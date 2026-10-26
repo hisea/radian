@@ -467,15 +467,18 @@ its phase: `review.verifying` plans the verification and runs its stages, and
 `review.integrating` runs `review::gate_integration` (the next free integration label). It
 writes only verdicts and `runs/<task>/gate.json`: `running` with its pid first (keeping the
 pass's inputs and death count), then `done`, `refused` or `error` with the attempt it ran
-for. A verification record also carries the `inputs` digest from `plan_verification` (config
-text, shas, extra stages, remote sha); an integration record carries a digest of the shas, the
-config text and the remote main; a pass reports a `refused` record and starts no new gate
-while the digest is unchanged. A gate process that exits having written nothing leaves the
-pass's `started` record: the pass rewrites it as `no_record` with those inputs, reports it in
-the summary and does not count the pass as changed, so a gate that fails at once is not
-started on every pass. One that wrote `running` and died is `background::count_death`'s
-business: the death goes up, and past `[limits] max_gate_deaths` the record becomes `died`,
-which behaves like `no_record`. A gate the loop stops itself (`stop`) is `interrupted`, and
+for. A `verify` `done` record also carries the profile the gate planned (its name, `stages`,
+`commands` and `before_attempt`), and the pass that applies the verdicts uses that profile,
+so a `config.toml` change while the gate runs cannot judge its verdicts by another one or
+expect a stage it did not run. A verification record also carries the `inputs` digest from
+`plan_verification` (config text, shas, extra stages, remote sha); an integration record
+carries a digest of the shas, the config text and the remote main; a pass reports a `refused`
+record and starts no new gate while the digest is unchanged. A gate process that exits having
+written nothing leaves the `started` record: the pass rewrites it as `no_record` with those
+inputs, reports it in the summary and does not count the pass as changed, so a gate that fails
+at once is not started on every pass. One that wrote `running` and died is
+`background::count_death`'s business: the death goes up, and past `[limits] max_gate_deaths`
+the record becomes `died`, which behaves like `no_record`. A gate the loop stops itself (`stop`) is `interrupted`, and
 the next pass starts it again without counting. It never changes the task's state; the pass
 holding `runner.lock` does that from the record.
 

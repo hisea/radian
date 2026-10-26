@@ -25,8 +25,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::gate::config::{Profile, StageSpec};
 use crate::store::{Error, Store, model};
 
 use super::stage;
@@ -97,6 +99,20 @@ const STOP_START_TIMEOUT: Duration = Duration::from_secs(2);
 /// stopped it only once the process is off the lock.
 const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The gate profile a verification ran under, as the gate planned it. It is written into the
+/// `done` record so the pass that applies the verdicts judges them by the profile that produced
+/// them, even when `config.toml` changes while the gate runs (ADR 0048 decisions 10 and 15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlannedProfile {
+    /// The `[gate.profiles.<name>]` name every verdict of the run records.
+    pub name: String,
+    /// The profile itself, as the gate read it.
+    pub profile: Profile,
+    /// The effective stages: the profile's plus the task's `extra_stages`, as the gate ran them.
+    pub stages: Vec<StageSpec>,
+}
+
 /// One gate's outcome, as a pass reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
@@ -118,6 +134,10 @@ pub struct Record {
     /// How many times a gate died after writing `running` for this attempt and these inputs
     /// (ADR 0048 decision 10). A pass compares it with `[limits] max_gate_deaths`.
     pub deaths: u32,
+    /// The profile a `done` verification planned, when the record carries one: a pass applies
+    /// the verdicts with it instead of re-reading the flow's profile from a `config.toml` that
+    /// may have changed since the gate started (ADR 0048 decision 10).
+    pub profile: Option<PlannedProfile>,
 }
 
 /// The record path for one task.
@@ -163,6 +183,9 @@ pub fn read(store: &Store, task: &str) -> Option<Record> {
             .and_then(Value::as_u64)
             .and_then(|deaths| u32::try_from(deaths).ok())
             .unwrap_or(0),
+        profile: value
+            .get("profile")
+            .and_then(|profile| serde_json::from_value(profile.clone()).ok()),
     })
 }
 
@@ -721,6 +744,9 @@ fn run_inner(options: &Options) -> Result<(), Error> {
     };
     // Filled in when the verification can be planned; a planning refusal has none.
     let mut inputs = String::new();
+    // The profile the stages run under, kept for the `done` record: a later pass applies the
+    // verdicts with it even when `config.toml` changed after the gate started.
+    let mut planned_profile: Option<PlannedProfile> = None;
     // While the gate runs, the record names this process, so a stop can signal it. The fields
     // the pass wrote are kept: the digest of the inputs it started the gate with and the
     // deaths the same attempt and inputs already have (ADR 0048 decision 10).
@@ -763,6 +789,11 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         match crate::review::plan_verification(&store, &task.id) {
             Ok(plan) => {
                 inputs = plan.inputs.clone();
+                planned_profile = Some(PlannedProfile {
+                    name: plan.profile_name.clone(),
+                    profile: plan.profile.clone(),
+                    stages: plan.stages.clone(),
+                });
                 // Test-only (see `crate::review::REVIEW_PROGRAM_ENV`): the fake review program a
                 // test leaves for the gate, in place of `radian exec`.
                 let review_program =
@@ -783,17 +814,19 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         return Err(Error::Failed("the gate was stopped".to_owned()));
     }
     match result {
-        Ok(attempt) => write(
-            &store,
-            &task.id,
-            &json!({
+        Ok(attempt) => {
+            let mut done = json!({
                 "kind": kind,
                 "attempt": attempt,
                 "status": "done",
                 "inputs": inputs,
-            }),
-        )
-        .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}"))),
+            });
+            if let Some(profile) = &planned_profile {
+                done["profile"] = json!(profile);
+            }
+            write(&store, &task.id, &done)
+                .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
+        }
         Err(Error::Refused(text)) => write(
             &store,
             &task.id,

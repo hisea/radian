@@ -1285,3 +1285,23 @@ were restored from copies under `.radian/mut/` with `cp` and compared with `cmp`
 | TK0166-M2 | the wrapper takes `before_attempt` from `gate.profile` instead of the task's flow's `gate_profile` (`work/mod.rs`) | `gate_profile::a_rework_runs_only_its_flows_before_attempt_steps` (the quiet flow's rework merges main: `the quiet flow ran a step`) | ✅ failed |
 
 2/2 caught.
+
+## TK0166 rework: a started gate keeps the profile it ran under (2026-10-26, branch `work/TK0166-per-flow-gate-profile`)
+
+The review found that a `done` record only carried the attempt and the inputs digest: the pass
+that applied its verdicts re-planned from `config.toml`, so a flow changed to another profile
+while the gate ran judged the old verdicts by the new profile (a `commands`-only gate then
+failed with `left no review verdict`) and a later pass reran the task. The gate now writes the
+profile it planned (name, profile and effective stages) into its `done` record, and
+`apply_verification` (and the conflict rework it may write) uses that profile instead of the
+flow's current one. Each mutation was applied by hand to the named file. The named test ran
+with `cargo nextest run -p radian-arc --locked --profile sandbox --test gate_profile`; it drives
+the binary, so it needed `cargo build -p radian-tui --bin radian` after each mutation. The
+sources were restored from copies under `.radian/mut/` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0166-M3 | `apply_verification` ignores the recorded profile and keeps the one it re-planned from the changed `config.toml` | `gate_profile::a_started_gate_keeps_the_profile_it_ran_under` (`radian arc run` exits 1: `the gate of TK0001-art-1 left no review verdict`) | ✅ failed |
+| TK0166-M4 | the gate omits the planned profile from its `done` record | `gate_profile::a_started_gate_keeps_the_profile_it_ran_under` (`record["profile"]["name"]` is `Null`, not `"running"`) | ✅ failed |
+
+2/2 caught.

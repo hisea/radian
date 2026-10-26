@@ -798,8 +798,11 @@ fn advance_verification(
             // no death (ADR 0048 decision 10).
             crate::gate::background::INTERRUPTED => {}
             "done" => {
+                // The gate recorded the profile its verdicts belong to: a config change since
+                // it started must not change how they are applied (ADR 0048 decision 10).
+                let planned = record.profile.clone();
                 crate::gate::background::clear(store, task_id);
-                return match crate::review::apply_verification(store, task_id) {
+                return match crate::review::apply_verification(store, task_id, planned.as_ref()) {
                     Ok(verified) => {
                         transitions.push(verified.line());
                         let mut changed = true;

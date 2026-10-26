@@ -13,7 +13,7 @@ use radian_arc::gate::{Stage, Verdict, verdict_path};
 use radian_arc::review;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn setup(label: &str) -> (TestRepo, Store) {
     let repo = TestRepo::new(label);
@@ -381,6 +381,90 @@ fn a_removed_flow_fails_the_gate_naming_the_flow() {
     assert!(text.contains(&task), "{text}");
     assert!(text.contains("art"), "{text}");
     assert!(text.contains("does not define"), "{text}");
+}
+
+/// A gate that already started keeps the profile it started with when `config.toml` changes
+/// before the pass that applies its verdicts: the pass judges the verdicts by the profile that
+/// produced them, not by the one the flow names now.
+#[test]
+fn a_started_gate_keeps_the_profile_it_ran_under() {
+    let repo = Repo::new("gate-profile-started");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    append_config(
+        &store,
+        "[gate.profiles.running]\n\
+         stages = [{ stage = \"commands\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         commands = [\"true\"]\n\
+         \n\
+         [gate.profiles.after]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         \n\
+         [flows.art]\n\
+         gate_profile = \"running\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task_with_flow(
+            &plan,
+            "art",
+            "Art",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("art"),
+        )
+        .expect("add the art task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.main_sha();
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    write(&repo.clone.join("art.txt"), "art\n");
+    repo.git(&["add", "art.txt"]);
+    repo.git(&["commit", "-m", "art"]);
+    repo.git(&["push", "origin", &branch]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    set_verifying(&store, &task, &head, &base);
+
+    // The gate runs to completion and leaves its `done` record with the profile it planned.
+    let gate = repo.radian(&["arc", "gate", "--task", &task]);
+    assert_eq!(gate.code, 0, "gate: {}", gate.stderr);
+    let record: Value = serde_json::from_str(
+        &fs::read_to_string(store.root().join("runs").join(&task).join("gate.json"))
+            .expect("the gate record"),
+    )
+    .expect("gate.json reads");
+    assert_eq!(record["status"], "done");
+    assert_eq!(record["profile"]["name"], "running");
+    assert_eq!(
+        verdict_names(&store, &task),
+        vec!["commands.json".to_owned()]
+    );
+
+    // The flow now names a `review`-only profile, before the pass applies the verdicts.
+    tune(
+        &store,
+        "gate_profile = \"running\"",
+        "gate_profile = \"after\"",
+    );
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let task_now = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (task_now.state.as_str(), task_now.phase.as_str()),
+        ("review", "awaiting_human"),
+        "the applied gate: {run:?}"
+    );
+    assert_eq!(
+        verdict_names(&store, &task),
+        vec!["commands.json".to_owned()],
+        "the gate ran again under the new profile"
+    );
 }
 
 // ---- `before_attempt` follows the flow's profile ------------------------------------

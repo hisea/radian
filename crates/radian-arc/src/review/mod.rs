@@ -852,15 +852,7 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         None => false,
     };
     if let Some((verdict, path)) = failed {
-        return failed_stage(
-            store,
-            task,
-            &plan.label,
-            &plan.head,
-            &verdict,
-            path,
-            budget_paused,
-        );
+        return failed_stage(store, plan, &verdict, path, budget_paused);
     }
     if budget_paused {
         // The charge moved the task to `todo.paused_budget`; no approval is recorded for it.
@@ -925,12 +917,25 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
 /// plan, then moves the task as [`finish_verification`] does. The state moves here, in a pass
 /// that holds `runner.lock`, never in the gate process.
 ///
+/// `planned` is the profile the gate recorded in its `done` record. A gate that already started
+/// keeps the profile it started with: when `config.toml` changed while it ran, the verdicts are
+/// judged by that profile and not by the flow's profile now (ADR 0048 decisions 10 and 15).
+///
 /// # Errors
 ///
 /// A refusal (a moved branch, an unbuilt stage) leaves the task in `review.verifying`; a
 /// missing verdict or a task file that changed outside arc is an error.
-pub fn apply_verification(store: &Store, task_id: &str) -> Result<Verified, Error> {
-    let plan = plan_verification(store, task_id)?;
+pub fn apply_verification(
+    store: &Store,
+    task_id: &str,
+    planned: Option<&crate::gate::background::PlannedProfile>,
+) -> Result<Verified, Error> {
+    let mut plan = plan_verification(store, task_id)?;
+    if let Some(planned) = planned {
+        plan.profile = planned.profile.clone();
+        plan.profile_name = planned.name.clone();
+        plan.stages = planned.stages.clone();
+    }
     finish_verification(store, &plan)
 }
 
@@ -1309,13 +1314,14 @@ fn review_cost(store: &Store, task: &str, label: &str) -> Result<Option<f64>, Er
 
 fn failed_stage(
     store: &Store,
-    task: &model::TaskFile,
-    label: &str,
-    head: &str,
+    plan: &Verification,
     verdict: &Verdict,
     path: PathBuf,
     budget_paused: bool,
 ) -> Result<Verified, Error> {
+    let task = &plan.task;
+    let label = plan.label.as_str();
+    let head = plan.head.as_str();
     let mut text = failure_text(verdict);
     // A review cost that used up the budget stops the task before any rework is considered:
     // `charge_review_cost` already moved it to `todo.paused_budget` (ADR 0048 decision 12).
@@ -1337,7 +1343,7 @@ fn failed_stage(
     }
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
     // when the profile runs `merge-main` before an attempt (ADR 0048 decision 9).
-    let conflict = conflict_auto_rework(store, task, verdict)?;
+    let conflict = conflict_auto_rework(store, task, verdict, &plan.profile)?;
     if let Some(stop) = conflict
         .as_ref()
         .and_then(|conflict| conflict.stop.as_ref())
@@ -1420,6 +1426,10 @@ fn failed_stage(
 /// `merge-main` before an attempt, a stage that failed with reason `conflict` returns the task
 /// to `todo.ready` with the next attempt's brief instead of waiting for the lead.
 ///
+/// `profile` is the one the run that wrote the verdict planned: a background gate's `done`
+/// record carries it, so a `config.toml` change after the gate started does not change this
+/// decision either (ADR 0048 decision 10).
+///
 /// `None` when the verdict is not a conflict or the profile does not run `merge-main`; the
 /// caller then keeps the path to `review.rework_pending`.
 ///
@@ -1432,18 +1442,12 @@ fn conflict_auto_rework(
     store: &Store,
     task: &model::TaskFile,
     verdict: &Verdict,
+    profile: &crate::gate::Profile,
 ) -> Result<Option<Conflict>, Error> {
     if verdict.reason.as_deref() != Some("conflict") {
         return Ok(None);
     }
     let config = store.config()?;
-    let flow = task
-        .flow
-        .as_deref()
-        .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let Ok((_, profile)) = config.task_gate_profile(&task.id, flow) else {
-        return Ok(None);
-    };
     if !profile.runs_merge_main() {
         return Ok(None);
     }
@@ -2455,7 +2459,7 @@ fn integration_failed(
 ) -> Result<Merged, Error> {
     // The same conflict path as a failed verification stage (ADR 0048 decision 9).
     let task = store.load_task(&context.task_id)?.item;
-    let conflict = conflict_auto_rework(store, &task, verdict)?;
+    let conflict = conflict_auto_rework(store, &task, verdict, &context.profile)?;
     let mut text = failure_text(verdict);
     if let Some(stop) = conflict
         .as_ref()
