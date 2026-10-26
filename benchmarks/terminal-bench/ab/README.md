@@ -101,7 +101,6 @@ prepend `$HOME/.local/bin` to `PATH` so `harbor` resolves.
 | `AB_TASKS` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `ab3` | The task set: a bare name under `tasks/`, or a path to a file. See [Choosing the tasks](#choosing-the-tasks) for the format and the refusals. |
 | `AB_N` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `2` in `ab.sh` and `ab-pi.sh`; `3` in `ab-system.sh` | Passed as `-n` (trials per arm). `run.sh` ignores it and passes `-n 4`; `smoke.sh` passes `-n 1`. |
 | `AB_K` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `2` in `ab.sh` and `ab-pi.sh`; `3` in `ab-system.sh` | Passed as `-k`. `run.sh` and `smoke.sh` pass no `-k` and use Harbor's default. |
-| `AB_TEST_SKIP_LOADAVG` | `ab.sh`, `ab-system.sh` | unset | Test-only: `tests/test_ab_scripts.py` sets it to `1` so the load sampler, which reads `/proc/loadavg`, does not start. A normal run has no reason to set it. |
 | `RADIAN_AB_SYSTEM_FILE` | `radian_system.py` | unset | Path to a UTF-8 role file. When set, the agent appends `--system <quoted text>` to the command; when unset, the command is unchanged. `ab-system.sh` sets it to `<label>/role.txt` for its concise arm and unsets it for its base arm, so a value exported by the caller cannot silently give both arms a `--system`. |
 | `RADIAN_BENCH_BINARY` | `run.sh` | `$HOME/.cache/radian-musl/target/release/radian` | Host path of the static radian binary under test; its `.sha256` sidecar must exist beside it. |
 

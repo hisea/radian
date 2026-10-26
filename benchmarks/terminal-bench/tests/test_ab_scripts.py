@@ -110,6 +110,14 @@ class ScriptSyntaxTest(unittest.TestCase):
                     self.assertNotIn(needle, text)
 
 
+class TestOnlyInputsTest(unittest.TestCase):
+    """A test-only input is not a user-facing input, so the README omits it."""
+
+    def test_the_readme_names_no_test_only_input(self):
+        readme = (AB / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("AB_TEST_SKIP_LOADAVG", readme)
+
+
 def parse_task_file(path):
     """The task names in a task-set file, comments and blanks removed."""
     names = []
