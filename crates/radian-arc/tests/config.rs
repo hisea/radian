@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
-use radian_arc::gate::{GateConfig, Stage, StageSpec, effective_stages};
+use radian_arc::gate::{
+    BeforeAttempt, BeforeAttemptCommand, GateConfig, Stage, StageSpec, effective_stages,
+};
 
 #[derive(Deserialize)]
 struct File {
@@ -159,6 +161,53 @@ fn an_unknown_before_attempt_step_is_refused_by_name() {
                 .is_ok()
         );
     }
+}
+
+/// A `before_attempt` entry may be a command table (ADR 0048 decisions 7 and 10): `run` is
+/// required and not empty, `timeout_secs` is optional, and any other key is refused by name.
+#[test]
+fn a_before_attempt_command_table_is_closed_and_needs_a_run() {
+    for (value, needle) in [
+        ("[{ run = \"\" }]", "empty"),
+        ("[{ timeout_secs = 5 }]", "run"),
+        ("[{ run = \"true\", shell = \"bash\" }]", "shell"),
+    ] {
+        let error = radian_arc::store::config::parse(&format!("{BASE}before_attempt = {value}\n"))
+            .expect_err("a broken command table must fail");
+        assert!(
+            error.contains(needle),
+            "the error names `{needle}`: {error}"
+        );
+    }
+
+    let config = radian_arc::store::config::parse(&format!(
+        "{BASE}before_attempt = [\"merge-main\", {{ run = \"cargo build --locked\", \
+         timeout_secs = 1200 }}]\n"
+    ))
+    .expect("both entry forms parse");
+    assert_eq!(
+        config.gate.profiles["default"].before_attempt,
+        vec![
+            BeforeAttempt::Step("merge-main".to_owned()),
+            BeforeAttempt::Run(BeforeAttemptCommand {
+                run: "cargo build --locked".to_owned(),
+                timeout_secs: Some(1200),
+            }),
+        ]
+    );
+    assert!(config.gate.profiles["default"].runs_merge_main());
+
+    let without_timeout = radian_arc::store::config::parse(&format!(
+        "{BASE}before_attempt = [{{ run = \"true\" }}]\n"
+    ))
+    .expect("`timeout_secs` is optional");
+    assert_eq!(
+        without_timeout.gate.profiles["default"].before_attempt,
+        vec![BeforeAttempt::Run(BeforeAttemptCommand {
+            run: "true".to_owned(),
+            timeout_secs: None,
+        })]
+    );
 }
 
 /// `gate.review.exec_args` must be an array of strings, and a non-array value is refused by

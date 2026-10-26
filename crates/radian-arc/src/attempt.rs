@@ -25,6 +25,16 @@ pub use crate::store::attempt_ops::FAILURE_CLASSES;
 /// How often the monitor looks at the child and its jsonl stream.
 const POLL: Duration = Duration::from_millis(100);
 
+/// How long `cancel` keeps waiting for the wrapper's `AttemptFinished` after the grace period.
+///
+/// The grace itself belongs to the process the wrapper is stopping: the worker's group gets
+/// SIGTERM for `[limits] cancel_grace_secs` and then SIGKILL, and a `before_attempt` command's
+/// group gets the same. The wrapper observes the stop a poll or so after `cancel` signals it and
+/// still has to reap what it killed and write its record, so `cancel` reserves this window for
+/// that work instead of shortening the grace to make room for it. Only after the grace and this
+/// window has passed without a record does `cancel` SIGKILL a wrapper that is still running.
+pub const CANCEL_RECORD_RESERVE: Duration = Duration::from_secs(1);
+
 /// What one `start` did: the reconcile results it applied first, then its own attempt, then
 /// the verification of a pushed attempt when the task reached `review.verifying`.
 #[derive(Debug, Clone, PartialEq)]
@@ -440,8 +450,10 @@ pub fn cancel_any(store: &Store, id: &str) -> Result<Cancelled, Error> {
 /// A `todo` task goes to `failed.cancelled`. A `doing` task gets SIGTERM on its wrapper (the
 /// pid and its start time must match, so a reused pid is not signalled; when `ps` cannot
 /// report the time, the pid alone decides, as ADR 0048 decision 9 says), then SIGKILL after
-/// `[limits] cancel_grace_secs`. When the wrapper's `AttemptFinished` arrives the task goes to
-/// `failed.cancelled`; when it never arrives the task goes to `doing.reconciling`. A `review`
+/// `[limits] cancel_grace_secs` plus [`CANCEL_RECORD_RESERVE`], the time the wrapper gets to
+/// reap what it stopped and write its record. When the wrapper's `AttemptFinished` arrives the
+/// task goes to `failed.cancelled`; when it never arrives the task goes to
+/// `doing.reconciling`. A `review`
 /// task's running gate is signalled first (the way the loop's own stop signals one), and the
 /// task then goes to `failed.cancelled`. A task that ran out of attempts (`failed.exhausted`)
 /// or cannot continue (`failed.irrecoverable`) goes to `failed.cancelled` as well: the owner
@@ -766,6 +778,20 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
             && attempt_ops::read_finish(store, task_id, attempt).is_none()
         {
             std::thread::sleep(POLL);
+        }
+        // The grace belongs to what the wrapper is stopping (the worker's group, a
+        // `before_attempt` command's group): the wrapper only starts that group's own
+        // SIGTERM-to-SIGKILL countdown when it observes the stop, and it still has to reap the
+        // group and write its record. The extra window is for that work alone; taking it out
+        // of the grace instead would shorten it, and a grace of one second or less to nothing.
+        if attempt_ops::read_finish(store, task_id, attempt).is_none() {
+            let deadline = Instant::now() + CANCEL_RECORD_RESERVE;
+            while Instant::now() < deadline
+                && attempt_ops::read_finish(store, task_id, attempt).is_none()
+                && still_running(pid, start.as_deref())
+            {
+                std::thread::sleep(POLL);
+            }
         }
         if attempt_ops::read_finish(store, task_id, attempt).is_none() {
             // The grace period ran out: SIGKILL, but only the process that is still the one

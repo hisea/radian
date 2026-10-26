@@ -1153,6 +1153,32 @@ pub fn attempt_notes(store: &Store, task: &str, attempt: u32) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// The reason the current attempt ended without reaching the gate, for `show`: the applied
+/// result's `reason`, else the wrapper's own `failure` from `attempt_finished.json`. A pushed
+/// attempt and a passing one leave none. A delivery failure has both this and `rework_reason`;
+/// `show` prints the one field, not both.
+pub fn attempt_failure(store: &Store, task: &str, attempt: u32) -> Option<String> {
+    let dir = run_dir(store, task, attempt);
+    for file in [ATTEMPT_RESULT_FILE, ATTEMPT_FINISHED_FILE] {
+        let Ok(text) = fs::read_to_string(dir.join(file)) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let reason = value
+            .get("reason")
+            .or_else(|| value.get("failure"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        if let Some(reason) = reason {
+            return Some(reason.to_owned());
+        }
+    }
+    None
+}
+
 /// The `notes` array one record carries, when the file exists, parses, and holds one.
 fn notes_in(path: &Path) -> Option<Vec<String>> {
     let text = fs::read_to_string(path).ok()?;

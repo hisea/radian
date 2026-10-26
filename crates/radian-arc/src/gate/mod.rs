@@ -36,11 +36,12 @@ pub mod background;
 
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
+pub(crate) use commands::{ShellWatch, run_shell};
 pub use config::{
-    BEFORE_ATTEMPT_STEPS, DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEW_CONCURRENCY,
-    DEFAULT_REVIEW_TIMEOUT_SECS, FirstReviewConfig, GateConfig, LISTED_STAGES, MERGE_MAIN, Profile,
-    ReviewChoice, ReviewConfig, STAGE_NAMES, Stage, StageSpec, default_before_attempt,
-    effective_stages,
+    BEFORE_ATTEMPT_STEPS, BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS,
+    DEFAULT_REVIEW_CONCURRENCY, DEFAULT_REVIEW_TIMEOUT_SECS, FirstReviewConfig, GateConfig,
+    LISTED_STAGES, MERGE_MAIN, Profile, ReviewChoice, ReviewConfig, STAGE_NAMES, Stage, StageSpec,
+    default_before_attempt, effective_stages,
 };
 pub use error::GateError;
 pub use exclusive::ExclusiveLock;

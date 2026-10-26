@@ -107,19 +107,134 @@ fn default_required() -> bool {
     true
 }
 
-/// The names of the steps a profile's `before_attempt` may list, in order. This is the one
-/// closed list: [`Profile::validate`], the `config.toml` parser and the manual's drift test all
-/// read it.
+/// The names of the built-in steps a profile's `before_attempt` may list, in order. This is
+/// the one closed list: [`Profile::validate`], the `config.toml` parser and the manual's drift
+/// test all read it. A custom command is a table, not a name ([`BeforeAttempt::Run`]).
 pub const BEFORE_ATTEMPT_STEPS: [&str; 1] = [MERGE_MAIN];
 
-/// The one step a profile can list in `before_attempt`: merge the remote main into the task's
-/// branch before the worker starts (ADR 0048 decision 7).
+/// The one built-in step a profile can list in `before_attempt`: merge the remote main into the
+/// task's branch before the worker starts (ADR 0048 decision 7).
 pub const MERGE_MAIN: &str = "merge-main";
+
+/// One entry of a profile's `before_attempt` (ADR 0048 decisions 7 and 10): a built-in step or
+/// a command the wrapper runs in the attempt's worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum BeforeAttempt {
+    /// A built-in step; [`BEFORE_ATTEMPT_STEPS`] is the closed list of names.
+    Step(String),
+    /// A shell command line, run as `sh -c <run>` in the attempt's worktree.
+    Run(BeforeAttemptCommand),
+}
+
+/// One custom `before_attempt` command: `{ run = "<command line>", timeout_secs = <integer> }`
+/// (ADR 0048 decisions 7 and 10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeforeAttemptCommand {
+    /// The shell command line, run with `sh -c` in the worktree. Required and not empty.
+    pub run: String,
+    /// The command's time limit in seconds. Unset: `gate.command_timeout_secs`. `0` means no
+    /// limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl BeforeAttempt {
+    /// The built-in step this entry names, when it is one.
+    #[must_use]
+    pub fn step(&self) -> Option<&str> {
+        match self {
+            BeforeAttempt::Step(step) => Some(step),
+            BeforeAttempt::Run(_) => None,
+        }
+    }
+
+    /// The command this entry runs, when it is one.
+    #[must_use]
+    pub fn command(&self) -> Option<&BeforeAttemptCommand> {
+        match self {
+            BeforeAttempt::Step(_) => None,
+            BeforeAttempt::Run(command) => Some(command),
+        }
+    }
+}
+
+/// The entry's shaped error names the offenders a TOML table would report by position only:
+/// an unknown key, a duplicate key, or a missing `run` (ADR 0048 decisions 7 and 10).
+impl<'de> Deserialize<'de> for BeforeAttempt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+            type Value = BeforeAttempt;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .write_str("`merge-main` or a table with `run` and optional `timeout_secs`")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(BeforeAttempt::Step(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(BeforeAttempt::Step(value))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut run: Option<String> = None;
+                let mut timeout_secs: Option<u64> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "run" => {
+                            if run.is_some() {
+                                return Err(serde::de::Error::duplicate_field("run"));
+                            }
+                            run = Some(map.next_value()?);
+                        }
+                        "timeout_secs" => {
+                            if timeout_secs.is_some() {
+                                return Err(serde::de::Error::duplicate_field("timeout_secs"));
+                            }
+                            timeout_secs = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(serde::de::Error::unknown_field(
+                                other,
+                                &["run", "timeout_secs"],
+                            ));
+                        }
+                    }
+                }
+                let run = run.ok_or_else(|| serde::de::Error::missing_field("run"))?;
+                Ok(BeforeAttempt::Run(BeforeAttemptCommand {
+                    run,
+                    timeout_secs,
+                }))
+            }
+        }
+
+        deserializer.deserialize_any(EntryVisitor)
+    }
+}
 
 /// What a profile's `before_attempt` holds when the key is absent (ADR 0048 decision 10).
 #[must_use]
-pub fn default_before_attempt() -> Vec<String> {
-    vec![MERGE_MAIN.to_owned()]
+pub fn default_before_attempt() -> Vec<BeforeAttempt> {
+    vec![BeforeAttempt::Step(MERGE_MAIN.to_owned())]
 }
 
 /// One gate profile: the stages, the steps before an attempt, and the acceptance and
@@ -133,7 +248,7 @@ pub struct Profile {
     /// The steps the wrapper runs in the task's worktree before the worker starts, in order.
     /// Absent: [`default_before_attempt`].
     #[serde(default = "default_before_attempt")]
-    pub before_attempt: Vec<String>,
+    pub before_attempt: Vec<BeforeAttempt>,
     /// Shell command lines the `commands` stage runs, in order.
     #[serde(default)]
     pub commands: Vec<String>,
@@ -155,17 +270,28 @@ impl Default for Profile {
 
 impl Profile {
     /// Rejects a profile that lists `integration`, lists one stage twice, lists `review`
-    /// before `commands`, or lists a `before_attempt` step this build does not run (the order
-    /// and the step list ADR 0048 decisions 7 and 10 fix).
+    /// before `commands`, or lists a `before_attempt` entry this build does not run or a
+    /// command with an empty `run` (the order and the entry list ADR 0048 decisions 7 and 10
+    /// fix).
     ///
     /// # Errors
     ///
     /// [`GateError::UnlistedStage`], [`GateError::DuplicateStage`],
-    /// [`GateError::StageOrder`] or [`GateError::UnknownBeforeAttemptStep`].
+    /// [`GateError::StageOrder`], [`GateError::UnknownBeforeAttemptStep`] or
+    /// [`GateError::EmptyBeforeAttemptRun`].
     pub fn validate(&self) -> Result<(), GateError> {
-        for step in &self.before_attempt {
-            if !BEFORE_ATTEMPT_STEPS.contains(&step.as_str()) {
-                return Err(GateError::UnknownBeforeAttemptStep(step.clone()));
+        for entry in &self.before_attempt {
+            match entry {
+                BeforeAttempt::Step(step) => {
+                    if !BEFORE_ATTEMPT_STEPS.contains(&step.as_str()) {
+                        return Err(GateError::UnknownBeforeAttemptStep(step.clone()));
+                    }
+                }
+                BeforeAttempt::Run(command) => {
+                    if command.run.trim().is_empty() {
+                        return Err(GateError::EmptyBeforeAttemptRun);
+                    }
+                }
             }
         }
         let mut seen = Vec::with_capacity(self.stages.len());
@@ -205,7 +331,9 @@ impl Profile {
     /// decisions 7 and 9).
     #[must_use]
     pub fn runs_merge_main(&self) -> bool {
-        self.before_attempt.iter().any(|step| step == MERGE_MAIN)
+        self.before_attempt
+            .iter()
+            .any(|entry| entry.step() == Some(MERGE_MAIN))
     }
 }
 

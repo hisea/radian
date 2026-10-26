@@ -10,6 +10,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::process;
+
 use super::checkout::GateCheckout;
 use super::config::Stage;
 use super::error::GateError;
@@ -175,10 +177,26 @@ pub(crate) fn run_series(
     Ok((records, SeriesOutcome::Passed))
 }
 
-struct OneCommand {
-    exit_code: Option<i32>,
-    duration_ms: u64,
-    outcome: SeriesOutcome,
+/// What one shell command did: the `commands`/integration line, or a wrapper
+/// `before_attempt` command (ADR 0048 decisions 7 and 10). The caller decides what a non-zero
+/// exit or a timeout means for its step.
+pub(crate) struct ShellOutcome {
+    /// The process's exit code; `None` when a signal killed it.
+    pub(crate) exit_code: Option<i32>,
+    /// How long it ran, in milliseconds.
+    pub(crate) duration_ms: u64,
+    /// Passed, failed, or was killed at the timeout.
+    pub(crate) outcome: SeriesOutcome,
+}
+
+impl ShellOutcome {
+    pub(crate) fn passed(&self) -> bool {
+        matches!(self.outcome, SeriesOutcome::Passed)
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        matches!(self.outcome, SeriesOutcome::TimedOut)
+    }
 }
 
 fn run_one(
@@ -186,7 +204,41 @@ fn run_one(
     line: &str,
     timeout: Duration,
     log: &Path,
-) -> Result<OneCommand, GateError> {
+) -> Result<ShellOutcome, GateError> {
+    run_shell(checkout, line, timeout, log, &[], None)
+}
+
+/// What can stop a [`run_shell`] command from outside the process that started it (ADR 0048
+/// decisions 7, 9 and 10). The gate stages reach their child through [`super::stage::Running`];
+/// the wrapper's `before_attempt` command implements this so its own SIGTERM handler and
+/// `radian arc cancel` reach the command's process group the way they reach a worker's.
+pub(crate) trait ShellWatch {
+    /// The command now runs in its own process group `pgid`; a stop must reach that group.
+    fn started(&self, pgid: u32);
+    /// The command was reaped; the group id must not be signalled after this.
+    fn finished(&self);
+    /// Whether a stop was requested while the command ran.
+    fn stopping(&self) -> bool;
+    /// How long the group gets after SIGTERM before SIGKILL.
+    fn grace(&self) -> Duration;
+}
+
+/// Runs one `sh -c` line in `dir`, stdout and stderr into `log`, in its own process group.
+/// `timeout` of zero waits forever; a timeout kills the whole group, so no child the command
+/// started outlives the step. A stop from `watch` also reaches the whole group: the command's
+/// own shell exiting on SIGTERM does not end the stop while one of its children still runs.
+/// `envs` are added on top of the wrapper's own environment; the gate stages pass none, the
+/// wrapper's `before_attempt` commands pass the `ARC_*` values a command worker gets (ADR
+/// 0048 decisions 7 and 10). `watch` is the caller's stop path: it receives the command's
+/// process group and is asked whether a stop was requested.
+pub(crate) fn run_shell(
+    dir: &Path,
+    line: &str,
+    timeout: Duration,
+    log: &Path,
+    envs: &[(&str, String)],
+    watch: Option<&dyn ShellWatch>,
+) -> Result<ShellOutcome, GateError> {
     let file = File::create(log).map_err(|source| GateError::Io {
         path: log.to_path_buf(),
         source,
@@ -199,10 +251,13 @@ fn run_one(
     command
         .arg("-c")
         .arg(line)
-        .current_dir(checkout)
+        .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(stderr));
+    for (name, value) in envs {
+        command.env(name, value);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -222,23 +277,70 @@ fn run_one(
     // build writing in the checkout the gate left (ADR 0048 decision 10).
     #[cfg(unix)]
     let mut running = super::stage::Running::track(pid);
+    // The wrapper's `before_attempt` command is stopped through the wrapper's own handler and
+    // signal file; its group is registered there for exactly as long as the command runs.
+    #[cfg(unix)]
+    let _watched = watch.map(|watch| {
+        watch.started(pid);
+        Watched { watch }
+    });
+    #[cfg(unix)]
+    let mut stop_sent: Option<Instant> = None;
     let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
     let (status, timed_out) = loop {
-        if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
-            path: checkout.to_path_buf(),
+        // Peek at the exit without reaping it where the platform can: while the child is a
+        // zombie its process-group id stays reserved, so a stop can still reach whatever the
+        // command left in its group (ADR 0048 decisions 7 and 9).
+        #[cfg(unix)]
+        let exited = process::exited_status(pid).map_err(|source| GateError::Io {
+            path: dir.to_path_buf(),
             source,
-        })? {
+        })?;
+        #[cfg(not(unix))]
+        let exited = child.try_wait().map_err(|source| GateError::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if exited.is_some() {
+            // The shell of a stopped command may exit on SIGTERM while a child it started
+            // ignores it, and it can exit before this loop observes the stop. Nothing the
+            // command started outlives the stop: kill the rest of the group before the zombie
+            // is reaped and its group id can name another.
+            #[cfg(unix)]
+            if watch.is_some_and(|watch| watch.stopping()) && process::group_has_live_member(pid) {
+                process::signal_group(pid, process::SIGKILL);
+            }
+            let status = child.wait().map_err(|source| GateError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
             break (status, false);
         }
         #[cfg(unix)]
         running.stopped();
+        #[cfg(unix)]
+        if let Some(watch) = watch
+            && watch.stopping()
+        {
+            let now = Instant::now();
+            match stop_sent {
+                None => {
+                    process::signal_group(pid, process::SIGTERM);
+                    stop_sent = Some(now);
+                }
+                Some(at) if now >= at + watch.grace() => {
+                    process::signal_group(pid, process::SIGKILL);
+                }
+                Some(_) => {}
+            }
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             #[cfg(unix)]
             kill_group(pid);
             #[cfg(not(unix))]
             let _ = child.kill();
             let status = child.wait().map_err(|source| GateError::Io {
-                path: checkout.to_path_buf(),
+                path: dir.to_path_buf(),
                 source,
             })?;
             break (status, true);
@@ -258,11 +360,25 @@ fn run_one(
     } else {
         SeriesOutcome::Failed
     };
-    Ok(OneCommand {
+    Ok(ShellOutcome {
         exit_code: status.code(),
         duration_ms,
         outcome,
     })
+}
+
+#[cfg(unix)]
+struct Watched<'a> {
+    watch: &'a dyn ShellWatch,
+}
+
+#[cfg(unix)]
+impl Drop for Watched<'_> {
+    fn drop(&mut self) {
+        // Runs on every return path, so the wrapper's stop handler can never signal a group
+        // whose command has already been reaped.
+        self.watch.finished();
+    }
 }
 
 #[cfg(unix)]

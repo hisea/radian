@@ -1597,6 +1597,105 @@ fn cancel_without_a_result_leaves_the_task_reconciling() {
     let _ = wrapper.wait();
 }
 
+/// The grace belongs to the process the wrapper is stopping; `cancel` then leaves the wrapper a
+/// record window of its own before SIGKILL (`CANCEL_RECORD_RESERVE`). A wrapper that needs longer
+/// than the grace to write its record still gets it applied, rather than being killed at the
+/// grace. Mutation TK0169-M6 (kill the wrapper at the grace, with no record window): the
+/// stand-in dies before it writes, and the task is left `doing.reconciling`.
+#[test]
+fn a_cancel_waits_a_record_window_after_the_grace() {
+    let repo = Repo::new("cancel-record-window");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("open");
+    tune(
+        &repo,
+        &[("cancel_grace_secs = 10", "cancel_grace_secs = 1")],
+    );
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = tasks[0].clone();
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+    let token = store
+        .load_task(&task)
+        .expect("the task reads")
+        .item
+        .token
+        .expect("the claim wrote a token");
+
+    // A stand-in wrapper that ignores SIGTERM and writes its record half a second after the
+    // one-second grace: only the record window lets it finish. It prints `ready` once the trap
+    // is installed, so the test's SIGTERM cannot arrive before the shell handles it.
+    let finished = repo.run_dir(&task, 1).join("attempt_finished.json");
+    let ready = repo.root.join("slow-wrapper.ready");
+    let record = json!({
+        "type": "AttemptFinished",
+        "attempt_id": format!("{task}-1"),
+        "token": token,
+        "exit_code": 0,
+        "outcome": "terminated",
+        "base_sha": null,
+        "head_sha": null,
+        "dirty": [],
+        "pushed": false,
+        "remote_sha": null,
+        "failure": null,
+    });
+    let script = repo.root.join("slow-wrapper.sh");
+    let record_path = repo.root.join("slow-wrapper-record.json");
+    std::fs::write(&record_path, record.to_string()).expect("the stand-in's record");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntrap 'sleep 1.5; cp '{record}' '{finished}'; exit 0' TERM\n\
+             printf ready > '{ready}'\nwhile :; do sleep 0.05; done\n",
+            record = record_path.display(),
+            finished = finished.display(),
+            ready = ready.display(),
+        ),
+    )
+    .expect("the stand-in wrapper");
+    make_executable(&script);
+    let mut wrapper = std::process::Command::new(&script)
+        .spawn()
+        .expect("the stand-in wrapper starts");
+    let pid = wrapper.id();
+    let dir = repo.attempt_dir(&task, 1);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("identity.json"),
+        json!({
+            "attempt_id": format!("{task}-1"),
+            "token": token,
+            "pid": 0,
+            "process_started_at": null,
+            "wrapper_pid": pid,
+            "wrapper_process_started_at": null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    wait_for_file_within(&ready, Duration::from_secs(10));
+    let started = Instant::now();
+    let canceled = attempt::cancel(&store, &task).expect("cancel");
+    assert_eq!(
+        (canceled.state.as_str(), canceled.phase.as_str()),
+        ("failed", "cancelled"),
+        "the cancel killed the wrapper before its record window: {canceled:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(1400),
+        "the cancel did not wait for the record the wrapper wrote after the grace: {:?}",
+        started.elapsed()
+    );
+    let _ = wrapper.wait();
+}
+
 /// A reused pid with another start time is never signalled: the record names a live process
 /// whose start time does not match. The task still moves to `failed.cancelled` (the owner
 /// asked), but the process stays alive.

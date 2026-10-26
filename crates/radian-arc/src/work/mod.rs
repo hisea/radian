@@ -53,6 +53,9 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use serde_json::{Value, json};
 
+use crate::gate::{
+    BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS, ShellWatch, run_shell,
+};
 use crate::git::GitOutput;
 use crate::process;
 use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval};
@@ -405,6 +408,12 @@ impl Clock {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
+
+    /// Whether the wrapper was asked to stop: a SIGTERM/SIGINT the handler saw, or the record
+    /// `radian arc cancel` leaves in the attempt's run directory (ADR 0048 decision 9).
+    fn stopped(&self) -> bool {
+        STOP_REQUESTED.load(Ordering::SeqCst) || self.signal.is_file()
+    }
 }
 
 /// The `runs/<task>/attempts/<task>-<n>` path of one attempt.
@@ -436,10 +445,59 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             Err(failure) => return refuse(o, s, &base_sha, &failure.message),
         }
     }
-    // The profile's steps before an attempt: a reused worktree merges the remote main first
-    // (ADR 0048 decision 7). A conflict leaves the worktree mid-merge, and its section goes
-    // first. The brief in the task file is never changed.
-    let conflict = before_attempt(o, s, created)?;
+    // The profile's entries before an attempt: `merge-main` and the custom commands, in the
+    // order listed (ADR 0048 decisions 7 and 10). The repository's git control files are
+    // recorded first, so an entry that changes one fails the attempt the same way a worker
+    // does: the check runs again after the entries and before the worker starts. It runs even
+    // when an entry failed, so a command that changed a control file and then failed is put
+    // back before this attempt ends.
+    let control = GitControl::record(&s.worktree, &s.clock)?;
+    let before = before_attempt(o, s, created);
+    let check = control.check();
+    // A restore that failed wins over the entry's own failure, exactly as it does after a
+    // worker: the attempt ends here with the control-check reason, so no later step runs on a
+    // control file the wrapper could not put back. The entry's failure stays as context.
+    if let ControlCheck::Changed(change) = &check
+        && change.restore_failed.is_some()
+    {
+        let failure = match &before {
+            Ok(_) => change.reason(),
+            Err(before) => format!("{}; {}", change.reason(), before.message),
+        };
+        return write_finish(
+            o,
+            s,
+            Finish {
+                base_sha: &base_sha,
+                head_sha: None,
+                dirty: Vec::new(),
+                pushed: false,
+                remote_sha: None,
+                outcome: "terminated",
+                exit_code: EXIT_ERROR,
+                failure: Some(failure),
+                notes: &[],
+            },
+        );
+    }
+    let conflict = before?;
+    if let ControlCheck::Changed(change) = check {
+        return write_finish(
+            o,
+            s,
+            Finish {
+                base_sha: &base_sha,
+                head_sha: None,
+                dirty: Vec::new(),
+                pushed: false,
+                remote_sha: None,
+                outcome: "terminated",
+                exit_code: EXIT_ERROR,
+                failure: Some(change.reason()),
+                notes: &[],
+            },
+        );
+    }
     let start_sha = branch_tip(&s.repo, &s.branch, &s.clock)?.ok_or_else(|| {
         Failure::error(format!("cannot read {} in {}", s.branch, s.repo.display()))
     })?;
@@ -482,10 +540,6 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         }),
         Worker::Shell(_) => json!({"kind": "command", "flow": o.flow, "program": "sh"}),
     };
-    // The repository's git control files, as they are before the worker starts (ADR 0048
-    // decision 7). The record stays in this process's memory: a worker can write the worktree
-    // and, with a wider sandbox, the git directories, so no on-disk record can be trusted.
-    let control = GitControl::record(&s.worktree, &s.clock)?;
     let mut child = spawn_child(
         o,
         &Spawn {
@@ -1324,33 +1378,168 @@ fn moved_outside(branch: &str) -> String {
     format!("{branch} moved outside this task")
 }
 
-/// The steps the profile lists for before an attempt (ADR 0048 decision 7). A worktree this
-/// attempt created already starts from the fetched main, so no step runs for it. Returns the
-/// section a step leaves in front of the brief: a `merge-main` that conflicted leaves the
-/// worktree mid-merge, and the worker resolves it first. The brief stored in the task file
+/// The entries the profile lists for before an attempt (ADR 0048 decisions 7 and 10). They run
+/// in the order listed: `merge-main` does nothing on a worktree this attempt created, which
+/// already starts from the fetched main, and a command runs before every attempt, the first
+/// included. Returns the section a `merge-main` leaves in front of the brief: a conflict leaves
+/// the worktree mid-merge, and the worker resolves it first. The brief stored in the task file
 /// never changes.
 fn before_attempt(o: &Options, s: &Setup, created: bool) -> Result<Option<String>, Failure> {
-    if created {
-        return Ok(None);
-    }
+    let (entries, default_timeout) = before_attempt_entries(&s.repo, &o.task, &o.flow)?;
     let mut conflict = None;
-    for step in before_attempt_steps(&s.repo, &o.task, &o.flow)? {
-        if step == crate::gate::MERGE_MAIN
-            && let Some(found) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
-        {
-            conflict = Some(conflict_section(&found));
+    for (index, entry) in entries.iter().enumerate() {
+        match entry {
+            // `Profile::validate` admits only `merge-main`; the wrapper never guesses at a
+            // step this build does not run.
+            BeforeAttempt::Step(step) => {
+                if step == crate::gate::MERGE_MAIN
+                    && !created
+                    && let Some(found) = merge_main(&s.repo, &s.worktree, o, &s.branch, &s.clock)?
+                {
+                    conflict = Some(conflict_section(&found));
+                }
+            }
+            BeforeAttempt::Run(command) => {
+                run_before_command(o, s, command, index + 1, default_timeout)?;
+            }
         }
     }
     Ok(conflict)
 }
 
-/// The task's profile's `before_attempt` steps (ADR 0048 decisions 7, 10 and 15): the flow's
-/// `gate_profile`, else `gate.profile`. A repository arc is not set up in has no profile, so no
-/// step runs there, the same way the remote and main flags fall back to the git defaults. A
-/// `config.toml` that does not parse fails the attempt instead of being ignored, and so does a
-/// flow or profile the file no longer defines: a skipped merge would reach the gate as a
-/// conflict, or run the wrong profile's steps.
-fn before_attempt_steps(repo: &Path, task: &str, flow: &str) -> Result<Vec<String>, Failure> {
+/// Runs one custom `before_attempt` command (ADR 0048 decisions 7 and 10): `sh -c <run>` in the
+/// attempt's worktree with no sandbox, in its own process group, the command worker's
+/// `ARC_WORKTREE`, `ARC_TASK` and `ARC_ATTEMPT` added to the wrapper's environment, stdout and
+/// stderr into `before/<index>.log`. A non-zero exit, or the command's timeout, ends the attempt
+/// before the worker starts. The shorter of the command's timeout and the attempt's remaining
+/// wall time applies; the wall clock's own expiry is the attempt's `wall_time` failure, as it is
+/// for every other wrapper step.
+fn run_before_command(
+    o: &Options,
+    s: &Setup,
+    command: &BeforeAttemptCommand,
+    index: usize,
+    default_timeout: Duration,
+) -> Result<(), Failure> {
+    if s.clock.stopped() {
+        return Err(stopped_before(index, command));
+    }
+    if s.clock.expired() {
+        s.clock.mark()?;
+        return Err(Failure::wall());
+    }
+    let before = s.runs.join("before");
+    fs::create_dir_all(&before)
+        .map_err(|error| Failure::error(format!("cannot create {}: {error}", before.display())))?;
+    let log = before.join(format!("{index}.log"));
+    let configured = command
+        .timeout_secs
+        .map_or(default_timeout, Duration::from_secs);
+    // The wall clock bounds every step of the attempt (ADR 0048 decision 7.8), so a command
+    // gets no more than the time that is left. `wall_wins` keeps the failure's class right.
+    let (timeout, wall_wins) = match s.clock.remaining() {
+        Some(remaining) if configured.is_zero() => (remaining, true),
+        Some(remaining) => (remaining.min(configured), remaining <= configured),
+        None => (configured, false),
+    };
+    let absolute = fs::canonicalize(&s.worktree).unwrap_or_else(|_| s.worktree.clone());
+    let env = [
+        ("ARC_WORKTREE", absolute.display().to_string()),
+        ("ARC_TASK", o.task.clone()),
+        ("ARC_ATTEMPT", format!("{}-{}", o.task, o.attempt)),
+    ];
+    // The wrapper's own stop path reaches this command's group: its SIGTERM/SIGINT handler
+    // forwards through `CHILD_PID`, and a cancel may only have left `signal.json`. Either ends
+    // the attempt, so a command with no timeout cannot hold the task or start a worker after
+    // the stop.
+    let stop = CommandStop {
+        clock: &s.clock,
+        grace: Duration::from_secs(o.cancel_grace_secs),
+    };
+    let result = run_shell(&s.worktree, &command.run, timeout, &log, &env, Some(&stop))
+        .map_err(|error| Failure::error(format!("before_attempt entry {index}: {error}")))?;
+    // A stop wins over the command's own result, as a cancel does for a running worker.
+    if s.clock.stopped() {
+        return Err(stopped_before(index, command));
+    }
+    if result.timed_out() {
+        if wall_wins {
+            s.clock.mark()?;
+            return Err(Failure::wall());
+        }
+        return Err(Failure::error(format!(
+            "before_attempt entry {index} timed out after {} s: {}; log: {}",
+            timeout.as_secs(),
+            command.run,
+            log.display()
+        )));
+    }
+    if !result.passed() {
+        let status = result.exit_code.map_or_else(
+            || "was killed by a signal".to_owned(),
+            |code| format!("failed with exit code {code}"),
+        );
+        return Err(Failure::error(format!(
+            "before_attempt entry {index} {status}: {}; log: {}",
+            command.run,
+            log.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The wrapper was asked to stop while a `before_attempt` command was about to run or ran
+/// (ADR 0048 decision 9): the attempt ends before the worker, and the command's group has been
+/// signalled. A cancel has already recorded its reason; this failure is the attempt's record.
+fn stopped_before(index: usize, command: &BeforeAttemptCommand) -> Failure {
+    Failure::error(format!(
+        "before_attempt entry {index} stopped: {}",
+        command.run
+    ))
+}
+
+/// The wrapper's stop path for one `before_attempt` command (ADR 0048 decisions 7 and 9): the
+/// command's process group is the one the SIGTERM handler forwards to, and a cancel's
+/// `signal.json` is read the same way the worker monitor reads it.
+struct CommandStop<'a> {
+    clock: &'a Clock,
+    grace: Duration,
+}
+
+impl ShellWatch for CommandStop<'_> {
+    fn started(&self, pgid: u32) {
+        CHILD_PID.store(pgid as i32, Ordering::SeqCst);
+    }
+
+    fn finished(&self) {
+        CHILD_PID.store(0, Ordering::SeqCst);
+    }
+
+    fn stopping(&self) -> bool {
+        self.clock.stopped()
+    }
+
+    fn grace(&self) -> Duration {
+        // The configured grace belongs to the command's group, on a cancel as on a plain
+        // SIGTERM. `cancel` leaves the wrapper its own window to reap the group and write its
+        // record (`attempt::CANCEL_RECORD_RESERVE`), so nothing here shortens the grace: a
+        // grace of one second or less would otherwise become none at all.
+        self.grace
+    }
+}
+
+/// The task's profile's `before_attempt` entries and that profile's default command timeout
+/// (ADR 0048 decisions 7, 10 and 15): the flow's `gate_profile`, else `gate.profile`. A
+/// repository arc is not set up in has no profile, so no entry runs there, the same way the
+/// remote and main flags fall back to the git defaults. A `config.toml` that does not parse
+/// fails the attempt instead of being ignored, and so does a flow or profile the file no longer
+/// defines: a skipped merge would reach the gate as a conflict, or run the wrong profile's
+/// entries.
+fn before_attempt_entries(
+    repo: &Path,
+    task: &str,
+    flow: &str,
+) -> Result<(Vec<BeforeAttempt>, Duration), Failure> {
     match crate::store::Store::open(repo) {
         Ok(store) => {
             let config = store
@@ -1359,9 +1548,15 @@ fn before_attempt_steps(repo: &Path, task: &str, flow: &str) -> Result<Vec<Strin
             let (_, profile) = config
                 .task_gate_profile(task, flow)
                 .map_err(Failure::error)?;
-            Ok(profile.before_attempt.clone())
+            Ok((
+                profile.before_attempt.clone(),
+                config.gate.command_timeout(),
+            ))
         }
-        Err(crate::store::Error::NotInitialized) => Ok(Vec::new()),
+        Err(crate::store::Error::NotInitialized) => Ok((
+            Vec::new(),
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )),
         Err(error) => Err(Failure::error(error.message())),
     }
 }

@@ -20,9 +20,26 @@ When [`worker-brief.md`](files.md#worker-briefmd) exists, its content is the las
 
 ## The steps before an attempt
 
-Before the worker starts, the wrapper runs the profile's `before_attempt` steps in the worktree (see the [`before_attempt` row](files.md#configtoml)); a first attempt's steps do nothing.
-`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; a conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](gate.md#a-conflict-with-main)).
+Before the worker starts, the wrapper runs the profile's `before_attempt` entries in the worktree, in the order listed (see the [`before_attempt` row](files.md#configtoml)).
+An entry is `merge-main` or a table `{ run = "<command line>", timeout_secs = <integer> }`.
+`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; it does nothing on a first attempt, whose worktree already starts from the fetched main.
+A conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](gate.md#a-conflict-with-main)).
 A failed fetch or merge ends the attempt with git's message.
+
+A command entry runs in the worktree with no sandbox before every attempt, the first included, after any entry listed before it:
+
+```toml
+before_attempt = [{ run = "cargo build --locked", timeout_secs = 1200 }]
+```
+
+It is `sh -c <run>`, gets the wrapper's environment plus [`ARC_WORKTREE`, `ARC_TASK` and `ARC_ATTEMPT`](#the-environment), and its stdout and stderr go to `runs/<task>/attempts/<attempt id>/before/<n>.log`, where `n` is the entry's position in the list from 1.
+Its output never reaches the worker's stdin: a worker that needs it reads the log or the files the command produced.
+`timeout_secs` defaults to [`gate.command_timeout_secs`](files.md#configtoml), and `0` means no limit; the timeout kills the command's whole process group.
+The time counts against the attempt's `max_wall_time_secs`.
+A command that exits non-zero, or runs out of time, ends the attempt before the worker starts: it is an infrastructure failure under the retry rules, with no worker and no rework count, `attempt_finished.json` names the entry, its exit code or timeout and the log path, and [`show`](index.md#radian-arc-show-id-json) prints that reason.
+A `reverify` attempt runs no worker and no `before_attempt` command.
+
+The wrapper records the repository's git control files before the first entry and compares them after the entries, before the worker starts, so a command that changes one fails the attempt the same way a worker does (see [what the wrapper checks](#what-the-wrapper-checks-after-the-worker-exits)).
 
 ## The limits
 
@@ -31,10 +48,11 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 - no new line in `runs/<task>/attempts/<attempt id>/result.jsonl` for the task's `stall_timeout_secs` (else `[limits] stall_timeout_secs`) sends SIGTERM to the worker's process group;
 - `max_wall_time_secs` (else `[limits] max_wall_time_secs`) since the wrapper started does the same; this clock also bounds the wrapper's own git steps, so a fetch or a push still running at the limit is stopped the same way.
 - a fetch, a push or an `ls-remote` is also bounded by [`limits.git_remote_timeout_secs`](files.md#configtoml); whichever of it and the attempt's remaining wall time is shorter applies, and the call, with everything it started, is killed when it runs out.
-- after `[limits] cancel_grace_secs` the worker gets SIGKILL.
+- after `[limits] cancel_grace_secs` the worker gets SIGKILL; a `before_attempt` command's group gets the same when a stop reaches it while it runs (see [The steps before an attempt](#the-steps-before-an-attempt)).
 
 A limit of `0` means no limit for that timer.
 The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
+On a cancel the wrapper is itself killed only after the grace and one more second, the window in which it reaps what it stopped and writes that record; the grace is never shortened to make room for the record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
 ## What the wrapper checks after the worker exits
@@ -45,7 +63,9 @@ The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json`
 - the worktree has no uncommitted and no untracked files;
 - the task's own change is not empty, unless [`allow_noop`](files.md#task-fields) is on: the task's own value when its file carries one, else its flow's `flows.<name>.allow_noop` (see [An empty change](gate.md#an-empty-change));
 - the task's own change touches no path under `.radian/arc/`;
-- the repository's git control files are as the wrapper recorded them before the worker started: `<common dir>/config`, `<git dir>/config.worktree` (the worktree's own git dir), `<common dir>/config.worktree`, every file under `<common dir>/hooks/` and `<common dir>/info/`, and every `config` file and every file under `hooks/` in `<common dir>/modules/**` (submodules). A file the worker creates, removes or changes counts as a change: the wrapper compares content, not time. The record stays in the wrapper's memory, never in the worktree, and the check does not depend on the worker's sandbox. A control file larger than 1 MiB is not read whole: an attempt does not start while one of those paths is that large, and one the worker creates fails the attempt and is removed.
+- the repository's git control files are as the wrapper recorded them before the first `before_attempt` entry ran: `<common dir>/config`, `<git dir>/config.worktree` (the worktree's own git dir), `<common dir>/config.worktree`, every file under `<common dir>/hooks/` and `<common dir>/info/`, and every `config` file and every file under `hooks/` in `<common dir>/modules/**` (submodules). A file the worker creates, removes or changes counts as a change: the wrapper compares content, not time. The record stays in the wrapper's memory, never in the worktree, and the check does not depend on the worker's sandbox. A control file larger than 1 MiB is not read whole: an attempt does not start while one of those paths is that large, and one the worker creates fails the attempt and is removed.
+
+The wrapper compares the control files once after the `before_attempt` entries and before the worker starts, and again when the worker exits. A `before_attempt` command that changes one therefore fails the attempt before the worker starts, with the same restore and reason as a worker that changes one.
 
 A failed check fails the attempt with its reason in `runs/<task>/attempts/<attempt id>/attempt_finished.json`, which [`show`](index.md#radian-arc-show-id-json) prints; nothing is pushed. The git control check also restores every recorded file to its recorded content and removes every file that was not there before, then fails the attempt with the reason `the worker changed git control files: <paths, comma-separated>`. A control file the wrapper cannot read back counts as a change and is restored the same way. When the restore itself fails, the reason carries both failures, and the wrapper runs no further git command for that attempt. The wrapper stops everything the worker left in its process group before it compares the files, so a background process the worker started cannot change one after the worker exits.
 
