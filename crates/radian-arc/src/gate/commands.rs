@@ -175,10 +175,26 @@ pub(crate) fn run_series(
     Ok((records, SeriesOutcome::Passed))
 }
 
-struct OneCommand {
-    exit_code: Option<i32>,
-    duration_ms: u64,
-    outcome: SeriesOutcome,
+/// What one shell command did: the `commands`/integration line, or a wrapper
+/// `before_attempt` command (ADR 0048 decisions 7 and 10). The caller decides what a non-zero
+/// exit or a timeout means for its step.
+pub(crate) struct ShellOutcome {
+    /// The process's exit code; `None` when a signal killed it.
+    pub(crate) exit_code: Option<i32>,
+    /// How long it ran, in milliseconds.
+    pub(crate) duration_ms: u64,
+    /// Passed, failed, or was killed at the timeout.
+    pub(crate) outcome: SeriesOutcome,
+}
+
+impl ShellOutcome {
+    pub(crate) fn passed(&self) -> bool {
+        matches!(self.outcome, SeriesOutcome::Passed)
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        matches!(self.outcome, SeriesOutcome::TimedOut)
+    }
 }
 
 fn run_one(
@@ -186,7 +202,22 @@ fn run_one(
     line: &str,
     timeout: Duration,
     log: &Path,
-) -> Result<OneCommand, GateError> {
+) -> Result<ShellOutcome, GateError> {
+    run_shell(checkout, line, timeout, log, &[])
+}
+
+/// Runs one `sh -c` line in `dir`, stdout and stderr into `log`, in its own process group.
+/// `timeout` of zero waits forever; a timeout kills the whole group, so no child the command
+/// started outlives the step. `envs` are added on top of the wrapper's own environment; the
+/// gate stages pass none, the wrapper's `before_attempt` commands pass the `ARC_*` values a
+/// command worker gets (ADR 0048 decisions 7 and 10).
+pub(crate) fn run_shell(
+    dir: &Path,
+    line: &str,
+    timeout: Duration,
+    log: &Path,
+    envs: &[(&str, String)],
+) -> Result<ShellOutcome, GateError> {
     let file = File::create(log).map_err(|source| GateError::Io {
         path: log.to_path_buf(),
         source,
@@ -199,10 +230,13 @@ fn run_one(
     command
         .arg("-c")
         .arg(line)
-        .current_dir(checkout)
+        .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(stderr));
+    for (name, value) in envs {
+        command.env(name, value);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -225,7 +259,7 @@ fn run_one(
     let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
-            path: checkout.to_path_buf(),
+            path: dir.to_path_buf(),
             source,
         })? {
             break (status, false);
@@ -238,7 +272,7 @@ fn run_one(
             #[cfg(not(unix))]
             let _ = child.kill();
             let status = child.wait().map_err(|source| GateError::Io {
-                path: checkout.to_path_buf(),
+                path: dir.to_path_buf(),
                 source,
             })?;
             break (status, true);
@@ -258,7 +292,7 @@ fn run_one(
     } else {
         SeriesOutcome::Failed
     };
-    Ok(OneCommand {
+    Ok(ShellOutcome {
         exit_code: status.code(),
         duration_ms,
         outcome,

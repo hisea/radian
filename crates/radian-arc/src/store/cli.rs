@@ -611,6 +611,15 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             for note in super::attempt_ops::attempt_notes(store, &item.id, item.attempt) {
                 field(&mut out, "attempt_note", &note);
             }
+            // An attempt that never reached the gate (an infrastructure or model failure) has
+            // no `rework_reason`: its own failure is the reason `show` prints.
+            let rework_reason = crate::review::rework_reason(store, item);
+            if rework_reason.is_none()
+                && let Some(reason) =
+                    super::attempt_ops::attempt_failure(store, &item.id, item.attempt)
+            {
+                field(&mut out, "attempt_failure", &reason);
+            }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &task_cost_text(item));
             field(
@@ -696,8 +705,8 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "retry_at",
                 &optional_text(item.retry_at.as_deref()),
             );
-            if let Some(reason) = crate::review::rework_reason(store, item) {
-                field(&mut out, "rework_reason", &reason);
+            if let Some(reason) = &rework_reason {
+                field(&mut out, "rework_reason", reason);
             }
             if let Some((path, verdict)) = crate::review::latest_review_verdict(store, &item.id) {
                 field(&mut out, "review_verdict", &path.display().to_string());
@@ -1251,6 +1260,7 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
             let mut value = task_json(&task, &config, true, show_task_queue_reason(store, &task));
             let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
+            let rework_reason = crate::review::rework_reason(store, &task.item);
             if let Some(object) = value.as_object_mut() {
                 // The `after` chain, both ways (ADR 0048 decision 3): `show` and the MCP
                 // `show` tool report the same walk.
@@ -1279,9 +1289,21 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                     json!(chain.never_runs.as_ref().map(super::chain::Entry::json)),
                 );
                 object.insert("cycle".to_owned(), json!(chain.cycle));
+                object.insert("rework_reason".to_owned(), json!(rework_reason));
                 object.insert(
-                    "rework_reason".to_owned(),
-                    json!(crate::review::rework_reason(store, &task.item)),
+                    "attempt_failure".to_owned(),
+                    json!(
+                        rework_reason
+                            .is_none()
+                            .then(|| {
+                                super::attempt_ops::attempt_failure(
+                                    store,
+                                    &task.item.id,
+                                    task.item.attempt,
+                                )
+                            })
+                            .flatten()
+                    ),
                 );
                 object.insert(
                     "gate_profile".to_owned(),

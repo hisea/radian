@@ -99,9 +99,14 @@ pub enum GateError {
 
     /// A profile lists a `before_attempt` step this build does not run.
     #[error(
-        "`{0}` is not a step a profile can run before an attempt; the only step is `merge-main`"
+        "`{0}` is not a step a profile can run before an attempt; the only built-in step is \
+         `merge-main`, and a custom command is a table with `run`"
     )]
     UnknownBeforeAttemptStep(String),
+
+    /// A profile lists a `before_attempt` command without a command line.
+    #[error("a `before_attempt` command has an empty `run`; a command line is required")]
+    EmptyBeforeAttemptRun,
 
     /// A `serve` stop reached the gate: the stage child was killed and no verdict is
     /// written. The next loop starts the stage again as unverified (ADR 0048 decision 13).
