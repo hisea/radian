@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use agent_provider_openai_compatible::testing::Reply;
 use common::*;
 use radian_arc::attempt;
-use radian_arc::store::attempt_ops::{self, Class, Finish};
+use radian_arc::store::attempt_ops::{self, Class, Finish, WorkerLine};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Exit, Store, plan_ops};
 use serde_json::{Value, json};
@@ -312,7 +312,12 @@ fn a_claim_records_the_worker_it_decided_on() {
         .expect("start.json parses")
     };
 
-    attempt_ops::claim(&store, &tasks[0]).expect("the first claim");
+    let first = attempt_ops::claim(&store, &tasks[0]).expect("the first claim");
+    assert_eq!(
+        first.worker.record(),
+        start(&tasks[0])["worker"],
+        "the claim and `start.json` carry the same worker"
+    );
     assert_eq!(
         start(&tasks[0])["worker"],
         json!({"kind": "radian"}),
@@ -328,7 +333,19 @@ fn a_claim_records_the_worker_it_decided_on() {
             "command = [\"tools/codex\"]",
         )],
     );
-    attempt_ops::claim(&store, &tasks[1]).expect("the second claim");
+    let second = attempt_ops::claim(&store, &tasks[1]).expect("the second claim");
+    assert_eq!(
+        second.worker.record(),
+        start(&tasks[1])["worker"],
+        "the claim and `start.json` carry the same worker"
+    );
+    assert_eq!(
+        second.worker,
+        WorkerLine::Command {
+            command: vec![repo.clone.join("tools/codex").display().to_string()],
+        },
+        "the claim carries the resolved command the wrapper starts"
+    );
     assert_eq!(
         start(&tasks[1])["worker"],
         json!({
