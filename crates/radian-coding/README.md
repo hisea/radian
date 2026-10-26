@@ -15,7 +15,7 @@ via `GIT_CONFIG_*` in untrusted projects, ADR 0039 decision 5). See the crate do
 | `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
 | `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore`/`.ignore` respected (workspace root down to the search base), `.git` skipped, symlinks never followed; capped by `max_results`. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
 | `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore`/`.ignore` respected (workspace root down to the search base), binary files skipped; capped per file, in total matches, and in total output bytes (32 KiB, context lines dropped before matches, each cut named in the text). `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
-| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). The model runs git through `shell`; in a project the user has not trusted, every shell child carries the host git hardening as environment (`GIT_CONFIG_*`, ADR 0039 decision 5). |
+| `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative, or absolute inside the workspace), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). The model runs git through `shell`; in a project the user has not trusted, every shell child carries the host git hardening as environment (`GIT_CONFIG_*`, ADR 0039 decision 5). |
 | `job` | `Shared` | Read or stop one `shell` job by its job id (`read`, `wait` or `kill`). Plain `read` returns the output since the last call plus a `[status: …]` line; `tail_lines`, `from_line`/`max_lines` or `pattern` page the full file by line. `wait` blocks (default 30 s, max 600 s) and never kills; `kill` SIGTERMs the job's process group, then SIGKILLs after 3 s. A truncated foreground result is a settled entry under a normal job id — the same reader. No list tool: job ids are already in context. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
 
@@ -148,8 +148,7 @@ path, so a symlink into a denied directory refuses; the file itself opens with `
 on its last component. A refusal names the denied path and says it is in the sandbox's
 deny set.
 
-A model names one as an **absolute** path or with `~` (a relative path is always
-workspace-relative). `CodingTools` resolves the roots from the process environment once, when
+A model names one as an **absolute** path or with `~` (a relative path, and an absolute path inside the workspace, is workspace-relative — ADR 0039 decision 6). `CodingTools` resolves the roots from the process environment once, when
 the tool set is built (`CodingTools::new` / `with_sandbox*`), canonicalizes each root itself and
 holds it as a directory fd; the configured spelling is kept as an alias, so a path written the
 way `CARGO_HOME` was set still matches when canonicalization rewrites it (`/tmp` →
@@ -187,7 +186,9 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
-- absolute paths and `..` are refused before any filesystem access (`path_outside_workspace`);
+- an absolute path outside the workspace and any `..` are refused before any filesystem
+  access (`path_outside_workspace`); an absolute path inside the workspace root, in either
+  spelling, is the workspace-relative path and takes every check below (ADR 0039 decision 6);
 - `read`/`grep`/`glob` additionally read **read-only** roots outside the workspace
   (ADR 0039): `$CARGO_HOME/registry/src`, every
   `$RUSTUP_HOME/toolchains/*/lib/rustlib/src`, and each discovered skill's directory. An absolute or `~` path under one is opened from
