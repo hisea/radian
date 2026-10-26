@@ -13,6 +13,7 @@ Run with the standard library alone:
 """
 
 import importlib.util
+import json
 import os
 import shlex
 import subprocess
@@ -146,6 +147,130 @@ class RadianSystemTest(unittest.TestCase):
             "/tmp/radian", invocation, "do it", "/o", "/e"
         )
         self.assertEqual(command, base)
+
+
+# A stub `harbor` on PATH records each arm it was asked to run and exits with
+# HARBOR_STUB_RC. The real Harbor, Docker and model stay out of these tests.
+STUB_HARBOR = """\
+#!/bin/sh
+out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s %s\\n' "${out##*/}" "${RADIAN_AB_SYSTEM_FILE-<unset>}" >> "$HARBOR_STUB_LOG"
+exit "${HARBOR_STUB_RC:-0}"
+"""
+
+
+def stub_host(root):
+    """Lay out a HOME the shell scripts can run in; return its environment."""
+    home = root / "home"
+    credentials = home / ".radian" / "credentials"
+    credentials.mkdir(parents=True)
+    (credentials / "auth.json").write_text(
+        json.dumps({"opencode-go": {"key": "test-key"}}), encoding="utf-8"
+    )
+    tb_bin = home / "tb2" / "bin"
+    tb_bin.mkdir(parents=True)
+    for name in ("radian", "radian-test"):
+        (tb_bin / name).write_text("", encoding="utf-8")
+        (tb_bin / f"{name}.sha256").write_text(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+            encoding="utf-8",
+        )
+    stub_dir = root / "stub-bin"
+    stub_dir.mkdir()
+    harbor = stub_dir / "harbor"
+    harbor.write_text(STUB_HARBOR, encoding="utf-8")
+    harbor.chmod(0o755)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    env["HARBOR_STUB_LOG"] = str(root / "harbor-stub.log")
+    return home, env
+
+
+def stub_records(root):
+    """The arm name and role-file value each stub harbor invocation saw."""
+    log = root / "harbor-stub.log"
+    if not log.exists():
+        return {}
+    records = {}
+    for line in log.read_text(encoding="utf-8").splitlines():
+        arm, value = line.split(" ", 1)
+        records[arm] = value
+    return records
+
+
+def run_script(script, args, env, cwd):
+    """Run a script with file-backed output.
+
+    ``ab-system.sh`` leaves a load sampler in the background; a pipe would keep
+    ``subprocess.run`` waiting for that child's EOF, so both streams go to files.
+    """
+    streams = {}
+    for name in ("stdout", "stderr"):
+        streams[name] = open(Path(cwd) / f"script.{name}", "w", encoding="utf-8")
+    try:
+        result = subprocess.run(
+            ["bash", str(script), *args],
+            env=env,
+            cwd=cwd,
+            stdout=streams["stdout"],
+            stderr=streams["stderr"],
+        )
+    finally:
+        for stream in streams.values():
+            stream.close()
+    stderr = (Path(cwd) / "script.stderr").read_text(encoding="utf-8")
+    return result.returncode, stderr
+
+
+class RunScriptDoneLineTest(unittest.TestCase):
+    """A failed Harbor arm must still write its `done` line."""
+
+    def test_a_failed_arm_still_writes_its_done_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            env["HARBOR_STUB_RC"] = "7"
+            env["RADIAN_BENCH_BINARY"] = str(home / "tb2" / "bin" / "radian")
+            rc, stderr = run_script(AB / "run.sh", ["rework"], env, tmp)
+            self.assertEqual(rc, 0, stderr)
+            done = home / "tb2" / "jobs" / "rework" / "done"
+            self.assertTrue(done.exists(), f"no done file; stderr: {stderr}")
+            lines = sorted(done.read_text(encoding="utf-8").splitlines())
+            self.assertEqual(
+                lines, ["opencode rc=7", "pi rc=7", "radian rc=7"]
+            )
+
+
+class AbSystemEnvironmentTest(unittest.TestCase):
+    """The base arm must not inherit the caller's role file."""
+
+    def test_base_arm_ignores_an_exported_system_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            role = root / "role.md"
+            role.write_text("You are terse.\n", encoding="utf-8")
+            env["RADIAN_AB_SYSTEM_FILE"] = "/sentinel/from/the/caller"
+            rc, stderr = run_script(
+                AB / "ab-system.sh",
+                ["rework", "radian-test", str(role)],
+                env,
+                tmp,
+            )
+            self.assertEqual(rc, 0, stderr)
+            out = home / "tb2" / "jobs" / "rework"
+            records = stub_records(root)
+            self.assertEqual(records.get("base"), "<unset>", stderr)
+            self.assertEqual(records.get("concise"), str(out / "role.txt"))
+            lines = sorted((out / "done").read_text(encoding="utf-8").splitlines())
+            self.assertEqual(lines, ["base rc=0", "concise rc=0"])
 
 
 if __name__ == "__main__":

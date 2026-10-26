@@ -67,7 +67,7 @@ prepend `$HOME/.local/bin` to `PATH` so `harbor` resolves.
 |---|---|---|---|
 | `AB_N` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `2` in `ab.sh` and `ab-pi.sh`; `3` in `ab-system.sh` | Passed as `-n` (trials per arm). `run.sh` ignores it and passes `-n 4`; `smoke.sh` passes `-n 1`. |
 | `AB_K` | `ab-system.sh` | `3` | Passed as `-k`. `ab.sh` and `ab-pi.sh` pass a fixed `-k 2`; `run.sh` and `smoke.sh` pass no `-k` and use Harbor's default. |
-| `RADIAN_AB_SYSTEM_FILE` | `radian_system.py` | unset | Path to a UTF-8 role file. When set, the agent appends `--system <quoted text>` to the command; when unset, the command is unchanged. `ab-system.sh` sets it to `<label>/role.txt` for its concise arm. |
+| `RADIAN_AB_SYSTEM_FILE` | `radian_system.py` | unset | Path to a UTF-8 role file. When set, the agent appends `--system <quoted text>` to the command; when unset, the command is unchanged. `ab-system.sh` sets it to `<label>/role.txt` for its concise arm and unsets it for its base arm, so a value exported by the caller cannot silently give both arms a `--system`. |
 | `RADIAN_BENCH_BINARY` | `run.sh` | `$HOME/.cache/radian-musl/target/release/radian` | Host path of the static radian binary under test; its `.sha256` sidecar must exist beside it. |
 
 The scripts export these themselves; they are not inputs:
@@ -82,7 +82,7 @@ The scripts export these themselves; they are not inputs:
 
 ```text
 $HOME/tb2/jobs/<label>/
-  done            # one line per finished arm: "<arm> rc=<code>" (smoke: "rc=<code>")
+  done            # one line per finished arm: "<arm> rc=<code>" (smoke: "rc=<code>"); a failed arm still writes its line
   loadavg.log     # UTC timestamp plus 1/5/15-minute load, every 30 s (ab.sh, ab-system.sh)
   <arm>/          # Harbor output for that arm (one directory per binary name, pi, opencode)
   <arm>.log       # Harbor stdout and stderr for that arm

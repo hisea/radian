@@ -22,8 +22,9 @@ BIN=$HOME/tb2/bin/$b; SHA=$(cut -d' ' -f1 "$BIN.sha256")
 ( while true; do echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(cut -d' ' -f1-3 /proc/loadavg)" >> "$out/loadavg.log"; sleep 30; done ) &
 sampler=$!
 pids=()
+# The caller may have RADIAN_AB_SYSTEM_FILE exported; the base arm must not inherit it.
 for arm in base concise; do
-  ( if [ $arm = concise ]; then export RADIAN_AB_SYSTEM_FILE="$out/role.txt"; fi
+  ( if [ $arm = concise ]; then export RADIAN_AB_SYSTEM_FILE="$out/role.txt"; else unset RADIAN_AB_SYSTEM_FILE; fi
     PYTHONPATH=$PP harbor run "${COMMON[@]}" -a radian_system:RadianSystem \
       --ak binary_path="$BIN" --ak binary_sha256="$SHA" --ak thinking=high -o "$out/$arm" > "$out/$arm.log" 2>&1 && rc=0 || rc=$?
     echo "$arm rc=$rc" >> "$out/done" ) &
