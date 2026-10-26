@@ -77,8 +77,9 @@ with an error naming the limit. One approval covers a job's whole life.
 
 Type `/jobs` to open the jobs page. It lists the running background jobs in
 registry order. Type `/jobs kill <id>` to stop one job, `/jobs kill all` to
-stop every job. The kill signals the job's whole session with SIGTERM,
-then SIGKILL after 3 seconds. A settle the model has not seen arrives as a system
+stop every job. The kill signals the job's whole session: `kill <id>` sends
+SIGTERM, then SIGKILL after 3 seconds; `kill all` sends SIGKILL at once. A
+settle the model has not seen arrives as a system
 message: on a busy lane it joins the running turn, on an idle lane it opens
 a follow-up turn that wakes it. After three wake-started turns with no user
 input, a settle is injected only.
@@ -123,8 +124,9 @@ That has three consequences:
   editor, a pager, a password prompt on `/dev/tty`, an `isatty` check.
   Pass the program the input it wants (for example `git commit -m`).
 - A signal sent to radian's process group never reaches the command.
-- A stop (`timeout_secs`, `esc` or `ctrl-c`, `job kill`, session exit) signals
-  the command's whole session: SIGTERM, then SIGKILL after 3 seconds.
+- A stop (`timeout_secs`, `esc` or `ctrl-c`, `job kill`) signals
+  the command's whole session: SIGTERM, then SIGKILL after 3 seconds. A
+  session exit sends SIGKILL alone.
   A child that changed its own process group is still reached (GNU `timeout`
   does that); one that starts a new session is not.
 
