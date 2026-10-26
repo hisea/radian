@@ -440,10 +440,14 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // The profile's entries before an attempt: `merge-main` and the custom commands, in the
     // order listed (ADR 0048 decisions 7 and 10). The repository's git control files are
     // recorded first, so an entry that changes one fails the attempt the same way a worker
-    // does: the check runs again after the entries and before the worker starts.
+    // does: the check runs again after the entries and before the worker starts. It runs even
+    // when an entry failed, so a command that changed a control file and then failed is put
+    // back before this attempt ends.
     let control = GitControl::record(&s.worktree, &s.clock)?;
-    let conflict = before_attempt(o, s, created)?;
-    if let ControlCheck::Changed(change) = control.check() {
+    let before = before_attempt(o, s, created);
+    let check = control.check();
+    let conflict = before?;
+    if let ControlCheck::Changed(change) = check {
         return write_finish(
             o,
             s,
