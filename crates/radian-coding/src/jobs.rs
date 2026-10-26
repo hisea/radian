@@ -48,7 +48,8 @@ use crate::fail;
 pub use crate::output::SweepSummary;
 use crate::provider::Limits;
 use crate::shell::{
-    lock_bool, own_session, sandboxed_command, signal_session, wait_for_exit_without_reaping,
+    KILL_GRACE, lock_bool, own_session, sandboxed_command, signal_if_reserved, signal_session,
+    wait_for_exit_without_reaping,
 };
 
 /// How many background jobs may run at once in one session (ADR 0037 decision 7). A job costs
@@ -61,9 +62,6 @@ pub const MAX_RUNNING_JOBS: usize = 4;
 /// `.out` file keeps the full history for the host, but the model reads only through
 /// the `job` tool, so the ring is the read window and only has to cover one read gap.
 pub const JOB_RING_BYTES: usize = 64 << 10;
-
-/// SIGTERM, then SIGKILL after this grace (ADR 0037 decision 2).
-const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// The `job` wait's default, and its hard cap (dsh's numbers).
 const DEFAULT_WAIT_MS: u64 = 30_000;
@@ -944,16 +942,6 @@ fn terminate(cell: &Arc<Mutex<JobCell>>, kind: Termination) {
     });
 }
 
-/// Sends `signal` to the job's whole session only while the leader is still unreaped, holding
-/// the same lock the supervisor holds across its kill-and-reap, so a reused session id is never
-/// signalled.
-fn signal_if_reserved(sid: u32, signal: i32, reaped: &Arc<Mutex<bool>>) {
-    let guard = lock_bool(reaped);
-    if !*guard {
-        signal_session(sid, signal);
-    }
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -1033,7 +1021,7 @@ pub(crate) fn job_spec() -> ToolSpec {
                       range returns the output since your last read, plus `[status: ...]`. \
                       `wait` blocks until the job ends or `timeout_ms` elapses. `wait` never \
                       kills the job. `kill` stops the job's whole process group. The tool \
-                      sends SIGTERM first and SIGKILL after 2 s. `kill` on a finished job \
+                      sends SIGTERM first and SIGKILL after 3 s. `kill` on a finished job \
                       only reports its state. This tool is the only way to read the output \
                       file. A completion notice arrives when the job ends."
             .into(),
@@ -1215,7 +1203,7 @@ pub(crate) fn run_kill(
     let (text, state) = match jobs.kill(&args.job_id)? {
         KillResult::Requested => (
             format!(
-                "stopping {} (SIGTERM, then SIGKILL after 2s); it settles as killed\n",
+                "stopping {} (SIGTERM, then SIGKILL after 3s); it settles as killed\n",
                 args.job_id
             ),
             None,

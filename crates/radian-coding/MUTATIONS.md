@@ -794,3 +794,13 @@ with `cargo nextest run -p <crate> --locked --profile sandbox`.
 | TK0123-M1 | `placeholder` formats the source name unchanged (drop the control-character → space map) | ✅ 2 failed | `radian-coding image::tests::a_control_character_in_the_source_name_stays_on_one_line` (`"[image: bad\nname\r\t.png, 10×10, 1 KB]"`); `radian-tui::render a_composer_attachment_name_with_a_line_break_stays_on_one_row` (`Lines: the control characters became spaces`) |
 
 1/1 caught.
+
+## foreground timeout/cancel SIGTERM grace (2026-10-25, branch `work/TK0174-foreground-timeout-sigterm-grace`)
+
+The foreground stop path now SIGTERMs the session, waits up to the shared `KILL_GRACE` (3 s) for the leader to exit unreaped, then SIGKILLs what is left (ADR 0037 §7). The mutation sent SIGKILL first again, as the old code did. It was applied by hand to `crates/radian-coding/src/shell.rs`, backed up under `.radian/shell.rs.orig` and restored from that copy (never `git checkout`), confirmed byte-identical with `diff -q`; the four tests ran with `cargo nextest run -p radian-coding --locked --profile sandbox --test shell -E 'test(a_timeout_sigterms_before_it_kills) + test(a_timeout_kills_after_the_grace_when_sigterm_is_ignored) + test(a_cancellation_sigterms_before_it_kills) + test(a_cancellation_kills_after_the_grace_when_sigterm_is_ignored)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0174-M1 | `Supervised::stop` sends SIGKILL at once instead of SIGTERM (`signal_if_reserved(self.pid, SIGKILL, &reaped)`) | ✅ 4 failed | `a_timeout_sigterms_before_it_kills` (exit code null, signal 9, no `trapped.marker`); `a_timeout_kills_after_the_grace_when_sigterm_is_ignored` (SIGKILL at 1.03 s); `a_cancellation_sigterms_before_it_kills`; `a_cancellation_kills_after_the_grace_when_sigterm_is_ignored` |
+
+1/1 caught.
