@@ -22,7 +22,7 @@ pub(crate) fn schema() -> serde_json::Value {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "File to write. Use a workspace-relative path."
+                "description": "File to write. Use a workspace-relative path, or an absolute path inside the workspace."
             },
             "content": {
                 "type": "string",

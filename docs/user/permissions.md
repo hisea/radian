@@ -24,7 +24,7 @@ Deny rules still deny in both tiers.
 The sandbox still applies in `workspace` when approval is automatic.
 
 The file tools read the workspace, read-only roots, and more under `full`.
-Use a workspace-relative path for everything the file tools do.
+A workspace path is a relative path, or an absolute path inside the workspace: an absolute path under the workspace root, in either spelling of the root, is taken as its relative remainder, in every tier.
 Name a read-only root as an absolute path or with `~`, in either tier.
 Read-only roots are the cargo registry sources, every toolchain's sources, and each discovered skill's directory.
 Name any other absolute or `~` path only under `full`.
