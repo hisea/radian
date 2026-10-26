@@ -22,11 +22,14 @@
 //!   std applies `setpgid(0, 0)` before any `pre_exec` closure runs, and a process-group leader
 //!   cannot `setsid` (EPERM). `setsid` already creates a new group, so `killpg(pid, ...)` still
 //!   reaches the whole group in one syscall. No controlling terminal also means a sandboxed
-//!   command cannot `TIOCSTI` its way into the host terminal (ADR 0016). A command that
-//!   deliberately escapes the **session** (its own `setsid`) is out of scope; the drain is
-//!   bounded so even that cannot hang the tool.
+//!   command cannot `TIOCSTI` its way into the host terminal (ADR 0016). A descendant that
+//!   escapes the session with its own `setsid` is still reached: a stop walks the leader's
+//!   descendant tree across sessions ([`Descendants`], ADR 0037 §7). What no walk reaches is a
+//!   process that left the tree before the stop, and the drain is bounded so even that cannot
+//!   hang the tool.
 //! - Output is capped; the model is told how many bytes were discarded.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -994,17 +997,19 @@ impl Supervised {
 
     /// Stops the session after a timeout or a cancellation: SIGTERM first, then SIGKILL after
     /// [`KILL_GRACE`] to whatever is left (ADR 0037 §7). This is the job path's signalling
-    /// code: each signal is sent only while the leader is unreaped, and the wait leaves it
-    /// unreaped so its session id stays reserved.
+    /// code: the session signal is sent only while the leader is unreaped, and the wait leaves
+    /// it unreaped so its session id stays reserved. The descendant tree collected by the
+    /// SIGTERM goes to the SIGKILL pass: the supervisor can reap the leader in between, and it is
+    /// the collected set, not the reservation, that reaches a descendant whose parent died.
     async fn stop(&self) {
         let reaped = Arc::clone(&self.reaped);
-        signal_if_reserved(self.pid, SIGTERM, &reaped);
+        let tree = signal_if_reserved(self.pid, SIGTERM, &reaped, None);
         let pid = self.pid;
         // `waitid(WNOWAIT)` blocks; keep it off the async worker. If the leader exits within
         // the grace, the supervisor's own session kill cleans up what it left behind.
         let _ = tokio::task::spawn_blocking(move || {
             wait_for_exit(pid, KILL_GRACE);
-            signal_if_reserved(pid, SIGKILL, &reaped);
+            signal_if_reserved(pid, SIGKILL, &reaped, Some(&tree));
         })
         .await;
     }
@@ -1233,7 +1238,8 @@ pub fn wait_for_exit(_pid: u32, _grace: std::time::Duration) -> bool {
 /// `timeout` does exactly that, and so does a shell's own job control — so a group-only signal
 /// leaves it running, reparented to pid 1 (dogfood bug 2026-10-17: `timeout -k 30 2400 cargo
 /// test` outlived the kill of the job's group). A child that calls `setsid` itself leaves the
-/// session as well; no session-scoped signal can reach it, and that is out of scope.
+/// session as well, so this alone cannot reach it; a stop path collects the leader's descendant
+/// tree across sessions and signals that too ([`Descendants`], ADR 0037 §7).
 ///
 /// The caller holds the leader's `reaped` flag (see [`crate::jobs`]): while the leader is
 /// unreaped its pid stays reserved, and a session id is only ever created from its own leader's
@@ -1261,6 +1267,227 @@ pub fn signal_session(sid: u32, signal: i32) {
     {
         let _ = (sid, signal);
     }
+}
+
+/// One collected process: its pid and the start time that tells a live process from a reused
+/// pid (ADR 0037 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Collected {
+    pid: u32,
+    start: u64,
+    /// The process was in the job's session when it was collected, so the session signal
+    /// already reaches it and the collected signal skips it.
+    in_session: bool,
+}
+
+/// The leader's descendant tree **across sessions**, gathered when a stop path first signals
+/// (ADR 0037 §7). Its reason is a descendant that called `setsid`: no session-scoped signal
+/// reaches it (apt's `dpkg` runs in its own pty session, keeps `/var/lib/dpkg/lock` and breaks
+/// every later `apt` call). The grace paths keep the set their SIGTERM collected and signal it
+/// again on the SIGKILL pass, because a descendant whose parent died during the grace is a child
+/// of pid 1 by then and a fresh walk from the roots finds nothing.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Descendants {
+    collected: Vec<Collected>,
+}
+
+impl Descendants {
+    /// Walks from the roots — the leader `sid` and every current member of its session — down by
+    /// parent pid, across sessions.
+    fn collect(sid: u32) -> Self {
+        let mut tree = Self::default();
+        tree.walk(sid);
+        tree
+    }
+
+    /// One walk from the roots; a process already collected keeps its first start time, which is
+    /// the value every later signal is checked against.
+    fn walk(&mut self, sid: u32) {
+        let own = std::process::id();
+        let processes: Vec<ProcessInfo> = all_processes()
+            .into_iter()
+            .filter(|process| process.pid != own)
+            .collect();
+        let mut seen: HashSet<u32> = self.collected.iter().map(|entry| entry.pid).collect();
+        let mut children: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (index, process) in processes.iter().enumerate() {
+            children.entry(process.ppid).or_default().push(index);
+        }
+        let mut queue: VecDeque<usize> = processes
+            .iter()
+            .enumerate()
+            .filter(|(_, process)| process.pid == sid || process.session == Some(sid))
+            .map(|(index, _)| index)
+            .collect();
+        while let Some(index) = queue.pop_front() {
+            let process = &processes[index];
+            if seen.insert(process.pid) {
+                self.collected.push(Collected {
+                    pid: process.pid,
+                    start: process.start,
+                    in_session: process.pid == sid || process.session == Some(sid),
+                });
+            }
+            for &child in children.get(&process.pid).into_iter().flatten() {
+                if !seen.contains(&processes[child].pid) {
+                    queue.push_back(child);
+                }
+            }
+        }
+    }
+
+    /// Signals every collected process from index `from` on that is not in the job session.
+    /// Before each `kill` the process's start time is read again: a pid that is gone or reused
+    /// is skipped (ADR 0037 §7).
+    fn signal(&self, from: usize, signal: i32) {
+        for entry in self.collected.get(from..).unwrap_or_default() {
+            if entry.in_session || process_start(entry.pid) != Some(entry.start) {
+                continue;
+            }
+            #[cfg(unix)]
+            if let Ok(pid) = libc::pid_t::try_from(entry.pid) {
+                // SAFETY: `kill` takes plain integers and has no memory-safety preconditions.
+                unsafe {
+                    libc::kill(pid, signal);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = (entry.pid, signal);
+        }
+    }
+}
+
+/// One process as the tree walk sees it: its parent, its start time and the session it is in.
+struct ProcessInfo {
+    pid: u32,
+    ppid: u32,
+    start: u64,
+    session: Option<u32>,
+}
+
+/// Every process the platform can enumerate, with the fields the walk needs. A platform with no
+/// enumeration returns nothing, and [`signal_session`]'s group signal is then all there is.
+#[cfg(target_os = "macos")]
+fn all_processes() -> Vec<ProcessInfo> {
+    use std::mem::size_of;
+    let mut out = Vec::new();
+    // `proc_listallpids(NULL, 0)` returns the buffer size in bytes; with a buffer it returns the
+    // number of pids it wrote into it (measured on macOS 27).
+    // SAFETY: the size query writes nothing; the fill call is handed the buffer and its length.
+    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return out;
+    }
+    let mut pids = vec![0 as libc::c_int; needed as usize / size_of::<libc::c_int>() + 64];
+    let written = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast(),
+            (pids.len() * size_of::<libc::c_int>()) as libc::c_int,
+        )
+    };
+    if written <= 0 {
+        return out;
+    }
+    for &pid in &pids[..(written as usize).min(pids.len())] {
+        if pid > 0
+            && let Some(info) = process_info(pid as u32)
+        {
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// One process's parent, start time and session, from libproc.
+#[cfg(target_os = "macos")]
+fn process_info(pid: u32) -> Option<ProcessInfo> {
+    let bsd = bsd_info(pid)?;
+    Some(ProcessInfo {
+        pid,
+        ppid: bsd.pbi_ppid,
+        start: start_time(&bsd),
+        // `getsid(2)` answers for a process in another session with no privilege (BSD does not
+        // enforce POSIX's `EPERM`); a process that is gone has no session and is skipped.
+        session: process_session(pid),
+    })
+}
+
+/// `proc_pidinfo(PROC_PIDTBSDINFO)`: the parent pid and the start time of one process.
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is zeroed plain data that `proc_pidinfo` fills in, and it is handed its own
+    // size; no other preconditions.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let written =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (written == size).then_some(info)
+}
+
+/// The start time as one number, so a pid-reuse check compares two plain `u64`s.
+#[cfg(target_os = "macos")]
+fn start_time(info: &libc::proc_bsdinfo) -> u64 {
+    info.pbi_start_tvsec
+        .saturating_mul(1_000_000)
+        .saturating_add(info.pbi_start_tvusec)
+}
+
+/// Every process, from `/proc`. Unverified here: Linux cannot be run on this machine (the code
+/// only has to keep compiling for it).
+#[cfg(target_os = "linux")]
+fn all_processes() -> Vec<ProcessInfo> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Some(info) = process_info(pid) {
+            out.push(info);
+        }
+    }
+    out
+}
+
+/// One process's parent, start time and session, from `/proc`.
+#[cfg(target_os = "linux")]
+fn process_info(pid: u32) -> Option<ProcessInfo> {
+    let (ppid, session, start) = proc_stat(pid)?;
+    Some(ProcessInfo {
+        pid,
+        ppid,
+        start,
+        session: Some(session),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn all_processes() -> Vec<ProcessInfo> {
+    Vec::new()
+}
+
+/// The start time of `pid`, or `None` if it is gone: the pid-reuse check a collected signal makes
+/// just before its `kill` (ADR 0037 §7).
+#[cfg(target_os = "macos")]
+fn process_start(pid: u32) -> Option<u64> {
+    Some(start_time(&bsd_info(pid)?))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start(pid: u32) -> Option<u64> {
+    proc_stat(pid).map(|(_, _, start)| start)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// Every process whose session id is `sid`. macOS asks libproc and `getsid(2)`; Linux reads
@@ -1331,18 +1558,25 @@ fn session_members(sid: u32) -> Vec<u32> {
     out
 }
 
-/// Field 6 of `/proc/<pid>/stat`, the session. `comm` (field 2) may hold spaces and parentheses,
-/// so everything up to the **last** `)` is skipped; after it the fields are
-/// `state ppid pgrp session`.
+/// Field 6 of `/proc/<pid>/stat`, the session.
 #[cfg(target_os = "linux")]
 fn session_of_stat(pid: u32) -> Option<u32> {
+    proc_stat(pid).map(|(_, session, _)| session)
+}
+
+/// One `/proc/<pid>/stat` read: `(parent pid, session, start time)`, fields 4, 6 and 22.
+///
+/// `comm` (field 2) may hold spaces and parentheses, so everything up to the **last** `)` is
+/// skipped; after it the fields are `state ppid pgrp session`, …, `starttime`.
+#[cfg(target_os = "linux")]
+fn proc_stat(pid: u32) -> Option<(u32, u32, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(3)?
-        .parse()
-        .ok()
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    Some((
+        fields.get(1)?.parse().ok()?,
+        fields.get(3)?.parse().ok()?,
+        fields.get(19)?.parse().ok()?,
+    ))
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
@@ -1350,15 +1584,41 @@ fn session_members(_sid: u32) -> Vec<u32> {
     Vec::new()
 }
 
-/// Sends `signal` to the whole session of `sid` only while the leader is still unreaped,
-/// holding the same lock the supervisor holds across its kill-and-reap, so a reused session id
-/// is never signalled (ADR 0037 §7's pid-reuse guard). Shared by the job stop paths and the
-/// foreground timeout/cancel path.
-pub(crate) fn signal_if_reserved(sid: u32, signal: i32, reaped: &Mutex<bool>) {
+/// Sends `signal` to the whole session of `sid` and to the descendant tree collected for it, only
+/// while the leader is still unreaped, holding the same lock the supervisor holds across its
+/// kill-and-reap, so a reused session id is never signalled (ADR 0037 §7's pid-reuse guard).
+/// Shared by the job stop paths and the foreground timeout/cancel path.
+///
+/// `earlier` is the set an earlier signal collected. The grace paths pass the set their SIGTERM
+/// collected on the SIGKILL pass, and this also signals what a fresh walk finds by then. A fresh
+/// walk and the session signal need the reservation; a collected pid does not, because its own
+/// start time is what it is checked against, so the SIGKILL pass still reaches the collected set
+/// when the supervisor reaped the leader during the grace. Returns the set for a later pass.
+pub(crate) fn signal_if_reserved(
+    sid: u32,
+    signal: i32,
+    reaped: &Mutex<bool>,
+    earlier: Option<&Descendants>,
+) -> Descendants {
     let guard = lock(reaped);
-    if !*guard {
-        signal_session(sid, signal);
+    let mut tree = earlier.cloned().unwrap_or_default();
+    if *guard {
+        // The leader is reaped: its pid may already belong to another process, so neither the
+        // session signal nor a walk from it is safe. The collected set still is.
+        tree.signal(0, signal);
+        return tree;
     }
+    if earlier.is_none() {
+        tree = Descendants::collect(sid);
+    }
+    signal_session(sid, signal);
+    tree.signal(0, signal);
+    if earlier.is_some() {
+        let fresh = tree.collected.len();
+        tree.walk(sid);
+        tree.signal(fresh, signal);
+    }
+    tree
 }
 
 /// Sends SIGKILL to every process of session `pid`. Unix only in practice; other platforms have
@@ -1657,5 +1917,51 @@ mod tests {
         let (failure_head, _, _) = capped.view(false);
         assert_eq!(success_head.len(), 10);
         assert_eq!(failure_head.len(), 5);
+    }
+
+    /// ADR 0037 §7's guard for a collected process: a set whose recorded start time no longer
+    /// matches the live process is not signalled — that is a reused pid — and the same set with
+    /// the matching time is. The child is a real process this test starts and reaps itself.
+    #[test]
+    fn a_collected_pid_with_a_changed_start_time_is_not_signalled() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("a `sleep` child to signal");
+        let pid = child.id();
+        let start = process_start(pid).expect("the child's start time");
+        let set = |start: u64| Descendants {
+            collected: vec![Collected {
+                pid,
+                start,
+                in_session: false,
+            }],
+        };
+
+        set(start.wrapping_add(1)).signal(0, SIGKILL);
+        // A matching signal would end the child within microseconds; the bounded wait is what
+        // tells "not signalled" from "not signalled yet".
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            assert!(
+                child.try_wait().expect("try_wait").is_none(),
+                "a pid whose start time changed must not be signalled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        set(start).signal(0, SIGKILL);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the collected child survived SIGKILL"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(!status.success(), "SIGKILL must have ended the child");
     }
 }

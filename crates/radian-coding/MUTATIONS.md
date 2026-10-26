@@ -804,3 +804,24 @@ The foreground stop path now SIGTERMs the session, waits up to the shared `KILL_
 | TK0174-M1 | `Supervised::stop` sends SIGKILL at once instead of SIGTERM (`signal_if_reserved(self.pid, SIGKILL, &reaped)`) | ✅ 4 failed | `a_timeout_sigterms_before_it_kills` (exit code null, signal 9, no `trapped.marker`); `a_timeout_kills_after_the_grace_when_sigterm_is_ignored` (SIGKILL at 1.03 s); `a_cancellation_sigterms_before_it_kills`; `a_cancellation_kills_after_the_grace_when_sigterm_is_ignored` |
 
 1/1 caught.
+
+## a stop reaches descendants that started their own session (2026-10-26, branch `work/TK0175-stop-descendant-tree`)
+
+A stop now collects the leader's descendant tree across sessions (`Descendants` in
+`crates/radian-coding/src/shell.rs`) and signals it with the session; the grace paths pass the
+set their SIGTERM collected to their SIGKILL pass. Each mutation was applied by hand to
+`crates/radian-coding/src/shell.rs`, backed up under `.radian/shell.rs.orig` and then undone
+either from that copy (M1, M2) or by reverting the one edited line (M3, so the test improvements
+made in the same file after the backup stayed), never with `git checkout`; the file was
+confirmed by `diff` to hold only the intended change. The integration tests ran with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test job_setsid_child` and the
+unit test with `cargo nextest run -p radian-coding --locked --profile sandbox --lib -E
+'test(a_collected_pid_with_a_changed_start_time_is_not_signalled)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0175-M1 | `Supervised::stop` signals only the session (`signal_session(self.pid, SIGTERM)`, an empty tree for the SIGKILL pass): no walk on the foreground timeout/cancel path | ✅ 2 failed | `a_foreground_timeout_reaches_a_child_that_started_its_own_session` (the `sleep` child survived the timeout); `a_foreground_timeout_reaches_an_ignoring_child_after_its_parent_died` (the child outlived the SIGKILL pass) |
+| TK0175-M2 | the SIGKILL pass starts from an empty set (`let mut tree = Descendants::default()`), so it has only a fresh walk, not the set collected at SIGTERM | ✅ 2 failed | `a_foreground_timeout_reaches_an_ignoring_child_after_its_parent_died`; `job_kill_reaches_a_child_that_started_its_own_session` (the ignoring child, a child of pid 1 by the SIGKILL pass, survived) |
+| TK0175-M3 | `Descendants::signal` drops the start-time check (`if entry.in_session { continue; }`) | ✅ 1 failed | `shell::tests::a_collected_pid_with_a_changed_start_time_is_not_signalled` (`a pid whose start time changed must not be signalled`) |
+
+3/3 caught.
