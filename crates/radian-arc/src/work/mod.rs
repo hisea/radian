@@ -1506,14 +1506,6 @@ struct CommandStop<'a> {
     grace: Duration,
 }
 
-/// How much of the configured grace a `before_attempt` command gives up when a cancel is what
-/// stops it. `radian arc cancel` writes `signal.json` and then gives the wrapper exactly
-/// `[limits] cancel_grace_secs` before SIGKILL (ADR 0048 decision 9), so a command whose group
-/// ignores SIGTERM must be escalated inside that same window: a full grace would end after the
-/// wrapper itself is killed, and the group would outlive both. The rest is the time the
-/// wrapper needs to reap the command and write its records.
-const STOP_RESERVE: Duration = Duration::from_secs(1);
-
 impl ShellWatch for CommandStop<'_> {
     fn started(&self, pgid: u32) {
         CHILD_PID.store(pgid as i32, Ordering::SeqCst);
@@ -1528,14 +1520,11 @@ impl ShellWatch for CommandStop<'_> {
     }
 
     fn grace(&self) -> Duration {
-        // A cancel's own countdown started when it wrote `signal.json`, before it signalled
-        // this process, and the wrapper is SIGKILLed when it runs out. A plain SIGTERM has no
-        // such deadline, so it keeps the full configured grace.
-        if self.clock.signal.is_file() {
-            self.grace.saturating_sub(STOP_RESERVE)
-        } else {
-            self.grace
-        }
+        // The configured grace belongs to the command's group, on a cancel as on a plain
+        // SIGTERM. `cancel` leaves the wrapper its own window to reap the group and write its
+        // record (`attempt::CANCEL_RECORD_RESERVE`), so nothing here shortens the grace: a
+        // grace of one second or less would otherwise become none at all.
+        self.grace
     }
 }
 

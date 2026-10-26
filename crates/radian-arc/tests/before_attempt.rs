@@ -14,9 +14,11 @@ use std::process::Child;
 use std::time::{Duration, Instant};
 
 use common::*;
+use radian_arc::attempt;
+use radian_arc::attempt::CANCEL_RECORD_RESERVE;
 use radian_arc::review;
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Store, plan_ops};
+use radian_arc::store::{Store, attempt_ops, plan_ops};
 use serde_json::{Value, json};
 
 fn init(repo: &Repo) {
@@ -696,11 +698,10 @@ fn a_failed_restore_wins_over_a_failing_command() {
     assert!(text.contains("exit code 7"), "{text}");
 }
 
-/// `radian arc cancel` writes `signal.json` and gives the wrapper exactly `cancel_grace_secs`
-/// before SIGKILL. A `before_attempt` group that ignores SIGTERM must therefore be killed
-/// inside that same window: with the whole configured grace the wrapper was killed first and
-/// the group outlived both it and the attempt. Mutation TK0169-M4 (use the whole configured
-/// grace on the cancel path): the wrapper is still running when the cancel's grace runs out.
+/// `radian arc cancel` writes `signal.json`, signals the wrapper, and SIGKILLs it after
+/// `cancel_grace_secs` plus `CANCEL_RECORD_RESERVE`, the window in which the wrapper reaps what
+/// it stopped and writes its record. A `before_attempt` group that ignores SIGTERM must be
+/// killed inside the grace, and the wrapper must still get its record out before that deadline.
 #[test]
 fn a_term_ignoring_group_is_killed_before_the_cancel_kills_the_wrapper() {
     let repo = Repo::new("before-command-cancel-deadline");
@@ -722,7 +723,7 @@ fn a_term_ignoring_group_is_killed_before_the_cancel_kills_the_wrapper() {
     );
 
     // What `radian arc cancel` does, in order: record the reason, signal the wrapper, and
-    // SIGKILL it when `cancel_grace_secs` passes without an `AttemptFinished`.
+    // SIGKILL it when the grace and the record window pass without an `AttemptFinished`.
     let grace = Duration::from_secs(2);
     fs::write(
         repo.run_dir(task, 1).join("signal.json"),
@@ -732,7 +733,7 @@ fn a_term_ignoring_group_is_killed_before_the_cancel_kills_the_wrapper() {
     // SAFETY: `kill(2)` with a positive pid reads no memory; the pid is the wrapper's.
     unsafe { libc::kill(wrapper.id() as i32, libc::SIGTERM) };
     let finished = repo.run_dir(task, 1).join("attempt_finished.json");
-    let deadline = Instant::now() + grace;
+    let deadline = Instant::now() + grace + CANCEL_RECORD_RESERVE;
     while Instant::now() < deadline && !finished.is_file() {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -762,6 +763,163 @@ fn a_term_ignoring_group_is_killed_before_the_cancel_kills_the_wrapper() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The configured grace belongs to the command's group; `cancel` does not take the wrapper's
+/// record time out of it. A one-second grace with a group that ignores SIGTERM must still last
+/// that second: a grace reduced by a one-second record reserve was SIGKILLed on the next poll,
+/// which the group's survival 400 ms in shows.
+#[test]
+fn a_one_second_cancel_grace_is_not_shortened_by_the_record_reserve() {
+    let repo = Repo::new("before-command-cancel-small-grace");
+    init(&repo);
+    let task = "TK0312-small-grace";
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 1");
+    before_attempt(
+        &repo,
+        "[{ run = 'trap \"\" TERM; sleep 300 & echo $! > child.pid; wait', timeout_secs = 0 }]",
+    );
+    let ran = repo.root.join("worker-ran");
+    let worker = format!("touch '{}'", ran.display());
+    let wrapper = spawn_attempt_with_grace(&repo, task, 1, "tok-small-grace", &worker, 1);
+    let child = wait_for_pid(
+        &repo.worktree(task).join("child.pid"),
+        "the command's child",
+    );
+
+    let grace = Duration::from_secs(1);
+    let started = Instant::now();
+    fs::write(
+        repo.run_dir(task, 1).join("signal.json"),
+        "{\n  \"reason\": \"cancel\"\n}\n",
+    )
+    .expect("signal.json");
+    // SAFETY: `kill(2)` with a positive pid reads no memory; the pid is the wrapper's.
+    unsafe { libc::kill(wrapper.id() as i32, libc::SIGTERM) };
+    // 400 ms into a one-second grace the group still ignores SIGTERM, so it is still there. A
+    // grace shortened by the record reserve killed it within the wrapper's first poll.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(
+        alive(child),
+        "the command's group was killed before its one-second grace ran out"
+    );
+
+    let finished = repo.run_dir(task, 1).join("attempt_finished.json");
+    let deadline = started + grace + CANCEL_RECORD_RESERVE + Duration::from_secs(10);
+    while Instant::now() < deadline && !finished.is_file() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        finished.is_file(),
+        "the wrapper wrote no AttemptFinished within the cancel's window"
+    );
+    let output = wrapper.wait_with_output().expect("the wrapper's output");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!ran.exists(), "the worker started after the cancel");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the cancel left the TERM-ignoring group running; {child} still sleeps"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `radian arc cancel` itself, against a wrapper that is running a TERM-ignoring `before_attempt`
+/// command: the command's group gets the configured second, the wrapper reaps it and writes its
+/// record, and `cancel` applies that record. The wrapper is signalled while the command runs, so
+/// the test writes the identity record `cancel` reads (a running attempt's record names the
+/// wrapper); no worker ever starts. The record window `cancel` waits after the grace is pinned
+/// by `attempt::a_cancel_waits_a_record_window_after_the_grace`.
+#[test]
+fn a_real_cancel_leaves_the_wrapper_its_record_window() {
+    let repo = Repo::new("before-command-real-cancel");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("real-cancel", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task(
+            &plan,
+            "work",
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    tune(&repo, "cancel_grace_secs = 10", "cancel_grace_secs = 1");
+    before_attempt(
+        &repo,
+        "[{ run = 'trap \"\" TERM; sleep 300 & echo $! > child.pid; wait', timeout_secs = 0 }]",
+    );
+    attempt_ops::claim(&store, &task).expect("claim");
+    store
+        .change_task(&task, |task| {
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("running");
+    let token = store
+        .load_task(&task)
+        .expect("the task reads")
+        .item
+        .token
+        .expect("the claim wrote a token");
+
+    let ran = repo.root.join("worker-ran");
+    let worker = format!("touch '{}'", ran.display());
+    let wrapper = spawn_attempt_with_grace(&repo, &task, 1, &token, &worker, 1);
+    let child = wait_for_pid(
+        &repo.worktree(&task).join("child.pid"),
+        "the command's child",
+    );
+    let pid = wrapper.id();
+    fs::write(
+        repo.attempt_dir(&task, 1).join("identity.json"),
+        json!({
+            "attempt_id": format!("{task}-1"),
+            "token": token,
+            "pid": 0,
+            "process_started_at": null,
+            "wrapper_pid": pid,
+            "wrapper_process_started_at": null,
+        })
+        .to_string(),
+    )
+    .expect("identity.json");
+
+    let canceled = attempt::cancel(&store, &task).expect("cancel");
+    assert_eq!(
+        (canceled.state.as_str(), canceled.phase.as_str()),
+        ("failed", "cancelled"),
+        "cancel did not apply the wrapper's record: {canceled:?}"
+    );
+    assert!(!ran.exists(), "the worker started after the cancel");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the cancel left the TERM-ignoring group running; {child} still sleeps"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = wrapper.wait_with_output().expect("the wrapper's output");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// The command's own shell can exit on SIGTERM while a child it started ignores it. The stop
