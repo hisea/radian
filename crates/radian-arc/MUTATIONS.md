@@ -1234,3 +1234,21 @@ ignored the flow limit) failed all five new tests.
 | TK0165-M3 | the total limit is dropped when the flow has a free slot (`start_ready` and `claim_by` lose the `doing.total` check) | `flows::one_total_slot_names_the_shared_limit_or_the_full_flow`, `flows::a_full_flow_does_not_block_another_flows_later_task` (two tasks start with one total slot) | ✅ 2 failed |
 
 3/3 caught.
+
+## TK0165 rework: the queue reason in `list` and `show` (2026-10-26, branch `work/TK0165-per-flow-concurrency`)
+
+The review found that `list` and `show` could not name the full limit. They now print the
+loop summary's reason for a `todo.ready` task a limited slot holds (ADR 0048 decision 13), and
+the minor item made a bare `[flows]` table turn the per-flow limit on as the manual says. Each
+mutation was applied by hand to the named file. The tests ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox`; the flows tests drive the binary, so they also needed
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture` after each
+change. The sources were restored from copies under `.radian/mut/` with `cp` and compared with
+`cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0165-M4 | `slot_wait_reason` answers `None`, so `list` and `show` never name a slot | `flows::list_and_show_name_a_full_flows_queue_reason`, `flows::list_and_show_name_the_shared_limit_when_the_flow_has_room` (no `(waiting for a free code slot)` and no `queue_reason` field) | ✅ 2 failed |
+| TK0165-M5 | `flows_configured` is again inferred from the deserialized map (`!config.flows.is_empty()`), so a bare `[flows]` table keeps old scheduling | `store::config::tests::a_bare_flows_table_holds_the_default_flow_to_its_concurrency` (`config.flows_configured` is false) | ✅ failed |
+
+2/2 caught.

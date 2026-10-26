@@ -281,56 +281,116 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
         ));
     }
     // A task's flow gets a column only when the repository defines one besides `default`:
-    // a repository without `[flows]` prints the line it always printed (ADR 0048 decision 15).
-    let show_flow = store
-        .config()?
-        .flows
-        .keys()
-        .any(|name| name != DEFAULT_FLOW);
+    // a repository without `[flows]` prints no flow column (ADR 0048 decision 15).
+    let config = store.config()?;
+    let show_flow = config.flows.keys().any(|name| name != DEFAULT_FLOW);
+    // The queue reasons read the limits and the `doing` counts once for the whole tree
+    // (ADR 0048 decision 13).
+    let queue = QueueState::read(&store)?;
     match plan {
         Some(id) => Ok(list_plan_text_with_flows(
             &store.plan_view(id)?,
             all,
             show_flow,
+            &queue,
         )),
         None => {
             // Claim order, the order `run` serves tasks in: the plan's priority, then its id.
             let mut views = store.plans()?;
             views.sort_by(|one, other| super::model::claim_order(&one.plan.item, &other.plan.item));
-            Ok(list_text_with_flows(&views, all, show_flow))
+            Ok(list_text_with_flows(&views, all, show_flow, &queue))
         }
     }
+}
+
+/// What `list` and `show` need to name a full limit: the config and the `doing` counts, read
+/// once per call, and the reason they give for a ready task (ADR 0048 decision 13).
+struct QueueState<'a> {
+    store: &'a Store,
+    config: super::config::Config,
+    counts: super::attempt_ops::DoingCounts,
+}
+
+impl<'a> QueueState<'a> {
+    fn read(store: &'a Store) -> Result<Self, Error> {
+        Ok(Self {
+            store,
+            config: store.config()?,
+            counts: crate::run::queue_doing_counts(store)?,
+        })
+    }
+
+    /// The slot a ready task waits for now, in the loop summary's words, or `None` when no
+    /// limit holds it.
+    fn reason(
+        &self,
+        plan: &super::model::PlanFile,
+        task: &super::model::TaskFile,
+    ) -> Option<String> {
+        crate::run::slot_wait_reason(self.store, &self.config, &self.counts, plan, task)
+    }
+}
+
+/// The reason `show` gives one task, best-effort: `show` prints every field even when the
+/// store cannot read its config or a `doing` task file, so a store that cannot is no reason.
+fn show_task_queue_reason(store: &Store, task: &super::model::TaskFile) -> Option<String> {
+    let plan = store.load_plan(&task.plan).ok()?;
+    let queue = QueueState::read(store).ok()?;
+    queue.reason(&plan.item, task)
 }
 
 /// The text `radian arc list` prints (ADR 0048 decision 1, `list`). Unless `all`, a task in
 /// `done.merged`, a finished plan, and a cancelled plan are left out, and the last line counts
 /// what was left out. A plan with no tasks is shown too. Every other state, `failed.*`
-/// included, stays visible. No flow column: [`list_text_with_flows`] adds it.
+/// included, stays visible. No flow column and no queue reason: [`list_text_with_flows`] adds
+/// both from a store.
 pub fn list_text(views: &[PlanView], all: bool) -> String {
-    render(views, all, false, false)
+    render(views, all, false, false, None)
 }
 
-/// [`list_text`] with the flow column, which `radian arc list` shows only when the repository
-/// defines a flow other than `default`.
-pub fn list_text_with_flows(views: &[PlanView], all: bool, show_flow: bool) -> String {
-    render(views, all, false, show_flow)
+/// [`list_text`] with the flow column and the queue reasons, which `radian arc list` shows
+/// from a store.
+fn list_text_with_flows(
+    views: &[PlanView],
+    all: bool,
+    show_flow: bool,
+    queue: &QueueState,
+) -> String {
+    render(views, all, false, show_flow, Some(queue))
 }
 
 /// The text `radian arc list --plan <id>` prints: the plan the user named is always shown,
 /// with an empty task list when it is finished, so the user sees that it exists. Its merged
 /// tasks follow the default filter.
 pub fn list_plan_text(view: &PlanView, all: bool) -> String {
-    render(std::slice::from_ref(view), all, true, false)
+    render(std::slice::from_ref(view), all, true, false, None)
 }
 
-/// [`list_plan_text`] with the flow column.
-pub fn list_plan_text_with_flows(view: &PlanView, all: bool, show_flow: bool) -> String {
-    render(std::slice::from_ref(view), all, true, show_flow)
+/// [`list_plan_text`] with the flow column and the queue reasons.
+fn list_plan_text_with_flows(
+    view: &PlanView,
+    all: bool,
+    show_flow: bool,
+    queue: &QueueState,
+) -> String {
+    render(
+        std::slice::from_ref(view),
+        all,
+        true,
+        show_flow,
+        Some(queue),
+    )
 }
 
 /// `named` keeps a finished or cancelled plan's header line: `--plan` asked for that plan by
 /// name.
-fn render(views: &[PlanView], all: bool, named: bool, show_flow: bool) -> String {
+fn render(
+    views: &[PlanView],
+    all: bool,
+    named: bool,
+    show_flow: bool,
+    queue: Option<&QueueState>,
+) -> String {
     let mut out = String::new();
     let mut hidden_plans = 0usize;
     let mut hidden_cancelled = 0usize;
@@ -376,15 +436,22 @@ fn render(views: &[PlanView], all: bool, named: bool, show_flow: bool) -> String
             } else {
                 String::new()
             };
+            // A ready task that a full limit holds says which one, in the loop summary's
+            // words (ADR 0048 decision 13): `list` names the reason the same way `run` does.
+            let waiting = queue
+                .and_then(|queue| queue.reason(&view.plan.item, &task.item))
+                .map(|reason| format!("  ({reason})"))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "  {}{flow}  {}.{}  attempt {}  {}{}{}\n",
+                "  {}{flow}  {}.{}  attempt {}  {}{}{}{}\n",
                 task.item.id,
                 task.item.state.as_str(),
                 task.item.phase,
                 task.item.attempt,
                 task.item.title,
                 retry,
-                changed_marker(task.changed_outside_arc)
+                changed_marker(task.changed_outside_arc),
+                waiting
             ));
         }
     }
@@ -512,6 +579,13 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             field(&mut out, "title", &item.title);
             field(&mut out, "state", item.state.as_str());
             field(&mut out, "phase", &item.phase);
+            // The slot a ready task waits for now, in `run`'s summary words (ADR 0048
+            // decision 13); `-` when no limit holds it.
+            field(
+                &mut out,
+                "queue_reason",
+                &optional_text(show_task_queue_reason(store, item).as_deref()),
+            );
             field(&mut out, "attempt", &item.attempt.to_string());
             field(
                 &mut out,
@@ -762,7 +836,11 @@ fn cost_text(cost: f64) -> String {
     text
 }
 
-fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_json::Value {
+fn task_json(
+    task: &Loaded<super::model::TaskFile>,
+    with_body: bool,
+    queue_reason: Option<String>,
+) -> serde_json::Value {
     let item = &task.item;
     let mut value = json!({
         "id": item.id,
@@ -770,6 +848,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
         "title": item.title,
         "state": item.state.as_str(),
         "phase": item.phase,
+        "queue_reason": queue_reason,
         "attempt": item.attempt,
         "attempt_id": item.attempt_id,
         "token": item.token,
@@ -801,7 +880,7 @@ fn task_json(task: &Loaded<super::model::TaskFile>, with_body: bool) -> serde_js
     value
 }
 
-fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
+fn plan_json(queue: Option<&QueueState>, view: &PlanView, with_body: bool) -> serde_json::Value {
     let plan = &view.plan.item;
     let mut value = json!({
         "id": plan.id,
@@ -819,7 +898,10 @@ fn plan_json(view: &PlanView, with_body: bool) -> serde_json::Value {
             .iter()
             // A task's own body is only in `show <task> --json`; the plan's JSON names the
             // tasks, it does not repeat every brief.
-            .map(|task| task_json(task, false))
+            .map(|task| {
+                let reason = queue.and_then(|queue| queue.reason(&view.plan.item, &task.item));
+                task_json(task, false, reason)
+            })
             .collect::<Vec<_>>(),
         "changed_outside_arc": view.plan.changed_outside_arc,
     });
@@ -1115,6 +1197,7 @@ fn mcp(claude_experimental: bool) -> Result<u8, Error> {
 /// cancelled plan is left out (by its `status` or by all its tasks being `failed.cancelled`);
 /// a plan named with `plan` is always included.
 pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_json::Value, Error> {
+    let queue = QueueState::read(store)?;
     let views = match plan {
         Some(id) => vec![store.plan_view(id)?],
         None => {
@@ -1128,16 +1211,22 @@ pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_j
         }
     };
     Ok(serde_json::Value::Array(
-        views.iter().map(|view| plan_json(view, false)).collect(),
+        views
+            .iter()
+            .map(|view| plan_json(Some(&queue), view, false))
+            .collect(),
     ))
 }
 
 /// `radian arc show --json`'s document, for the CLI and the MCP `show` tool.
 pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
     Ok(match store.show(id)? {
-        Item::Plan(view) => plan_json(&view, true),
+        Item::Plan(view) => {
+            let queue = QueueState::read(store).ok();
+            plan_json(queue.as_ref(), &view, true)
+        }
         Item::Task(task) => {
-            let mut value = task_json(&task, true);
+            let mut value = task_json(&task, true, show_task_queue_reason(store, &task.item));
             let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
             if let Some(object) = value.as_object_mut() {

@@ -1200,6 +1200,16 @@ fn after_merged(store: &Store, task: &model::TaskFile) -> Result<bool, Error> {
     Ok(true)
 }
 
+/// [`after_merged`] for a display: a task file that does not read is not merged, so the
+/// display knows the `after` chain is the reason and a slot is not.
+fn after_merged_lenient(store: &Store, task: &model::TaskFile) -> bool {
+    task.after.iter().all(|id| {
+        store
+            .load_task(id)
+            .is_ok_and(|loaded| !loaded.changed_outside_arc && loaded.item.is_merged())
+    })
+}
+
 /// Whether a scheduling pass could claim `task` right now: both its flow's own `concurrency`
 /// and `[limits] concurrency` must have room (ADR 0048 decision 13). `confirm --dry-run` says a
 /// ready task waits when it would have none.
@@ -1212,39 +1222,73 @@ pub(crate) fn free_concurrency_slot(store: &Store, task: &model::TaskFile) -> Re
         .flow
         .as_deref()
         .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    let (doing, in_flow) = queue_doing_counts(store, flow)?;
-    if let Some(limit) = config.flow_concurrency(flow)
-        && in_flow >= u64::from(limit.max(1))
-    {
-        return Ok(false);
-    }
-    Ok(doing < u64::from(config.limits.concurrency.max(1)))
+    let counts = queue_doing_counts(store)?;
+    Ok(filled_limit_reason(&config, &counts, flow).is_none())
 }
 
-/// Counts the tasks in `doing`, the repository total and `flow`'s own, for the queue reasons
+/// Counts the tasks in `doing`, the repository total and every flow's, for the queue reasons
 /// (ADR 0048 decision 13). A task file that does not read is not counted: the queue is a
 /// display, and a dry run must not fail on an unrelated broken file. A real claim reads every
 /// file ([`attempt_ops::doing_counts`]).
-fn queue_doing_counts(store: &Store, flow: &str) -> Result<(u64, u64), Error> {
-    let mut doing = 0;
-    let mut in_flow = 0;
+pub(crate) fn queue_doing_counts(store: &Store) -> Result<attempt_ops::DoingCounts, Error> {
+    let mut counts = attempt_ops::DoingCounts::default();
     for id in store.task_ids()? {
         if let Ok(loaded) = store.load_task(&id)
             && loaded.item.state == TaskState::Doing
         {
-            doing += 1;
-            if loaded
-                .item
-                .flow
-                .as_deref()
-                .unwrap_or(crate::store::config::DEFAULT_FLOW)
-                == flow
-            {
-                in_flow += 1;
-            }
+            counts.add(
+                loaded
+                    .item
+                    .flow
+                    .as_deref()
+                    .unwrap_or(crate::store::config::DEFAULT_FLOW),
+            );
         }
     }
-    Ok((doing, in_flow))
+    Ok(counts)
+}
+
+/// The queue reason a full limit gives, in the words `radian arc run`'s summary, `list`,
+/// `show` and the dry run's queue line all use: the task's flow's own limit first (for example
+/// `waiting for a free image slot`), else the repository-wide `waiting for a free concurrency
+/// slot`. `None` when both limits have room (ADR 0048 decision 13).
+pub(crate) fn filled_limit_reason(
+    config: &crate::store::config::Config,
+    counts: &attempt_ops::DoingCounts,
+    flow: &str,
+) -> Option<String> {
+    if let Some(limit) = config.flow_concurrency(flow)
+        && counts.in_flow(flow) >= u64::from(limit.max(1))
+    {
+        return Some(format!("waiting for a free {flow} slot"));
+    }
+    (counts.total >= u64::from(config.limits.concurrency.max(1)))
+        .then(|| "waiting for a free concurrency slot".to_owned())
+}
+
+/// Why `radian arc list` and `radian arc show` name a slot for a `todo.ready` task: the same
+/// words the loop's summary uses, only when a limit is what holds the task now. `None` when
+/// the task is in another state, its plan is paused, an `after` task has not merged, its flow
+/// is missing, or both limits have room (ADR 0048 decision 13).
+pub(crate) fn slot_wait_reason(
+    store: &Store,
+    config: &crate::store::config::Config,
+    counts: &attempt_ops::DoingCounts,
+    plan: &model::PlanFile,
+    task: &model::TaskFile,
+) -> Option<String> {
+    if task.state != TaskState::Todo || task.phase != "ready" {
+        return None;
+    }
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    if !config.flows.contains_key(flow) || plan.auto == "off" || !after_merged_lenient(store, task)
+    {
+        return None;
+    }
+    filled_limit_reason(config, counts, flow)
 }
 
 /// The final summary: for each plan and task that is not merged, what it waits on. Plans are
@@ -1368,13 +1412,9 @@ fn concurrency_reason(store: &Store, task: &model::TaskFile) -> Result<String, E
         .flow
         .as_deref()
         .unwrap_or(crate::store::config::DEFAULT_FLOW);
-    if let Some(limit) = config.flow_concurrency(flow) {
-        let (_, in_flow) = queue_doing_counts(store, flow)?;
-        if in_flow >= u64::from(limit.max(1)) {
-            return Ok(format!("waiting for a free {flow} slot"));
-        }
-    }
-    Ok("waiting for a free concurrency slot".to_owned())
+    let counts = queue_doing_counts(store)?;
+    Ok(filled_limit_reason(&config, &counts, flow)
+        .unwrap_or_else(|| "waiting for a free concurrency slot".to_owned()))
 }
 
 #[cfg(test)]

@@ -106,8 +106,9 @@ impl Config {
     /// The concurrency this flow's own `doing` tasks are held to, or `None` when it has no
     /// per-flow limit. A file that writes no `[flows]` table has none: its implicit `default`
     /// flow's tasks count against [`Limits::concurrency`] alone, so it schedules as it did
-    /// before flows existed. Once the file writes a flow, every flow it holds is held to its
-    /// `concurrency`, the implicit `default` flow included (ADR 0048 decision 13).
+    /// before flows existed. Once the file writes a `[flows]` table, a bare one included,
+    /// every flow it holds is held to its `concurrency`, the implicit `default` flow included
+    /// (ADR 0048 decision 13).
     pub fn flow_concurrency(&self, name: &str) -> Option<u32> {
         if self.flows_configured {
             self.flows.get(name).map(|flow| flow.concurrency)
@@ -453,12 +454,12 @@ key_commands = []             # what the integration stage runs on the merge can
 pub fn parse(text: &str) -> Result<Config, String> {
     check_review_shape(text)?;
     check_worker_shape(text)?;
-    check_flows_shape(text)?;
+    // A bare `[flows]` table counts too: the manual and the ADR say the per-flow limit is on
+    // once the file writes a `[flows]` section, so the table's presence is read from the
+    // document, not inferred from the named sections the map holds.
+    let flows_configured = check_flows_shape(text)?;
     let mut config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
-    // `check_flows` inserts the implicit `default` flow, so the file's own table is read here:
-    // a file without `[flows]` keeps old scheduling, and one with a flow is held to each flow's
-    // concurrency (ADR 0048 decision 13).
-    config.flows_configured = !config.flows.is_empty();
+    config.flows_configured = flows_configured;
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",
@@ -583,11 +584,12 @@ fn check_worker_shape(text: &str) -> Result<(), String> {
 }
 
 /// `flows.<name>.command` must be an array of strings before the TOML deserializer reports a
-/// position without the key. A non-array value is refused by name.
-fn check_flows_shape(text: &str) -> Result<(), String> {
+/// position without the key. A non-array value is refused by name. Returns whether the file
+/// writes a `[flows]` table at all: a bare table counts (ADR 0048 decision 13).
+fn check_flows_shape(text: &str) -> Result<bool, String> {
     let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let Some(flows) = document.get("flows").and_then(toml::Value::as_table) else {
-        return Ok(());
+        return Ok(false);
     };
     for (name, flow) in flows {
         let Some(command) = flow.get("command") else {
@@ -603,7 +605,7 @@ fn check_flows_shape(text: &str) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Validates every `[flows.<name>]` section, refuses a `[flows.default]` beside `[worker]`'s
@@ -1053,6 +1055,20 @@ mod tests {
                 .and_then(|flow| flow.command.clone()),
             Some(vec!["/usr/bin/codex".to_owned()])
         );
+    }
+
+    /// A bare `[flows]` table, with no named section, turns the per-flow limit on for the
+    /// implicit `default` flow: the manual says any `[flows]` section does (ADR 0048
+    /// decision 13). A file with no table keeps no per-flow limit at all.
+    #[test]
+    fn a_bare_flows_table_holds_the_default_flow_to_its_concurrency() {
+        let config = parse("schema_version = 1\n[flows]\n").expect("a bare [flows] table parses");
+        assert!(config.flows_configured);
+        assert_eq!(config.flow_concurrency(DEFAULT_FLOW), Some(1));
+
+        let without = parse("schema_version = 1\n").expect("a file without [flows]");
+        assert!(!without.flows_configured);
+        assert_eq!(without.flow_concurrency(DEFAULT_FLOW), None);
     }
 
     /// A flow name is 1 to 32 characters from `[a-z0-9-]`, with no leading or trailing `-`.

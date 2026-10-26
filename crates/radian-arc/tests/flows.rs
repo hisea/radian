@@ -961,6 +961,176 @@ fn a_confirm_dry_run_names_a_full_flows_queue_reason() {
     wait_for_end(&repo, &first);
 }
 
+/// `list` and `show` name the flow that holds a ready task, in the loop summary's words:
+/// `waiting for a free code slot`, in the task line, the `queue_reason` field and both JSON
+/// documents. With both limits full in claim order, the flow's reason wins.
+#[test]
+fn list_and_show_name_a_full_flows_queue_reason() {
+    let (repo, store) = setup("flows-concurrency-list");
+    let worker = script(
+        &repo,
+        "waiting-worker",
+        &waiting_body(&repo.root, &repo.root),
+    );
+    two_flows(&repo, &worker, 1, 1);
+    tune(&repo, "concurrency = 1", "concurrency = 2");
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let first = add_flow_task(&store, &plan, "code-one", "code");
+    let second = add_flow_task(&store, &plan, "code-two", "code");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+
+    // Nothing is `doing`, so both limits have room and neither command names one.
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    assert!(
+        !list.stdout.contains("waiting for a free"),
+        "no slot is full: {}",
+        list.stdout
+    );
+    let show = repo.radian(&["arc", "show", &second]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(
+        show.stdout.contains("queue_reason: -"),
+        "no slot holds the task: {}",
+        show.stdout
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    wait_until(Duration::from_secs(60), "the code worker to start", || {
+        repo.root.join(format!("started-{first}")).exists()
+    });
+
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    let line = list
+        .stdout
+        .lines()
+        .find(|line| line.contains(&second))
+        .unwrap_or_else(|| panic!("`{second}` is listed: {}", list.stdout));
+    assert!(
+        line.contains("(waiting for a free code slot)"),
+        "the flow's reason wins when both limits are full: {}",
+        list.stdout
+    );
+    let first_line = list
+        .stdout
+        .lines()
+        .find(|line| line.contains(&first))
+        .expect("the running task is listed");
+    assert!(
+        !first_line.contains("waiting for a free"),
+        "a `doing` task waits for no slot: {}",
+        list.stdout
+    );
+
+    let list_json = repo.radian(&["arc", "list", "--json"]);
+    assert_eq!(list_json.code, 0, "list --json: {}", list_json.stderr);
+    let value: Value = serde_json::from_str(&list_json.stdout).expect("list --json parses");
+    let task = value[0]["tasks"]
+        .as_array()
+        .expect("the plan's tasks")
+        .iter()
+        .find(|task| task["id"] == json!(second))
+        .expect("the waiting task is in list --json");
+    assert_eq!(
+        task["queue_reason"],
+        json!("waiting for a free code slot"),
+        "{value}"
+    );
+
+    let show = repo.radian(&["arc", "show", &second]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(
+        show.stdout
+            .contains("queue_reason: waiting for a free code slot"),
+        "{}",
+        show.stdout
+    );
+    let show_json = repo.radian(&["arc", "show", &second, "--json"]);
+    assert_eq!(show_json.code, 0, "show --json: {}", show_json.stderr);
+    let value: Value = serde_json::from_str(&show_json.stdout).expect("show --json parses");
+    assert_eq!(
+        value["queue_reason"],
+        json!("waiting for a free code slot"),
+        "{value}"
+    );
+
+    release(&repo, &first);
+    wait_for_end(&repo, &first);
+}
+
+/// The shared limit keeps its own words in `list` and `show`: a ready `image` task whose flow
+/// has room waits for `waiting for a free concurrency slot` while `[limits] concurrency` is
+/// full.
+#[test]
+fn list_and_show_name_the_shared_limit_when_the_flow_has_room() {
+    let (repo, store) = setup("flows-concurrency-list-total");
+    let worker = script(
+        &repo,
+        "waiting-worker",
+        &waiting_body(&repo.root, &repo.root),
+    );
+    two_flows(&repo, &worker, 1, 1);
+    let plan = store.add_plan("plan", "Plan", "request").unwrap();
+    let first = add_flow_task(&store, &plan, "code", "code");
+    let image = add_flow_task(&store, &plan, "image", "image");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    wait_until(Duration::from_secs(60), "the code worker to start", || {
+        repo.root.join(format!("started-{first}")).exists()
+    });
+
+    let list = repo.radian(&["arc", "list"]);
+    assert_eq!(list.code, 0, "list: {}", list.stderr);
+    let line = list
+        .stdout
+        .lines()
+        .find(|line| line.contains(&image))
+        .unwrap_or_else(|| panic!("`{image}` is listed: {}", list.stdout));
+    assert!(
+        line.contains("(waiting for a free concurrency slot)"),
+        "the image flow has room, so the shared total is the reason: {}",
+        list.stdout
+    );
+    let list_json = repo.radian(&["arc", "list", "--json"]);
+    let value: Value = serde_json::from_str(&list_json.stdout).expect("list --json parses");
+    let task = value[0]["tasks"]
+        .as_array()
+        .expect("the plan's tasks")
+        .iter()
+        .find(|task| task["id"] == json!(image))
+        .expect("the waiting task is in list --json");
+    assert_eq!(
+        task["queue_reason"],
+        json!("waiting for a free concurrency slot"),
+        "{value}"
+    );
+
+    let show = repo.radian(&["arc", "show", &image]);
+    assert_eq!(show.code, 0, "show: {}", show.stderr);
+    assert!(
+        show.stdout
+            .contains("queue_reason: waiting for a free concurrency slot"),
+        "{}",
+        show.stdout
+    );
+    let show_json = repo.radian(&["arc", "show", &image, "--json"]);
+    let value: Value = serde_json::from_str(&show_json.stdout).expect("show --json parses");
+    assert_eq!(
+        value["queue_reason"],
+        json!("waiting for a free concurrency slot"),
+        "{value}"
+    );
+
+    release(&repo, &first);
+    wait_for_end(&repo, &first);
+}
+
 /// The manual names every new config key with the code's default, and the task table names
 /// `flow`.
 #[test]
