@@ -38,3 +38,22 @@ pub mod store;
 mod test_support;
 pub mod work;
 pub mod worker_args;
+
+/// Not part of the public API: the integration tests drive arc's locked fetch (ADR 0048
+/// decision 10) through this, because the `git` module stays private to the crate. `Ok(())`
+/// is a fetch that exited zero; any other outcome is the line a stage would fail with.
+#[doc(hidden)]
+pub fn fetch_for_test(
+    dir: &std::path::Path,
+    args: &[&str],
+    limit: std::time::Duration,
+) -> Result<(), String> {
+    git::fetch_for_test(dir, args, limit)
+}
+
+/// Not part of the public API: the lock file the locked fetch uses in `dir`'s repository, so a
+/// test can hold it and prove two worktrees share it.
+#[doc(hidden)]
+pub fn fetch_lock_for_test(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    git::fetch_lock_path(dir).map_err(|error| error.to_string())
+}

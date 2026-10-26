@@ -865,6 +865,26 @@ fn the_manual_quotes_the_default_worker_brief() {
     );
 }
 
+/// `init` writes no file in the repository's git dir but `.git/info/exclude`: the fetch lock
+/// appears with the first fetch arc runs (ADR 0048 decision 10). The manual must say so, or
+/// the `init` section reads as a promise that `init` creates the lock.
+#[test]
+fn the_manual_says_the_first_fetch_creates_the_lock() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the crate lives in <root>/crates/radian-arc");
+    let page = read(&root.join("docs/user/arc/index.md"));
+    let line = page
+        .lines()
+        .find(|line| line.contains("radian-arc-fetch.lock"))
+        .expect("docs/user/arc/index.md names the fetch lock");
+    assert!(
+        line.contains("first fetch"),
+        "the page must say when the lock appears, not leave it to `init`: {line}"
+    );
+}
+
 #[test]
 fn init_refuses_outside_a_repository_and_without_an_origin_remote() {
     let scratch = Scratch::new("init-errors");

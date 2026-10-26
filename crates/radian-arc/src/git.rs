@@ -18,11 +18,16 @@
 //!   and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are removed: every call names its repository, so
 //!   a caller's environment can never point a command at another repository or object store.
 //!
+//! Every fetch goes through [`fetch`], which serializes arc's own fetches into one repository
+//! with a lock in its git common dir (ADR 0048 decision 10).
+//!
 //! The repository, global and system configuration files are otherwise unaffected.
 
 use std::fmt;
 use std::io::Read;
-use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd as _;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -63,6 +68,8 @@ pub(crate) enum RunError {
     Build(String),
     /// The process could not be started.
     Spawn(std::io::Error),
+    /// The fetch lock could not be resolved, created or taken.
+    Lock(String),
 }
 
 impl fmt::Display for RunError {
@@ -70,6 +77,7 @@ impl fmt::Display for RunError {
         match self {
             RunError::Build(message) => f.write_str(message),
             RunError::Spawn(error) => write!(f, "cannot run git: {error}"),
+            RunError::Lock(message) => f.write_str(message),
         }
     }
 }
@@ -111,7 +119,8 @@ pub(crate) enum TimedRun {
 /// the command's process group (the command leads its own group), so a fetch or a push that
 /// waits on a remote cannot outlive the attempt. `None` waits forever: a local call (a
 /// `diff`, a `log`, a `merge-base`, a `status`, a local `merge`) uses [`run`] instead, and
-/// every call that talks to a remote uses [`run_remote`], which always has a limit.
+/// every call that talks to a remote uses [`run_remote`] or [`fetch`], both of which always
+/// have a limit.
 pub(crate) fn run_with_timeout(
     dir: &Path,
     args: &[&str],
@@ -256,6 +265,196 @@ pub(crate) fn run_remote(
 pub(crate) fn timeout_text(args: &[&str], limit: Duration) -> String {
     let subcommand = args.first().copied().unwrap_or("git");
     format!("git {subcommand} timed out after {} s", limit.as_secs())
+}
+
+/// The name of the lock file, in the repository's git common dir, that serializes every fetch
+/// arc runs into that repository (ADR 0048 decision 10). Every worktree of one repository
+/// resolves the same common dir and so shares the lock; a fetch arc did not start, a person's
+/// own `git fetch` included, is not serialized by it.
+pub(crate) const FETCH_LOCK_FILE: &str = "radian-arc-fetch.lock";
+
+/// How often a fetch looks for the shared lock while another process holds it.
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// What a fetch arc runs produced.
+pub(crate) enum FetchRun {
+    /// The fetch finished; the caller checks the exit status.
+    Done(GitOutput),
+    /// The limit ran out while the fetch ran; its whole process group was killed.
+    TimedOut { limit: Duration },
+    /// The limit ran out while waiting for the fetch lock; no git command ran.
+    LockTimedOut { limit: Duration, lock: PathBuf },
+}
+
+/// Runs a fetch in `dir` under the repository's one fetch lock (ADR 0048 decision 10).
+///
+/// The exclusive `flock` on `<git common dir>/radian-arc-fetch.lock` is held for the fetch
+/// only, and waiting for it counts against `limit`, the same wall-clock limit the fetch itself
+/// has: a fetch that gives up on the lock ran no git command, and its failure names the lock.
+/// Two arc processes, and two worktrees of one repository, therefore never race git's
+/// compare-and-swap update of `refs/remotes/<remote>/<branch>`.
+pub(crate) fn fetch(dir: &Path, args: &[&str], limit: Duration) -> Result<FetchRun, RunError> {
+    let deadline = Instant::now() + limit;
+    let lock = FetchLock::open(dir)?;
+    if !lock.acquire(deadline)? {
+        return Ok(FetchRun::LockTimedOut {
+            limit,
+            lock: lock.path.clone(),
+        });
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok(FetchRun::TimedOut { limit });
+    }
+    match run_with_timeout(dir, args, Some(remaining))? {
+        TimedRun::Done(output) => Ok(FetchRun::Done(output)),
+        TimedRun::TimedOut => Ok(FetchRun::TimedOut { limit }),
+    }
+}
+
+/// The lock file [`fetch`] uses in `dir`'s repository.
+pub(crate) fn fetch_lock_path(dir: &Path) -> Result<PathBuf, RunError> {
+    Ok(common_dir(dir)?.join(FETCH_LOCK_FILE))
+}
+
+/// The text a fetch that ran out of time while waiting for the shared lock fails with. It
+/// names the lock, so the failure is not mistaken for a git error.
+pub(crate) fn lock_timeout_text(lock: &Path, limit: Duration) -> String {
+    format!(
+        "git fetch timed out after {} s waiting for the arc fetch lock {}",
+        limit.as_secs(),
+        lock.display()
+    )
+}
+
+/// The repository's absolute git common dir: every worktree of one repository names the same
+/// directory, so every worktree shares one fetch lock.
+fn common_dir(dir: &Path) -> Result<PathBuf, RunError> {
+    let output = run(dir, &["rev-parse", "--git-common-dir"])?;
+    if !output.success() {
+        let stderr = output.stderr.trim();
+        let detail = stderr.lines().last().unwrap_or(stderr);
+        return Err(RunError::Lock(format!(
+            "cannot find the git common dir of {}: {detail}",
+            dir.display()
+        )));
+    }
+    let text = output.stdout.trim();
+    if text.is_empty() {
+        return Err(RunError::Lock(format!(
+            "cannot find the git common dir of {}",
+            dir.display()
+        )));
+    }
+    let path = PathBuf::from(text);
+    // A plain checkout prints `.git` (relative to `dir`); a linked worktree prints the main
+    // checkout's git dir. Resolving both gives one file for the whole repository.
+    let path = if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    };
+    std::fs::canonicalize(&path).map_err(|source| {
+        RunError::Lock(format!(
+            "cannot resolve the git common dir {}: {source}",
+            path.display()
+        ))
+    })
+}
+
+/// A held `flock` on the repository's fetch lock. Dropping it releases the lock.
+struct FetchLock {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl FetchLock {
+    /// Opens (creating it when missing) the repository's fetch lock file.
+    fn open(dir: &Path) -> Result<Self, RunError> {
+        let path = fetch_lock_path(dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|source| {
+                RunError::Lock(format!(
+                    "cannot open the arc fetch lock {}: {source}",
+                    path.display()
+                ))
+            })?;
+        Ok(Self { file, path })
+    }
+
+    /// Takes the lock, waiting until `deadline`. `false` when the deadline passed first.
+    fn acquire(&self, deadline: Instant) -> Result<bool, RunError> {
+        loop {
+            match self.try_acquire() {
+                Ok(()) => return Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(source) => {
+                    return Err(RunError::Lock(format!(
+                        "cannot take the arc fetch lock {}: {source}",
+                        self.path.display()
+                    )));
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep((deadline - now).min(LOCK_POLL));
+        }
+    }
+
+    /// Tries to take the lock without waiting. `WouldBlock` means someone else holds it.
+    #[cfg(unix)]
+    fn try_acquire(&self) -> std::io::Result<()> {
+        // SAFETY: `flock` is a syscall on `self.file`'s descriptor, which stays open; it has no
+        // memory operands.
+        let result = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn try_acquire(&self) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the arc fetch lock needs flock(2)",
+        ))
+    }
+}
+
+impl Drop for FetchLock {
+    fn drop(&mut self) {
+        // Closing the descriptor releases the flock; the explicit unlock keeps the intent.
+        #[cfg(unix)]
+        // SAFETY: the descriptor belongs to `self.file`, which is still open here.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// Runs a fetch for the integration tests and answers the line a stage would fail with. Not
+/// part of the crate's API (`git` stays private); `Ok(())` is a fetch that exited zero.
+pub(crate) fn fetch_for_test(dir: &Path, args: &[&str], limit: Duration) -> Result<(), String> {
+    match fetch(dir, args, limit) {
+        Ok(FetchRun::Done(output)) if output.success() => Ok(()),
+        Ok(FetchRun::Done(output)) => Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            output.stderr.trim()
+        )),
+        Ok(FetchRun::TimedOut { limit }) => Err(timeout_text(args, limit)),
+        Ok(FetchRun::LockTimedOut { limit, lock }) => Err(lock_timeout_text(&lock, limit)),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Runs a git command in `dir` and requires success, returning trimmed standard output.

@@ -7,50 +7,50 @@
 use std::path::Path;
 
 use super::error::GateError;
-use crate::git::RunError;
+use crate::git::{FetchRun, RunError};
 
 pub(crate) use crate::git::GitOutput;
 
 /// Runs a git command in `dir` without checking the exit status.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
-    crate::git::run(dir, args).map_err(|error| match error {
-        RunError::Spawn(source) => GateError::Spawn {
-            program: "git".to_string(),
-            source,
-        },
-        RunError::Build(message) => GateError::Git {
-            dir: dir.to_path_buf(),
-            command: command_line(args),
-            stderr: message,
-        },
-    })
+    crate::git::run(dir, args).map_err(|error| run_error(dir, args, error))
 }
 
-/// Runs a git command in `dir` that talks to a remote, bounded by
-/// `[limits] git_remote_timeout_secs`. A limit that runs out kills the command's process group
-/// and fails with `git <subcommand> timed out after <n> s`.
-pub(crate) fn run_remote(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
-    match crate::git::run_remote(dir, args, None).map_err(|error| match error {
-        RunError::Spawn(source) => GateError::Spawn {
-            program: "git".to_string(),
-            source,
-        },
-        RunError::Build(message) => GateError::Git {
-            dir: dir.to_path_buf(),
-            command: command_line(args),
-            stderr: message,
-        },
-    })? {
-        crate::git::RemoteRun::Done(output) => Ok(output),
-        crate::git::RemoteRun::TimedOut { limit } => Err(GateError::RemoteTimeout(
-            crate::git::timeout_text(args, limit),
+/// Runs a fetch in `dir` under the repository's one fetch lock (ADR 0048 decision 10),
+/// bounded by `[limits] git_remote_timeout_secs`. A limit that runs out kills the command's
+/// process group and fails with `git <subcommand> timed out after <n> s`; a limit that runs
+/// out while waiting for the lock fails with a line that names the lock.
+pub(crate) fn fetch(dir: &Path, args: &[&str]) -> Result<GitOutput, GateError> {
+    let limit = crate::git::remote_timeout(dir);
+    match crate::git::fetch(dir, args, limit).map_err(|error| run_error(dir, args, error))? {
+        FetchRun::Done(output) => Ok(output),
+        FetchRun::TimedOut { limit } => Err(GateError::RemoteTimeout(crate::git::timeout_text(
+            args, limit,
+        ))),
+        FetchRun::LockTimedOut { limit, lock } => Err(GateError::RemoteTimeout(
+            crate::git::lock_timeout_text(&lock, limit),
         )),
     }
 }
 
-/// Runs a git command in `dir` that talks to a remote and requires success.
-fn remote_ok(dir: &Path, args: &[&str]) -> Result<String, GateError> {
-    let output = run_remote(dir, args)?;
+/// The gate's error for a git command that did not run at all.
+fn run_error(dir: &Path, args: &[&str], error: RunError) -> GateError {
+    match error {
+        RunError::Spawn(source) => GateError::Spawn {
+            program: "git".to_string(),
+            source,
+        },
+        RunError::Build(message) | RunError::Lock(message) => GateError::Git {
+            dir: dir.to_path_buf(),
+            command: command_line(args),
+            stderr: message,
+        },
+    }
+}
+
+/// Runs a fetch in `dir` and requires success.
+fn fetch_ok(dir: &Path, args: &[&str]) -> Result<String, GateError> {
+    let output = fetch(dir, args)?;
     finish(dir, args, output)
 }
 
@@ -81,7 +81,7 @@ pub(crate) fn command_line(args: &[&str]) -> String {
 
 /// Fetches `remote`. The gate never trusts a local ref alone; the remote is the truth.
 pub(crate) fn fetch_remote(repository: &Path, remote: &str) -> Result<(), GateError> {
-    remote_ok(repository, &["fetch", remote])?;
+    fetch_ok(repository, &["fetch", remote])?;
     Ok(())
 }
 
@@ -95,7 +95,7 @@ pub(crate) fn fetch_main(
     main_branch: &str,
 ) -> Result<(), GateError> {
     let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{remote}/{main_branch}");
-    remote_ok(repository, &["fetch", remote, &refspec])?;
+    fetch_ok(repository, &["fetch", remote, &refspec])?;
     Ok(())
 }
 

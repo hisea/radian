@@ -16,6 +16,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   The remote's `work/<task>` must still be `head_sha`.
   When it differs, arc records the reason in the attempt's `review.json` and the task stays in `review.verifying`; `show` prints the reason.
   The fetch is a git call that talks to a remote, so [`limits.git_remote_timeout_secs`](files.md#configtoml) bounds it; a fetch that runs out fails the gate with `git fetch timed out after <n> s`.
+  arc's own fetches into a repository take turns on a lock in its git common dir (see [`radian arc init`](index.md#radian-arc-init-track)); a fetch that waits for the lock past the same limit fails with a line that names the lock. A `git fetch` you run yourself is not serialized by it.
 - The stages are the configured profile's (`gate.profile`, then `gate.profiles.<name>.stages`), in order, plus the task's `extra_stages`.
   `human` is your approval and does not run here.
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
