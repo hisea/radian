@@ -35,6 +35,7 @@ A second `init` keeps an existing `config.toml` byte for byte and creates nothin
 
 It adds the arc paths to `.git/info/exclude`, a local file: `init` never changes a committed `.gitignore`.
 Each line is added once; a second run adds nothing.
+arc also creates `<git common dir>/radian-arc-fetch.lock`, the lock that makes its own fetches into the repository take turns; every worktree of the repository shares it (see [the gate run](gate.md#the-gate-run)).
 
 | Line | Without `--track` | With `--track` |
 |---|---|---|

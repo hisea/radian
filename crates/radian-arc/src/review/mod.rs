@@ -3133,9 +3133,30 @@ fn git_remote_ok(dir: &Path, args: &[&str]) -> Result<String, Error> {
     Ok(out.stdout.trim().to_string())
 }
 
+/// Fetches `remote` under the repository's one fetch lock (ADR 0048 decision 10), bounded by
+/// `[limits] git_remote_timeout_secs`. A fetch that runs out, or one that gives up waiting for
+/// the lock, is an ordinary failure of the step.
+fn fetch_remote(dir: &Path, remote: &str) -> Result<(), Error> {
+    let args = ["fetch", remote];
+    let limit = crate::git::remote_timeout(dir);
+    match crate::git::fetch(dir, &args, limit).map_err(|error| Error::Failed(error.to_string()))? {
+        crate::git::FetchRun::Done(out) if out.success() => Ok(()),
+        crate::git::FetchRun::Done(out) => Err(Error::Failed(format!(
+            "git fetch {remote} failed: {}",
+            out.stderr.trim()
+        ))),
+        crate::git::FetchRun::TimedOut { limit } => {
+            Err(Error::Failed(crate::git::timeout_text(&args, limit)))
+        }
+        crate::git::FetchRun::LockTimedOut { limit, lock } => {
+            Err(Error::Failed(crate::git::lock_timeout_text(&lock, limit)))
+        }
+    }
+}
+
 /// The remote's `work/<task>` after a fetch, when it exists.
 fn remote_work_sha(repo: &Path, remote: &str, task: &str) -> Result<Option<String>, Error> {
-    git_remote_ok(repo, &["fetch", remote])?;
+    fetch_remote(repo, remote)?;
     remote_branch(repo, remote, &format!("work/{task}"))
 }
 

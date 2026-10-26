@@ -1213,7 +1213,7 @@ fn ensure_worktree(
         // with a different fetch configuration cannot leave it stale.
         let start = format!("{remote}/{main_branch}");
         let refspec = format!("+refs/heads/{main_branch}:refs/remotes/{start}");
-        match git_remote(repo, &["fetch", remote, &refspec], clock) {
+        match fetch_remote(repo, &["fetch", remote, &refspec], clock) {
             Ok(_) => {}
             Err(failure) if failure.wall => return Err(failure),
             Err(failure) => {
@@ -1385,7 +1385,7 @@ fn merge_main(
     let main_ref = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
     let short_ref = format!("{}/{}", o.remote, o.main_branch);
     let refspec = format!("+refs/heads/{0}:{1}", o.main_branch, main_ref);
-    match git_remote(repo, &["fetch", &o.remote, &refspec], clock) {
+    match fetch_remote(repo, &["fetch", &o.remote, &refspec], clock) {
         Ok(_) => {}
         Err(failure) if failure.wall => return Err(failure),
         Err(failure) => {
@@ -3089,16 +3089,36 @@ fn remote_limit(key: Duration, remaining: Option<Duration>) -> (Duration, bool) 
     }
 }
 
-fn git_remote(cwd: &Path, args: &[&str], clock: &Clock) -> Result<String, Failure> {
-    let out = git_remote_raw(cwd, args, clock)?;
-    if !out.status.success() {
-        return Err(Failure::error(format!(
+/// Fetches from a remote under the repository's one fetch lock (ADR 0048 decision 10). The
+/// shorter of the attempt's remaining wall time and `[limits] git_remote_timeout_secs` bounds
+/// both the wait for the lock and the fetch itself; a wait that runs out fails the step with a
+/// line that names the lock, not with the attempt's wall-time failure.
+fn fetch_remote(cwd: &Path, args: &[&str], clock: &Clock) -> Result<(), Failure> {
+    if clock.expired() {
+        clock.mark()?;
+        return Err(Failure::wall());
+    }
+    let key = crate::git::remote_timeout(cwd);
+    let (limit, wall_wins) = remote_limit(key, clock.remaining());
+    match crate::git::fetch(cwd, args, limit) {
+        Ok(crate::git::FetchRun::Done(output)) if output.status.success() => Ok(()),
+        Ok(crate::git::FetchRun::Done(output)) => Err(Failure::error(format!(
             "git {} failed: {}",
             args.join(" "),
-            out.stderr.trim()
-        )));
+            output.stderr.trim()
+        ))),
+        Ok(crate::git::FetchRun::TimedOut { limit: _ }) if wall_wins => {
+            clock.mark()?;
+            Err(Failure::wall())
+        }
+        Ok(crate::git::FetchRun::TimedOut { limit }) => {
+            Err(Failure::error(crate::git::timeout_text(args, limit)))
+        }
+        Ok(crate::git::FetchRun::LockTimedOut { limit, lock }) => {
+            Err(Failure::error(crate::git::lock_timeout_text(&lock, limit)))
+        }
+        Err(error) => Err(Failure::error(error.to_string())),
     }
-    Ok(out.stdout)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
