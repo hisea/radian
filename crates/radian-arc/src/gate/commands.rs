@@ -10,6 +10,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::process;
+
 use super::checkout::GateCheckout;
 use super::config::Stage;
 use super::error::GateError;
@@ -203,20 +205,37 @@ fn run_one(
     timeout: Duration,
     log: &Path,
 ) -> Result<ShellOutcome, GateError> {
-    run_shell(checkout, line, timeout, log, &[])
+    run_shell(checkout, line, timeout, log, &[], None)
+}
+
+/// What can stop a [`run_shell`] command from outside the process that started it (ADR 0048
+/// decisions 7, 9 and 10). The gate stages reach their child through [`super::stage::Running`];
+/// the wrapper's `before_attempt` command implements this so its own SIGTERM handler and
+/// `radian arc cancel` reach the command's process group the way they reach a worker's.
+pub(crate) trait ShellWatch {
+    /// The command now runs in its own process group `pgid`; a stop must reach that group.
+    fn started(&self, pgid: u32);
+    /// The command was reaped; the group id must not be signalled after this.
+    fn finished(&self);
+    /// Whether a stop was requested while the command ran.
+    fn stopping(&self) -> bool;
+    /// How long the group gets after SIGTERM before SIGKILL.
+    fn grace(&self) -> Duration;
 }
 
 /// Runs one `sh -c` line in `dir`, stdout and stderr into `log`, in its own process group.
 /// `timeout` of zero waits forever; a timeout kills the whole group, so no child the command
 /// started outlives the step. `envs` are added on top of the wrapper's own environment; the
 /// gate stages pass none, the wrapper's `before_attempt` commands pass the `ARC_*` values a
-/// command worker gets (ADR 0048 decisions 7 and 10).
+/// command worker gets (ADR 0048 decisions 7 and 10). `watch` is the caller's stop path: it
+/// receives the command's process group and is asked whether a stop was requested.
 pub(crate) fn run_shell(
     dir: &Path,
     line: &str,
     timeout: Duration,
     log: &Path,
     envs: &[(&str, String)],
+    watch: Option<&dyn ShellWatch>,
 ) -> Result<ShellOutcome, GateError> {
     let file = File::create(log).map_err(|source| GateError::Io {
         path: log.to_path_buf(),
@@ -256,6 +275,15 @@ pub(crate) fn run_shell(
     // build writing in the checkout the gate left (ADR 0048 decision 10).
     #[cfg(unix)]
     let mut running = super::stage::Running::track(pid);
+    // The wrapper's `before_attempt` command is stopped through the wrapper's own handler and
+    // signal file; its group is registered there for exactly as long as the command runs.
+    #[cfg(unix)]
+    let _watched = watch.map(|watch| {
+        watch.started(pid);
+        Watched { watch }
+    });
+    #[cfg(unix)]
+    let mut stop_sent: Option<Instant> = None;
     let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().map_err(|source| GateError::Io {
@@ -266,6 +294,22 @@ pub(crate) fn run_shell(
         }
         #[cfg(unix)]
         running.stopped();
+        #[cfg(unix)]
+        if let Some(watch) = watch
+            && watch.stopping()
+        {
+            let now = Instant::now();
+            match stop_sent {
+                None => {
+                    process::signal_group(pid, process::SIGTERM);
+                    stop_sent = Some(now);
+                }
+                Some(at) if now >= at + watch.grace() => {
+                    process::signal_group(pid, process::SIGKILL);
+                }
+                Some(_) => {}
+            }
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             #[cfg(unix)]
             kill_group(pid);
@@ -297,6 +341,20 @@ pub(crate) fn run_shell(
         duration_ms,
         outcome,
     })
+}
+
+#[cfg(unix)]
+struct Watched<'a> {
+    watch: &'a dyn ShellWatch,
+}
+
+#[cfg(unix)]
+impl Drop for Watched<'_> {
+    fn drop(&mut self) {
+        // Runs on every return path, so the wrapper's stop handler can never signal a group
+        // whose command has already been reaped.
+        self.watch.finished();
+    }
 }
 
 #[cfg(unix)]

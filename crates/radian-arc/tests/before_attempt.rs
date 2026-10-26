@@ -8,6 +8,9 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -52,6 +55,67 @@ fn attempt(repo: &Repo, task: &str, number: u32, token: &str, worker: &str) -> R
         "--allow-noop",
     ];
     repo.work(&args, "the brief\n")
+}
+
+/// Starts one attempt without waiting for it, in a process group of its own so a test can
+/// signal the wrapper the way `arc cancel` does.
+fn spawn_attempt(repo: &Repo, task: &str, number: u32, token: &str, worker: &str) -> Child {
+    let number = number.to_string();
+    let mut child = repo.spawn_in_own_group(&[
+        "arc",
+        "work",
+        "--task",
+        task,
+        "--attempt",
+        number.as_str(),
+        "--token",
+        token,
+        "--worker-command",
+        worker,
+        "--allow-noop",
+    ]);
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    stdin.write_all(b"the brief\n").expect("write the brief");
+    child
+}
+
+/// Waits for the pid a running `before_attempt` command wrote to `path`.
+fn wait_for_pid(path: &Path, what: &str) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Waits for the wrapper to exit, and kills both process groups if it does not: a test that
+/// fails on a hung wrapper must fail instead of blocking the suite.
+fn wait_for_wrapper(
+    mut child: Child,
+    within: Duration,
+    command_child: u32,
+) -> std::process::Output {
+    let deadline = Instant::now() + within;
+    loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            return child.wait_with_output().expect("the wrapper's output");
+        }
+        if Instant::now() >= deadline {
+            // SAFETY: `kill(2)` with a negative pid signals a process group and reads no
+            // memory. Both pids are the leaders `process_group(0)` made.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+                libc::kill(-(command_child as i32), libc::SIGKILL);
+            }
+            panic!("the wrapper did not exit within {within:?} after the stop");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Commits `file` on main in a second clone and pushes it, leaving the main clone's
@@ -463,4 +527,153 @@ fn a_command_that_edits_git_config_fails_the_control_check() {
         !config.contains("hacked"),
         "the wrapper restored the control file: {config}"
     );
+}
+
+/// A SIGTERM to the wrapper while a `before_attempt` command runs reaches the command's own
+/// process group: the command and its child are gone, the attempt ends before the worker, and
+/// the wrapper writes its record instead of waiting on an untimed command.
+#[test]
+fn a_sigterm_while_a_before_attempt_command_runs_stops_its_group() {
+    let repo = Repo::new("before-command-sigterm");
+    init(&repo);
+    let task = "TK0306-sigterm";
+    before_attempt(
+        &repo,
+        "[{ run = 'sleep 300 & echo $! > child.pid; wait', timeout_secs = 0 }]",
+    );
+    let ran = repo.root.join("worker-ran");
+    let worker = format!("touch '{}'", ran.display());
+    let wrapper = spawn_attempt(&repo, task, 1, "tok-sigterm", &worker);
+    let child = wait_for_pid(
+        &repo.worktree(task).join("child.pid"),
+        "the command's child",
+    );
+
+    // `arc cancel` signals the wrapper; the handler must forward it to the command's group.
+    unsafe {
+        libc::kill(wrapper.id() as i32, libc::SIGTERM);
+    }
+    let output = wait_for_wrapper(wrapper, Duration::from_secs(20), child);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!ran.exists(), "the worker started after the stop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let finished: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("no stdout: {}", String::from_utf8_lossy(&output.stderr))),
+    )
+    .expect("the last line is AttemptFinished");
+    let text = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no failure: {finished}"));
+    assert!(text.contains("before_attempt entry 1 stopped"), "{text}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the stop killed only the command's shell; {child} still sleeps"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `arc cancel` records `signal.json` before it signals the wrapper; the wrapper reads that
+/// record while a `before_attempt` command runs, so the command's group is stopped even when
+/// the handler's own SIGTERM is not what ends it.
+#[test]
+fn a_cancel_record_while_a_before_attempt_command_runs_stops_its_group() {
+    let repo = Repo::new("before-command-cancel");
+    init(&repo);
+    let task = "TK0307-cancel";
+    before_attempt(
+        &repo,
+        "[{ run = 'sleep 300 & echo $! > child.pid; wait', timeout_secs = 0 }]",
+    );
+    let ran = repo.root.join("worker-ran");
+    let worker = format!("touch '{}'", ran.display());
+    let wrapper = spawn_attempt(&repo, task, 1, "tok-cancel", &worker);
+    let child = wait_for_pid(
+        &repo.worktree(task).join("child.pid"),
+        "the command's child",
+    );
+
+    // What `radian arc cancel` writes before it signals the wrapper.
+    fs::write(
+        repo.run_dir(task, 1).join("signal.json"),
+        "{\n  \"reason\": \"cancel\"\n}\n",
+    )
+    .expect("signal.json");
+    let output = wait_for_wrapper(wrapper, Duration::from_secs(20), child);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!ran.exists(), "the worker started after the cancel");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let finished: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .last()
+            .unwrap_or_else(|| panic!("no stdout: {}", String::from_utf8_lossy(&output.stderr))),
+    )
+    .expect("the last line is AttemptFinished");
+    let text = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no failure: {finished}"));
+    assert!(text.contains("before_attempt entry 1 stopped"), "{text}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the cancel killed only the command's shell; {child} still sleeps"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A command that changes a control file, makes the restore impossible, and then fails: the
+/// failed restore wins over the command's own failure and ends the attempt before the worker,
+/// exactly as a failed restore does after a worker. The command's failure stays as context.
+#[test]
+fn a_failed_restore_wins_over_a_failing_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new("before-command-restore-fails");
+    init(&repo);
+    let task = "TK0308-restore-fails";
+    // `chmod 500` on the common git directory leaves the changed `config` un-restorable (it
+    // cannot be removed), and the command then exits non-zero.
+    before_attempt(
+        &repo,
+        "[{ run = 'git config user.name hacked; common=$(git rev-parse --git-common-dir); \
+         case \"$common\" in /*) ;; *) common=\"$ARC_WORKTREE/$common\" ;; esac; \
+         chmod 500 \"$common\"; exit 7' }]",
+    );
+    let ran = repo.root.join("worker-ran");
+    let worker = format!("touch '{}'", ran.display());
+    let run = attempt(&repo, task, 1, "tok-restore", &worker);
+    // Put the git directory back before any assertion can panic, so the scratch directory can
+    // be removed even when the test fails.
+    fs::set_permissions(repo.clone.join(".git"), fs::Permissions::from_mode(0o755))
+        .expect("restore the git directory's permissions");
+
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(!ran.exists(), "the worker started after the failed restore");
+    let text = failure(&run);
+    assert!(text.contains("changed git control files"), "{text}");
+    assert!(text.contains("restoring them failed"), "{text}");
+    assert!(text.contains("before_attempt entry 1"), "{text}");
+    assert!(text.contains("exit code 7"), "{text}");
 }

@@ -53,7 +53,9 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use serde_json::{Value, json};
 
-use crate::gate::{BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS, run_shell};
+use crate::gate::{
+    BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS, ShellWatch, run_shell,
+};
 use crate::git::GitOutput;
 use crate::process;
 use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval};
@@ -406,6 +408,12 @@ impl Clock {
     fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
+
+    /// Whether the wrapper was asked to stop: a SIGTERM/SIGINT the handler saw, or the record
+    /// `radian arc cancel` leaves in the attempt's run directory (ADR 0048 decision 9).
+    fn stopped(&self) -> bool {
+        STOP_REQUESTED.load(Ordering::SeqCst) || self.signal.is_file()
+    }
 }
 
 /// The `runs/<task>/attempts/<task>-<n>` path of one attempt.
@@ -446,6 +454,32 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     let control = GitControl::record(&s.worktree, &s.clock)?;
     let before = before_attempt(o, s, created);
     let check = control.check();
+    // A restore that failed wins over the entry's own failure, exactly as it does after a
+    // worker: the attempt ends here with the control-check reason, so no later step runs on a
+    // control file the wrapper could not put back. The entry's failure stays as context.
+    if let ControlCheck::Changed(change) = &check
+        && change.restore_failed.is_some()
+    {
+        let failure = match &before {
+            Ok(_) => change.reason(),
+            Err(before) => format!("{}; {}", change.reason(), before.message),
+        };
+        return write_finish(
+            o,
+            s,
+            Finish {
+                base_sha: &base_sha,
+                head_sha: None,
+                dirty: Vec::new(),
+                pushed: false,
+                remote_sha: None,
+                outcome: "terminated",
+                exit_code: EXIT_ERROR,
+                failure: Some(failure),
+                notes: &[],
+            },
+        );
+    }
     let conflict = before?;
     if let ControlCheck::Changed(change) = check {
         return write_finish(
@@ -1387,6 +1421,9 @@ fn run_before_command(
     index: usize,
     default_timeout: Duration,
 ) -> Result<(), Failure> {
+    if s.clock.stopped() {
+        return Err(stopped_before(index, command));
+    }
     if s.clock.expired() {
         s.clock.mark()?;
         return Err(Failure::wall());
@@ -1411,8 +1448,20 @@ fn run_before_command(
         ("ARC_TASK", o.task.clone()),
         ("ARC_ATTEMPT", format!("{}-{}", o.task, o.attempt)),
     ];
-    let result = run_shell(&s.worktree, &command.run, timeout, &log, &env)
+    // The wrapper's own stop path reaches this command's group: its SIGTERM/SIGINT handler
+    // forwards through `CHILD_PID`, and a cancel may only have left `signal.json`. Either ends
+    // the attempt, so a command with no timeout cannot hold the task or start a worker after
+    // the stop.
+    let stop = CommandStop {
+        clock: &s.clock,
+        grace: Duration::from_secs(o.cancel_grace_secs),
+    };
+    let result = run_shell(&s.worktree, &command.run, timeout, &log, &env, Some(&stop))
         .map_err(|error| Failure::error(format!("before_attempt entry {index}: {error}")))?;
+    // A stop wins over the command's own result, as a cancel does for a running worker.
+    if s.clock.stopped() {
+        return Err(stopped_before(index, command));
+    }
     if result.timed_out() {
         if wall_wins {
             s.clock.mark()?;
@@ -1437,6 +1486,42 @@ fn run_before_command(
         )));
     }
     Ok(())
+}
+
+/// The wrapper was asked to stop while a `before_attempt` command was about to run or ran
+/// (ADR 0048 decision 9): the attempt ends before the worker, and the command's group has been
+/// signalled. A cancel has already recorded its reason; this failure is the attempt's record.
+fn stopped_before(index: usize, command: &BeforeAttemptCommand) -> Failure {
+    Failure::error(format!(
+        "before_attempt entry {index} stopped: {}",
+        command.run
+    ))
+}
+
+/// The wrapper's stop path for one `before_attempt` command (ADR 0048 decisions 7 and 9): the
+/// command's process group is the one the SIGTERM handler forwards to, and a cancel's
+/// `signal.json` is read the same way the worker monitor reads it.
+struct CommandStop<'a> {
+    clock: &'a Clock,
+    grace: Duration,
+}
+
+impl ShellWatch for CommandStop<'_> {
+    fn started(&self, pgid: u32) {
+        CHILD_PID.store(pgid as i32, Ordering::SeqCst);
+    }
+
+    fn finished(&self) {
+        CHILD_PID.store(0, Ordering::SeqCst);
+    }
+
+    fn stopping(&self) -> bool {
+        self.clock.stopped()
+    }
+
+    fn grace(&self) -> Duration {
+        self.grace
+    }
 }
 
 /// The task's profile's `before_attempt` entries and that profile's default command timeout

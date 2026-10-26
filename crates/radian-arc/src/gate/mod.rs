@@ -36,7 +36,7 @@ pub mod background;
 
 pub use checkout::{GateCheckout, gates_dir};
 pub use commands::CommandRun;
-pub(crate) use commands::run_shell;
+pub(crate) use commands::{ShellWatch, run_shell};
 pub use config::{
     BEFORE_ATTEMPT_STEPS, BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS,
     DEFAULT_REVIEW_CONCURRENCY, DEFAULT_REVIEW_TIMEOUT_SECS, FirstReviewConfig, GateConfig,
