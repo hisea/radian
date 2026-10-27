@@ -202,16 +202,22 @@ fn read_value(store: &Store, task: &str) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// Removes the record once a pass has applied it. A record left behind is harmless (the state
-/// moved away from the gate's phase), but the next gate overwrites it anyway.
+/// Removes the record once a pass has applied it, under the same record lock a write takes: a
+/// holder that already read the record (a pass naming its process, a gate writing `running`)
+/// must not put it back after the removal. A record left behind is harmless (the state moved
+/// away from the gate's phase), but the next gate overwrites it anyway.
 pub fn clear(store: &Store, task: &str) {
+    let Ok(_lock) = lock_record(store, task) else {
+        return;
+    };
     let _ = fs::remove_file(record_path(store, task));
 }
 
-/// The lock a pass and the gate process take around a write of one task's record. A write
-/// replaces the file with a rename, so two that overlap do not tear it; the lock is what orders
-/// them, so a pass that names the process it started cannot put its `started` record back over
-/// the `running` one the gate wrote in between (ADR 0048 decision 10).
+/// The lock a pass and the gate process take around a write or removal of one task's record.
+/// A write replaces the file with a rename, so two that overlap do not tear it; the lock is what
+/// orders them, so a pass that names the process it started cannot put its `started` record back
+/// over the `running` one the gate wrote in between, and a reset cannot be undone by a holder
+/// that already read the record (ADR 0048 decision 10).
 fn lock_record(store: &Store, task: &str) -> io::Result<File> {
     let path = record_path(store, task).with_extension("json.lock");
     if let Some(dir) = path.parent() {
@@ -658,8 +664,13 @@ fn wait_for_gate(store: &Store, task: &str) -> Option<Record> {
 
 /// Records that arc stopped the gate: `running` or `started` becomes `interrupted`, keeping
 /// the kind, the attempt and the inputs. A record the gate finished in the meantime is left
-/// as it is.
+/// as it is: the read and the write are one step under the record lock, so a `done` or
+/// `refused` record the gate wrote in between is not overwritten by this one (ADR 0048
+/// decision 10).
 fn write_interrupted(store: &Store, task: &str) {
+    let Ok(_lock) = lock_record(store, task) else {
+        return;
+    };
     let Some(record) = read(store, task) else {
         return;
     };
@@ -676,7 +687,7 @@ fn write_interrupted(store: &Store, task: &str) {
     if let Some(inputs) = record.inputs {
         value["inputs"] = json!(inputs);
     }
-    let _ = write(store, task, &value);
+    let _ = write_locked(store, task, &value);
 }
 
 // ---- the child side -------------------------------------------------------------------
@@ -816,6 +827,11 @@ fn run_inner(options: &Options) -> Result<(), Error> {
         "process_started_at": crate::process::start_time(std::process::id()),
         "started_at": crate::store::plan_ops::utc_now(),
     });
+    // The record is replaced as a whole, so the read that keeps the pass's inputs and deaths
+    // and the write that adds this process are one step under the record lock: a reset that
+    // removed the record in between must not be undone by this write (ADR 0048 decision 10).
+    let record_lock = lock_record(&store, &task.id)
+        .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
     if let Some(written) = read_value(&store, &task.id) {
         if let Some(written_inputs) = written
             .get("inputs")
@@ -834,8 +850,9 @@ fn run_inner(options: &Options) -> Result<(), Error> {
             running["deaths"] = json!(deaths);
         }
     }
-    write(&store, &task.id, &running)
-        .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
+    let written = write_locked(&store, &task.id, &running);
+    drop(record_lock);
+    written.map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))?;
     // Test-only (see [`DIE_AFTER_RUNNING_ENV`]): a gate that wrote `running` and then died.
     if std::env::var_os(DIE_AFTER_RUNNING_ENV).is_some() {
         return Err(Error::Failed(
