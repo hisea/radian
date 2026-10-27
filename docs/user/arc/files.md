@@ -80,7 +80,7 @@ The `review` stage is unchanged: every task's review still uses `[gate.review]` 
 An attempt's worker session id is decided by its claim, which writes it to `attempts/<task>/<attempt>/start.json`; the wrapper writes the session it used to `identity.json` when it spawns the worker and to `execution.json` when it ends.
 A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`.
 With `worker.rework_session = "fresh"` it is `<task>-<attempt>`; with `resume` it is the task id.
-`radian arc show` prints it as `session_id` (known from the claim on, not only after the attempt ends), and `radian attach <session id>` opens that session's journal.
+`radian arc show` prints it as `session_id` (known from the claim on, not only after the attempt ends), and, for a `radian exec` worker, `radian attach <session id>` opens that session's journal; a `command` or `acp` worker has no journal, only the attempt's `result.jsonl` (see [the task page's conversation tab](tui.md#the-task-page)).
 
 The same records name the worker the attempt runs: the claim writes the worker it decided on (the `worker` field; a flow's worker takes effect at the next claim), and the wrapper writes the worker it started when it spawns it and when it ends.
 Each record's `worker` object carries `kind` (`radian` or `command`) and `flow` (the task's flow, `default` when its file has no `flow` field); a command worker also carries `program`.
