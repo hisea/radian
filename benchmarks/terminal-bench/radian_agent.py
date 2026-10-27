@@ -38,6 +38,7 @@ from harbor.agents.options import Cli, InstalledAgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from capture import CaptureMixin
 from radian_command import (
     CREDENTIAL_ENV_NAME,
     GENERIC_PROVIDER_ID,
@@ -139,9 +140,21 @@ class RadianOptions(InstalledAgentOptions):
         "Omit to let the task's own agent timeout govern: the framework then "
         "ends the trial gracefully and still runs the verifier.",
     )
+    # Capture is adapter-side only (`ab/capture.py`): neither field reaches the
+    # radian command line. Without `capture_port` the trial runs unchanged.
+    capture_port: int | None = Field(
+        default=None,
+        ge=1,
+        description="Port of this arm's mitmdump; enables the request capture.",
+    )
+    capture_ca: str | None = Field(
+        default=None,
+        description="Host path of the arm's mitmproxy CA, uploaded to the "
+        "container when `capture_port` is set.",
+    )
 
 
-class RadianAgent(BaseInstalledAgent):
+class RadianAgent(CaptureMixin, BaseInstalledAgent):
     """Runs the radian binary under test against one task instruction."""
 
     capabilities = AgentCapabilities()
@@ -319,6 +332,8 @@ class RadianAgent(BaseInstalledAgent):
         }
         if probe.return_code != 0:
             env[_SSL_CERT_FILE] = self._remote_ca_bundle_path()
+        # `ab/capture.py` adds the proxy and its CA bundle here; empty otherwise.
+        env.update(self._trial_env())
         result = await self.exec_as_agent(
             environment,
             command=command,

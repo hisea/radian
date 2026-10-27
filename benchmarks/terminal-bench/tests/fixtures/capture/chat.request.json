@@ -1,0 +1,9 @@
+{
+  "headers": {
+    "authorization": "Bearer sk-capture-fixture-0000000000000000",
+    "content-type": "application/json",
+    "x-api-key": "sk-capture-fixture-header-value"
+  },
+  "path": "/v1/chat/completions",
+  "method": "POST"
+}

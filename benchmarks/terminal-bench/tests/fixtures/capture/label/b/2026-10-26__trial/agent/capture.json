@@ -1,0 +1,7 @@
+{
+  "container_ip": "172.18.0.3",
+  "gateway": "172.18.0.1",
+  "port": 18081,
+  "ca_remote": "/tmp/harbor-ab-capture/ca.pem",
+  "bundle_remote": "/tmp/harbor-ab-capture/ca-bundle.crt"
+}

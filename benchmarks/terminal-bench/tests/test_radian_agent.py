@@ -22,6 +22,9 @@ from unittest import mock
 
 BENCH_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BENCH_DIR))
+# `radian_agent` imports the capture mixin from `ab/` (PYTHONPATH does the same
+# under the ab scripts).
+sys.path.insert(0, str(BENCH_DIR / "ab"))
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError  # noqa: E402
 from harbor.environments.base import ExecResult  # noqa: E402

@@ -1,0 +1,9 @@
+{
+  "model": "some-thinking-model",
+  "max_tokens": 8000,
+  "thinking": {"type": "enabled", "budget_tokens": 4000},
+  "messages": [
+    {"role": "system", "content": "You are a terse assistant."},
+    {"role": "user", "content": "Summarize the diff."}
+  ]
+}
