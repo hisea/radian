@@ -102,8 +102,32 @@ Pass `--catalog-provider <id>` to look the model up under another catalog name.
 Omit it to derive the name from the base URL host.
 
 Define named endpoints under `[providers.<name>]`.
-Set `kind` and `base_url` for each name.
-Set `model.provider` to the name to use it.
+A full declaration sets `kind` and `base_url`; set `model.provider` to the name to use it.
+`kind` is `openai-compatible`, `anthropic` or `openai-responses`; pi's `openai-completions` and `anthropic-messages` are accepted as aliases.
+
+A gateway can serve several wire APIs behind one name.
+Radian resolves the protocol and the endpoint **per model**: ordered `models` rules first, then the model list `GET <base_url>/models` advertises for that model, then `kind`.
+`prefer` orders the protocols a model list entry offers (default `["anthropic", "openai-responses", "openai-compatible"]`, native API first and chat last), and `base_urls` overrides one protocol's endpoint.
+The startup and `/model` lines name the protocol, the endpoint when it differs, and the source:
+
+```toml
+[model]
+provider = "magpie"
+model = "codex/gpt-5.6-sol"
+
+[providers.magpie]
+kind = "openai-compatible"       # the fallback when no rule and no list entry decides
+base_url = "http://127.0.0.1:3425/v1"
+base_urls.openai-responses = "http://127.0.0.1:3425/v1"
+
+[[providers.magpie.models]]
+match = "claude/*"              # whole model id; `*` matches any run of characters
+kind = "anthropic"
+```
+
+`magpie/codex/gpt-5.6-sol (openai-responses, model list)` sends the Responses request to `<base>/responses` with the provider key as a Bearer token and none of the ChatGPT headers.
+A model the list puts under chat and the native API picks the native API, because a gateway may refuse chat for it; a table with neither `kind` nor `base_url` adds only `models`, `prefer` or `base_urls` to the provider of that name already in `auth.json`.
+See `configuration` for every field.
 
 Read `cli` for every flag and exit code.
 Read `configuration` for every file key.

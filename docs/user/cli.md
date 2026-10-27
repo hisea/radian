@@ -183,7 +183,7 @@ radian arc reset-budget TK0001-first-work
 ## `radian login` and `radian logout`
 
 `radian login [PROVIDER]` stores an API key in `~/.radian/credentials/auth.json`.
-`PROVIDER` is a built-in id (`opencode-go`, `anthropic`, `openai`, `openai-compatible`), `chatgpt` (browser OAuth), `chatgpt-device` (device code), or `custom`, which names a new endpoint: name, protocol, base URL, and key. An unknown provider is refused.
+`PROVIDER` is a built-in id (`opencode-go`, `anthropic`, `openai`, `openai-compatible`), `chatgpt` (browser OAuth), `chatgpt-device` (device code), or `custom`, which names a new endpoint: name, protocol, base URL, and key. The custom protocol is `openai-compatible`, `anthropic` or `openai-responses` (pi's `openai-completions` and `anthropic-messages` are accepted). An unknown provider is refused.
 A bare `radian login` shows the numbered provider list.
 The key never echoes.
 A verification request (`GET <base>/models`) runs before the save.

@@ -24,9 +24,8 @@ fn models_path(protocol: Protocol) -> &'static str {
         // base URL never carries it (the adapter appends `/v1/messages`).
         Protocol::OpenAiCompatible => "models",
         Protocol::Anthropic => "v1/models",
-        // Unreachable in practice: `chatgpt` is the only `Responses` descriptor and its login
-        // is OAuth (ADR 0026), never routed through this API-key
-        // verification. Kept total (no panic) rather than relying on that staying true.
+        // A named provider's Responses base is an OpenAI-style `/v1`, so the same path works.
+        // The `chatgpt` descriptor's login is OAuth, which never reaches this API-key check.
         Protocol::Responses => "models",
     }
 }

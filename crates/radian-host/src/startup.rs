@@ -580,6 +580,7 @@ mod tests {
                 kind: "openai-compatible".to_owned(),
                 base_url: "https://corp.example/v1".to_owned(),
                 reasoning_replay: None,
+                ..Default::default()
             },
         )]
         .into_iter()

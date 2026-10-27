@@ -69,6 +69,7 @@ fn a_fitting_switch_queues_directly() {
         model: "claude".into(),
         tokens: Some(100),
         budget: Some(200),
+        route: None,
     });
     assert!(
         result.effects.iter().any(|effect| matches!(
@@ -92,6 +93,7 @@ fn an_over_budget_switch_asks_first() {
         model: "claude".into(),
         tokens: Some(500),
         budget: Some(200),
+        route: None,
     });
     assert!(
         result.effects.is_empty(),
@@ -118,6 +120,7 @@ fn a_declined_confirm_queues_nothing() {
         model: "claude".into(),
         tokens: Some(500),
         budget: Some(200),
+        route: None,
     });
     let result = app.update(Input::ConfirmCommand(false));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
@@ -132,6 +135,7 @@ fn a_failed_compaction_does_not_queue() {
         provider: "anthropic".into(),
         model: "claude".into(),
         result: Err("the summarizer failed".into()),
+        route: None,
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert!(app.session.next_model.is_none());
@@ -153,6 +157,7 @@ fn a_succeeded_compaction_queues_the_switch() {
             tokens_before: 500,
             tokens_after: 100,
         }),
+        route: None,
     });
     assert!(
         result
@@ -174,6 +179,7 @@ fn an_unknown_budget_queues_without_a_comparison() {
         model: "deepseek-v4.1-flash".into(),
         tokens: Some(900),
         budget: None,
+        route: None,
     });
     assert!(
         result
@@ -194,6 +200,7 @@ fn the_next_marker_clears_when_the_change_is_applied() {
         model: "claude".into(),
         tokens: None,
         budget: None,
+        route: None,
     });
     assert!(app.session.next_model.is_some());
     let event = radian_session::RuntimeEvent::ConfigChanged {
@@ -213,6 +220,7 @@ fn the_confirm_keys_are_hardcoded() {
         model: "claude".into(),
         tokens: Some(500),
         budget: Some(200),
+        route: None,
     });
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     let result = app.on_key(key(KeyCode::Char('y')));
@@ -311,6 +319,7 @@ fn the_provider_list_resolves_built_ins_config_and_auth() {
             kind: "openai-compatible".to_owned(),
             base_url: "https://acme.example/v1".to_owned(),
             reasoning_replay: None,
+            ..Default::default()
         },
     );
     for name in [

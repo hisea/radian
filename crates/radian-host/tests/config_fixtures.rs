@@ -34,6 +34,7 @@ fn the_reader_matches_the_reference_checker() {
         ("tui-theme-colors.toml", "accept"),
         ("tui-footer-command.toml", "accept"),
         ("providers.toml", "accept"),
+        ("providers-model-routing.toml", "accept"),
         ("model-retries.toml", "accept"),
         ("skills-extra-paths.toml", "accept"),
         ("skills-builtin.toml", "accept"),
@@ -214,6 +215,50 @@ fn the_providers_fixture_carries_named_providers() {
         "https://llm.example.com/v1"
     );
     assert_eq!(config.providers["relay"].kind, "anthropic");
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+}
+
+/// The `providers-model-routing.toml` fixture (ADR 0026 D10): the aliases are canonicalized,
+/// `prefer`, `base_urls` and the ordered rules are carried, and a rules-only table parses as an
+/// overlay (whether an auth entry exists is decided at resolution, not parse).
+#[test]
+fn the_routing_fixture_carries_rules_prefer_and_base_urls() {
+    let (path, text) = fixture("providers-model-routing.toml");
+    let config = config::parse(&path, &text).unwrap();
+    let gateway = &config.providers["gemini-gateway"];
+    assert_eq!(
+        gateway.kind, "openai-compatible",
+        "the alias's canonical name"
+    );
+    assert_eq!(
+        gateway.prefer.as_ref().unwrap(),
+        &[
+            "anthropic".to_owned(),
+            "openai-responses".to_owned(),
+            "openai-compatible".to_owned()
+        ]
+    );
+    assert_eq!(
+        gateway.base_urls["openai-responses"],
+        "http://127.0.0.1:3425/v1"
+    );
+    assert_eq!(
+        gateway.models,
+        vec![
+            radian_host::ModelRuleDecl {
+                pattern: "claude/*".to_owned(),
+                kind: "anthropic".to_owned()
+            },
+            radian_host::ModelRuleDecl {
+                pattern: "codex/*".to_owned(),
+                kind: "openai-responses".to_owned()
+            }
+        ]
+    );
+    let overlay = &config.providers["gateway-b"];
+    assert!(!overlay.is_full());
+    assert!(overlay.kind.is_empty());
+    assert_eq!(overlay.models.len(), 1);
     assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 

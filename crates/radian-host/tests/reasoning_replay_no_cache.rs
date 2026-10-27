@@ -119,6 +119,10 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
             protocol: Protocol::OpenAiCompatible,
             base_url: "https://acme.example/v1".into(),
             reasoning_replay: None,
+            rules: Vec::new(),
+            prefer: None,
+            base_urls: BTreeMap::new(),
+            model_list: None,
         })
     };
     assert_eq!(
@@ -145,6 +149,7 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
             kind: "openai-compatible".into(),
             base_url: "https://acme.example/v1".into(),
             reasoning_replay: None,
+            ..Default::default()
         },
     );
     assert!(route_replays_reasoning(
@@ -185,6 +190,10 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
             protocol: Protocol::OpenAiCompatible,
             base_url: "https://acme.example/v1".into(),
             reasoning_replay: Some(override_),
+            rules: Vec::new(),
+            prefer: None,
+            base_urls: BTreeMap::new(),
+            model_list: None,
         })
     };
     assert_eq!(

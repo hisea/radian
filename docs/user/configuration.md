@@ -79,15 +79,38 @@ The key is stored under the same name in `auth.json`, so each endpoint has its o
 
 | Key | Type | Required | Allowed | What it does |
 |---|---|---|---|---|
-| `providers.<name>.kind` | string | yes | `openai-compatible`, `anthropic` | The wire protocol. Anything else is refused. |
-| `providers.<name>.base_url` | non-empty string | yes | any URL | The endpoint base. An empty value is refused. |
+| `providers.<name>.kind` | string | a full declaration | `openai-compatible`, `anthropic`, `openai-responses`; aliases `openai-completions` = `openai-compatible`, `anthropic-messages` = `anthropic` | The wire protocol used when no rule and no model-list entry decides. An unknown value is refused. Every line Radian prints uses the canonical name. |
+| `providers.<name>.base_url` | non-empty string | a full declaration | any URL | The endpoint base. An empty value is refused. |
 | `providers.<name>.reasoning_replay` | string or `false` | none | a field name, or `false` | The assistant-message field the model needs its reasoning replayed under. `false` turns replay off. `true` is refused. |
+| `providers.<name>.prefer` | array of strings | none | `openai-compatible`, `anthropic`, `openai-responses`, plus the aliases `openai-completions` = `openai-compatible` and `anthropic-messages` = `anthropic`; each at most once | The order in which one model-list entry's protocols are tried. The default is `["anthropic", "openai-responses", "openai-compatible"]`: native API first, chat last. A kind left out is never picked from the list. A duplicate (aliases name the same kind) is refused. |
+| `providers.<name>.base_urls` | table | none | keys `openai-compatible`, `anthropic`, `openai-responses`, plus the aliases `openai-completions` = `openai-compatible` and `anthropic-messages` = `anthropic`; non-empty URLs | The adapter base URL of that protocol, overriding the endpoint of a rule, the model list or the kind. An unknown key or an empty URL is refused. |
+| `providers.<name>.models` | array of tables | none | each with `match` and `kind` | Ordered rules. The first `match` that covers the whole model id picks its `kind`. A rule missing either key is refused; unknown keys inside a rule are skipped and named. |
+| `providers.<name>.models[].match` | non-empty string | yes | any model id; `*` matches any run of characters | The rule's pattern. Nothing else is special; the whole id must match. An empty pattern is refused. |
+| `providers.<name>.models[].kind` | string | yes | `openai-compatible`, `anthropic`, `openai-responses`, plus the aliases `openai-completions` and `anthropic-messages` | The protocol the rule picks. An unknown value is refused. |
+
+Radian resolves the protocol and the endpoint **per model**, in this order:
+
+1. The first rule whose `match` covers the model id, with the endpoint `base_urls[<kind>]` (when set) or `base_url`.
+2. The provider's own model list: the `GET <base_url>/models` entry whose `id` equals the model id (cached for 1 hour, the same list `/model` offers).
+3. `kind`, with `base_url`.
+
+A model-list entry advertises its wire APIs in one of three vocabularies; the first field present is used, and values it does not know are ignored:
+
+- `endpoints[]` with `api`: `openai-completions` → `openai-compatible`, `openai-responses` → `openai-responses`, `anthropic-messages` → `anthropic`. Paths are absolute from the host root.
+- `supported_endpoint_types[]` (new-api and one-api relays): `openai` → `openai-compatible` at `/v1/chat/completions`, `openai-response` → `openai-responses` at `/v1/responses`, `anthropic` → `anthropic` at `/v1/messages`.
+- `native_endpoints[]`: a path ending `/chat/completions` → `openai-compatible`, `/responses` → `openai-responses`, `/messages` → `anthropic`.
+
+Several usable protocols are narrowed by `prefer`. The endpoint is the origin (scheme, host and port) of `base_url` plus the advertised path with its API suffix removed: `/apis/anthropic/v1/messages` becomes `<origin>/apis/anthropic/v1`, `/v1/responses` becomes `<origin>/v1`. The Anthropic adapter adds `/v1/messages` itself, so its request lands on `<origin>/apis/anthropic/v1/messages`. `base_urls` replaces that endpoint for its protocol.
+
+At startup with no cached model list, one fetch with a 3-second timeout runs before the route is built. A failed fetch uses `kind` and prints one line naming the reason; it never blocks a turn. Resolution runs again at every route build: startup, `/model <name>/<model>`, resume, and a `subagent` child's own startup. The startup and `/model` lines name the protocol, the endpoint when it differs from `base_url`, and the source, for example `magpie/codex/gpt-5.6-sol (openai-responses, model list)` or `magpie/claude/claude-opus-5-5 (anthropic, rule claude/*)`.
+
+A table with **no** `kind` and **no** `base_url` but with `models`, `prefer`, `base_urls` or `reasoning_replay` adds those to the provider of that name already declared in `auth.json`, with no "config wins" warning. The same table with no `auth.json` entry of that name is refused. A table with `kind` or `base_url` is a full declaration; with a same-name `auth.json` entry, configuration wins and warns once.
 
 The name uses letters, digits, `-`, and `_` only, and must not shadow a built-in provider.
 Unknown keys under a name are skipped and named.
 
 Without `reasoning_replay`, a route's replay field comes from the model catalog's `interleaved` entry for its provider name and model id. That covers a built-in provider, and a named provider whose name a catalog provider also uses (for example `[providers.opencode]`); a named provider no catalog provider shares replays nothing, as does a model the catalog does not carry. The catalog is the local cache when it parses, else the bundled snapshot. A field Radian cannot replay counts as no replay.
-See `providers` for login and routing.
+See `providers` for login, routing, the gateway example and the startup lines.
 
 ```toml
 [providers.office]

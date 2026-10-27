@@ -50,6 +50,7 @@ fn decl(base_url: &str, override_: Option<ReasoningReplayOverride>) -> ProviderD
         kind: "openai-compatible".into(),
         base_url: base_url.into(),
         reasoning_replay: override_,
+        ..Default::default()
     }
 }
 

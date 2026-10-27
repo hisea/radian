@@ -130,7 +130,7 @@ impl App {
         };
         // A `/model` confirm (D7): y compacts first, n cancels the switch. The modal's y/n are
         // hardcoded (ADR 0023 U4), exactly like the approval's.
-        if let Some((provider, model, budget)) = pending.switch {
+        if let Some((provider, model, budget, route)) = pending.switch {
             if !confirmed {
                 self.push_notice("cancelled; the model is unchanged");
                 return UpdateResult::dirty();
@@ -139,6 +139,7 @@ impl App {
                 provider,
                 model,
                 budget,
+                route,
             });
         }
         if !confirmed {

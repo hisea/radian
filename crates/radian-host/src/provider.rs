@@ -14,12 +14,12 @@ use crate::model::Provider;
 use crate::usage::{UsageArgs, UsageFetcher};
 
 /// Which wire protocol a model talks, mapped to one of the three existing adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Protocol {
     OpenAiCompatible,
     Anthropic,
-    /// OpenAI's Responses API (`agent-provider-openai-responses`, ADR 0026 slice
-    /// 2): today only the `chatgpt` descriptor uses it.
+    /// OpenAI's Responses API (`agent-provider-openai-responses`). The `chatgpt` descriptor
+    /// uses it, and a named provider may choose it as a `kind`, a rule or its model list.
     Responses,
 }
 
@@ -232,14 +232,19 @@ pub fn default_include_usage(provider_name: &str) -> Option<bool> {
 pub const RADIAN_KIND: &str = "RADIAN_KIND";
 
 impl Protocol {
-    /// The wire protocol a `kind` names (D10: a named/custom provider may only declare one of
-    /// these two; `Responses` is deliberately absent — it is the `chatgpt` descriptor's fixed
-    /// protocol, not a dial a custom endpoint can choose, since its base URL shape and its
-    /// headers come from the OAuth login, not from a user-typed endpoint).
+    /// The wire protocol a `kind` names (ADR 0026 D10). Accepts the three canonical names and
+    /// pi's aliases, so a pi `models.json` provider copies over unchanged.
     pub fn from_kind(kind: &str) -> Option<Self> {
+        if let Some((_, canonical)) = PROVIDER_KIND_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == kind)
+        {
+            return Self::from_kind(canonical);
+        }
         match kind {
             "openai-compatible" => Some(Self::OpenAiCompatible),
             "anthropic" => Some(Self::Anthropic),
+            "openai-responses" => Some(Self::Responses),
             _ => None,
         }
     }
@@ -249,6 +254,48 @@ impl Protocol {
         self.adapter_name()
     }
 }
+
+/// The canonical `[providers.<name>] kind` values (ADR 0026 D10). The parser and the manual's
+/// drift test both read this list.
+pub const PROVIDER_KINDS: &[&str] = &["openai-compatible", "anthropic", "openai-responses"];
+
+/// The accepted aliases of a kind (pi's `models.json` spellings). The parser and the manual's
+/// drift test both read this list.
+pub const PROVIDER_KIND_ALIASES: &[(&str, &str)] = &[
+    ("openai-completions", "openai-compatible"),
+    ("anthropic-messages", "anthropic"),
+];
+
+/// The `endpoints[].api` vocabulary of a model-list entry (ADR 0026 D10): pi's names.
+pub const ENDPOINT_APIS: &[(&str, Protocol)] = &[
+    ("openai-completions", Protocol::OpenAiCompatible),
+    ("openai-responses", Protocol::Responses),
+    ("anthropic-messages", Protocol::Anthropic),
+];
+
+/// The `supported_endpoint_types[]` vocabulary of a model-list entry (new-api/one-api),
+/// with the default path each token serves (ADR 0026 D10).
+pub const SUPPORTED_ENDPOINT_TYPES: &[(&str, Protocol, &str)] = &[
+    ("openai", Protocol::OpenAiCompatible, "/v1/chat/completions"),
+    ("openai-response", Protocol::Responses, "/v1/responses"),
+    ("anthropic", Protocol::Anthropic, "/v1/messages"),
+];
+
+/// The `native_endpoints[]` path suffixes of a model-list entry (magpie), each naming a
+/// protocol (ADR 0026 D10).
+pub const NATIVE_ENDPOINT_SUFFIXES: &[(&str, Protocol)] = &[
+    ("/chat/completions", Protocol::OpenAiCompatible),
+    ("/responses", Protocol::Responses),
+    ("/messages", Protocol::Anthropic),
+];
+
+/// The default `prefer` order (ADR 0026 D10): the native API first, chat last, because a
+/// gateway can refuse chat for a model it also lists under chat.
+pub const DEFAULT_PREFER: &[Protocol] = &[
+    Protocol::Anthropic,
+    Protocol::Responses,
+    Protocol::OpenAiCompatible,
+];
 
 /// The `/login` choice for "not one of the built-ins" — a named provider is born there
 /// (ADR 0026 D10). The TUI wizard and `radian login` share it so they cannot drift.
@@ -316,16 +363,226 @@ pub fn name_error(name: &str) -> Option<String> {
     }
 }
 
+/// One ordered rule of a named provider (ADR 0026 D10): `match` over the whole model id,
+/// with `*` matching any run of characters, and the wire protocol a match picks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRule {
+    pub pattern: String,
+    pub protocol: Protocol,
+}
+
+/// One raw rule as configuration carries it (ADR 0026 D10), before the named-provider
+/// resolution turns it into a [`ModelRule`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRuleDecl {
+    pub pattern: String,
+    pub kind: String,
+}
+
 /// One named provider: a custom service the user gave a name (ADR 0026 D10). Its key is
 /// stored under that name in `auth.json`, so several custom endpoints each have their own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedProvider {
     pub name: String,
+    /// The declared `kind`: the protocol step 3 uses when no rule or model-list entry matches.
     pub protocol: Protocol,
     pub base_url: String,
     /// The `[providers.<name>]` override for the catalog's reasoning replay (ADR 0014
     ///  Q2). `None` falls through to the catalog.
     pub reasoning_replay: Option<ReasoningReplayOverride>,
+    /// The ordered rules (ADR 0026 D10). First match wins.
+    pub rules: Vec<ModelRule>,
+    /// The protocol preference over several model-list entries (ADR 0026 D10). `None` uses
+    /// [`DEFAULT_PREFER`]; `Some` with an empty list picks nothing from the list.
+    pub prefer: Option<Vec<Protocol>>,
+    /// A per-protocol endpoint override (ADR 0026 D10), applied from any resolution step.
+    pub base_urls: BTreeMap<Protocol, String>,
+    /// The provider's own model list, when the resolver had a key to read it with
+    /// (ADR 0026 D10). `None` leaves steps 1 and 3. Boxed because it is the large field of
+    /// [`ProviderRef`].
+    pub model_list: Option<Box<crate::ProviderModels>>,
+}
+
+/// Where a named provider's per-model resolution got its protocol and endpoint
+/// (ADR 0026 D10). Later code reads it to name the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteSource {
+    /// The first `[[providers.<name>.models]]` whose `match` covered the model id.
+    Rule(String),
+    /// The provider's own `GET <base>/models` entry.
+    ModelList,
+    /// The provider's declared `kind`.
+    Kind,
+}
+
+impl RouteSource {
+    /// The source's name in a startup or `/model` line.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Rule(pattern) => format!("rule {pattern}"),
+            Self::ModelList => "model list".to_owned(),
+            Self::Kind => "kind".to_owned(),
+        }
+    }
+}
+
+/// One named provider's resolution for one model (ADR 0026 D10): which adapter, the endpoint
+/// and where both came from. `endpoint` is the API's own base (what a startup line shows);
+/// `base_url` is what the adapter takes (the Anthropic adapter re-adds `/v1/messages`, so its
+/// base stops before `/v1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedModelRoute {
+    pub protocol: Protocol,
+    /// The adapter's base URL.
+    pub base_url: String,
+    /// The protocol's API base as the model list advertised it.
+    pub endpoint: String,
+    pub source: RouteSource,
+}
+
+/// Whether `pattern` covers `text` for a rule's `match` (ADR 0026 D10): `*` matches any run of
+/// characters, every other character is literal, and the whole id must match.
+pub fn pattern_matches(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let Some(rest) = text.strip_prefix(parts[0]) else {
+        return false;
+    };
+    let mut rest = rest;
+    for (index, part) in parts[1..].iter().enumerate() {
+        if index + 1 == parts.len() - 1 {
+            return rest.ends_with(part);
+        }
+        match rest.find(part) {
+            Some(found) => rest = &rest[found + part.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// The origin (scheme, host and port) of `url` (ADR 0026 D10), or `None` when it does not
+/// parse.
+pub fn origin_of(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    Some(parsed.origin().ascii_serialization())
+}
+
+/// A model-list path as the base URL the protocol's **API** uses (ADR 0026 D10): the origin of
+/// `base_url` plus the advertised path with its `/chat/completions`, `/responses` or
+/// `/messages` suffix removed. This is the endpoint a startup line names; the adapter's own
+/// base is [`adapter_base`]. `None` when the path names no such API.
+pub fn endpoint_from_path(base_url: &str, path: &str) -> Option<String> {
+    let origin = origin_of(base_url)?;
+    let trimmed = path
+        .strip_suffix("/chat/completions")
+        .or_else(|| path.strip_suffix("/responses"))
+        .or_else(|| path.strip_suffix("/messages"))?;
+    Some(format!("{}{}", origin.trim_end_matches('/'), trimmed))
+}
+
+/// The base URL the adapter takes for an API endpoint (ADR 0026 D10). Chat and Responses
+/// append their own API suffix to the endpoint as-is; the Anthropic adapter appends
+/// `/v1/messages`, so an endpoint that already ends in `/v1` stops before it.
+pub fn adapter_base(protocol: Protocol, endpoint: &str) -> String {
+    if protocol != Protocol::Anthropic {
+        return endpoint.to_owned();
+    }
+    let trimmed = endpoint.trim_end_matches('/');
+    match trimmed.strip_suffix("/v1") {
+        Some(rest) if !rest.is_empty() => rest.to_owned(),
+        _ => endpoint.to_owned(),
+    }
+}
+
+impl NamedProvider {
+    /// The endpoint one resolution step uses (ADR 0026 D10): the `base_urls` override when it
+    /// names this protocol, else the step's own URL.
+    fn endpoint_for_step(&self, protocol: Protocol, step_url: impl FnOnce() -> String) -> String {
+        self.base_urls
+            .get(&protocol)
+            .cloned()
+            .unwrap_or_else(step_url)
+    }
+
+    /// Steps 3: the declared kind and `base_url`.
+    fn kind_route(&self) -> NamedModelRoute {
+        let endpoint = self
+            .base_urls
+            .get(&self.protocol)
+            .cloned()
+            .unwrap_or_else(|| self.base_url.clone());
+        let base_url = if self.base_urls.contains_key(&self.protocol) {
+            endpoint.clone()
+        } else {
+            adapter_base(self.protocol, &endpoint)
+        };
+        NamedModelRoute {
+            protocol: self.protocol,
+            base_url,
+            endpoint,
+            source: RouteSource::Kind,
+        }
+    }
+
+    /// Resolves one model (ADR 0026 D10): rules, then the model list narrowed by `prefer`, then
+    /// the declared `kind`.
+    pub fn resolve_model(&self, model: &str) -> NamedModelRoute {
+        // 1. Rules, first match wins.
+        if let Some(rule) = self
+            .rules
+            .iter()
+            .find(|rule| pattern_matches(&rule.pattern, model))
+        {
+            let protocol = rule.protocol;
+            let endpoint = self.endpoint_for_step(protocol, || self.base_url.clone());
+            let base_url = if self.base_urls.contains_key(&protocol) {
+                endpoint.clone()
+            } else {
+                adapter_base(protocol, &endpoint)
+            };
+            return NamedModelRoute {
+                protocol,
+                base_url,
+                endpoint,
+                source: RouteSource::Rule(rule.pattern.clone()),
+            };
+        }
+        // 2. The provider's own model list, narrowed by `prefer`.
+        if let Some(list) = &self.model_list
+            && let Some(advertised) = list.endpoints.get(model)
+        {
+            let prefer = self.prefer.as_deref().unwrap_or(DEFAULT_PREFER);
+            for protocol in prefer {
+                let Some(entry) = advertised
+                    .iter()
+                    .find(|entry| entry.protocol() == Some(*protocol))
+                else {
+                    continue;
+                };
+                if let Some(overridden) = self.base_urls.get(protocol).cloned() {
+                    return NamedModelRoute {
+                        protocol: *protocol,
+                        base_url: overridden.clone(),
+                        endpoint: overridden,
+                        source: RouteSource::ModelList,
+                    };
+                }
+                if let Some(endpoint) = endpoint_from_path(&self.base_url, &entry.path) {
+                    return NamedModelRoute {
+                        protocol: *protocol,
+                        base_url: adapter_base(*protocol, &endpoint),
+                        endpoint,
+                        source: RouteSource::ModelList,
+                    };
+                }
+            }
+        }
+        // 3. The declared kind.
+        self.kind_route()
+    }
 }
 
 /// A `[providers.<id>]` override for the catalog's reasoning replay (ADR 0014 R5):
@@ -349,13 +606,92 @@ pub enum NamedSource {
 
 /// One `[providers.<name>]` declaration's fields, as the config reader carries them (ADR 0026
 /// D10). The TUI/CLI resolve them through [`resolve_provider`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderDecl {
     pub kind: String,
     pub base_url: String,
     /// `reasoning_replay` (ADR 0014 R5): a field name, or `false` to switch replay
     /// off. `None` lets the catalog decide.
     pub reasoning_replay: Option<ReasoningReplayOverride>,
+    /// `prefer` (ADR 0026 D10): canonical kind spellings, in order. `None` keeps
+    /// [`DEFAULT_PREFER`]; an empty list picks nothing from the model list.
+    pub prefer: Option<Vec<String>>,
+    /// `base_urls` (ADR 0026 D10): canonical kind spelling → endpoint.
+    pub base_urls: BTreeMap<String, String>,
+    /// `[[providers.<name>.models]]` (ADR 0026 D10), in file order.
+    pub models: Vec<ModelRuleDecl>,
+}
+
+impl ProviderDecl {
+    /// Whether this table is a full declaration (`kind` or `base_url`) rather than an overlay
+    /// that only adds rules, `prefer` or `base_urls` to an auth-declared provider
+    /// (ADR 0026 D10).
+    pub fn is_full(&self) -> bool {
+        !self.kind.is_empty() || !self.base_url.is_empty()
+    }
+
+    /// The declaration's rules, with their kinds resolved (ADR 0026 D10).
+    pub(crate) fn rule_list(&self, name: &str) -> Result<Vec<ModelRule>, String> {
+        self.models
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                let protocol = resolve_kind(&rule.kind).map_err(|()| {
+                    format!(
+                        "providers.{name}.models[{index}].kind = {:?} is not one of {}",
+                        rule.kind,
+                        kind_list()
+                    )
+                })?;
+                Ok(ModelRule {
+                    pattern: rule.pattern.clone(),
+                    protocol,
+                })
+            })
+            .collect()
+    }
+
+    /// The declaration's `prefer` list resolved (ADR 0026 D10).
+    pub(crate) fn prefer_list(&self) -> Result<Option<Vec<Protocol>>, String> {
+        self.prefer
+            .as_ref()
+            .map(|list| {
+                list.iter()
+                    .map(|kind| {
+                        resolve_kind(kind).map_err(|()| {
+                            format!("prefer entry {kind:?} is not one of {}", kind_list())
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
+    /// The declaration's `base_urls` table resolved (ADR 0026 D10).
+    pub(crate) fn base_url_list(&self) -> Result<BTreeMap<Protocol, String>, String> {
+        let mut out = BTreeMap::new();
+        for (kind, url) in &self.base_urls {
+            let protocol = resolve_kind(kind)
+                .map_err(|()| format!("base_urls key {kind:?} is not one of {}", kind_list()))?;
+            out.insert(protocol, url.clone());
+        }
+        Ok(out)
+    }
+}
+
+/// Resolves a kind spelling, aliases included.
+pub(crate) fn resolve_kind(kind: &str) -> Result<Protocol, ()> {
+    Protocol::from_kind(kind).ok_or(())
+}
+
+/// The kind set and its aliases as one line, for a refusal.
+pub fn kind_list() -> String {
+    let aliases = PROVIDER_KIND_ALIASES
+        .iter()
+        .map(|(alias, canonical)| format!("{alias} = {canonical}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{} (aliases: {aliases})", PROVIDER_KINDS.join("|"))
 }
 
 /// A provider named on the command line or in the config: a built-in descriptor, or a named
@@ -397,6 +733,17 @@ impl ProviderRef {
         }
     }
 
+    /// A **named** provider's per-model resolution, including its source (ADR 0026 D10), for
+    /// code that needs the decision without building the adapter (`Route::source` carries the
+    /// same value once a route is built). `None` for a built-in descriptor, whose protocol
+    /// comes from the catalog or its own table.
+    pub fn named_route(&self, model: &str) -> Option<NamedModelRoute> {
+        match self {
+            Self::BuiltIn(_) => None,
+            Self::Named(named) => Some(named.resolve_model(model)),
+        }
+    }
+
     /// The `auth.json` entry this provider's key lives under: the descriptor id for built-ins,
     /// the name for named ones. This is D10's fix: every custom endpoint gets its own key
     /// instead of sharing the generic descriptor's slot.
@@ -407,27 +754,27 @@ impl ProviderRef {
         }
     }
 
-    /// The wire protocol the built-in table (or a named provider's `kind`) gives `model`,
-    /// **ignoring the catalog** (ADR 0026): the fallback [`Self::resolve_protocol`]
-    /// uses for a model the catalog does not carry, and what a route's notice compares against.
+    /// The wire protocol `model` uses (ADR 0026): a built-in descriptor's model takes it from
+    /// the catalog entry's `npm` when the catalog carries the model, and from the built-in table
+    /// otherwise; an `npm` Radian has no adapter for is refused. A named provider resolves per
+    /// model (D10): rules, then its model list, then its declared `kind`.
     pub fn protocol_for(&self, model: &str) -> Protocol {
         match self {
             Self::BuiltIn(descriptor) => descriptor.protocol_for(model),
-            Self::Named(named) => named.protocol,
+            Self::Named(named) => named.resolve_model(model).protocol,
         }
     }
 
-    /// The wire protocol of `model` (ADR 0026): a built-in descriptor's
-    /// model takes it from the catalog entry's `npm` when the catalog carries the model, and
-    /// from the built-in table otherwise; an `npm` Radian has no adapter for is refused. A named
-    /// provider is untouched (D10/decision 5): its declared `kind` decides.
+    /// The wire protocol of `model` with a built-in descriptor's catalog rule (ADR 0026).
     pub fn resolve_protocol(
         &self,
         catalog: Option<&crate::Catalog>,
         model: &str,
     ) -> Result<Protocol, String> {
         match self {
-            Self::Named(named) => Ok(named.protocol),
+            // A named provider resolves per model from its own declaration and list (D10);
+            // the catalog's `npm` is never read for it.
+            Self::Named(named) => Ok(named.resolve_model(model).protocol),
             // The generic descriptor names no built-in models: the user typed the id and the
             // endpoint, so the catalog's `npm` must not dictate its protocol (ADR 0026
             // 's spirit — only a descriptor's own model list is gated).
@@ -447,9 +794,10 @@ impl ProviderRef {
 
     /// The endpoint `model` talks to (ADR 0026): the auth entry's base URL
     /// when it carries one, else the hard-coded per-(descriptor, protocol) base; a named
-    /// provider has exactly one endpoint. The catalog's own `api` field is never used.
+    /// provider resolves it per model (D10). The catalog's own `api` field is never used.
     pub fn endpoint_for(
         &self,
+        model: &str,
         protocol: Protocol,
         auth_base_url: Option<&str>,
     ) -> Result<String, String> {
@@ -468,7 +816,7 @@ impl ProviderRef {
                         )
                     })
             }
-            Self::Named(named) => Ok(named.base_url.clone()),
+            Self::Named(named) => Ok(named.resolve_model(model).base_url),
         }
     }
 
@@ -495,64 +843,93 @@ impl ProviderRef {
 /// (`RADIAN_BASE_URL`, `RADIAN_KIND`, default `openai-compatible`). Both sources defining the
 /// same name is a one-line warning, config wins; neither is an error naming the built-ins.
 /// `openai-compatible` itself always resolves to the built-in descriptor (a reserved name).
+///
+/// A config table with neither `kind` nor `base_url` is an **overlay** (D10): it adds `models`,
+/// `prefer`, `base_urls` and `reasoning_replay` to the auth-declared provider of that name,
+/// silently; with no auth entry it is refused. A table with `kind` or `base_url` is a full
+/// declaration and wins over auth with one warning.
 pub fn resolve_provider(
     name: &str,
     config_entries: &BTreeMap<String, ProviderDecl>,
-    auth_env: Option<&std::collections::BTreeMap<String, String>>,
+    auth_env: Option<&BTreeMap<String, String>>,
+) -> Result<(ProviderRef, Option<String>), String> {
+    resolve_provider_with_models(name, config_entries, auth_env, None)
+}
+
+/// [`resolve_provider`] with the provider's own model list, read by the caller with the
+/// provider's key (ADR 0026 D10 step 2). Only a named provider keeps it; a built-in
+/// descriptor's protocol still comes from the catalog.
+pub fn resolve_provider_with_models(
+    name: &str,
+    config_entries: &BTreeMap<String, ProviderDecl>,
+    auth_env: Option<&BTreeMap<String, String>>,
+    model_list: Option<crate::ProviderModels>,
 ) -> Result<(ProviderRef, Option<String>), String> {
     if name == GENERIC_ID {
         return Ok((ProviderRef::BuiltIn(descriptor(GENERIC_ID).unwrap()), None));
     }
     if let Some(decl) = config_entries.get(name) {
-        let protocol = Protocol::from_kind(&decl.kind).ok_or_else(|| {
-            format!(
-                "providers.{name}.kind = {:?} is not one of openai-compatible|anthropic",
-                decl.kind
-            )
-        })?;
-        let warning = auth_env.filter(|_| descriptor(name).is_none()).map(|_| {
-            format!(
-                "provider `{name}` is declared in both config and auth.json; the config \
+        if decl.is_full() {
+            let protocol = Protocol::from_kind(&decl.kind).ok_or_else(|| {
+                format!(
+                    "providers.{name}.kind = {:?} is not one of {}",
+                    decl.kind,
+                    kind_list()
+                )
+            })?;
+            let warning = auth_env.filter(|_| descriptor(name).is_none()).map(|_| {
+                format!(
+                    "provider `{name}` is declared in both config and auth.json; the config \
                      wins"
-            )
-        });
-        return Ok((
-            ProviderRef::Named(NamedProvider {
+                )
+            });
+            let named = NamedProvider {
                 name: name.to_owned(),
                 protocol,
                 base_url: decl.base_url.clone(),
                 reasoning_replay: decl.reasoning_replay.clone(),
-            }),
-            warning,
-        ));
+                rules: decl.rule_list(name)?,
+                prefer: decl.prefer_list()?,
+                base_urls: decl.base_url_list()?,
+                model_list: model_list.map(Box::new),
+            };
+            return Ok((ProviderRef::Named(named), warning));
+        }
+        // A rules-only table: it adds to the auth-declared provider of that name.
+        let Some(env) = auth_env else {
+            return Err(format!(
+                "provider `{name}`: [providers.{name}] sets no `kind` and no `base_url`, and \
+                 auth.json has no entry for it; add `kind` and `base_url`, or log in to it"
+            ));
+        };
+        let (protocol, base_url) = auth_declaration(name, env)?;
+        let named = NamedProvider {
+            name: name.to_owned(),
+            protocol,
+            base_url,
+            reasoning_replay: decl.reasoning_replay.clone(),
+            rules: decl.rule_list(name)?,
+            prefer: decl.prefer_list()?,
+            base_urls: decl.base_url_list()?,
+            model_list: model_list.map(Box::new),
+        };
+        return Ok((ProviderRef::Named(named), None));
     }
     if let Some(descriptor) = descriptor(name) {
         return Ok((ProviderRef::BuiltIn(descriptor), None));
     }
     if let Some(env) = auth_env {
-        let kind = env
-            .get(RADIAN_KIND)
-            .map(String::as_str)
-            .unwrap_or("openai-compatible");
-        let protocol = Protocol::from_kind(kind).ok_or_else(|| {
-            format!(
-                "provider `{name}`: auth.json env.{RADIAN_KIND} = {kind:?} is not one of \
-                 openai-compatible|anthropic"
-            )
-        })?;
-        let base_url = env.get(crate::auth::RADIAN_BASE_URL).ok_or_else(|| {
-            format!(
-                "provider `{name}` is not built in and names no endpoint: add \
-                 `[providers.{name}]` with `base_url`, or set env.RADIAN_BASE_URL in its \
-                 auth.json entry"
-            )
-        })?;
+        let (protocol, base_url) = auth_declaration(name, env)?;
         return Ok((
             ProviderRef::Named(NamedProvider {
                 name: name.to_owned(),
                 protocol,
-                base_url: base_url.clone(),
+                base_url,
                 reasoning_replay: None,
+                rules: Vec::new(),
+                prefer: None,
+                base_urls: BTreeMap::new(),
+                model_list: model_list.map(Box::new),
             }),
             None,
         ));
@@ -566,6 +943,31 @@ pub fn resolve_provider(
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+/// The protocol and endpoint an `auth.json` entry declares (ADR 0026 D10).
+fn auth_declaration(
+    name: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(Protocol, String), String> {
+    let kind = env
+        .get(RADIAN_KIND)
+        .map(String::as_str)
+        .unwrap_or("openai-compatible");
+    let protocol = Protocol::from_kind(kind).ok_or_else(|| {
+        format!(
+            "provider `{name}`: auth.json env.{RADIAN_KIND} = {kind:?} is not one of {}",
+            kind_list()
+        )
+    })?;
+    let base_url = env.get(crate::auth::RADIAN_BASE_URL).ok_or_else(|| {
+        format!(
+            "provider `{name}` is not built in and names no endpoint: add \
+             `[providers.{name}]` with `base_url`, or set env.RADIAN_BASE_URL in its auth.json \
+             entry"
+        )
+    })?;
+    Ok((protocol, base_url.clone()))
 }
 
 /// `opencode-go` adds the session-routing header and a client identifier (ADR 0026 D0). The
@@ -1180,12 +1582,32 @@ pub struct Route {
     /// differs from the built-in table's ([`ProviderRef::resolve_protocol`]): `"protocol from
     /// models.dev"` (ADR 0026). `None` when the table stands.
     pub protocol_notice: Option<String>,
+    /// Where a **named** provider's protocol and endpoint came from (ADR 0026 D10): a rule,
+    /// the model list or the declared `kind`. `None` for a built-in descriptor, whose protocol
+    /// comes from the catalog or its own table.
+    pub source: Option<RouteSource>,
 }
 
 impl Route {
     pub fn adapter(&self) -> Provider {
         self.protocol.adapter()
     }
+}
+
+/// The description a startup or `/model` line shows for a named provider's route
+/// (ADR 0026 D10): `name/model (protocol[, at endpoint][, source])`. `None` for a built-in
+/// descriptor, whose line keeps its own wording.
+pub fn describe_model_route(provider: &ProviderRef, model: &str) -> Option<String> {
+    let ProviderRef::Named(named) = provider else {
+        return None;
+    };
+    let route = named.resolve_model(model);
+    let mut detail = route.protocol.kind().to_owned();
+    if route.endpoint != named.base_url {
+        detail.push_str(&format!(" at {}", crate::redact_base_url(&route.endpoint)));
+    }
+    detail.push_str(&format!(", {}", route.source.describe()));
+    Some(format!("{}/{} ({detail})", named.name, model))
 }
 
 /// Resolves a descriptor id, a model, the generic base URL/headers and the credential entry's
@@ -1306,8 +1728,9 @@ fn check_route_dials(
     Ok(())
 }
 
-/// Builds the route from an already-resolved protocol: the catalog notice, the endpoint and
-/// the headers.
+/// Builds the route: the catalog notice, the endpoint and the headers. A named provider's
+/// protocol and endpoint come from its per-model resolution (ADR 0026 D10); the caller passes
+/// the resolved protocol so the catalog/table choice is made once.
 #[allow(clippy::too_many_arguments)] // the public route signatures' inputs, plus the protocol
 fn build_route(
     provider: &ProviderRef,
@@ -1328,18 +1751,25 @@ fn build_route(
         && catalog.is_some_and(|catalog| catalog.npm(provider.id(), model).is_some())
         && protocol != provider.protocol_for(model))
     .then(|| "protocol from models.dev".to_owned());
-    let base_url = if generic {
-        // `--base-url`/config wins, then the credential entry's base URL, then the descriptor.
-        base_url_override
-            .map(str::to_owned)
-            .or_else(|| auth_base_url.map(str::to_owned))
-            .unwrap_or_else(|| {
-                descriptor_base_url(GENERIC_ID, Protocol::OpenAiCompatible)
-                    .expect("the generic descriptor has a base URL")
-                    .to_owned()
-            })
-    } else {
-        provider.endpoint_for(protocol, auth_base_url)?
+    let (base_url, source) = match provider {
+        ProviderRef::Named(named) => {
+            let route = named.resolve_model(model);
+            (route.base_url, Some(route.source))
+        }
+        ProviderRef::BuiltIn(_) if generic => {
+            // `--base-url`/config wins, then the credential entry's base URL, then the
+            // descriptor.
+            let base_url = base_url_override
+                .map(str::to_owned)
+                .or_else(|| auth_base_url.map(str::to_owned))
+                .unwrap_or_else(|| {
+                    descriptor_base_url(GENERIC_ID, Protocol::OpenAiCompatible)
+                        .expect("the generic descriptor has a base URL")
+                        .to_owned()
+                });
+            (base_url, None)
+        }
+        ProviderRef::BuiltIn(_) => (provider.endpoint_for(model, protocol, auth_base_url)?, None),
     };
     let mut headers = provider.request_headers(session_id);
     if generic {
@@ -1356,6 +1786,7 @@ fn build_route(
         base_url,
         headers,
         protocol_notice,
+        source,
     })
 }
 
@@ -2033,7 +2464,7 @@ mod tests {
         ProviderDecl {
             kind: kind.to_owned(),
             base_url: base_url.to_owned(),
-            reasoning_replay: None,
+            ..Default::default()
         }
     }
 
@@ -2083,7 +2514,7 @@ mod tests {
         );
         assert_eq!(
             provider
-                .endpoint_for(Protocol::OpenAiCompatible, None)
+                .endpoint_for("any-model", Protocol::OpenAiCompatible, None)
                 .unwrap(),
             "https://corp.example/v1"
         );
@@ -2115,8 +2546,11 @@ mod tests {
         let (provider, warning) = resolve_provider("solo", &BTreeMap::new(), Some(&auth)).unwrap();
         assert!(warning.is_none());
         assert_eq!(
-            provider.endpoint_for(Protocol::Anthropic, None).unwrap(),
-            "https://auth.example/v1"
+            provider
+                .endpoint_for("m", Protocol::Anthropic, None)
+                .unwrap(),
+            "https://auth.example",
+            "the Anthropic adapter re-adds `/v1/messages`, so a `/v1` base stops before it"
         );
         assert_eq!(provider.protocol_for("m"), Protocol::Anthropic);
 
@@ -2137,7 +2571,9 @@ mod tests {
         );
         let (provider, warning) = resolve_provider("solo", &config, Some(&auth)).unwrap();
         assert_eq!(
-            provider.endpoint_for(Protocol::Anthropic, None).unwrap(),
+            provider
+                .endpoint_for("m", Protocol::Anthropic, None)
+                .unwrap(),
             "https://config.example"
         );
         let warning = warning.expect("both sources warn");
@@ -2285,24 +2721,25 @@ pub fn thinking_map_for(descriptor: &ProviderDescriptor, model: &str) -> Option<
     (!descriptor.thinking.is_empty()).then_some(descriptor.thinking)
 }
 
-/// The descriptor id a named provider's protocol maps to (ADR 0026 D10).
+/// The descriptor id a named provider's protocol maps to (ADR 0026 D10). `Responses` names
+/// the `chatgpt` descriptor, which carries the Responses thinking shapes.
 pub fn protocol_descriptor_id(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::OpenAiCompatible => GENERIC_ID,
         Protocol::Anthropic => "anthropic",
-        // Unreachable: `Protocol::from_kind` never yields `Responses` (D10's named/custom
-        // providers cannot declare it), so no `NamedProvider` ever carries this variant.
         Protocol::Responses => crate::oauth_chatgpt::PROVIDER_ID,
     }
 }
 
 /// The thinking map a [`ProviderRef`]'s model uses (ADR 0026 D11): a built-in descriptor's
-/// model/provider map, or the map of the descriptor its kind names.
+/// model/provider map, or the map of the descriptor the model's **resolved** protocol names
+/// (D10: rules, model list, kind).
 pub fn thinking_map_for_ref(provider: &ProviderRef, model: &str) -> Option<ThinkingMap> {
     match provider {
         ProviderRef::BuiltIn(descriptor) => thinking_map_for(descriptor, model),
         ProviderRef::Named(named) => {
-            descriptor(protocol_descriptor_id(named.protocol)).and_then(|descriptor| {
+            let protocol = named.resolve_model(model).protocol;
+            descriptor(protocol_descriptor_id(protocol)).and_then(|descriptor| {
                 (!descriptor.thinking.is_empty()).then_some(descriptor.thinking)
             })
         }
@@ -2461,5 +2898,486 @@ mod thinking_tests {
             supported_wire(ANTHROPIC_THINKING, "low"),
             supported_wire(ANTHROPIC_THINKING, "max")
         );
+    }
+
+    // ---------- per-model named-provider resolution (ADR 0026 D10) ----------
+}
+
+#[cfg(test)]
+mod named_route_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn decl(kind: &str, base_url: &str) -> ProviderDecl {
+        ProviderDecl {
+            kind: kind.to_owned(),
+            base_url: base_url.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn auth_env(base_url: &str, kind: Option<&str>) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        map.insert(crate::auth::RADIAN_BASE_URL.to_owned(), base_url.to_owned());
+        if let Some(kind) = kind {
+            map.insert(RADIAN_KIND.to_owned(), kind.to_owned());
+        }
+        map
+    }
+
+    fn advertised(kind: &str, path: &str) -> crate::AdvertisedEndpoint {
+        crate::AdvertisedEndpoint {
+            kind: kind.to_owned(),
+            path: path.to_owned(),
+        }
+    }
+
+    /// A model list with the given `(id, endpoints)` entries, built the way the cache stores
+    /// it (ADR 0026 D10).
+    fn model_list(entries: &[(&str, &[crate::AdvertisedEndpoint])]) -> crate::ProviderModels {
+        let mut endpoints = BTreeMap::new();
+        let mut models = Vec::new();
+        for (id, eps) in entries {
+            models.push((*id).to_owned());
+            endpoints.insert((*id).to_owned(), eps.to_vec());
+        }
+        crate::ProviderModels {
+            key_fingerprint: "f".to_owned(),
+            models,
+            fetched_at: 0,
+            endpoints,
+        }
+    }
+
+    fn named(
+        protocol: Protocol,
+        base_url: &str,
+        rules: Vec<ModelRule>,
+        prefer: Option<Vec<Protocol>>,
+        base_urls: BTreeMap<Protocol, String>,
+        model_list: Option<crate::ProviderModels>,
+    ) -> NamedProvider {
+        NamedProvider {
+            name: "magpie".to_owned(),
+            protocol,
+            base_url: base_url.to_owned(),
+            reasoning_replay: None,
+            rules,
+            prefer,
+            base_urls,
+            model_list: model_list.map(Box::new),
+        }
+    }
+
+    /// The resolution order (D10): a rule beats the model list, which beats the declared kind.
+    #[test]
+    fn a_rule_beats_the_model_list_and_the_model_list_beats_the_kind() {
+        let list = model_list(&[(
+            "claude/opus-5-5",
+            &[advertised("openai-compatible", "/v1/chat/completions")],
+        )]);
+        let none = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            Some(list.clone()),
+        );
+        // The list wins over chat.
+        let route = none.resolve_model("claude/opus-5-5");
+        assert_eq!(route.protocol, Protocol::OpenAiCompatible);
+        assert_eq!(route.source, RouteSource::ModelList);
+        // A rule wins over the list.
+        let ruled = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            vec![ModelRule {
+                pattern: "claude/*".to_owned(),
+                protocol: Protocol::Anthropic,
+            }],
+            None,
+            BTreeMap::new(),
+            Some(list),
+        );
+        let route = ruled.resolve_model("claude/opus-5-5");
+        assert_eq!(route.protocol, Protocol::Anthropic);
+        assert_eq!(route.source, RouteSource::Rule("claude/*".to_owned()));
+        // No rule, no entry: the declared kind.
+        let route = ruled.resolve_model("something-else");
+        assert_eq!(route.protocol, Protocol::OpenAiCompatible);
+        assert_eq!(route.source, RouteSource::Kind);
+    }
+
+    /// `*` matches any run of characters and nothing else is special; the first rule wins.
+    #[test]
+    fn star_matches_any_run_and_the_first_rule_wins() {
+        assert!(pattern_matches("claude/*", "claude/opus-5"));
+        assert!(pattern_matches("*", "anything"));
+        assert!(pattern_matches("a*b*c", "aXXbYYc"));
+        assert!(!pattern_matches("claude/*", "claude"));
+        assert!(!pattern_matches("claude?opus", "claude/opus"));
+        assert!(!pattern_matches("claude/*", "xclaude/opus"));
+        assert!(pattern_matches("exact", "exact"));
+
+        let provider = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            vec![
+                ModelRule {
+                    pattern: "claude/*".to_owned(),
+                    protocol: Protocol::Anthropic,
+                },
+                ModelRule {
+                    pattern: "claude/opus-*".to_owned(),
+                    protocol: Protocol::Responses,
+                },
+            ],
+            None,
+            BTreeMap::new(),
+            None,
+        );
+        let route = provider.resolve_model("claude/opus-5-5");
+        assert_eq!(route.protocol, Protocol::Anthropic, "the first rule wins");
+        assert_eq!(route.source, RouteSource::Rule("claude/*".to_owned()));
+    }
+
+    /// The default `prefer` picks the native API over chat for a model listed under both.
+    #[test]
+    fn the_default_prefer_picks_anthropic_and_responses_over_chat() {
+        let list = model_list(&[
+            (
+                "anthropic:claude-haiku-4-5",
+                &[
+                    advertised("openai-compatible", "/v1/chat/completions"),
+                    advertised("anthropic", "/apis/anthropic/v1/messages"),
+                ],
+            ),
+            (
+                "azureopenai-dev-eastus2:gpt-4o-2024-08-06",
+                &[
+                    advertised("openai-compatible", "/v1/chat/completions"),
+                    advertised("openai-responses", "/v1/responses"),
+                ],
+            ),
+        ]);
+        let provider = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            Some(list),
+        );
+        let claude = provider.resolve_model("anthropic:claude-haiku-4-5");
+        assert_eq!(claude.protocol, Protocol::Anthropic);
+        assert_eq!(claude.source, RouteSource::ModelList);
+        let azure = provider.resolve_model("azureopenai-dev-eastus2:gpt-4o-2024-08-06");
+        assert_eq!(azure.protocol, Protocol::Responses);
+    }
+
+    /// A custom `prefer` (chat first) picks chat; a kind left out is never picked from the
+    /// list, so the declared `kind` answers instead.
+    #[test]
+    fn a_custom_prefer_picks_chat_and_a_left_out_kind_is_never_picked() {
+        let list = model_list(&[(
+            "both",
+            &[
+                advertised("anthropic", "/v1/messages"),
+                advertised("openai-compatible", "/v1/chat/completions"),
+            ],
+        )]);
+        let chat_first = named(
+            Protocol::Anthropic,
+            "https://gw.example/v1",
+            Vec::new(),
+            Some(vec![Protocol::OpenAiCompatible, Protocol::Anthropic]),
+            BTreeMap::new(),
+            Some(list.clone()),
+        );
+        assert_eq!(
+            chat_first.resolve_model("both").protocol,
+            Protocol::OpenAiCompatible
+        );
+        let anthopic_only = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            Vec::new(),
+            Some(vec![Protocol::Anthropic]),
+            BTreeMap::new(),
+            Some(model_list(&[(
+                "chat-only",
+                &[advertised("openai-compatible", "/v1/chat/completions")],
+            )])),
+        );
+        let route = anthopic_only.resolve_model("chat-only");
+        assert_eq!(
+            route.protocol,
+            Protocol::OpenAiCompatible,
+            "the list's chat is left out, so the kind stands"
+        );
+        assert_eq!(route.source, RouteSource::Kind);
+    }
+
+    /// An entry with no endpoint field, an unknown protocol or a model the list omits all fall
+    /// through to the declared `kind`; the model id is never an API hint.
+    #[test]
+    fn an_entry_with_no_usable_protocol_falls_to_kind() {
+        let list = model_list(&[
+            ("no-endpoints", &[]),
+            ("unknown-only", &[advertised("gemini", "/v1/gemini")]),
+        ]);
+        let provider = named(
+            Protocol::Anthropic,
+            "https://gw.example/v1",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            Some(list),
+        );
+        for model in ["no-endpoints", "unknown-only", "absent"] {
+            let route = provider.resolve_model(model);
+            assert_eq!(route.protocol, Protocol::Anthropic, "{model}");
+            assert_eq!(route.source, RouteSource::Kind, "{model}");
+            assert_eq!(route.endpoint, "https://gw.example/v1", "{model}");
+            assert_eq!(
+                route.base_url, "https://gw.example",
+                "{model}: the Anthropic adapter re-adds `/v1/messages`"
+            );
+        }
+    }
+
+    /// The endpoint is the origin of `base_url` plus the advertised path without its API
+    /// suffix; `supported_endpoint_types` paths follow the same rule.
+    #[test]
+    fn the_endpoint_is_the_origin_plus_the_stripped_advertised_path() {
+        assert_eq!(
+            endpoint_from_path("https://gw.example/v1", "/apis/anthropic/v1/messages"),
+            Some("https://gw.example/apis/anthropic/v1".to_owned())
+        );
+        assert_eq!(
+            endpoint_from_path("http://127.0.0.1:3425/v1", "/v1/responses"),
+            Some("http://127.0.0.1:3425/v1".to_owned())
+        );
+        assert_eq!(
+            endpoint_from_path("https://relay.example/deep/path", "/v1/messages"),
+            Some("https://relay.example/v1".to_owned()),
+            "the base path is dropped: only the origin is kept"
+        );
+        assert_eq!(
+            endpoint_from_path("https://gw.example", "/v1/embeddings"),
+            None
+        );
+
+        let list = model_list(&[(
+            "claude",
+            &[advertised("anthropic", "/apis/anthropic/v1/messages")],
+        )]);
+        let provider = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            Some(list),
+        );
+        let route = provider.resolve_model("claude");
+        assert_eq!(route.protocol, Protocol::Anthropic);
+        assert_eq!(route.endpoint, "https://gw.example/apis/anthropic/v1");
+        // The Anthropic adapter re-adds `/v1/messages`, so its base stops before `/v1`.
+        assert_eq!(route.base_url, "https://gw.example/apis/anthropic");
+        assert_eq!(
+            adapter_base(Protocol::Anthropic, "http://127.0.0.1:3425/v1"),
+            "http://127.0.0.1:3425"
+        );
+        assert_eq!(
+            adapter_base(Protocol::OpenAiCompatible, "http://127.0.0.1:3425/v1"),
+            "http://127.0.0.1:3425/v1"
+        );
+        assert_eq!(
+            adapter_base(Protocol::Responses, "http://127.0.0.1:3425/v1"),
+            "http://127.0.0.1:3425/v1"
+        );
+    }
+
+    /// `base_urls` overrides the endpoint from any step; a missing key keeps the step's URL.
+    #[test]
+    fn base_urls_override_the_endpoint_from_any_step() {
+        let mut base_urls = BTreeMap::new();
+        base_urls.insert(Protocol::Anthropic, "https://anthropic.example".to_owned());
+        base_urls.insert(
+            Protocol::Responses,
+            "https://responses.example/v1".to_owned(),
+        );
+        let list = model_list(&[("claude", &[advertised("anthropic", "/v1/messages")])]);
+        let provider = named(
+            Protocol::Anthropic,
+            "https://gw.example/v1",
+            vec![ModelRule {
+                pattern: "claude/*".to_owned(),
+                protocol: Protocol::Anthropic,
+            }],
+            None,
+            base_urls,
+            Some(list),
+        );
+        // Rule step.
+        assert_eq!(
+            provider.resolve_model("claude/sonnet").base_url,
+            "https://anthropic.example"
+        );
+        // Model-list step.
+        assert_eq!(
+            provider.resolve_model("claude").base_url,
+            "https://anthropic.example"
+        );
+        // Kind step, and a kind with no override keeps `base_url`.
+        let chat = named(
+            Protocol::OpenAiCompatible,
+            "https://gw.example/v1",
+            Vec::new(),
+            None,
+            provider.base_urls.clone(),
+            None,
+        );
+        assert_eq!(chat.resolve_model("m").base_url, "https://gw.example/v1");
+    }
+
+    /// The kind set accepts `openai-responses` and pi's aliases; printed lines use Radian's
+    /// names.
+    #[test]
+    fn aliases_are_accepted_and_lines_print_radian_names() {
+        for (spelling, expected) in [
+            ("openai-compatible", Protocol::OpenAiCompatible),
+            ("openai-completions", Protocol::OpenAiCompatible),
+            ("anthropic", Protocol::Anthropic),
+            ("anthropic-messages", Protocol::Anthropic),
+            ("openai-responses", Protocol::Responses),
+        ] {
+            assert_eq!(Protocol::from_kind(spelling), Some(expected), "{spelling}");
+            assert_eq!(
+                expected.kind(),
+                Protocol::from_kind(spelling).unwrap().kind()
+            );
+        }
+        assert_eq!(Protocol::Responses.kind(), "openai-responses");
+        assert_eq!(Protocol::OpenAiCompatible.kind(), "openai-compatible");
+        assert_eq!(Protocol::Anthropic.kind(), "anthropic");
+        assert_eq!(Protocol::from_kind("grpc"), None);
+    }
+
+    /// A rules-only config table adds to the auth-declared provider with no warning, and the
+    /// same table with no auth entry is refused with one line.
+    #[test]
+    fn a_rules_only_table_overlays_an_auth_provider_and_needs_one() {
+        let mut config = BTreeMap::new();
+        let mut decl = ProviderDecl::default();
+        decl.models.push(ModelRuleDecl {
+            pattern: "claude/*".to_owned(),
+            kind: "anthropic-messages".to_owned(),
+        });
+        config.insert("magpie".to_owned(), decl);
+        let auth = auth_env("http://127.0.0.1:3425/v1", Some("openai-completions"));
+        let (provider, warning) =
+            resolve_provider_with_models("magpie", &config, Some(&auth), None).unwrap();
+        assert!(warning.is_none(), "an overlay never warns");
+        let ProviderRef::Named(named) = &provider else {
+            panic!("a named provider");
+        };
+        assert_eq!(
+            named.protocol,
+            Protocol::OpenAiCompatible,
+            "the alias resolved"
+        );
+        assert_eq!(named.base_url, "http://127.0.0.1:3425/v1");
+        assert_eq!(
+            named.resolve_model("claude/opus-5-5").protocol,
+            Protocol::Anthropic
+        );
+        // The same table with no auth entry is refused, naming the provider.
+        let error = resolve_provider("magpie", &config, None).unwrap_err();
+        assert!(error.contains("providers.magpie"), "{error}");
+        assert!(error.contains("auth.json"), "{error}");
+    }
+
+    /// A full table still wins over auth with one warning.
+    #[test]
+    fn a_full_table_still_wins_over_auth_with_a_warning() {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "corp".to_owned(),
+            decl("openai-responses", "https://corp.example/v1"),
+        );
+        let auth = auth_env("https://auth.example/v1", None);
+        let (provider, warning) = resolve_provider("corp", &config, Some(&auth)).unwrap();
+        assert!(warning.is_some());
+        assert_eq!(provider.protocol_for("m"), Protocol::Responses);
+    }
+
+    /// The startup/switch line names the protocol, the endpoint only when it differs, and the
+    /// source (ADR 0026 D10).
+    #[test]
+    fn the_line_names_protocol_endpoint_and_source() {
+        let list = model_list(&[
+            (
+                "codex/gpt-5.6-sol",
+                &[advertised("openai-responses", "/v1/responses")],
+            ),
+            (
+                "anthropic:claude-haiku-4-5",
+                &[advertised("anthropic", "/apis/anthropic/v1/messages")],
+            ),
+        ]);
+        let provider = named(
+            Protocol::OpenAiCompatible,
+            "http://127.0.0.1:3425/v1",
+            vec![ModelRule {
+                pattern: "claude/*".to_owned(),
+                protocol: Protocol::Anthropic,
+            }],
+            None,
+            BTreeMap::new(),
+            Some(list),
+        );
+        let r = ProviderRef::Named(provider);
+        assert_eq!(
+            describe_model_route(&r, "codex/gpt-5.6-sol").as_deref(),
+            Some("magpie/codex/gpt-5.6-sol (openai-responses, model list)")
+        );
+        assert_eq!(
+            describe_model_route(&r, "anthropic:claude-haiku-4-5").as_deref(),
+            Some(
+                "magpie/anthropic:claude-haiku-4-5 (anthropic at \
+                 http://127.0.0.1:3425/apis/anthropic/v1, model list)"
+            )
+        );
+        assert_eq!(
+            describe_model_route(&r, "claude/opus-5-5").as_deref(),
+            Some("magpie/claude/opus-5-5 (anthropic, rule claude/*)")
+        );
+        assert_eq!(
+            describe_model_route(&ProviderRef::BuiltIn(descriptor("anthropic").unwrap()), "m"),
+            None
+        );
+    }
+
+    /// A named provider resolved to `openai-responses` builds the Responses adapter on its own
+    /// base URL with no ChatGPT headers (D12's API-key path).
+    #[test]
+    fn a_responses_named_route_builds_the_responses_adapter() {
+        let provider = ProviderRef::Named(named(
+            Protocol::Responses,
+            "https://corp.example/v1",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            None,
+        ));
+        let route = resolve_route_for(&provider, "m", None, None, &[], "s", None).unwrap();
+        assert_eq!(route.protocol, Protocol::Responses);
+        assert_eq!(route.adapter(), Provider::ChatGpt);
+        assert_eq!(route.base_url, "https://corp.example/v1");
+        assert!(route.headers.is_empty(), "no ChatGPT/Codex headers");
+        assert_eq!(route.source, Some(RouteSource::Kind));
     }
 }

@@ -53,9 +53,11 @@ pub(super) struct SessionCarry {
 /// `run()`'s model/provider phase: resolves the model name, the tier and its source, the
 /// provider, the wire protocol, the credential and the request settings. Every check that
 /// can fail runs before the session file exists, so a refusal leaves nothing behind.
+#[allow(clippy::too_many_arguments)] // the model/provider phase's inputs, plus the runtime
 pub(super) fn resolve_model(
     cli: &Cli,
     config: &radian_host::Config,
+    runtime: &tokio::runtime::Runtime,
     dir: &Path,
     workspace_path: &Path,
     resume: Option<&str>,
@@ -227,20 +229,44 @@ pub(super) fn resolve_model(
             .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned())
     };
     let auth_store = radian_host::AuthStore::open().map_err(|e| e.to_string())?;
-    let (provider_ref, provider_warning) = radian_host::resolve_provider(
-        &provider_name,
-        &config.providers,
-        auth_store.entry_env(&provider_name).as_ref(),
-    )?;
+    let auth_env = auth_store.entry_env(&provider_name);
+    let (mut provider_ref, provider_warning) =
+        radian_host::resolve_provider(&provider_name, &config.providers, auth_env.as_ref())?;
     if let Some(warning) = &provider_warning {
         // A display conflict, not an error: the startup line says which side won.
         startup_log.line(format!("[provider] {warning}"));
     }
     let key_id = provider_ref.key_id().to_owned();
-    // ADR 0026: a built-in descriptor's model takes its wire protocol
-    // from the catalog (the local cache, else the bundled snapshot); a model the catalog does
-    // not carry uses the descriptor table. An unsupported `npm` refuses the run.
+    // ADR 0026 D2: the key comes only from `auth.json` and is read before the route: it also
+    // authenticates the model-list read of step 2 (D10).
     let catalog = radian_host::protocol_catalog();
+    let credential = radian_host::resolve_key(&key_id).map_err(|e| e.to_string())?;
+    // ADR 0026 D10: a named provider's protocol and endpoint resolve per model from its own
+    // model list. With no cache, one 3 s fetch runs here (the startup route is built after
+    // it); a failed fetch falls through to `kind` with one line naming the reason.
+    if matches!(provider_ref, radian_host::ProviderRef::Named(_)) {
+        let (list, line) = runtime.block_on(radian_host::startup_model_list(
+            &provider_ref,
+            credential
+                .as_ref()
+                .map(|credential| credential.key.as_str()),
+        ));
+        if let Some(line) = line {
+            startup_log.line(format!("radian: {line}"));
+        }
+        if let Some(list) = list {
+            provider_ref = radian_host::resolve_provider_with_models(
+                &provider_name,
+                &config.providers,
+                auth_env.as_ref(),
+                Some(list),
+            )?
+            .0;
+        }
+    }
+    // ADR 0026: a built-in descriptor's model takes its wire protocol from the catalog (the
+    // local cache, else the bundled snapshot); a model the catalog does not carry uses the
+    // descriptor table. A named provider resolves from its rules, list and kind (D10).
     let protocol = provider_ref.resolve_protocol(Some(&catalog), &model_name)?;
     let provider = protocol.adapter();
     let chatgpt_oauth = provider_name == radian_host::CHATGPT_PROVIDER_ID;
@@ -296,11 +322,11 @@ pub(super) fn resolve_model(
     // pre-fills the probe for the generic provider (a named one has a fixed endpoint).
     let probe_base_url = match base_url_override.clone() {
         Some(url) if provider_ref.takes_base_url_override() => url,
-        _ => provider_ref.endpoint_for(protocol, None)?,
+        _ => provider_ref.endpoint_for(&model_name, protocol, None)?,
     };
-    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a clear refusal with
-    // the fix (run `/login <provider>` — D3, in this slice), unless the endpoint is local.
-    let credential = match radian_host::resolve_key(&key_id).map_err(|e| e.to_string())? {
+    // ADR 0026 D2: a missing key is a clear refusal with the fix (run `/login <provider>` —
+    // D3), unless the endpoint is local.
+    let credential = match credential {
         Some(credential) => Some(credential),
         None if is_local_base_url(&probe_base_url) => None,
         // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
@@ -395,9 +421,10 @@ pub(super) fn resolve_window_and_route(
     // is set here, once, from the effective route.
     app.session.model_name = resolved.model_name.clone();
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
-    let catalog_base_url = resolved
-        .provider_ref
-        .endpoint_for(resolved.protocol, None)?;
+    let catalog_base_url =
+        resolved
+            .provider_ref
+            .endpoint_for(&resolved.model_name, resolved.protocol, None)?;
     let auth_base_url = resolved
         .credential
         .as_ref()
@@ -405,9 +432,11 @@ pub(super) fn resolve_window_and_route(
         .map(String::as_str);
     let output_base_url = match resolved.base_url_override.clone() {
         Some(url) if resolved.provider_ref.takes_base_url_override() => url,
-        _ => resolved
-            .provider_ref
-            .endpoint_for(resolved.protocol, auth_base_url)?,
+        _ => resolved.provider_ref.endpoint_for(
+            &resolved.model_name,
+            resolved.protocol,
+            auth_base_url,
+        )?,
     };
     let request_output = radian_host::route_output(
         resolved.provider,
@@ -490,6 +519,12 @@ pub(super) fn resolve_window_and_route(
     // ADR 0026: the catalog overruled the built-in table's protocol.
     if let Some(notice) = &route.protocol_notice {
         startup_log.line(format!("radian: [provider] {notice}"));
+    }
+    // ADR 0026 D10: a named provider's route names its protocol, endpoint and source.
+    if let Some(description) =
+        radian_host::describe_model_route(&resolved.provider_ref, &resolved.model_name)
+    {
+        startup_log.line(format!("radian: [provider] {description}"));
     }
     // D1/D2: every check that can fail runs **before** the session file is created. The
     // workspace is validated first, so a typo is a workspace error and never reaches the

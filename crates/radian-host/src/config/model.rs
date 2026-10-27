@@ -38,9 +38,9 @@ pub struct SmolConfig {
     pub model: String,
 }
 
-/// The `[providers.<name>] kind` values (the two wire protocols). The parser and the
-/// manual's drift test both read this list.
-pub const PROVIDER_KINDS: &[&str] = &["openai-compatible", "anthropic"];
+/// The `[providers.<name>] kind` values (the wire protocols) and pi's aliases. The parser and
+/// the manual's drift test both read these lists.
+pub use crate::provider::{PROVIDER_KIND_ALIASES, PROVIDER_KINDS};
 
 pub(super) fn parse_providers(
     value: &Value,
@@ -61,23 +61,19 @@ pub(super) fn parse_providers(
                 reason,
             });
         }
-        let mut decl = crate::provider::ProviderDecl {
-            kind: String::new(),
-            base_url: String::new(),
-            reasoning_replay: None,
-        };
+        let mut decl = crate::provider::ProviderDecl::default();
         for (field, value) in spec {
             match (field.as_str(), value) {
-                ("kind", Value::String(kind)) if PROVIDER_KINDS.contains(&kind.as_str()) => {
-                    decl.kind = kind.clone();
+                // D10: the kind accepts the three protocols and pi's aliases; the stored value
+                // is the canonical spelling so every later line prints Radian's name.
+                ("kind", Value::String(kind)) => {
+                    decl.kind = canonical_kind(path, name, "kind", kind)?;
                 }
-                // D10: only the two wire protocols exist in this build; anything else is a
-                // structural error, not a display preference to skip.
                 ("kind", _) => {
                     return Err(wrong_type(
                         path,
                         &format!("providers.{name}.kind"),
-                        "one of openai-compatible|anthropic",
+                        "a string",
                     ));
                 }
                 ("base_url", Value::String(base_url)) if !base_url.is_empty() => {
@@ -114,12 +110,169 @@ pub(super) fn parse_providers(
                         "a non-empty string or false",
                     ));
                 }
+                // ADR 0026 D10: an ordered list of distinct kinds. Aliases count as the same
+                // kind, and a kind left out is never picked from the model list.
+                ("prefer", Value::Array(values)) => {
+                    let mut prefer: Vec<String> = Vec::new();
+                    for (index, value) in values.iter().enumerate() {
+                        let Value::String(kind) = value else {
+                            return Err(ConfigError::InvalidProviderField {
+                                path: path.to_path_buf(),
+                                key: format!("providers.{name}.prefer[{index}]"),
+                                reason: format!("must be one of {}", crate::provider::kind_list()),
+                            });
+                        };
+                        let canonical =
+                            canonical_kind(path, name, &format!("prefer[{index}]"), kind)?;
+                        if prefer.contains(&canonical) {
+                            return Err(ConfigError::InvalidProviderField {
+                                path: path.to_path_buf(),
+                                key: format!("providers.{name}.prefer"),
+                                reason: format!(
+                                    "lists {canonical} twice; aliases name the same kind"
+                                ),
+                            });
+                        }
+                        prefer.push(canonical);
+                    }
+                    decl.prefer = Some(prefer);
+                }
+                ("prefer", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.prefer"),
+                        "an array of protocol kinds",
+                    ));
+                }
+                // ADR 0026 D10: a per-protocol endpoint override.
+                ("base_urls", Value::Table(urls)) => {
+                    for (key, value) in urls {
+                        let Value::String(url) = value else {
+                            return Err(wrong_type(
+                                path,
+                                &format!("providers.{name}.base_urls.{key}"),
+                                "a string",
+                            ));
+                        };
+                        if url.is_empty() {
+                            return Err(ConfigError::InvalidProviderField {
+                                path: path.to_path_buf(),
+                                key: format!("providers.{name}.base_urls.{key}"),
+                                reason: "must not be empty".into(),
+                            });
+                        }
+                        let canonical =
+                            canonical_kind(path, name, &format!("base_urls.{key}"), key)?;
+                        decl.base_urls.insert(canonical, url.clone());
+                    }
+                }
+                ("base_urls", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.base_urls"),
+                        "a table of protocol kinds to URLs",
+                    ));
+                }
+                // ADR 0026 D10: ordered rules, first match wins. A rule missing `match` or
+                // `kind`, or carrying an empty `match`, refuses the file; unknown keys inside
+                // a rule are skipped and named.
+                ("models", Value::Array(items)) => {
+                    for (index, item) in items.iter().enumerate() {
+                        let Some(rule) = item.as_table() else {
+                            return Err(wrong_type(
+                                path,
+                                &format!("providers.{name}.models[{index}]"),
+                                "a table",
+                            ));
+                        };
+                        let mut decl_rule = crate::provider::ModelRuleDecl::default();
+                        let mut has_match = false;
+                        let mut has_kind = false;
+                        for (key, value) in rule {
+                            match (key.as_str(), value) {
+                                ("match", Value::String(pattern)) if !pattern.is_empty() => {
+                                    decl_rule.pattern = pattern.clone();
+                                    has_match = true;
+                                }
+                                ("match", Value::String(_)) => {
+                                    return Err(ConfigError::InvalidProviderField {
+                                        path: path.to_path_buf(),
+                                        key: format!("providers.{name}.models[{index}].match"),
+                                        reason: "must not be empty".into(),
+                                    });
+                                }
+                                ("match", _) => {
+                                    return Err(wrong_type(
+                                        path,
+                                        &format!("providers.{name}.models[{index}].match"),
+                                        "a non-empty string",
+                                    ));
+                                }
+                                ("kind", Value::String(kind)) => {
+                                    decl_rule.kind = canonical_kind(
+                                        path,
+                                        name,
+                                        &format!("models[{index}].kind"),
+                                        kind,
+                                    )?;
+                                    has_kind = true;
+                                }
+                                ("kind", _) => {
+                                    return Err(wrong_type(
+                                        path,
+                                        &format!("providers.{name}.models[{index}].kind"),
+                                        "a string",
+                                    ));
+                                }
+                                (other, _) => config
+                                    .skipped
+                                    .push(format!("providers.{name}.models[{index}].{other}")),
+                            }
+                        }
+                        if !has_match {
+                            return Err(ConfigError::InvalidProviderField {
+                                path: path.to_path_buf(),
+                                key: format!("providers.{name}.models[{index}].match"),
+                                reason: "is required".into(),
+                            });
+                        }
+                        if !has_kind {
+                            return Err(ConfigError::InvalidProviderField {
+                                path: path.to_path_buf(),
+                                key: format!("providers.{name}.models[{index}].kind"),
+                                reason: "is required".into(),
+                            });
+                        }
+                        decl.models.push(decl_rule);
+                    }
+                }
+                ("models", _) => {
+                    return Err(wrong_type(
+                        path,
+                        &format!("providers.{name}.models"),
+                        "an array of rules",
+                    ));
+                }
                 (other, _) => config.skipped.push(format!("providers.{name}.{other}")),
             }
         }
         config.providers.insert(name.clone(), decl);
     }
     Ok(())
+}
+
+/// Resolves a kind spelling to its canonical name, or refuses naming the key (ADR 0026 D10).
+fn canonical_kind(path: &Path, name: &str, field: &str, kind: &str) -> Result<String, ConfigError> {
+    crate::provider::Protocol::from_kind(kind)
+        .map(|protocol| protocol.kind().to_owned())
+        .ok_or_else(|| ConfigError::InvalidProviderField {
+            path: path.to_path_buf(),
+            key: format!("providers.{name}.{field}"),
+            reason: format!(
+                "value {kind:?} is not one of {}",
+                crate::provider::kind_list()
+            ),
+        })
 }
 
 pub(super) fn parse_model(

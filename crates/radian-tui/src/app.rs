@@ -154,6 +154,7 @@ pub enum Effect {
         provider: String,
         model: String,
         budget: u64,
+        route: Option<String>,
     },
     /// Queue a model route for the next turn boundary (D5). The change is a route only.
     QueueModel { provider: String, model: String },

@@ -184,20 +184,46 @@ pub(crate) async fn setup(
         .or_else(|| config.model.provider.clone())
         .unwrap_or_else(|| radian_host::GENERIC_ID.to_owned());
     let auth_store = radian_host::AuthStore::open().map_err(|e| SetupError(e.to_string()))?;
-    let (provider_ref, provider_warning) = radian_host::resolve_provider(
-        &provider_name,
-        &config.providers,
-        auth_store.entry_env(&provider_name).as_ref(),
-    )
-    .map_err(SetupError)?;
+    let auth_env = auth_store.entry_env(&provider_name);
+    let (mut provider_ref, provider_warning) =
+        radian_host::resolve_provider(&provider_name, &config.providers, auth_env.as_ref())
+            .map_err(SetupError)?;
     if let Some(warning) = &provider_warning {
         eprintln!("[provider] {warning}");
     }
     let key_id = provider_ref.key_id().to_owned();
-    // ADR 0026: a built-in descriptor's model takes its wire protocol
-    // from the catalog (the local cache, else the bundled snapshot); a model the catalog does
-    // not carry uses the descriptor table. An unsupported `npm` is a startup refusal.
+    // ADR 0026 D2: the key comes only from `auth.json` and is read before the route: it also
+    // authenticates the model-list read of step 2 (D10).
     let catalog = radian_host::protocol_catalog();
+    let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
+    // ADR 0026 D10: a named provider's protocol and endpoint resolve per model from its own
+    // model list. With no cache, one 3 s fetch runs here (before the route is built); a failed
+    // fetch falls through to `kind` with one line naming the reason.
+    if matches!(provider_ref, radian_host::ProviderRef::Named(_)) {
+        let (list, line) = radian_host::startup_model_list(
+            &provider_ref,
+            credential
+                .as_ref()
+                .map(|credential| credential.key.as_str()),
+        )
+        .await;
+        if let Some(line) = line {
+            eprintln!("{line}");
+        }
+        if let Some(list) = list {
+            provider_ref = radian_host::resolve_provider_with_models(
+                &provider_name,
+                &config.providers,
+                auth_env.as_ref(),
+                Some(list),
+            )
+            .map_err(SetupError)?
+            .0;
+        }
+    }
+    // ADR 0026: a built-in descriptor's model takes its wire protocol from the catalog (the
+    // local cache, else the bundled snapshot); a model the catalog does not carry uses the
+    // descriptor table. A named provider resolves from its rules, list and kind (D10).
     let protocol = provider_ref
         .resolve_protocol(Some(&catalog), &model_name)
         .map_err(SetupError)?;
@@ -237,12 +263,11 @@ pub(crate) async fn setup(
     let probe_base_url = match base_url_override.clone() {
         Some(url) if provider_ref.takes_base_url_override() => url,
         _ => provider_ref
-            .endpoint_for(protocol, None)
+            .endpoint_for(&model_name, protocol, None)
             .map_err(SetupError)?,
     };
-    // ADR 0026 D2: the key comes only from `auth.json`. A missing entry is a refusal unless the
-    // endpoint is local (a local server needs no key).
-    let credential = radian_host::resolve_key(&key_id).map_err(|e| SetupError(e.to_string()))?;
+    // ADR 0026 D2: a missing key is a refusal unless the endpoint is local (a local server
+    // needs no key).
     // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
     // entry slice ① wrote (ADR 0026) — `credential` stays `None` for it either
     // way (`ChatGptModel` reads `auth.json` itself, per call), so the refusal below must also
@@ -388,6 +413,10 @@ pub(crate) async fn setup(
     // ADR 0026: the catalog overruled the built-in table's protocol.
     if let Some(notice) = &route.protocol_notice {
         eprintln!("[provider] {notice}");
+    }
+    // ADR 0026 D10: a named provider's route names its protocol, endpoint and source.
+    if let Some(description) = radian_host::describe_model_route(&provider_ref, &model_name) {
+        eprintln!("[provider] {description}");
     }
     // The catalog matches on the hostname of the endpoint the model actually talks to (ADR 0018).
     let catalog_base_url = route.base_url.clone();

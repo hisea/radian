@@ -160,12 +160,14 @@ impl App {
                 model,
                 tokens,
                 budget,
-            } => self.model_checked(provider, model, tokens, budget),
+                route,
+            } => self.model_checked(provider, model, tokens, budget, route),
             Input::SwitchCompacted {
                 provider,
                 model,
                 result,
-            } => self.switch_compacted(provider, model, result),
+                route,
+            } => self.switch_compacted(provider, model, result, route),
             Input::SessionDone(notices) => {
                 for notice in notices {
                     self.push_notice(notice);

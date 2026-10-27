@@ -225,6 +225,7 @@ fn a_switch_between_chat_routes_is_allowed_and_a_switch_to_anthropic_is_refused(
             kind: "openai-compatible".to_owned(),
             base_url: "http://127.0.0.1:9".to_owned(),
             reasoning_replay: None,
+            ..Default::default()
         },
     );
     let chat = radian_host::route_adapter_for("openai-compatible", "m", &providers)

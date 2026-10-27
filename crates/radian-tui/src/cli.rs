@@ -1594,6 +1594,7 @@ fn run_one_session(
     } = run_resolve::resolve_model(
         cli,
         config,
+        runtime,
         dir,
         workspace_path,
         resume.as_deref(),

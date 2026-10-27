@@ -381,6 +381,7 @@ impl App {
         model: String,
         tokens: Option<u64>,
         budget: Option<u64>,
+        route: Option<String>,
     ) -> UpdateResult {
         match (tokens, budget) {
             (Some(t), Some(b)) if t > b => {
@@ -402,24 +403,32 @@ impl App {
                 self.push_modal(Modal::ConfirmCommand(PendingCommand {
                     command,
                     prompt,
-                    switch: Some((provider, model, b)),
+                    switch: Some((provider, model, b, route)),
                 }));
                 UpdateResult::dirty()
             }
-            _ => self.queue_model(provider, model),
+            _ => self.queue_model(provider, model, route),
         }
     }
 
     /// Queues the route (D5) and says what happens next. The cache warning is the accepted
-    /// cost of a switch (ADR 0026 已接受的代价).
-    fn queue_model(&mut self, provider: String, model: String) -> UpdateResult {
+    /// cost of a switch (ADR 0026 已接受的代价). `route` carries a named provider's protocol,
+    /// endpoint and source (ADR 0026 D10), when the loop resolved one.
+    fn queue_model(
+        &mut self,
+        provider: String,
+        model: String,
+        route: Option<String>,
+    ) -> UpdateResult {
         // ADR 0008 §2: the first route in a session that started with no model unblocks send.
         self.session.has_model = true;
         self.session.model_name = model.clone();
         self.session.provider = Some(provider.clone());
         self.session.next_model = Some(format!("{provider}/{model}"));
+        let detail = route.map(|route| format!(" ({route})")).unwrap_or_default();
         self.push_notice(format!(
-            "next turn: {provider}/{model}; the first turn after a switch will not hit the cache"
+            "next turn: {provider}/{model}{detail}; the first turn after a switch will not hit \
+             the cache"
         ));
         UpdateResult::effect(Effect::QueueModel { provider, model })
     }
@@ -452,11 +461,12 @@ impl App {
         provider: String,
         model: String,
         result: Result<CompactionOutcome, String>,
+        route: Option<String>,
     ) -> UpdateResult {
         match result {
             Ok(_) => {
                 self.push_notice(format!("compacted; switching to {provider}/{model}"));
-                self.queue_model(provider, model)
+                self.queue_model(provider, model, route)
             }
             Err(error) => {
                 self.push_notice(format!(
