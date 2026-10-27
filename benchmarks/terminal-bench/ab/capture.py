@@ -13,7 +13,9 @@ in place):
   (`/tmp/harbor-ab-capture/ca-bundle.crt`), and `update-ca-certificates`
   registers the CA when the image ships that tool;
 - `capture.json` is written to the trial's agent log dir with the container's
-  own IP, so `capture_check.py` maps a captured `client_ip` to a trial.
+  own IP (the first non-loopback local address, preferring the trie block that
+  contains the gateway), so `capture_check.py` maps a captured `client_ip` to a
+  trial.
 
 The proxy host is the container's default gateway, read from `/proc/net/route`
 (`ip` is not installed in every task image). `HTTPS_PROXY`/`HTTP_PROXY` and
@@ -28,8 +30,10 @@ library alone (`tests/test_ab_capture.py`).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import shlex
 from dataclasses import replace
 from pathlib import Path
@@ -54,12 +58,39 @@ NO_PROXY_VALUE = "localhost,127.0.0.1"
 
 CAPTURE_FILENAME = "capture.json"
 
+# The two kinds of line in `/proc/net/fib_trie` this reads: a block header
+# (`+-- 172.18.0.0/16 2 0 2`, also spelled `|--`) and a leaf address
+# (`|-- 172.18.0.2`, followed by its `/32 host LOCAL` line).
+_BLOCK_LINE = re.compile(
+    r"^(?P<indent>\s*)(?:\+--|\|--)\s+(?P<network>\d+\.\d+\.\d+\.\d+)"
+    r"/(?P<prefix>\d{1,2})(?:\s|$)"
+)
+_ADDRESS_LINE = re.compile(
+    r"^(?P<indent>\s*)(?:\+--|\|--)\s+(?P<address>\d+\.\d+\.\d+\.\d+)(?:\s|$)"
+)
+
 
 def _is_ipv4(text: str) -> bool:
     parts = text.split(".")
     return len(parts) == 4 and all(
         part.isdigit() and 0 <= int(part) <= 255 for part in parts
     )
+
+
+def _is_loopback(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
+
+
+def _in_network(address: str, network: tuple[str, int]) -> bool:
+    try:
+        return ipaddress.ip_address(address) in ipaddress.ip_network(
+            f"{network[0]}/{network[1]}", strict=False
+        )
+    except ValueError:
+        return False
 
 
 def default_gateway(route_table: str) -> str | None:
@@ -85,20 +116,54 @@ def default_gateway(route_table: str) -> str | None:
     return None
 
 
-def primary_ip(fib_trie: str) -> str | None:
-    """The container's own IPv4 address in a `/proc/net/fib_trie` dump.
+def primary_ip(fib_trie: str, gateway: str | None = None) -> str | None:
+    """The container's own non-loopback IPv4 address in a `/proc/net/fib_trie` dump.
 
     The trie names an address before the `/32 host LOCAL` line that describes
     it, and `ip` is not available in every image, so this reads the proc file.
+    The loopback block comes first and its address is the one the kernel lists
+    first, so `127.0.0.0/8` is skipped. When `gateway` is known
+    (`default_gateway`), an address in the trie block that contains the gateway
+    is preferred, so a container with a second interface records the address
+    the proxy sees.
     """
-    candidate = None
+    blocks: list[tuple[int, str, int]] = []
+    entries: list[tuple[str, tuple[str, int] | None]] = []
+    pending: tuple[str, int] | None = None
     for line in (fib_trie or "").splitlines():
-        for field in line.split():
-            if _is_ipv4(field):
-                candidate = field
-        if "/32 host LOCAL" in line and candidate:
-            return candidate
-    return None
+        block = _BLOCK_LINE.match(line)
+        if block:
+            blocks.append(
+                (len(block["indent"]), block["network"], int(block["prefix"]))
+            )
+            pending = None
+            continue
+        address = _ADDRESS_LINE.match(line)
+        if address:
+            pending = (address["address"], len(address["indent"]))
+            continue
+        if "/32 host LOCAL" in line and pending is not None:
+            ip, indent = pending
+            # The innermost block above this address is the network the trie
+            # files it under (`172.18.0.0/16`, `10.0.0.0/24`, ...).
+            network = None
+            for block_indent, block_ip, prefix in blocks:
+                if block_indent < indent:
+                    network = (block_ip, prefix)
+            entries.append((ip, network))
+            pending = None
+    local = [(ip, network) for ip, network in entries if not _is_loopback(ip)]
+    if not local:
+        return None
+    if gateway and _is_ipv4(gateway):
+        for ip, network in local:
+            if (
+                network is not None
+                and network[1] > 0
+                and _in_network(gateway, network)
+            ):
+                return ip
+    return local[0][0]
 
 
 def _bundle_command() -> str:
@@ -188,7 +253,7 @@ class CaptureMixin:
 
         fib = await self.exec_as_agent(environment, command="cat /proc/net/fib_trie")
         self._capture_gateway = gateway
-        self._capture_ip = primary_ip(getattr(fib, "stdout", "") or "")
+        self._capture_ip = primary_ip(getattr(fib, "stdout", "") or "", gateway)
 
         record = {
             "container_ip": self._capture_ip,

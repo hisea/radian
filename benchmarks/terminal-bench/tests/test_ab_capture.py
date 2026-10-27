@@ -63,6 +63,10 @@ def fixture_json(name):
     return json.loads(fixture_body(name))
 
 
+def fixture_text(name):
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
 def result(stdout="", return_code=0):
     """What the fake container hands back for one exec."""
     return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
@@ -84,6 +88,8 @@ FIB_TRIE = """Main:
 
 GATEWAY = "172.18.0.1"
 CONTAINER_IP = "172.18.0.3"
+# The address in `fixtures/capture/fib_trie.txt`, from a Docker bridge container.
+DOCKER_IP = "172.18.0.2"
 
 
 class FakeContainer:
@@ -396,6 +402,57 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(capture.primary_ip(FIB_TRIE), CONTAINER_IP)
         self.assertIsNone(capture.primary_ip(""))
 
+    def test_primary_ip_skips_the_loopback_block(self):
+        # A Docker bridge container's real trie: 127.0.0.1 is listed first.
+        trie = fixture_text("fib_trie.txt")
+        self.assertEqual(capture.primary_ip(trie), DOCKER_IP)
+        self.assertEqual(capture.primary_ip(trie, GATEWAY), DOCKER_IP)
+
+    def test_a_loopback_only_trie_has_no_primary_ip(self):
+        trie = """Main:
+  +-- 0.0.0.0/0 2 0 2
+     |-- 127.0.0.0
+        /8 universe UNICAST
+     |-- 127.0.0.1
+        /32 host LOCAL
+     +-- 127.0.0.0/8 2 0 2
+        |-- 127.0.0.1
+           /32 host LOCAL
+"""
+        self.assertIsNone(capture.primary_ip(trie))
+        self.assertIsNone(capture.primary_ip(trie, "172.18.0.1"))
+
+    def test_the_gateways_network_wins_with_two_interfaces(self):
+        trie = """Main:
+  +-- 0.0.0.0/0 4 0 4
+     |-- 127.0.0.0
+        /8 universe UNICAST
+     |-- 127.0.0.1
+        /32 host LOCAL
+     |-- 10.0.0.0
+        /24 universe UNICAST
+     |-- 10.0.0.5
+        /32 host LOCAL
+     |-- 172.18.0.0
+        /16 universe UNICAST
+     |-- 172.18.0.2
+        /32 host LOCAL
+     +-- 127.0.0.0/8 2 0 2
+        |-- 127.0.0.1
+           /32 host LOCAL
+     +-- 10.0.0.0/24 2 0 2
+        |-- 10.0.0.5
+           /32 host LOCAL
+     +-- 172.18.0.0/16 2 0 2
+        |-- 172.18.0.2
+           /32 host LOCAL
+"""
+        # Without a gateway the first non-loopback address is the answer;
+        # the proxy's network decides which interface the proxy sees.
+        self.assertEqual(capture.primary_ip(trie), "10.0.0.5")
+        self.assertEqual(capture.primary_ip(trie, "172.18.0.1"), DOCKER_IP)
+        self.assertEqual(capture.primary_ip(trie, "10.0.0.1"), "10.0.0.5")
+
 
 class UnmixedAgent:
     """The agent the mixin must not change: its own setup only."""
@@ -505,6 +562,17 @@ class MixinTest(unittest.TestCase):
             self.assertEqual(record["container_ip"], CONTAINER_IP)
             self.assertEqual(record["gateway"], GATEWAY)
             self.assertEqual(record["port"], 18080)
+
+    def test_capture_json_records_the_non_loopback_address(self):
+        # The real trie starts with the loopback block; capture.json must not
+        # record 127.0.0.1, or capture_check.py cannot map a client to a trial.
+        with tempfile.TemporaryDirectory() as tmp:
+            ca = Path(tmp) / "ca.pem"
+            ca.write_text("pem\n", encoding="utf-8")
+            agent = mixed(tmp, port=18080, ca=str(ca))
+            asyncio.run(agent.setup(FakeContainer(fib=fixture_text("fib_trie.txt"))))
+            record = json.loads((Path(tmp) / "capture.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["container_ip"], DOCKER_IP)
 
     def test_a_missing_ca_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

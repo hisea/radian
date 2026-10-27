@@ -1,0 +1,25 @@
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 0.0.0.0
+        /0 universe UNICAST
+     |-- 127.0.0.0
+        /8 universe UNICAST
+     |-- 127.0.0.1
+        /32 host LOCAL
+     |-- 172.18.0.0
+        /16 universe UNICAST
+     |-- 172.18.0.2
+        /32 host LOCAL
+     +-- 127.0.0.0/8 2 0 2
+        |-- 127.0.0.0
+           /8 universe UNICAST
+        +-- 127.0.0.1/32 2 0 2
+           |-- 127.0.0.1
+              /32 host LOCAL
+     +-- 172.18.0.0/16 2 0 2
+        |-- 172.18.0.0
+           /16 universe UNICAST
+        |-- 172.18.0.2
+           /32 host LOCAL
+        |-- 172.18.255.255
+           /32 broadcast UNICAST

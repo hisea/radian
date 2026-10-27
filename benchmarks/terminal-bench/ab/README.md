@@ -121,8 +121,9 @@ written. A request from a client outside `AB_CAPTURE_CLIENTS` is refused with a
 403 and writes no line.
 
 `capture.py` also writes `<trial agent log dir>/capture.json` with the
-container's own IP (`/proc/net/fib_trie`), the gateway and the port, which is
-how a captured `client_ip` is mapped back to the trial that sent it.
+container's own IP (`/proc/net/fib_trie`: the first non-loopback local address,
+preferring the trie block that contains the gateway), the gateway and the port,
+which is how a captured `client_ip` is mapped back to the trial that sent it.
 
 ### Which variable each client reads
 
