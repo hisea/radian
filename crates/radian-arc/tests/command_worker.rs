@@ -319,6 +319,8 @@ fn the_command_receives_every_arc_variable_and_its_state_survives() {
     );
     let canonical = fs::canonicalize(&state_dir).expect("the state directory");
     let common = fs::canonicalize(repo.clone.join(".git")).expect("the common dir");
+    // arc records the canonical repository root, and the deny list is built from it.
+    let arc = repo.canonical_clone().join(".radian").join("arc");
 
     let check = |attempt: u32, start: &str, survived: &str| {
         let text = read(&state_dir.join(format!("env-{attempt}")));
@@ -343,7 +345,7 @@ fn the_command_receives_every_arc_variable_and_its_state_survives() {
         assert_eq!(value("ARC_GIT_COMMON_DIR"), canonical_string(&common));
         let denied = value("ARC_DENY_READ");
         assert!(
-            denied.contains(&format!("{}/config.toml", repo.arc().display())),
+            denied.contains(&format!("{}/config.toml", arc.display())),
             "{denied}"
         );
         assert!(
