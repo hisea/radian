@@ -819,7 +819,12 @@ async fn total_is_not_invented_when_the_provider_omits_it() {
 
 #[test]
 fn include_usage_defaults_to_the_openai_host_only() {
-    for url in ["https://api.openai.com/v1", "https://api.openai.com:443/v1"] {
+    for url in [
+        "https://api.openai.com/v1",
+        "https://api.openai.com:443/v1",
+        "https://api.openai.com./v1",
+        "https://API.OPENAI.COM./v1",
+    ] {
         let model = OpenAiCompatible::new(OpenAiCompatibleConfig::new(url, "m")).unwrap();
         assert!(model.include_usage(), "{url}");
     }

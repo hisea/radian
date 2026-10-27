@@ -77,8 +77,9 @@ pub fn provider_for_host(host: &str) -> Option<&'static str> {
     }
 }
 
-/// The hostname of a base URL, lower-cased, without userinfo or port. `None` when the URL has
-/// no authority or does not parse.
+/// The hostname of a base URL, lower-cased, without userinfo or port, and without a trailing
+/// DNS dot (`https://api.openai.com./v1` is the same host). `None` when the URL has no
+/// authority or does not parse.
 pub fn host_of(base_url: &str) -> Option<String> {
     let rest = base_url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
@@ -90,6 +91,7 @@ pub fn host_of(base_url: &str) -> Option<String> {
     } else {
         authority.split(':').next()?
     };
+    let host = host.trim_end_matches('.');
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
@@ -1334,15 +1336,19 @@ mod tests {
     #[test]
     fn api_openai_com_keeps_sending_no_max_tokens() {
         // Its newer chat models reject `max_tokens`; Radian never invents
-        // `max_completion_tokens`.
-        assert_eq!(
-            route_output(
-                crate::Provider::OpenAiCompatible,
-                "https://api.openai.com/v1",
-                0
-            ),
-            RouteOutput::None
-        );
+        // `max_completion_tokens`. The trailing DNS dot names the same host and must not send
+        // the catalog cap either.
+        for base_url in [
+            "https://api.openai.com/v1",
+            "https://api.openai.com./v1",
+            "https://API.OpenAI.com.:443/v1",
+        ] {
+            assert_eq!(
+                route_output(crate::Provider::OpenAiCompatible, base_url, 0),
+                RouteOutput::None,
+                "{base_url}"
+            );
+        }
         assert_eq!(
             route_output(
                 crate::Provider::OpenAiCompatible,

@@ -135,8 +135,10 @@ pub(crate) fn is_local_host(host: &str) -> bool {
 
 /// The default for `include_usage`: only OpenAI's own endpoint reports usage compatibly.
 /// Compared by exact host, never by substring: `evil-openai.com.attacker.net` must not match.
+/// A trailing DNS dot names the same host, so `api.openai.com.` matches too.
 pub(crate) fn openai_host_is_default(host: &str) -> bool {
-    host.eq_ignore_ascii_case("api.openai.com")
+    host.trim_end_matches('.')
+        .eq_ignore_ascii_case("api.openai.com")
 }
 
 /// The `max_tokens` an OpenAI-compatible chat request sends when the route's catalog entry
