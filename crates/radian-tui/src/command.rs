@@ -73,7 +73,7 @@ pub struct PendingCommand {
     pub prompt: String,
     /// A `/model` switch waiting behind this confirm (ADR 0026 D7): `y` compacts to this
     /// budget and then queues the route; `n` cancels. `None` for a `/memory` confirm.
-    pub switch: Option<(String, String, u64)>,
+    pub switch: Option<(String, String, u64, Option<String>)>,
 }
 
 /// What `/jobs` asked for (ADR 0037 decision 4).

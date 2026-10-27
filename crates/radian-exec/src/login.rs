@@ -417,16 +417,21 @@ fn ask_custom_steps() -> Result<(String, String, String), i32> {
     if let Some(reason) = radian_host::provider::name_error(&name) {
         return Err(aborted(reason));
     }
-    println!("  1. openai-compatible   2. anthropic");
+    println!("  1. openai-compatible   2. anthropic   3. openai-responses");
     let kind = match read_line("protocol [1]: ") {
         Ok(answer) => match answer.trim() {
             "" | "1" => "openai-compatible".to_owned(),
             "2" => "anthropic".to_owned(),
-            other => {
-                return Err(aborted(format!(
-                    "unknown protocol {other:?} (openai-compatible or anthropic)"
-                )));
-            }
+            "3" => "openai-responses".to_owned(),
+            other => match radian_host::Protocol::from_kind(other) {
+                Some(protocol) => protocol.kind().to_owned(),
+                None => {
+                    return Err(aborted(format!(
+                        "unknown protocol {other:?} ({})",
+                        radian_host::kind_list()
+                    )));
+                }
+            },
         },
         Err(error) => return Err(aborted(error)),
     };

@@ -1824,6 +1824,36 @@ pub struct ProviderModels {
     pub models: Vec<String>,
     /// Epoch millis of the successful fetch.
     pub fetched_at: u64,
+    /// The endpoint fields a model-list entry advertised (ADR 0026 D10), by model id, in the
+    /// vocabulary's own order. An absent id means the entry advertised no endpoint, or an
+    /// older cache wrote none: the route then falls through to the provider's `kind`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoints: BTreeMap<String, Vec<AdvertisedEndpoint>>,
+}
+
+/// One wire API a model-list entry advertises (ADR 0026 D10): the protocol's `kind` spelling
+/// and the absolute path from the host root. A `supported_endpoint_types` entry carries its
+/// documented default path.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdvertisedEndpoint {
+    /// The protocol's canonical `kind` ([`crate::Protocol::kind`]).
+    pub kind: String,
+    /// The advertised path, e.g. `/v1/responses`.
+    pub path: String,
+}
+
+impl AdvertisedEndpoint {
+    pub fn protocol(&self) -> Option<crate::Protocol> {
+        crate::Protocol::from_kind(&self.kind)
+    }
+}
+
+/// What one model-list fetch produced (ADR 0026 D10): the ids, plus the endpoint fields each
+/// entry advertised. Sorted by id, like the cache.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FetchedProviderModels {
+    pub models: Vec<String>,
+    pub endpoints: BTreeMap<String, Vec<AdvertisedEndpoint>>,
 }
 
 /// The fingerprint of a resolved key: the first 16 hex characters of SHA-256. A fingerprint is
@@ -1858,18 +1888,53 @@ pub fn read_provider_models_at(root: &Path, provider: &str, key: &str) -> Option
 
 /// Writes a provider's model list. The key never lands in the file, only its fingerprint.
 pub fn write_provider_models(provider: &str, key: &str, models: Vec<String>) -> io::Result<()> {
+    write_provider_model_list(
+        provider,
+        key,
+        &FetchedProviderModels {
+            models,
+            endpoints: BTreeMap::new(),
+        },
+    )
+}
+
+/// [`write_provider_models`] with the endpoint fields a fetch carried (ADR 0026 D10).
+pub fn write_provider_model_list(
+    provider: &str,
+    key: &str,
+    list: &FetchedProviderModels,
+) -> io::Result<()> {
     match crate::home::radian_home() {
-        Some(root) => write_provider_models_at(&root, provider, key, models),
+        Some(root) => write_provider_model_list_at(&root, provider, key, list),
         None => Ok(()),
     }
 }
 
 /// [`write_provider_models`] under an explicit root, so tests never touch the real cache.
+#[cfg(test)]
 pub fn write_provider_models_at(
     root: &Path,
     provider: &str,
     key: &str,
     models: Vec<String>,
+) -> io::Result<()> {
+    write_provider_model_list_at(
+        root,
+        provider,
+        key,
+        &FetchedProviderModels {
+            models,
+            endpoints: BTreeMap::new(),
+        },
+    )
+}
+
+/// [`write_provider_model_list`] under an explicit root.
+pub fn write_provider_model_list_at(
+    root: &Path,
+    provider: &str,
+    key: &str,
+    list: &FetchedProviderModels,
 ) -> io::Result<()> {
     let path = root
         .join("cache")
@@ -1877,11 +1942,12 @@ pub fn write_provider_models_at(
         .join(format!("{provider}.json"));
     let cache = ProviderModels {
         key_fingerprint: key_fingerprint(key),
-        models,
+        models: list.models.clone(),
         fetched_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64,
+        endpoints: list.endpoints.clone(),
     };
     write_cache(&path, &serde_json::to_string(&cache).unwrap_or_default())
 }
@@ -1920,40 +1986,159 @@ pub async fn fetch_provider_models(
     base_url: &str,
     key: &str,
 ) -> Option<Vec<String>> {
+    fetch_provider_model_list(provider_id, base_url, key)
+        .await
+        .ok()
+        .map(|list| list.models)
+}
+
+/// [`fetch_provider_models`] with the endpoint fields and the failure reason (ADR 0026 D10):
+/// the startup route needs the reason for its one line, the background refresh discards it.
+pub async fn fetch_provider_model_list(
+    provider_id: &str,
+    base_url: &str,
+    key: &str,
+) -> Result<FetchedProviderModels, String> {
     fetch_models_url(&provider_models_url(provider_id, base_url), key).await
 }
 
 /// One model-list `GET` of `url` with the key. A mock server stands in for the endpoint in
 /// tests, so the request and the OpenAI shape are covered without network. A key is never sent
 /// over plain `http` off this machine ([`models_url_accepts_key`]): such a URL is a silent
-/// `None`, the same as any other failure, so the caller records the retry marker.
-async fn fetch_models_url(url: &str, key: &str) -> Option<Vec<String>> {
+/// failure, the same as any other, so the caller records the retry marker.
+async fn fetch_models_url(url: &str, key: &str) -> Result<FetchedProviderModels, String> {
     if !models_url_accepts_key(url) {
-        return None;
+        return Err("a key is not sent over plain http to a remote host".to_owned());
     }
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .build()
-        .ok()?;
+        .map_err(|error| error.to_string())?;
     let response = client
         .get(url)
         .header("authorization", format!("Bearer {key}"))
         .send()
         .await
-        .ok()?;
+        .map_err(|error| {
+            // The transport error can embed the URL; the caller redacts before printing.
+            if error.is_timeout() {
+                "timed out".to_owned()
+            } else if error.is_connect() {
+                "could not connect".to_owned()
+            } else {
+                "request failed".to_owned()
+            }
+        })?;
     if !response.status().is_success() {
-        return None;
+        return Err(format!("HTTP {}", response.status().as_u16()));
     }
-    let text = response.text().await.ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let data = value.get("data")?.as_array()?;
-    let mut models: Vec<String> = data
-        .iter()
-        .filter_map(|entry| entry.get("id")?.as_str().map(str::to_owned))
-        .collect();
+    let text = response
+        .text()
+        .await
+        .map_err(|_| "unreadable answer".to_owned())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "not JSON".to_owned())?;
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "no data list".to_owned())?;
+    let list = parse_model_list(data);
+    if list.models.is_empty() {
+        return Err("the list is empty".to_owned());
+    }
+    Ok(list)
+}
+
+/// The model entries of one list answer (ADR 0026 D10): the ids plus each entry's advertised
+/// endpoints. The three vocabularies are tried in order and the first field present wins;
+/// unknown `api` values, tokens and paths are ignored, and a model whose field yields nothing
+/// usable simply advertises no endpoint.
+fn parse_model_list(data: &[serde_json::Value]) -> FetchedProviderModels {
+    let mut models = Vec::new();
+    let mut endpoints: BTreeMap<String, Vec<AdvertisedEndpoint>> = BTreeMap::new();
+    for entry in data {
+        let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        models.push(id.to_owned());
+        if let Some(found) = advertised_endpoints(entry) {
+            endpoints.insert(id.to_owned(), found);
+        }
+    }
     models.sort();
     models.dedup();
-    (!models.is_empty()).then_some(models)
+    FetchedProviderModels { models, endpoints }
+}
+
+/// One entry's endpoints, in the first vocabulary it carries (ADR 0026 D10).
+fn advertised_endpoints(entry: &serde_json::Value) -> Option<Vec<AdvertisedEndpoint>> {
+    if let Some(items) = entry.get("endpoints").and_then(serde_json::Value::as_array) {
+        let mut found: Vec<AdvertisedEndpoint> = Vec::new();
+        for item in items {
+            let Some(api) = item.get("api").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some((_, protocol)) = crate::provider::ENDPOINT_APIS
+                .iter()
+                .find(|(name, _)| *name == api)
+            else {
+                continue;
+            };
+            let path = item
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            push_endpoint(&mut found, *protocol, path);
+        }
+        return (!found.is_empty()).then_some(found);
+    }
+    if let Some(items) = entry
+        .get("supported_endpoint_types")
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut found: Vec<AdvertisedEndpoint> = Vec::new();
+        for item in items {
+            let Some(token) = item.as_str() else { continue };
+            let Some((_, protocol, path)) = crate::provider::SUPPORTED_ENDPOINT_TYPES
+                .iter()
+                .find(|(name, _, _)| *name == token)
+            else {
+                continue;
+            };
+            push_endpoint(&mut found, *protocol, path);
+        }
+        return (!found.is_empty()).then_some(found);
+    }
+    if let Some(items) = entry
+        .get("native_endpoints")
+        .and_then(serde_json::Value::as_array)
+    {
+        let mut found: Vec<AdvertisedEndpoint> = Vec::new();
+        for item in items {
+            let Some(path) = item.as_str() else { continue };
+            let Some((_, protocol)) = crate::provider::NATIVE_ENDPOINT_SUFFIXES
+                .iter()
+                .find(|(suffix, _)| path.ends_with(suffix))
+            else {
+                continue;
+            };
+            push_endpoint(&mut found, *protocol, path);
+        }
+        return (!found.is_empty()).then_some(found);
+    }
+    None
+}
+
+/// Adds one advertised endpoint unless the same protocol is already there (the first
+/// advertised path wins), and drops an empty path: a path is what derives the endpoint.
+fn push_endpoint(found: &mut Vec<AdvertisedEndpoint>, protocol: crate::Protocol, path: &str) {
+    if path.is_empty() || found.iter().any(|entry| entry.protocol() == Some(protocol)) {
+        return;
+    }
+    found.push(AdvertisedEndpoint {
+        kind: protocol.kind().to_owned(),
+        path: path.to_owned(),
+    });
 }
 
 /// One background refresh decision (ADR 0026 D0): fetch when the cache is older than the TTL
@@ -1969,6 +2154,64 @@ pub fn provider_models_stale(cache_age: Option<Duration>, cached_models: usize) 
         // A failure marker (an empty list): retry sooner than the TTL.
         Some(age) if cached_models == 0 => age >= PROVIDER_MODELS_RETRY,
         Some(age) => age >= PROVIDER_MODELS_TTL,
+    }
+}
+
+/// The model list a named provider's startup route resolves against (ADR 0026 D10): the cache
+/// when it exists, else one fetch with the usual 3 s timeout, written back. The second value is
+/// the one startup line for a failed fetch, naming the reason; a fetch never blocks a turn.
+/// A built-in descriptor keeps the catalog and has no list here.
+pub async fn startup_model_list(
+    provider: &crate::ProviderRef,
+    key: Option<&str>,
+) -> (Option<ProviderModels>, Option<String>) {
+    startup_model_list_at(crate::home::radian_home().as_deref(), provider, key).await
+}
+
+/// [`startup_model_list`] under an explicit cache root, so tests never touch the real home.
+pub async fn startup_model_list_at(
+    root: Option<&Path>,
+    provider: &crate::ProviderRef,
+    key: Option<&str>,
+) -> (Option<ProviderModels>, Option<String>) {
+    let crate::ProviderRef::Named(named) = provider else {
+        return (None, None);
+    };
+    let Some(key) = key else {
+        // A local endpoint may run without a key; there is nothing to authenticate the list
+        // fetch with, so the route falls through to the declared `kind`.
+        return (None, None);
+    };
+    if let Some(root) = root
+        && let Some(cache) = read_provider_models_at(root, &named.name, key)
+    {
+        return (Some(cache), None);
+    }
+    let url = provider_models_url(&named.name, &named.base_url);
+    match fetch_provider_model_list(&named.name, &named.base_url, key).await {
+        Ok(list) => {
+            let models = ProviderModels {
+                key_fingerprint: key_fingerprint(key),
+                models: list.models.clone(),
+                fetched_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                endpoints: list.endpoints.clone(),
+            };
+            if let Some(root) = root {
+                let _ = write_provider_model_list_at(root, &named.name, key, &list);
+            }
+            (Some(models), None)
+        }
+        Err(reason) => (
+            None,
+            Some(format!(
+                "[provider] {}: no model list (GET {} failed: {reason}); using kind",
+                named.name,
+                crate::redact_base_url(&url)
+            )),
+        ),
     }
 }
 
@@ -2097,10 +2340,10 @@ mod provider_models_tests {
     async fn the_refresh_gets_the_discovery_path_and_reads_the_list_shape() {
         let body = r#"{"object":"list","data":[{"id":"b"},{"id":"a"},{"id":"a"}]}"#;
         let (base, request) = capturing_server("200 OK", body);
-        let models = fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
+        let list = fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
             .await
             .expect("ids");
-        assert_eq!(models, vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(list.models, vec!["a".to_owned(), "b".to_owned()]);
         let head = request
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the request");
@@ -2128,26 +2371,100 @@ mod provider_models_tests {
             "the default path is kept"
         );
 
-        // A failure is silent: a non-200, a non-list body, and an empty list are all `None`.
+        // A failure is a silent `None` for the background refresh: a non-200, a non-list body
+        // and an empty list all fail.
         let (base, _) = capturing_server("404 Not Found", "{}");
         assert!(
             fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
                 .await
-                .is_none()
+                .is_err()
         );
         let (base, _) = capturing_server("200 OK", r#"{"nope":[]}"#);
         assert!(
             fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
                 .await
-                .is_none()
+                .is_err()
         );
         let (base, _) = capturing_server("200 OK", r#"{"object":"list","data":[]}"#);
         assert!(
             fetch_models_url(&format!("{base}/zen/go/v1/models"), "sk-test")
                 .await
-                .is_none()
+                .is_err()
         );
     }
+    /// The three model-list vocabularies (ADR 0026 D10): each field maps its own names, the
+    /// first field present wins, and unknown tokens/paths are ignored.
+    #[test]
+    fn the_three_endpoint_fields_map_their_own_vocabularies() {
+        let data = serde_json::json!([
+            {"id":"both","endpoints":[{"path":"/v1/chat/completions","api":"openai-completions"},{"path":"/apis/anthropic/v1/messages","api":"anthropic-messages"}],"supported_endpoint_types":["openai-response"]},
+            {"id":"binks-gpt-5.5","endpoints":[{"path":"/v1/responses","api":"openai-responses"}]},
+            {"id":"azure","endpoints":[{"path":"/v1/chat/completions","api":"openai-completions"},{"path":"/v1/responses","api":"openai-responses"}]},
+            {"id":"supported","supported_endpoint_types":["openai","openai-response","anthropic","gemini","embeddings"]},
+            {"id":"native","native_endpoints":["/v1/chat/completions","/v1/responses","/v1/messages","/v1/embeddings"]},
+            {"id":"unknown","endpoints":[{"path":"/v1/x","api":"grpc"}],"native_endpoints":["/v1/responses"]},
+            {"id":"plain"},
+        ]);
+        let list = parse_model_list(data.as_array().unwrap());
+        assert_eq!(
+            list.models,
+            vec![
+                "azure",
+                "binks-gpt-5.5",
+                "both",
+                "native",
+                "plain",
+                "supported",
+                "unknown"
+            ]
+        );
+        let kinds = |id: &str| -> Vec<String> {
+            list.endpoints
+                .get(id)
+                .map(|entries| entries.iter().map(|entry| entry.kind.clone()).collect())
+                .unwrap_or_default()
+        };
+        // `endpoints` wins over `supported_endpoint_types` when both are present.
+        assert_eq!(kinds("both"), vec!["openai-compatible", "anthropic"]);
+        assert_eq!(kinds("binks-gpt-5.5"), vec!["openai-responses"]);
+        assert_eq!(
+            kinds("azure"),
+            vec!["openai-compatible", "openai-responses"]
+        );
+        // `supported_endpoint_types` uses each token's documented default path.
+        assert_eq!(
+            kinds("supported"),
+            vec!["openai-compatible", "openai-responses", "anthropic"]
+        );
+        let supported = &list.endpoints["supported"];
+        assert_eq!(supported[0].path, "/v1/chat/completions");
+        assert_eq!(supported[1].path, "/v1/responses");
+        assert_eq!(supported[2].path, "/v1/messages");
+        // `native_endpoints` maps by path suffix; an unknown path is ignored.
+        assert_eq!(
+            kinds("native"),
+            vec!["openai-compatible", "openai-responses", "anthropic"]
+        );
+        // An unknown `api` leaves nothing usable; the next field is not consulted.
+        assert!(kinds("unknown").is_empty());
+        // An entry with no endpoint field keeps its id and advertises nothing.
+        assert!(kinds("plain").is_empty());
+    }
+
+    /// A `native_endpoints` field with only unknown paths advertises nothing, and duplicate
+    /// protocols keep the first path.
+    #[test]
+    fn a_native_path_with_no_api_suffix_and_a_duplicate_are_ignored() {
+        let data = serde_json::json!([
+            {"id":"native","native_endpoints":["/v1/embeddings","/v1/responses","/v9/responses"]},
+        ]);
+        let list = parse_model_list(data.as_array().unwrap());
+        let entries = &list.endpoints["native"];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "openai-responses");
+        assert_eq!(entries[0].path, "/v1/responses");
+    }
+
     /// The fingerprint changes with the key and never contains it (D0: the cache stores no key).
     #[test]
     fn the_fingerprint_tracks_the_key_without_leaking_it() {
@@ -2156,6 +2473,58 @@ mod provider_models_tests {
         assert_ne!(one, two);
         assert_eq!(one.len(), 16);
         assert!(!one.contains("sk-"));
+    }
+
+    fn named_ref(base_url: &str) -> crate::ProviderRef {
+        crate::ProviderRef::Named(crate::NamedProvider {
+            name: "corp".to_owned(),
+            protocol: crate::Protocol::OpenAiCompatible,
+            base_url: base_url.to_owned(),
+            reasoning_replay: None,
+            rules: Vec::new(),
+            prefer: None,
+            base_urls: BTreeMap::new(),
+            model_list: None,
+        })
+    }
+
+    /// No cache and a failed fetch: the route falls through to `kind`, and the one startup
+    /// line names the reason (ADR 0026 D10).
+    #[tokio::test]
+    async fn a_failed_startup_fetch_falls_to_kind_with_one_line() {
+        let root = crate::test_support::TempDir::named("radian-startup-list");
+        let (base, _) = capturing_server("404 Not Found", "{}");
+        let provider = named_ref(&format!("{base}/v1"));
+        let (list, line) =
+            startup_model_list_at(Some(root.path()), &provider, Some("sk-test")).await;
+        assert!(list.is_none());
+        let line = line.expect("one startup line");
+        assert!(line.contains("no model list"), "{line}");
+        assert!(line.contains("using kind"), "{line}");
+        assert!(line.contains("HTTP 404"), "{line}");
+    }
+
+    /// No cache and a successful fetch: the list is resolved (with its endpoint fields) and
+    /// written back; the next startup reads the cache without contacting the endpoint.
+    #[tokio::test]
+    async fn a_startup_fetch_resolves_and_caches_the_list() {
+        let root = crate::test_support::TempDir::named("radian-startup-list-ok");
+        let body = r#"{"data":[{"id":"m","native_endpoints":["/v1/responses"]}]}"#;
+        let (base, _) = capturing_server("200 OK", body);
+        let provider = named_ref(&format!("{base}/v1"));
+        let (list, line) =
+            startup_model_list_at(Some(root.path()), &provider, Some("sk-test")).await;
+        assert!(line.is_none());
+        let list = list.expect("the fetched list");
+        assert_eq!(list.models, vec!["m".to_owned()]);
+        assert_eq!(list.endpoints["m"][0].kind, "openai-responses");
+        // The cache keeps the endpoint fields, so the next startup derives the same route.
+        let cached = read_provider_models_at(root.path(), "corp", "sk-test").unwrap();
+        assert_eq!(cached.endpoints["m"][0].kind, "openai-responses");
+        let (list, line) =
+            startup_model_list_at(Some(root.path()), &provider, Some("sk-test")).await;
+        assert!(line.is_none());
+        assert_eq!(list.unwrap().models, vec!["m".to_owned()]);
     }
 
     /// The cache round-trips and refuses a file written for another key (a changed key means

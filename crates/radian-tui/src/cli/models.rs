@@ -115,11 +115,11 @@ async fn refresh_one(
     else {
         return;
     };
-    match radian_host::fetch_provider_models(provider_id, &base_url, &resolved.key).await {
-        Some(models) => {
-            let _ = radian_host::write_provider_models(provider_id, &resolved.key, models);
+    match radian_host::fetch_provider_model_list(provider_id, &base_url, &resolved.key).await {
+        Ok(list) => {
+            let _ = radian_host::write_provider_model_list(provider_id, &resolved.key, &list);
         }
-        None => {
+        Err(_) => {
             // The failure marker: an empty list, so the retry delay applies (D0).
             let _ = radian_host::write_provider_models(provider_id, &resolved.key, Vec::new());
         }
@@ -235,7 +235,8 @@ fn provider_models(provider: &str) -> Vec<String> {
 }
 
 /// The [`ProviderRef`] a `/thinking` clamp/completion resolves against: the route's provider
-/// name through the config's declarations and the auth entry's env (ADR 0026 D10). A name that
+/// name through the config's declarations and the auth entry's env (ADR 0026 D10), with its
+/// model list attached so the thinking map follows the **resolved** protocol (D10). A name that
 /// does not resolve falls back to the generic descriptor, whose map sends nothing.
 pub(super) fn provider_ref_for(
     name: &str,
@@ -244,7 +245,11 @@ pub(super) fn provider_ref_for(
     let auth_env = radian_host::AuthStore::open()
         .ok()
         .and_then(|store| store.entry_env(name));
-    radian_host::resolve_provider(name, config_providers, auth_env.as_ref())
+    let model_list = radian_host::auth::resolve_key(name)
+        .ok()
+        .flatten()
+        .and_then(|resolved| radian_host::read_provider_models(name, &resolved.key));
+    radian_host::resolve_provider_with_models(name, config_providers, auth_env.as_ref(), model_list)
         .map(|(provider, _warning)| provider)
         .unwrap_or_else(|_| {
             radian_host::ProviderRef::BuiltIn(
@@ -418,6 +423,7 @@ mod tests {
                 kind: "openai-compatible".to_owned(),
                 base_url: "http://127.0.0.1:9/v1".to_owned(),
                 reasoning_replay: None,
+                ..Default::default()
             },
         );
         let candidates = model_route_candidates(None, &config);
@@ -531,6 +537,7 @@ mod tests {
             kind: "openai-compatible".to_owned(),
             base_url: base_url.to_owned(),
             reasoning_replay: None,
+            ..Default::default()
         }
     }
 

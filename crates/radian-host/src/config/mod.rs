@@ -40,7 +40,7 @@ pub use hooks::{
     DEFAULT_HOOK_TIMEOUT_SECS, DEFAULT_INTENT_STOP, HOOK_EVENTS, HookCommand, HookMatcher,
     HooksConfig, POST_TOOL_USE, PRE_TOOL_USE, STOP, matcher_effective,
 };
-pub use model::{ModelConfig, PROVIDER_KINDS, SmolConfig};
+pub use model::{ModelConfig, PROVIDER_KIND_ALIASES, PROVIDER_KINDS, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
 pub use tui::{
     BELL_MODES, CLIPBOARD_MODES, DISPLAY_REASONING_MODES, DISPLAY_TOOL_OUTPUT_MODES,
@@ -1409,9 +1409,14 @@ theme = "light"
             "base_url = \"https://x\"\n",
         ))
         .unwrap_err();
-        assert!(matches!(error, ConfigError::WrongType { .. }), "{error}");
         assert!(
-            error.to_string().contains("openai-compatible|anthropic"),
+            matches!(error, ConfigError::InvalidProviderField { .. }),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("openai-compatible|anthropic|openai-responses"),
             "{error}"
         );
     }
@@ -1791,6 +1796,14 @@ future_option = "alpha"
         /// Dynamic families: the doc names the section, fixture leaves may live under it.
         const SECTIONS: &[&str] = &[
             "providers",
+            "providers.<name>.kind",
+            "providers.<name>.base_url",
+            "providers.<name>.reasoning_replay",
+            "providers.<name>.prefer",
+            "providers.<name>.base_urls",
+            "providers.<name>.models",
+            "providers.<name>.models[].match",
+            "providers.<name>.models[].kind",
             "model.headers",
             "model.smol",
             "tui.colors",
@@ -1858,6 +1871,12 @@ future_option = "alpha"
                 "kind = \"openai-compatible\"\n",
                 "base_url = \"https://models.example.test/v1\"\n",
                 "reasoning_replay = \"reasoning_content\"\n",
+                "prefer = [\"anthropic\", \"openai-completions\"]\n",
+                "[providers.office.base_urls]\n",
+                "anthropic = \"https://anthropic.example.test\"\n",
+                "[[providers.office.models]]\n",
+                "match = \"claude/*\"\n",
+                "kind = \"anthropic-messages\"\n",
                 "[permissions]\n",
                 "profile = \"workspace\"\n",
                 "approval = \"on-ask\"\n",
@@ -2114,6 +2133,44 @@ future_option = "alpha"
                     );
                 }
             }
+        }
+        // The kind row and every row that takes a kind also list pi's aliases.
+        for key in [
+            "providers.<name>.kind",
+            "providers.<name>.prefer",
+            "providers.<name>.base_urls",
+            "providers.<name>.models[].kind",
+        ] {
+            for row in row(&key_rows, key) {
+                for (alias, _) in model::PROVIDER_KIND_ALIASES {
+                    assert!(
+                        row.iter().any(|cell| cell.contains(alias)),
+                        "{key} row is missing the alias {alias}: {row:?}"
+                    );
+                }
+            }
+        }
+        // `prefer` and `base_urls` list every canonical kind, and `base_urls` every key.
+        for key in ["providers.<name>.prefer", "providers.<name>.base_urls"] {
+            for row in row(&key_rows, key) {
+                for kind in model::PROVIDER_KINDS {
+                    assert!(
+                        row.iter().any(|cell| cell.contains(kind)),
+                        "{key} row is missing {kind}: {row:?}"
+                    );
+                }
+            }
+        }
+        // The three model-list vocabularies are documented with every value the parser maps.
+        for (api, _) in crate::provider::ENDPOINT_APIS {
+            assert!(doc.contains(api), "configuration.md misses `{api}`");
+        }
+        for (token, _, path) in crate::provider::SUPPORTED_ENDPOINT_TYPES {
+            assert!(doc.contains(token), "configuration.md misses `{token}`");
+            assert!(doc.contains(path), "configuration.md misses `{path}`");
+        }
+        for (suffix, _) in crate::provider::NATIVE_ENDPOINT_SUFFIXES {
+            assert!(doc.contains(suffix), "configuration.md misses `{suffix}`");
         }
         // `compaction.thinking` is the seven levels plus `current`.
         for row in row(&key_rows, "compaction.thinking") {

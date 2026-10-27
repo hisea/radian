@@ -65,6 +65,14 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
+    /// A field of `[providers.<name>]` with a value or shape this build cannot use (ADR 0026
+    /// D10): a rule missing `match` or `kind`, an empty `match`, a duplicate `prefer`, an
+    /// unknown kind, an empty URL. One line, naming the key.
+    InvalidProviderField {
+        path: PathBuf,
+        key: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -133,6 +141,9 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidProviderName { path, name, reason } => {
                 write!(f, "{}: providers.{name}: {reason}", path.display())
+            }
+            ConfigError::InvalidProviderField { path, key, reason } => {
+                write!(f, "{}: `{key}` {reason}", path.display())
             }
         }
     }

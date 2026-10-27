@@ -712,6 +712,7 @@ fn the_first_model_queue_unblocks_send() {
         model: "m-1".to_owned(),
         tokens: None,
         budget: None,
+        route: None,
     });
     assert!(
         result.effects.iter().any(|effect| matches!(

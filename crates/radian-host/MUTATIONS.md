@@ -1497,3 +1497,16 @@ named test binary was run, and the source was restored from a copy under `.radia
 |---|---|---|---|
 | TK0200-M1 | the startup check in `radian-exec/src/setup.rs` consults all three adapters again (the old union) instead of `route.adapter()` | ✅ 1 failed (rc=100) | `radian-exec::cli::the_extra_body_max_tokens_is_allowed_on_a_chat_route_and_refused_on_anthropic` (the chat half exited 2: ``RADIAN_EXTRA_BODY sets `max_tokens`…``) |
 | TK0200-M2 | the `/model` switch check in `radian-tui/src/cli/loop_context.rs` is removed | ✅ 1 failed (rc=100) | `radian-tui cli::loop_context::tests::a_model_switch_to_a_route_that_reserves_an_extra_body_key_is_refused` (the effect fell through to the credential/budget path instead of sending the refusal) |
+
+## TK0213: a named provider resolves protocol and endpoint per model (2026-10-27)
+
+Branch `work/TK0213-per-model-protocol-rules`. Each mutation was applied in place, the named
+test binary was run, and the source was restored from a copy under `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0213-M1 | `NamedProvider::resolve_model` never takes a rule (`.filter(|_| false)` on the first-match find), so the model list and `kind` answer instead | ✅ 1 failed (rc=100) | `provider::named_route_tests::a_rule_beats_the_model_list_and_the_model_list_beats_the_kind` (rule expected `anthropic`, got `openai-compatible`); `a_rules_only_table_overlays_an_auth_provider_and_needs_one` fails on the same rule |
+| TK0213-M2 | `DEFAULT_PREFER` lists chat first (`openai-compatible`, `openai-responses`, `anthropic`) | ✅ 1 failed (rc=100) | `provider::named_route_tests::the_default_prefer_picks_anthropic_and_responses_over_chat` (the claude entry picks chat) |
+| TK0213-M3 | `endpoint_from_path` returns the bare origin, dropping the advertised path | ✅ 1 failed (rc=100) | `provider::named_route_tests::the_endpoint_is_the_origin_plus_the_stripped_advertised_path` and `the_line_names_protocol_endpoint_and_source`; `named_model_routing::a_named_provider_sends_to_the_api_its_model_list_advertised` fails on the Anthropic request path |
+| TK0213-M4 | `Protocol::from_kind` drops pi's aliases (`openai-completions`, `anthropic-messages`) | ✅ 1 failed (rc=100) | `provider::named_route_tests::aliases_are_accepted_and_lines_print_radian_names`; `a_rules_only_table_overlays_an_auth_provider_and_needs_one` fails on `env.RADIAN_KIND = "openai-completions"` |
+| TK0213-M5 | `startup_model_list_at` swallows a failed fetch (returns `(None, None)` instead of the one line) | ✅ 1 failed (rc=100) | `catalog::provider_models_tests::a_failed_startup_fetch_falls_to_kind_with_one_line` (`expect("one startup line")` on `None`) |

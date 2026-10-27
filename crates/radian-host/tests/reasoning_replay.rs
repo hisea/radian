@@ -26,6 +26,7 @@ fn decl(override_: Option<ReasoningReplayOverride>) -> ProviderDecl {
         kind: "openai-compatible".into(),
         base_url: "https://acme.example/v1".into(),
         reasoning_replay: override_,
+        ..Default::default()
     }
 }
 
@@ -85,6 +86,10 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         protocol: Protocol::OpenAiCompatible,
         base_url: "https://acme.example/v1".into(),
         reasoning_replay: None,
+        rules: Vec::new(),
+        prefer: None,
+        base_urls: BTreeMap::new(),
+        model_list: None,
     });
     assert_eq!(
         resolve_reasoning_replay(&named_no_override, "deepseek-v4.1-flash").as_deref(),
@@ -107,6 +112,10 @@ fn the_catalog_and_a_named_override_decide_reasoning_replay() {
         protocol: Protocol::OpenAiCompatible,
         base_url: "https://acme.example/v1".into(),
         reasoning_replay: Some(ReasoningReplayOverride::Field("reasoning".into())),
+        rules: Vec::new(),
+        prefer: None,
+        base_urls: BTreeMap::new(),
+        model_list: None,
     });
     assert_eq!(
         resolve_reasoning_replay(&named, "m").as_deref(),

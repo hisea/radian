@@ -94,14 +94,16 @@ pub fn hostname() -> Option<String> {
 }
 
 pub use catalog::{
-    CACHE_TTL, CATALOG_SNAPSHOT, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit,
-    ModelPrice, OUTPUT_RESERVATION_CAP, PROVIDER_MODELS_RETRY, PROVIDER_MODELS_TTL, PriceRates,
-    PriceTier, ProviderInfo, ProviderModels, RouteOutput, SNAPSHOT_DATE, Window, WindowCheck,
-    WindowQuery, WindowSource, bundled_catalog, cache_path, check_context_window_flag,
+    AdvertisedEndpoint, CACHE_TTL, CATALOG_SNAPSHOT, CATALOG_URL, Catalog, FETCH_TIMEOUT,
+    FetchedProviderModels, ModelEntry, ModelLimit, ModelPrice, OUTPUT_RESERVATION_CAP,
+    PROVIDER_MODELS_RETRY, PROVIDER_MODELS_TTL, PriceRates, PriceTier, ProviderInfo,
+    ProviderModels, RouteOutput, SNAPSHOT_DATE, Window, WindowCheck, WindowQuery, WindowSource,
+    bundled_catalog, cache_path, check_context_window_flag, fetch_provider_model_list,
     fetch_provider_models, host_of, input_budget, models_url_accepts_key, output_ceiling_warning,
     output_reservation, protocol_catalog, provider_for_host, provider_models_cache,
     provider_models_stale, provider_models_url, read_provider_models, resolve, resolve_offline,
-    route_output, route_takes_images, write_provider_models,
+    route_output, route_takes_images, startup_model_list, write_provider_model_list,
+    write_provider_models,
 };
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,
@@ -199,13 +201,17 @@ pub use projection::{
 };
 pub use prompt::RoleHooks;
 pub use provider::{
-    CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
-    EndpointUsage, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
-    ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
-    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, default_include_usage,
-    descriptor, descriptor_base_url, descriptors, has_usage_source, level_fits, login_choices,
-    name_error, parse_thinking_level, resolve_provider, resolve_route, resolve_route_for,
-    supported_thinking_levels, supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_PREFER, DEFAULT_THINKING_LEVEL, DESCRIPTORS,
+    DescriptorModel, ENDPOINT_APIS, EndpointUsage, GENERIC_ID, LoginMethod, ModelRule,
+    ModelRuleDecl, NATIVE_ENDPOINT_SUFFIXES, NamedModelRoute, NamedProvider, NamedSource,
+    PROVIDER_KIND_ALIASES, PROVIDER_KINDS, Protocol, ProviderDecl, ProviderDescriptor, ProviderRef,
+    RADIAN_KIND, ReasoningReplayOverride, Route, RouteSource, SUPPORTED_ENDPOINT_TYPES,
+    THINKING_LEVELS, ThinkingMap, UsageSource, adapter_base, clamp_thinking, clamp_thinking_with,
+    default_include_usage, describe_model_route, descriptor, descriptor_base_url, descriptors,
+    endpoint_from_path, has_usage_source, kind_list, level_fits, login_choices, name_error,
+    origin_of, parse_thinking_level, pattern_matches, resolve_provider,
+    resolve_provider_with_models, resolve_route, resolve_route_for, supported_thinking_levels,
+    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
     supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
     thinking_rank, unsupported_api_message, usage_endpoint, usage_item_alias, valid_name,
     wire_budget,

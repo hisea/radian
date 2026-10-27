@@ -1,0 +1,37 @@
+# ADR 0026 D10:一个具名 provider 可以按模型选择协议与端点。`prefer` 决定一个模型列表项
+# 同时列出多种协议时先试哪一种(默认 anthropic → openai-responses → openai-compatible,
+# 原生 API 优先、chat 最后);`base_urls` 覆盖某一协议的端点;`[[providers.<名字>.models]]`
+# 是有序规则,`match` 覆盖整个模型 id(`*` 匹配任意一段字符),第一条命中的规则决定协议。
+# `kind` 接受 openai-compatible、anthropic、openai-responses,以及 pi 的别名
+# openai-completions(= openai-compatible)与 anthropic-messages(= anthropic)。
+# 只含 models/prefer/base_urls 而既无 kind 也无 base_url 的表,会并入 auth.json 里同名的
+# provider;没有 auth.json 条目时启动拒绝。
+schema_version = 1
+
+[model]
+provider = "gemini-gateway"
+model = "codex/gpt-5.6-sol"
+
+[providers.gemini-gateway]
+kind = "openai-completions"
+base_url = "http://127.0.0.1:3425/v1"
+prefer = ["anthropic-messages", "openai-responses", "openai-compatible"]
+
+[providers.gemini-gateway.base_urls]
+openai-responses = "http://127.0.0.1:3425/v1"
+
+[[providers.gemini-gateway.models]]
+match = "claude/*"
+kind = "anthropic-messages"
+
+[[providers.gemini-gateway.models]]
+match = "codex/*"
+kind = "openai-responses"
+
+# 只加规则的覆盖表:同名 provider 已在 auth.json 里声明。
+[providers.gateway-b]
+prefer = ["openai-compatible", "anthropic"]
+
+[[providers.gateway-b.models]]
+match = "local-*"
+kind = "anthropic"

@@ -742,11 +742,18 @@ impl LoopContext<'_> {
                             .projection()
                             .budget()
                             .map(|report| report.projected_tokens);
+                        // ADR 0026 D10: a named provider's line names its protocol,
+                        // endpoint and source. The cache is local; a switch never fetches.
+                        let route = {
+                            let provider_ref = provider_ref_for(&provider, &self.config_providers);
+                            radian_host::describe_model_route(&provider_ref, &model)
+                        };
                         AppInput::ModelChecked {
                             provider,
                             model,
                             tokens,
                             budget,
+                            route,
                         }
                     }
                     Ok(_) => {
@@ -775,6 +782,7 @@ impl LoopContext<'_> {
                 provider,
                 model,
                 budget,
+                route,
             } => {
                 // D7: the same compaction path as `/compact`, targeting the new model's B'.
                 let tx = self.tx.clone();
@@ -786,6 +794,7 @@ impl LoopContext<'_> {
                             provider,
                             model,
                             result,
+                            route,
                         }));
                     }),
                 );

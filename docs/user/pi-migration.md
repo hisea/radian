@@ -64,7 +64,7 @@ skipped with a note (Radian's `model.headers` is a plain string map).
 | Pi | Radian | Notes |
 |---|---|---|
 | `settings.defaultProvider` | `model.provider` | only for providers Radian has an adapter for (`anthropic` → `anthropic`; OpenAI-compatible names → `openai-compatible`); anything else is reported |
-| `models.providers.<p>.api` | `model.provider` | `openai-completions`/`openai-responses`/`azure-openai-responses` → `openai-compatible`; `anthropic` → `anthropic` |
+| `models.providers.<p>.api` | `model.provider` | the active provider only: `openai-completions`/`openai-responses`/`azure-openai-responses` → `openai-compatible`; `anthropic` → `anthropic` |
 | `models.providers.<p>.baseUrl` | `model.base_url` | skipped when the URL carries credentials |
 | `settings.defaultModel` | `model.model` | else the first `models[].id` of the active provider |
 | `models.providers.<p>.apiKey` | `model.api_key` | as an **environment reference** (see above) |
@@ -72,6 +72,13 @@ skipped with a note (Radian's `model.headers` is a plain string map).
 | `settings.theme` | `tui.theme` | `dark`/`light`/`mono` only; Pi's `system` has no Radian equivalent |
 | `settings.compaction.enabled` | `compaction.auto` | the token settings (`reserveTokens`, `keepRecentTokens`) have no Radian key |
 | `keybindings.json` actions | `tui.keybindings` | see below |
+
+A whole `models.json` provider copies over as a named provider: `api` becomes `kind`
+(pi names — `openai-completions`, `openai-responses`, `anthropic-messages` — are Radian's kind
+aliases), `baseUrl` becomes `base_url`, and a per-model `api` becomes one
+`[[providers.<name>.models]]` rule with `match = "<model id>"` and the model's `kind`.
+`config import-pi` itself still writes only the active provider's `api`/`baseUrl` into
+`model.provider`/`model.base_url`; it does not create named providers.
 
 Pi actions → Radian actions (only same-meaning pairs): `tui.input.submit` → `send`,
 `tui.input.newLine` → `newline`, `tui.input.tab` → `complete`, `tui.editor.cursor*` →

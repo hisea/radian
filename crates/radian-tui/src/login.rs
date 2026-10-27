@@ -34,7 +34,7 @@ pub enum LoginStep {
     ChooseProvider { cursor: usize },
     /// The custom provider's name — also its `auth.json` key slot.
     CustomName,
-    /// The wire protocol: `openai-compatible` or `anthropic` (D10, first version).
+    /// The wire protocol: `openai-compatible`, `anthropic` or `openai-responses` (D10).
     CustomProtocol { cursor: usize },
     /// The endpoint.
     CustomBaseUrl,
@@ -64,8 +64,8 @@ pub enum LoginStep {
     },
 }
 
-/// The two protocol choices, in display order.
-pub const PROTOCOLS: [&str; 2] = ["openai-compatible", "anthropic"];
+/// The protocol choices, in display order (ADR 0026 D10).
+pub const PROTOCOLS: [&str; 3] = ["openai-compatible", "anthropic", "openai-responses"];
 
 /// One wizard.
 pub struct LoginWizard {
@@ -613,7 +613,12 @@ mod tests {
         assert!(matches!(wizard.step, LoginStep::CustomProtocol { .. }));
         assert_eq!(wizard.provider_name(), "corp");
 
-        // Protocol defaults to openai-compatible; Down picks anthropic.
+        // Protocol defaults to openai-compatible; Down picks anthropic. The third entry is
+        // openai-responses (ADR 0026 D10's third kind).
+        assert_eq!(
+            PROTOCOLS,
+            ["openai-compatible", "anthropic", "openai-responses"]
+        );
         assert_eq!(wizard.protocol_kind(), "openai-compatible");
         wizard.on_key(LoginKey::Down);
         wizard.on_key(LoginKey::Enter);

@@ -468,8 +468,13 @@ pub fn compaction_settings_for_route(
     level: &str,
     max_tokens: u32,
 ) -> serde_json::Value {
-    match crate::resolve_provider(provider_name, providers, None) {
-        Ok((provider, _)) => compaction_settings_for(&provider, model, level, max_tokens).0,
+    match resolve_route_name(
+        provider_name,
+        model,
+        providers,
+        UnsupportedProtocol::BuiltInTable,
+    ) {
+        Ok(route) => compaction_settings_for(&route.provider_ref, model, level, max_tokens).0,
         Err(_) => serde_json::Value::Null,
     }
 }
@@ -501,8 +506,13 @@ pub fn route_replays_reasoning(
     model: &str,
     providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
 ) -> bool {
-    match crate::resolve_provider(provider_name, providers, None) {
-        Ok((provider_ref, _)) => resolve_reasoning_replay(&provider_ref, model).is_some(),
+    match resolve_route_name(
+        provider_name,
+        model,
+        providers,
+        UnsupportedProtocol::BuiltInTable,
+    ) {
+        Ok(route) => resolve_reasoning_replay(&route.provider_ref, model).is_some(),
         Err(_) => crate::catalog::catalog_reasoning_replay(provider_name, model).is_some(),
     }
 }
@@ -524,11 +534,9 @@ enum UnsupportedProtocol {
     BuiltInTable,
 }
 
-/// The one spelling of a route name's lookup (ADR 0026 D10): the auth entry's env, then the
-/// provider (the config's declarations, that env, the descriptor table), then the model's
-/// protocol (the catalog, else the table). [`RouteContext::args_for`],
-/// [`RouteContext::output_for`] and [`route_adapter_for`] all resolve a route through it, so a
-/// future protocol change lands in one place.
+/// [`resolve_route_name`]'s implementation: the auth entry's env and model list, then the
+/// provider, then the model's protocol (ADR 0026 D10). The model list is attached so the
+/// route's thinking map and endpoint follow the per-model resolution.
 fn resolve_route_name(
     provider_name: &str,
     model: &str,
@@ -538,8 +546,16 @@ fn resolve_route_name(
     let auth_env = crate::AuthStore::open()
         .ok()
         .and_then(|store| store.entry_env(provider_name));
-    let (provider_ref, _warning) =
-        crate::resolve_provider(provider_name, providers, auth_env.as_ref())?;
+    let model_list = crate::auth::resolve_key(provider_name)
+        .ok()
+        .flatten()
+        .and_then(|resolved| crate::read_provider_models(provider_name, &resolved.key));
+    let (provider_ref, _warning) = crate::resolve_provider_with_models(
+        provider_name,
+        providers,
+        auth_env.as_ref(),
+        model_list,
+    )?;
     let catalog = crate::protocol_catalog();
     let protocol = match provider_ref.resolve_protocol(Some(&catalog), model) {
         Ok(protocol) => protocol,
@@ -847,7 +863,7 @@ impl RouteContext {
             .map(String::as_str);
         let base_url = route
             .provider_ref
-            .endpoint_for(route.protocol, auth_base_url)
+            .endpoint_for(model, route.protocol, auth_base_url)
             .unwrap_or_default();
         crate::route_output(route.protocol.adapter(), &base_url, self.max_tokens)
     }

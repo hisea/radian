@@ -113,18 +113,21 @@ pub enum Input {
     },
     /// A `/model` target was vetted by the loop (ADR 0026 D5/D7). `tokens` is the current
     /// context estimate `T` (`None` = unknown, so it cannot exceed anything), `budget` the
-    /// new model's `B'` (`None` = unknown, so no comparison is possible).
+    /// new model's `B'` (`None` = unknown, so no comparison is possible), and `route` the
+    /// named provider's resolution line (`(openai-responses, model list)`), when it has one.
     ModelChecked {
         provider: String,
         model: String,
         tokens: Option<u64>,
         budget: Option<u64>,
+        route: Option<String>,
     },
     /// The compaction before a switch finished (D7). Success queues the switch.
     SwitchCompacted {
         provider: String,
         model: String,
         result: Result<CompactionOutcome, String>,
+        route: Option<String>,
     },
     /// A `/sessions`, `/export` or `/fork` finished: the notices to show.
     SessionDone(Vec<String>),
