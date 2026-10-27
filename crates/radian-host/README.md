@@ -23,9 +23,15 @@ Responses route (ADR 0026); `Responses` is the API-key Responses route (ADR 0026
 `build_model(ModelArgs) -> Result<HostModel, String>` turns resolved values into an adapter.
 `ModelArgs` is everything the host resolved beforehand: `provider`, `base_url`, `model`,
 `api_key: Option<String>`, `headers`, `include_usage: Option<bool>` (OpenAI-compatible only),
-`max_tokens` and `thinking` (Anthropic only), `reasoning_effort` / `reasoning_replay`, and
+`max_tokens` and `thinking` (Anthropic only), `max_output_tokens` (the catalog cap sent as the
+chat route's `max_tokens`, ADR 0018), `reasoning_effort` / `reasoning_replay`, and
 `chatgpt_oauth`. `Provider` is `OpenAiCompatible`, `Anthropic` or `ChatGpt`, with `from_name`,
 `as_str` (the name written into the session's config snapshot) and `default_base_url`.
+`route_output(adapter, base_url, max_tokens)` and `RouteOutput` say what the request sends
+(Anthropic's `max_tokens`, the chat catalog cap, or none); `RouteContext::output_for` resolves
+the same value for a switched route. `default_include_usage(provider)` says which descriptors
+ask for streamed usage by default (`opencode-go` does; every other provider keeps the
+adapter's host rule, `api.openai.com` only).
 
 ### The wire protocol comes from the catalog (ADR 0026)
 

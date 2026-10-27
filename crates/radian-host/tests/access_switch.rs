@@ -49,6 +49,7 @@ fn model(session_id: &str) -> radian_host::SwitchableModel {
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
         reasoning_replay: None,
+        max_output_tokens: None,
         chatgpt_oauth: false,
     })
     .unwrap();

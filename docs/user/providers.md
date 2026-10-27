@@ -62,6 +62,19 @@ Set `model.provider`, `model.base_url`, and `model.model` in the config file for
 Pass `--max-tokens <n>` for Anthropic requests.
 The default is 16384.
 This flag is refused for `openai-compatible` requests.
+
+An OpenAI-compatible chat request sets its own output cap when the models catalog knows both numbers for the model: `max_tokens = min(O, ⌊C/4⌋)`, where `C` is the context window and `O` is the output limit.
+When either number is unknown, Radian sends no `max_tokens`.
+An explicit `max_tokens` in an extra request body or a per-request setting wins.
+A route to `api.openai.com` sends none, because its newer chat models reject `max_tokens`.
+The same cap is the output reservation that the context budget subtracts from `C`.
+
+`opencode-go` asks the server to include usage in the stream by default.
+This is a property of that provider descriptor, not of its host name.
+Pass `--include-usage false` to turn it off.
+A route to `api.openai.com` also asks by default; every other route does not.
+Pass `--include-usage` to turn it on.
+
 Pass `--thinking <level>` to set the thinking level.
 Use one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 Omit it to use `medium`.

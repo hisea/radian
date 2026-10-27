@@ -218,6 +218,14 @@ impl ProviderDescriptor {
     }
 }
 
+/// Whether a descriptor's chat route asks for streamed usage by default (ADR 0026 D0).
+/// `opencode-go` does; every other provider returns `None`, which leaves the adapter's
+/// host-based default in force (on for `api.openai.com` only). Decided by descriptor id, never
+/// by a host-name substring. An explicit `--include-usage` wins before this is consulted.
+pub fn default_include_usage(provider_name: &str) -> Option<bool> {
+    (provider_name == "opencode-go").then_some(true)
+}
+
 /// The `auth.json` `env` key naming a named provider's wire protocol (ADR 0026 D10). pi
 /// ignores it; Radian reads it when `[providers.<name>]` is absent. The default is the
 /// generic `openai-compatible`.
@@ -1290,6 +1298,23 @@ pub fn resolve_route_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0026 D0: the descriptor decides streamed usage, never the host name. Only
+    /// `opencode-go` asks for it; every other provider leaves the adapter's host default in
+    /// force (`api.openai.com` on, everywhere else off).
+    #[test]
+    fn only_the_opencode_go_descriptor_asks_for_streamed_usage_by_default() {
+        assert_eq!(default_include_usage("opencode-go"), Some(true));
+        for id in [
+            "openai-compatible",
+            "openai",
+            "anthropic",
+            "chatgpt",
+            "some-named-provider",
+        ] {
+            assert_eq!(default_include_usage(id), None, "{id}");
+        }
+    }
 
     /// ADR 0027: only the providers whose usage the footer can fetch
     /// declare a source; the endpoint providers poll, the headers providers (slice ④) read

@@ -63,3 +63,12 @@ binary was run (`--no-fail-fast`), and the source was restored and confirmed (`p
 Command: `timeout 300 cargo test -p agent-provider-openai-compatible --features testing --test
 contract --locked --no-fail-fast contract_14`. `contract_14` fails on the old code too (`limits`
 was always `None`); `contract_14b` passes there by construction (the "never invent" assertion).
+
+## TK0191: the chat route's catalog `max_tokens` (2026-10-26)
+
+Branch `work/TK0191-chat-max-tokens-and-opencode-go-usage`. Each mutation was applied in place,
+the named binary was run, and the source was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0191-M1 | `catalog_max_tokens` returns `output` without the `⌊context/4⌋` cap | ✅ 1 failed (rc=100) | `request::tests::the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window` (1 000 000 / 384 000 yields 384 000, not 250 000); the host's `catalog::a_chat_route_reserves_its_catalog_max_tokens` fails too |

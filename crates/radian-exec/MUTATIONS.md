@@ -490,3 +490,17 @@ from `.radian/mut-backup/chat.rs` (`cmp` identical). The restored lib then passe
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0184-M4 | `ExecRuntimeEvents::on_model_error` stores nothing (the callback body is a no-op) | ✅ 1 failed | `jsonl::tests::a_usage_limit_error_reaches_the_result_through_the_driver` (the stored slot stays `None`, so the `Result` has no `model_error`) |
+
+## TK0191: the startup route resolves its catalog cap once (2026-10-27)
+
+Branch `work/TK0191-chat-max-tokens-and-opencode-go-usage`. The mutation was applied in place, the
+`radian` binary rebuilt (`cargo build -p radian-tui --bin radian`, so the test does not refuse a
+stale binary), and the source restored from `.radian/mut-backup/setup.rs` (`cmp` identical). The
+catching test is in the sandbox profile's `/tmp` exclusion group (`scratch` hard-codes
+`/tmp`, which the workspace tier denies), so it was run from outside that sandbox:
+`cargo nextest run -p radian-exec --test cli --locked --profile default -E
+'test(=the_startup_line_names_the_catalog)'`. Unmutated, the same command passed (1/1).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0191-M1 | the startup route's `request_output` is `RouteOutput::None` (the catalog cap is never resolved), so the sent `max_tokens`, `R` and `B` all fall back to the old none / 16384 / 922000 | ✅ 1 failed (rc=100) | `cli::the_startup_line_names_the_catalog` (cli.rs:6746, the `B 750000` assertion; the line printed `[budget] C 1000000, I 922000, output 384000, R 16384, B 922000`, and the mock request carried no `max_tokens`) |

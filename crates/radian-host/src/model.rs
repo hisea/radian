@@ -148,6 +148,9 @@ pub struct ModelArgs {
     /// `openai-compatible` only: the thinking level's wire value (ADR 0026 D11), sent as
     /// `reasoning_effort`. `None` sends no key.
     pub reasoning_effort: Option<String>,
+    /// `openai-compatible` only: the catalog-derived output cap sent as `max_tokens`
+    /// (ADR 0018). `None` sends no field.
+    pub max_output_tokens: Option<u32>,
     /// `openai-compatible` only: the assistant-message field the model requires its reasoning
     /// replayed under (ADR 0014 R4). `None` sends no reasoning.
     pub reasoning_replay: Option<String>,
@@ -512,6 +515,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
             }
             config.headers = args.headers;
             config.include_usage = args.include_usage;
+            config.max_tokens = args.max_output_tokens;
             config.reasoning_effort = args.reasoning_effort;
             config.reasoning_replay = args.reasoning_replay;
             OpenAiCompatible::new(config)
@@ -705,6 +709,15 @@ impl RouteContext {
             Some(self.max_tokens),
         );
         let reasoning_replay = resolve_reasoning_replay(&provider_ref, model);
+        // ADR 0018 §2: the chat route sends `min(limit.output, ⌊C/4⌋)` when the catalog knows
+        // both. The same number goes into the model and into the switched route's budget
+        // (`RouteContext::output_for`), so the sent value and `R` cannot drift.
+        let limit = catalog.limit(provider_name, model);
+        let max_output_tokens =
+            crate::route_output(route.adapter(), &route.base_url, self.max_tokens).resolve(
+                limit.and_then(|limit| limit.context),
+                limit.and_then(|limit| limit.output),
+            );
         Ok(ModelArgs {
             provider: route.adapter(),
             base_url: route.base_url,
@@ -713,15 +726,47 @@ impl RouteContext {
                 .map(str::to_owned)
                 .or_else(|| credential.as_ref().map(|credential| credential.key.clone())),
             headers: route.headers,
-            include_usage: self.include_usage,
+            // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default;
+            // an explicit `--include-usage` wins either way.
+            include_usage: self
+                .include_usage
+                .or_else(|| crate::default_include_usage(provider_name)),
             max_tokens: self.max_tokens,
             thinking,
             reasoning_effort,
             reasoning_replay,
+            max_output_tokens,
             // The `chatgpt` descriptor is the only OAuth Responses route; every other Responses
             // route uses the key from `auth.json` (ADR 0026).
             chatgpt_oauth: provider_name == crate::oauth_chatgpt::PROVIDER_ID,
         })
+    }
+
+    /// The output a switched route's request sends (ADR 0018 §2), for the driver's budget
+    /// resolver: Anthropic's `max_tokens`, the catalog-derived chat cap, or none. The budget
+    /// query uses the route's own protocol and endpoint, so a cross-provider switch does not
+    /// inherit the startup route's reservation.
+    pub fn output_for(&self, provider_name: &str, model: &str) -> crate::RouteOutput {
+        let auth_env = crate::AuthStore::open()
+            .ok()
+            .and_then(|store| store.entry_env(provider_name));
+        let Ok((provider_ref, _)) =
+            crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())
+        else {
+            return crate::RouteOutput::None;
+        };
+        let catalog = crate::protocol_catalog();
+        let protocol = provider_ref
+            .resolve_protocol(Some(&catalog), model)
+            .unwrap_or_else(|_| provider_ref.protocol_for(model));
+        let auth_base_url = auth_env
+            .as_ref()
+            .and_then(|env| env.get(crate::RADIAN_BASE_URL))
+            .map(String::as_str);
+        let base_url = provider_ref
+            .endpoint_for(protocol, auth_base_url)
+            .unwrap_or_default();
+        crate::route_output(protocol.adapter(), &base_url, self.max_tokens)
     }
 }
 

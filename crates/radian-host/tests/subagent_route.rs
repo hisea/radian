@@ -104,6 +104,7 @@ fn model(base_url: &str, slot: Arc<radian_runtime::ConfigSlot>) -> radian_host::
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
         reasoning_replay: None,
+        max_output_tokens: None,
         // Not a `chatgpt` route (ADR 0026's field): this test drives the
         // openai-compatible adapter against a mock.
         chatgpt_oauth: false,
