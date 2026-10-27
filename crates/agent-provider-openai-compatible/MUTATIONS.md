@@ -72,3 +72,14 @@ the named binary was run, and the source was restored from a copy under `.radian
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0191-M1 | `catalog_max_tokens` returns `output` without the `⌊context/4⌋` cap | ✅ 1 failed (rc=100) | `request::tests::the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window` (1 000 000 / 384 000 yields 384 000, not 250 000); the host's `catalog::a_chat_route_reserves_its_catalog_max_tokens` fails too |
+
+## TK0198: the opencode-go Go usage limit and the narrowed stream_options hint (2026-10-27)
+
+Branch `work/TK0198-chat-usage-limit-and-stream-options-hint`. Each mutation was applied in place,
+`cargo nextest run -p agent-provider-openai-compatible --locked --profile sandbox --no-fail-fast`
+was run, and the source was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0198-M1 | the recognizer returns `None` for the GoUsageLimitError body | caught: 4 failed (rc=100) | `usage_limit::tests::the_go_usage_limit_body_names_the_message_and_the_window`, `usage_limit::tests::a_retry_after_header_is_the_reset_wait_and_wins_over_the_body`, `http::a_go_usage_limit_uses_retry_after_as_its_reset`, `http::a_go_usage_limit_fails_at_once_and_never_names_the_workspace` |
+| TK0198-M2 | the J10 hint is appended to every 400 again | caught: 1 failed (rc=100) | `http::a_400_that_does_not_name_stream_options_keeps_its_message` |
