@@ -13,9 +13,11 @@
 //!
 //! The record is `runs/<task>/gate.json`. The child writes `running` with its own pid as soon
 //! as it starts, and the outcome last, after its verdicts, so a record that says `done` means
-//! the verdicts are all there. A gate the loop itself stopped is `interrupted`; a gate that
-//! died after it wrote `running` is counted, and `[limits] max_gate_deaths` turns it into
-//! `died` (ADR 0048 decision 10).
+//! the verdicts are all there. A gate the loop itself stopped is `interrupted`; every start
+//! whose gate is gone without a `done`, `refused` or `error` record is counted, once, and
+//! `[limits] max_gate_deaths` turns it into `died` (ADR 0048 decision 10). A `started` record
+//! that kept the digest a pass planned is the one exception: its gate left no record, so the
+//! pass reports `no_record` and starts no gate for those inputs.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -37,8 +39,8 @@ use super::stage;
 pub const GATE_FILE: &str = "gate.json";
 /// The background gate process's output, next to the record.
 pub const GATE_LOG: &str = "gate.log";
-/// A record status: a pass wrote the inputs it started a gate with and the gate process has
-/// not written its own record yet.
+/// A record status: a pass wrote the record it started a gate with (and the digest of the
+/// inputs, when it could plan them) and the gate process has not written its own record yet.
 pub const STARTED: &str = "started";
 /// A record status: the gate process is running, with its pid and process start time.
 pub const RUNNING: &str = "running";
@@ -51,8 +53,8 @@ pub const ERROR: &str = "error";
 /// A record status: a gate process exited without writing any record at all (a panic before
 /// its first write, a store that could not be opened).
 pub const NO_RECORD: &str = "no_record";
-/// A record status: a gate process wrote its `running` record and then died, more often than
-/// `[limits] max_gate_deaths` allows for the same attempt and inputs.
+/// A record status: a gate start died once too often for the same attempt and inputs, so the
+/// gate is not started again until they change.
 pub const DIED: &str = "died";
 /// A record status: arc stopped the gate itself (a stop signal on the scheduling loop), so the
 /// next pass starts it again without counting a death.
@@ -131,7 +133,8 @@ pub struct Record {
     /// The digest of the inputs the gate saw (`plan_verification`'s `inputs`), when it could
     /// plan. A pass uses it to skip an unchanged refusal.
     pub inputs: Option<String>,
-    /// How many times a gate died after writing `running` for this attempt and these inputs
+    /// How many starts of this attempt and these inputs have died: a gate that wrote
+    /// `running` and is gone, or a `started` record with no digest whose gate is gone
     /// (ADR 0048 decision 10). A pass compares it with `[limits] max_gate_deaths`.
     pub deaths: u32,
     /// The profile a `done` verification planned, when the record carries one: a pass applies
@@ -242,10 +245,11 @@ pub fn write_no_record(
     .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
 }
 
-/// Records that a gate died after writing its `running` record once too often for the same
-/// attempt and the same inputs: the status [`DIED`] behaves exactly as [`NO_RECORD`] does, so
-/// a later pass compares the inputs the same way and starts no gate for the same ones (ADR
-/// 0048 decision 10).
+/// Records that a gate died once too often for the same attempt and the same inputs: the
+/// status [`DIED`] behaves exactly as [`NO_RECORD`] does, so a later pass compares the inputs
+/// the same way and starts no gate for the same ones (ADR 0048 decision 10). `inputs` is
+/// `None` when the pass could not plan the gate: the record then carries no digest, and a
+/// later pass that can plan once more starts one new gate.
 ///
 /// # Errors
 ///
@@ -255,41 +259,43 @@ pub fn write_died(
     task: &str,
     kind: &str,
     attempt: &str,
-    inputs: &str,
+    inputs: Option<&str>,
     deaths: u32,
 ) -> Result<(), Error> {
-    write(
-        store,
-        task,
-        &json!({
-            "kind": kind,
-            "attempt": attempt,
-            "status": DIED,
-            "text": DIED_TEXT,
-            "inputs": inputs,
-            "deaths": deaths,
-            "at": crate::store::plan_ops::utc_now(),
-        }),
-    )
-    .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
+    let mut value = json!({
+        "kind": kind,
+        "attempt": attempt,
+        "status": DIED,
+        "text": DIED_TEXT,
+        "deaths": deaths,
+        "at": crate::store::plan_ops::utc_now(),
+    });
+    if let Some(inputs) = inputs {
+        value["inputs"] = json!(inputs);
+    }
+    write(store, task, &value)
+        .map_err(|error| Error::Failed(format!("cannot write the gate record: {error}")))
 }
 
-/// What a pass does about a `running` record whose process is gone (ADR 0048 decision 10).
+/// What a pass does about a gate start whose gate is gone (ADR 0048 decision 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Death {
-    /// Nothing to count: the gate is started again as before.
-    Restart,
     /// The gate died; it is started again with this many deaths in its record.
     Count(u32),
     /// It died once too often for these inputs: the record is `died` and nothing starts.
     Stop,
 }
 
-/// Counts one death of a gate that wrote `running` and is gone. `inputs` is the digest of
-/// what the gate would read now: a death is counted only for the same inputs the gate was
-/// started with, and without a digest on both sides there is nothing to compare, so the gate
-/// is restarted as before. Also writes the `died` record when the count passes
-/// `[limits] max_gate_deaths`.
+/// Counts one death of a start whose gate is gone: its record is `running`, or `started` with
+/// no digest. `inputs` is the digest of what the gate would read now: a different digest on
+/// both sides begins the count again at 1, and an unknown one on either side (the gate could
+/// not be planned then, or cannot be planned now) carries the count forward, because there is
+/// nothing to compare. Also writes the `died` record when the count passes
+/// `[limits] max_gate_deaths`; it keeps the digest only when the pass has one now.
+///
+/// A start is counted exactly once: every start whose gate is gone without a `done`, `refused`
+/// or `error` record is one death, so `1 + max_gate_deaths` bounds the starts of one attempt
+/// even when a gate could not be planned.
 ///
 /// # Errors
 ///
@@ -302,13 +308,9 @@ pub fn count_death(
     record: &Record,
     inputs: Option<&str>,
 ) -> Result<Death, Error> {
-    let Some(inputs) = inputs else {
-        return Ok(Death::Restart);
-    };
-    let deaths = if record.inputs.as_deref() == Some(inputs) {
-        record.deaths.saturating_add(1)
-    } else {
-        1
+    let deaths = match (record.inputs.as_deref(), inputs) {
+        (Some(before), Some(now)) if before != now => 1,
+        _ => record.deaths.saturating_add(1),
     };
     if deaths > store.config()?.limits.max_gate_deaths {
         write_died(store, task, kind, attempt, inputs, deaths)?;
@@ -398,10 +400,11 @@ pub struct Start {
 /// second gate for the same task: the lock is either held by the child or free because the
 /// child is gone.
 ///
-/// Before it spawns, the pass writes the inputs it started the gate with, and the deaths it
-/// already has, to the gate record ([`STARTED`]); the gate replaces the status with `running`
-/// as its first write and keeps both fields. The record a gate process that exits without
-/// writing anything leaves is what lets a later pass report it instead of starting it again.
+/// Before it spawns, the pass writes the inputs it started the gate with (when it could plan
+/// them) and the deaths it already has to the gate record ([`STARTED`]); the gate replaces the
+/// status with `running` as its first write and keeps both fields. The record a gate process
+/// that exits without writing anything leaves is what lets a later pass report it instead of
+/// starting it again.
 /// Once the child exists the pass names it in that record too, so a stop that finds only the
 /// `started` record has a process to signal.
 ///

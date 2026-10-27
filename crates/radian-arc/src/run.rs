@@ -715,21 +715,42 @@ fn advance_verification(
     if let Some(record) = &record {
         match record.status.as_str() {
             crate::gate::background::STARTED => {
-                // The pass wrote the inputs it started the gate with and no gate record came
-                // back. A held lock means the gate is still coming up; a free one means the
-                // process exited without writing anything, and another start with the same
-                // inputs would only repeat it (ADR 0048 decision 10).
-                if !crate::gate::background::running(store, task_id)
-                    && let Some(inputs) = record.inputs.clone()
-                {
-                    crate::gate::background::write_no_record(
-                        store, task_id, "verify", &label, &inputs,
-                    )?;
-                    transitions.note(format!(
-                        "{task_id} verify cannot run: {}",
-                        crate::gate::background::NO_RECORD_TEXT
-                    ));
-                    return Ok(false);
+                // The pass wrote this record and no gate record came back. A held lock means
+                // the gate is still coming up; the checks below start nothing then.
+                if !crate::gate::background::running(store, task_id) {
+                    if let Some(inputs) = record.inputs.clone() {
+                        // The record has the digest the gate was started with: another start
+                        // with the same inputs would only repeat the exit (ADR 0048 decision
+                        // 10).
+                        crate::gate::background::write_no_record(
+                            store, task_id, "verify", &label, &inputs,
+                        )?;
+                        transitions.note(format!(
+                            "{task_id} verify cannot run: {}",
+                            crate::gate::background::NO_RECORD_TEXT
+                        ));
+                        return Ok(false);
+                    }
+                    // The pass could not plan the gate, so the record has no digest to guard
+                    // a restart with: the start is counted like any death, and the gate is
+                    // started again (or left `died`) instead of being restarted for free.
+                    let planned_now = crate::review::plan_verification(store, task_id).ok();
+                    let inputs = planned_now.as_ref().map(|plan| plan.inputs.as_str());
+                    match crate::gate::background::count_death(
+                        store, task_id, "verify", &label, record, inputs,
+                    )? {
+                        crate::gate::background::Death::Stop => {
+                            transitions.note(format!(
+                                "{task_id} verify cannot run: {}",
+                                crate::gate::background::DIED_TEXT
+                            ));
+                            return Ok(false);
+                        }
+                        crate::gate::background::Death::Count(count) => {
+                            deaths = count;
+                            planned = planned_now;
+                        }
+                    }
                 }
             }
             // A gate that wrote `running` and is gone died; arc's own stop (`interrupted`)
@@ -756,7 +777,6 @@ fn advance_verification(
                             deaths = count;
                             planned = planned_now;
                         }
-                        crate::gate::background::Death::Restart => {}
                     }
                 }
             }

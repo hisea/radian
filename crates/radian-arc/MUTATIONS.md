@@ -1460,3 +1460,55 @@ source was restored from `.radian/mut/work_mod_fixed.rs` with `cp` and compared 
 
 1/1 caught.
 
+
+## TK0195: a gate start is counted exactly once (2026-10-27, branch `work/TK0195-gate-start-counted-once`)
+
+`run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died` failed under the full
+workspace run on a loaded Linux host with `1 + max_gate_deaths starts: left: 4, right: 3`, its
+`deaths == 3` assertion green. The cause was a pass that could not plan the gate: it started the
+gate without an inputs digest (`started`, no `inputs`), the gate exited before its `running`
+write, and the next pass could not write `no_record` (there were no inputs to record) and started
+a fresh gate without counting a death. The reproduction is a `git` shim on `PATH` that fails the
+second `fetch` and every fetch after it until the arm is consumed (so the pass cannot get a
+digest) and then the next `rev-parse --show-toplevel` (the gate's `Store::open`, so that gate
+exits before `running`): before the fix the test failed 10 of 10, after it 0 of 100 runs. Each
+mutation was applied by hand to the named file, the binary rebuilt with `cargo build -p
+radian-tui --bin radian`, the named tests ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test run -E 'test(a_start_without_a_digest) or
+test(a_death_the_pass_cannot_plan_now) or test(a_gate_that_is_still_starting) or
+test(a_gate_that_dies_after_running)'`, and the source was restored from `.radian/mut/` with
+`cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0195-M1 | a `started` record with no digest and a free gate lock falls through to a new start without a death (`run.rs`, the `STARTED` branch) | `run::a_start_without_a_digest_that_left_no_record_is_counted_not_restarted_for_free` (`the pass started a gate for a start it never counted`) | ✅ 1 failed |
+| TK0195-M2 | a death the pass cannot plan now starts the count again at zero (`gate/background.rs`, `count_death` returns `Count(0)` when `inputs` is `None`) | `run::a_death_the_pass_cannot_plan_now_carries_the_count_forward` (`the pass started a gate at zero deaths again`) | ✅ 1 failed |
+
+2/2 caught.
+
+## TK0195 rework 2: the starting-phase test starts a real gate (2026-10-27, branch `work/TK0195-gate-start-counted-once`)
+
+The review found that `run::a_gate_that_is_still_starting_is_not_started_again_and_not_counted`
+wrote the `started` record and held the lock by hand, so the old `advance_verification` satisfied
+every assertion: it neither started a real gate nor failed with the fix undone. The test now sets
+the task's `head_sha` to `None` (the pass cannot plan the gate, so the record has no digest), runs
+a real `arc run` with `RADIAN_ARC_GATE_TEST_SLOW_START_MS=30000` (the gate holds the lock it
+inherited and stays short of its `running` write), runs another pass while it is starting, then
+kills the gate before its `running` write and runs one more pass with `max_gate_deaths = 0`.
+Each mutation below was applied by hand to `crates/radian-arc/src/run.rs`, the binary rebuilt
+with `cargo build -p radian-tui --bin radian`, the test ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test run -E 'test(a_gate_that_is_still_starting)'`, and the source
+was restored from its `.radian/mut*/run.rs.bak` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0195-M3 | the `STARTED` branch drops its gate-lock check, so a pass counts a gate that is still starting (`run.rs`, `if !crate::gate::background::running(…)` removed; `.radian/mut3/`) | `run::a_gate_that_is_still_starting_is_not_started_again_and_not_counted` (the first `run`'s next pass writes `died` with `deaths` 1 while the gate is alive) | ✅ 1 failed |
+
+TK0195-M1's mutation (the whole no-digest `count_death` branch removed, so a `started` record
+with no inputs and a free lock starts a gate again for free; `.radian/mut1/`) is re-verified
+against the reworked test and fails at its last pass:
+`the pass restarted a start it never counted: TK0001-work-1 verify started`. The test therefore
+pins both the lock check and the count. The test also passed 50 of 50 runs under load (8 `yes`
+processes on a 10-core host), as did
+`run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died`.
+

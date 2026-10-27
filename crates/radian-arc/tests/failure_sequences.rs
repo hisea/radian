@@ -606,7 +606,6 @@ fn apply_gate_death(store: &Store, task: &str) -> Result<bool, radian_arc::store
             );
             Ok(false)
         }
-        background::Death::Restart => Ok(false),
     }
 }
 

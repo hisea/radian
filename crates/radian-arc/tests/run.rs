@@ -2045,6 +2045,12 @@ fn gate_starts(repo: &Repo, task: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// What `runs/<task>/gate.log` holds, for a failure message: every gate start that printed an
+/// error, one line each.
+fn gate_log(repo: &Repo, task: &str) -> String {
+    fs::read_to_string(repo.arc().join("runs").join(task).join("gate.log")).unwrap_or_default()
+}
+
 /// Runs one-shot passes until a gate record with `status` and these inputs is there, and
 /// returns what the passes printed. The first pass that records a no-record gate may be a
 /// later pass of the run that started it, or the next run: a gate process takes a moment to
@@ -2298,7 +2304,12 @@ fn a_gate_that_dies_after_running_is_restarted_twice_then_left_died() {
             .is_some_and(|inputs| !inputs.is_empty()),
         "the record kept the inputs the pass started with: {record}"
     );
-    assert_eq!(gate_starts(&repo, &task), 3, "1 + max_gate_deaths starts");
+    assert_eq!(
+        gate_starts(&repo, &task),
+        3,
+        "1 + max_gate_deaths starts; gate.log:\n{}",
+        gate_log(&repo, &task)
+    );
     let inputs = record["inputs"].clone();
 
     // Later passes start nothing and print the same line.
@@ -2364,6 +2375,243 @@ fn a_gate_that_dies_after_running_is_restarted_twice_then_left_died() {
         3,
         "the count began again at 0"
     );
+}
+
+/// A start a pass made without a digest is counted exactly like one whose gate wrote
+/// `running`: a `started` record with no inputs and a free gate lock is one death, so the gate
+/// is not started again for free. This is the state a pass leaves when its plan failed (a
+/// `git fetch` under load) and the gate it started exited before its `running` record; counting
+/// it is what bounds the starts at `1 + max_gate_deaths` when the gate could not be planned.
+/// Mutation: treat a `started` record with no inputs as "start again as before" and the pass
+/// below starts a gate and leaves `started`.
+#[test]
+fn a_start_without_a_digest_that_left_no_record_is_counted_not_restarted_for_free() {
+    let repo = Repo::new("run-gate-started-no-inputs");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-started-no-inputs");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let note = format!("{task} verify cannot run: its gate died after it started");
+
+    // What a pass that could not plan the gate left: `started`, two deaths behind it, and no
+    // gate process, so the gate lock is free.
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "started",
+            "deaths": 2,
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        !run.stdout.contains("verify started"),
+        "the pass started a gate for a start it never counted: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&note),
+        "the pass did not report the third death: {}",
+        run.stdout
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "died", "{record}");
+    assert_eq!(
+        record["deaths"], 3,
+        "the third death reaches `died`: {record}"
+    );
+    assert!(
+        record["inputs"]
+            .as_str()
+            .is_some_and(|inputs| !inputs.is_empty()),
+        "the died record keeps the digest the pass can plan now: {record}"
+    );
+    assert_eq!(gate_starts(&repo, &task), 0, "no gate was started");
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "verifying".to_owned())
+    );
+}
+
+/// A real gate that has not written `running` yet holds the gate lock it inherited, and a pass
+/// that runs while it does starts nothing and counts nothing. The pass that started the gate
+/// returned at once (a pass only schedules), so the second pass sees only the `started` record
+/// it left: no digest, because this pass could not plan the gate, so the lock is the only proof
+/// the gate is there. Once that gate exits without a record the start is counted once: at 0
+/// allowed deaths the next pass leaves `died` and starts nothing. Mutation: count a `started`
+/// record without looking at the lock, and the second pass reports a death for a live gate and
+/// overwrites its record; restore the old free-lock fall-through, and the last pass starts the
+/// gate again for free.
+#[test]
+fn a_gate_that_is_still_starting_is_not_started_again_and_not_counted() {
+    let repo = Repo::new("run-gate-starting");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-starting");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    tune(&repo, "max_gate_deaths = 2", "max_gate_deaths = 0");
+    // No `head_sha`: `plan_verification` refuses, so the pass starts the gate with no digest,
+    // the state the count below is about.
+    store
+        .change_task(&task, |task| {
+            task.head_sha = None;
+            Ok(())
+        })
+        .expect("the task without a head");
+
+    // The first pass starts a real gate and returns while the gate is still short of its
+    // `running` record; the gate holds the lock it inherited for as long as it lives.
+    let env = [(background::SLOW_START_ENV, "30000".to_owned())];
+    let first = repo.radian_with_env(&["arc", "run"], &env);
+    assert_eq!(first.code, 0, "run: {}\n{}", first.stderr, first.stdout);
+    assert!(
+        first.stdout.contains("verify started"),
+        "the pass did not start a gate: {}",
+        first.stdout
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "started", "{record}");
+    assert!(
+        record.get("inputs").is_none(),
+        "the pass could not plan the gate: {record}"
+    );
+    let gate = record["pid"].as_u64().expect("the gate pid") as u32;
+    assert!(process_alive(gate), "the gate did not start");
+
+    // A second pass while the gate is still starting: the held lock says the gate is there, so
+    // nothing starts and the start is not counted.
+    let second = repo.radian_with_env(&["arc", "run"], &env);
+    assert_eq!(second.code, 0, "run: {}\n{}", second.stderr, second.stdout);
+    assert!(
+        !second.stdout.contains("verify started"),
+        "the pass started a second gate: {}",
+        second.stdout
+    );
+    assert!(
+        !second.stdout.contains("died after it started"),
+        "the pass counted a gate that is still starting: {}",
+        second.stdout
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(
+        record["status"], "started",
+        "a gate that is still starting is not a death: {record}"
+    );
+    assert_eq!(
+        record["deaths"], 0,
+        "the death count did not move: {record}"
+    );
+    assert_eq!(
+        record["pid"].as_u64(),
+        Some(u64::from(gate)),
+        "the record still names the first gate: {record}"
+    );
+    assert!(process_alive(gate), "the first gate was stopped");
+
+    // The gate exits before its `running` write: the lock is free, and the next pass counts
+    // that start exactly once. At 0 allowed deaths it records `died` and starts nothing.
+    // SAFETY: `kill` on the pid the record names, with a plain signal number.
+    assert_eq!(
+        unsafe { libc::kill(gate as i32, libc::SIGKILL) },
+        0,
+        "kill the gate"
+    );
+    wait_until(Duration::from_secs(30), "the gate to exit", || {
+        !process_alive(gate)
+    });
+    let third = repo.radian(&["arc", "run"]);
+    assert_eq!(third.code, 0, "run: {}\n{}", third.stderr, third.stdout);
+    assert!(
+        !third.stdout.contains("verify started"),
+        "the pass restarted a start it never counted: {}",
+        third.stdout
+    );
+    assert!(
+        third.stdout.contains("died after it started"),
+        "the pass did not count the death: {}",
+        third.stdout
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "died", "{record}");
+    assert_eq!(
+        record["deaths"], 1,
+        "the start is counted exactly once: {record}"
+    );
+    assert!(
+        record.get("inputs").is_none(),
+        "the pass still cannot plan the gate: {record}"
+    );
+    assert!(
+        record.get("pid").is_none(),
+        "the died record names no process: {record}"
+    );
+}
+
+/// A gate that wrote `running` and died while the pass cannot plan it is still one death:
+/// with no digest to compare, the count carries forward instead of beginning again at zero.
+/// Mutation: restart at zero deaths when the pass cannot plan, and the gate is started past
+/// `max_gate_deaths`.
+#[test]
+fn a_death_the_pass_cannot_plan_now_carries_the_count_forward() {
+    let repo = Repo::new("run-gate-death-no-digest-now");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "gate-death-no-digest-now");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    // No `head_sha`: `plan_verification` refuses, so this pass has no digest to compare with.
+    store
+        .change_task(&task, |task| {
+            task.head_sha = None;
+            Ok(())
+        })
+        .expect("the task without a head");
+    let note = format!("{task} verify cannot run: its gate died after it started");
+
+    write_gate_record(
+        &repo,
+        &task,
+        serde_json::json!({
+            "kind": "verify",
+            "attempt": format!("{task}-1"),
+            "status": "running",
+            "pid": 999_999_999u32,
+            "inputs": "the digest it was started with",
+            "deaths": 2,
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    assert!(
+        !run.stdout.contains("verify started"),
+        "the pass started a gate at zero deaths again: {}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&note),
+        "the pass did not report the third death: {}",
+        run.stdout
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "died", "{record}");
+    assert_eq!(record["deaths"], 3, "the count carried forward: {record}");
+    assert!(
+        record.get("inputs").is_none(),
+        "the pass had no digest to write: {record}"
+    );
+    assert_eq!(gate_starts(&repo, &task), 0, "no gate was started");
 }
 
 /// `[limits] max_gate_deaths` of 0 stops at the first death: one start, and no restart.
@@ -2768,8 +3016,15 @@ fn reverify_reruns_a_task_whose_gate_died() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     commands(&repo, "true");
     publish_verifying(&repo, &store, &plan, &task);
-    background::write_died(&store, &task, "verify", &format!("{task}-1"), "inputs", 3)
-        .expect("the record");
+    background::write_died(
+        &store,
+        &task,
+        "verify",
+        &format!("{task}-1"),
+        Some("inputs"),
+        3,
+    )
+    .expect("the record");
 
     let reverified = repo.radian(&["arc", "reverify", &task]);
     assert_eq!(reverified.code, 0, "reverify: {}", reverified.stderr);
