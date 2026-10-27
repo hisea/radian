@@ -25,6 +25,7 @@ mod describe;
 mod diagnostics;
 mod errors;
 mod escape;
+pub mod extra_body;
 pub mod goal;
 mod headers;
 pub mod headers_usage;
@@ -95,12 +96,12 @@ pub fn hostname() -> Option<String> {
 pub use catalog::{
     CACHE_TTL, CATALOG_SNAPSHOT, CATALOG_URL, Catalog, FETCH_TIMEOUT, ModelEntry, ModelLimit,
     ModelPrice, OUTPUT_RESERVATION_CAP, PROVIDER_MODELS_RETRY, PROVIDER_MODELS_TTL, PriceRates,
-    PriceTier, ProviderInfo, ProviderModels, SNAPSHOT_DATE, Window, WindowCheck, WindowQuery,
-    WindowSource, bundled_catalog, cache_path, check_context_window_flag, fetch_provider_models,
-    host_of, input_budget, models_url_accepts_key, output_ceiling_warning, output_reservation,
-    protocol_catalog, provider_for_host, provider_models_cache, provider_models_stale,
-    provider_models_url, read_provider_models, resolve, resolve_offline, route_takes_images,
-    write_provider_models,
+    PriceTier, ProviderInfo, ProviderModels, RouteOutput, SNAPSHOT_DATE, Window, WindowCheck,
+    WindowQuery, WindowSource, bundled_catalog, cache_path, check_context_window_flag,
+    fetch_provider_models, host_of, input_budget, models_url_accepts_key, output_ceiling_warning,
+    output_reservation, protocol_catalog, provider_for_host, provider_models_cache,
+    provider_models_stale, provider_models_url, read_provider_models, resolve, resolve_offline,
+    route_output, route_takes_images, write_provider_models,
 };
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,
@@ -137,6 +138,7 @@ pub use diagnostics::{
     diagnostics_dir, is_diagnostic_file, job_notice_log_name, now_millis, panic_log_name,
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
+pub use extra_body::{EXTRA_BODY_ENV, ExtraBody, parse_extra_body, read_extra_body, reserved_keys};
 pub use headers::{
     CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
     take_child_headers_from_env,
@@ -198,10 +200,10 @@ pub use provider::{
     CHATGPT_DEVICE_LOGIN, CUSTOM_LOGIN, DEFAULT_THINKING_LEVEL, DESCRIPTORS, DescriptorModel,
     EndpointUsage, GENERIC_ID, LoginMethod, NamedProvider, NamedSource, Protocol, ProviderDecl,
     ProviderDescriptor, ProviderRef, RADIAN_KIND, ReasoningReplayOverride, Route, THINKING_LEVELS,
-    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, descriptor, descriptor_base_url,
-    descriptors, has_usage_source, level_fits, login_choices, name_error, parse_thinking_level,
-    resolve_provider, resolve_route, resolve_route_for, supported_thinking_levels,
-    supported_thinking_levels_ref, supported_thinking_levels_ref_with,
+    ThinkingMap, UsageSource, clamp_thinking, clamp_thinking_with, default_include_usage,
+    descriptor, descriptor_base_url, descriptors, has_usage_source, level_fits, login_choices,
+    name_error, parse_thinking_level, resolve_provider, resolve_route, resolve_route_for,
+    supported_thinking_levels, supported_thinking_levels_ref, supported_thinking_levels_ref_with,
     supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
     thinking_rank, unsupported_api_message, usage_endpoint, usage_item_alias, valid_name,
     wire_budget,

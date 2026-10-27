@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use agent_provider_openai_compatible::testing::chunk;
 use agent_provider_openai_responses::testing::{
     MockServer, Reply, completed, message_item, output_item_done,
 };
@@ -37,6 +38,11 @@ fn isolated_home(base_url: &str) -> PathBuf {
                 "type": "api_key",
                 "key": "sk-opencode-test",
                 "env": {"RADIAN_BASE_URL": base_url},
+            },
+            "openai-compatible": {
+                "type": "api_key",
+                "key": "sk-generic-test",
+                "env": {"RADIAN_BASE_URL": base_url},
             }
         });
         let auth = credentials.join("auth.json");
@@ -57,6 +63,7 @@ fn isolated_home(base_url: &str) -> PathBuf {
 
 fn context() -> RouteContext {
     RouteContext {
+        extra_body: Default::default(),
         providers: BTreeMap::new(),
         session_id: "responses-api-key".to_owned(),
         user_headers: Vec::new(),
@@ -69,10 +76,16 @@ fn context() -> RouteContext {
 
 #[tokio::test]
 async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route() {
-    let server = MockServer::start(vec![Reply::sse(&[
-        output_item_done(0, message_item("msg_1", "route-ok")),
-        completed(None),
-    ])])
+    let server = MockServer::start(vec![
+        Reply::sse(&[
+            output_item_done(0, message_item("msg_1", "route-ok")),
+            completed(None),
+        ]),
+        Reply::sse(&[chunk(
+            serde_json::json!({"role": "assistant", "content": "chat-ok"}),
+            Some("stop"),
+        )]),
+    ])
     .await;
     let _home = isolated_home(&server.base_url);
     let ctx = context();
@@ -138,9 +151,59 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
         "radian does not support this model's API (@ai-sdk/google)"
     );
 
-    // A plain chat model on the same descriptor still resolves to the chat protocol.
+    // A plain chat model on the same descriptor still resolves to the chat protocol, asks for
+    // streamed usage by default (ADR 0026 D0), and sends the catalog-derived `max_tokens`
+    // (ADR 0018 §2): min(384000, 1000000 / 4) = 250000.
     let chat = ctx
         .args_for("opencode-go", "deepseek-v4.1-flash", None)
         .expect("the chat route resolves");
     assert_eq!(chat.provider, Provider::OpenAiCompatible);
+    assert_eq!(chat.include_usage, Some(true), "the descriptor's default");
+    assert_eq!(chat.max_output_tokens, Some(250_000));
+    let chat_model = build_model(chat).expect("the chat model builds");
+    chat_model
+        .complete(
+            ModelRequest {
+                system_prompt: None,
+                messages: vec![Message::user("hi")],
+                tools: Vec::new(),
+                settings: Value::Null,
+            },
+            ModelContext {
+                cancellation: CancellationToken::new(),
+                events: &NoopSink,
+            },
+        )
+        .await
+        .expect("the mock answers");
+    let body = server.requests()[1].json();
+    assert_eq!(
+        body["stream_options"],
+        serde_json::json!({"include_usage": true}),
+        "the request asks for streamed usage: {body}"
+    );
+    assert_eq!(body["max_tokens"], serde_json::json!(250_000), "{body}");
+
+    // `--include-usage false` overrides the descriptor default.
+    let off = RouteContext {
+        extra_body: Default::default(),
+        include_usage: Some(false),
+        ..context()
+    };
+    assert_eq!(
+        off.args_for("opencode-go", "deepseek-v4.1-flash", None)
+            .expect("the chat route resolves")
+            .include_usage,
+        Some(false)
+    );
+
+    // A generic `openai-compatible` route to another host keeps the adapter's host policy:
+    // no streamed usage by default (the mock is not `api.openai.com`).
+    let generic = ctx
+        .args_for("openai-compatible", "any-model", None)
+        .expect("the generic route resolves");
+    assert_eq!(generic.include_usage, None);
+    // Its base is not `api.openai.com`, so it does send a catalog cap when one exists; this
+    // model has no catalog entry, so it sends none.
+    assert_eq!(generic.max_output_tokens, None);
 }

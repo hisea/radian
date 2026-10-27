@@ -63,6 +63,7 @@ fn model(
     slot: Arc<radian_runtime::ConfigSlot>,
 ) -> radian_host::SwitchableModel {
     let initial = build_model(radian_host::ModelArgs {
+        extra_body: Default::default(),
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: base_url.to_owned(),
         model: "mock".into(),
@@ -73,6 +74,7 @@ fn model(
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
         reasoning_replay: None,
+        max_output_tokens: None,
         chatgpt_oauth: false,
     })
     .unwrap();
@@ -81,6 +83,7 @@ fn model(
         radian_host::ModelRoute::new("openai-compatible", "mock"),
         slot,
         radian_host::RouteContext {
+            extra_body: Default::default(),
             providers: std::collections::BTreeMap::new(),
             session_id: session_id.to_owned(),
             user_headers: Vec::new(),

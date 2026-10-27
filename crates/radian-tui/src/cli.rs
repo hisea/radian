@@ -18,9 +18,8 @@ use clap::Parser;
 use radian_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
 use radian_host::memory::MemoryService;
 use radian_host::{
-    DEFAULT_MAX_TOKENS, ModelArgs, Provider, SessionFacade, Thinking, build_model,
-    check_context_window_flag, check_provider_flags, is_local_base_url, load_mcp_config,
-    parse_headers, validate_session_id,
+    DEFAULT_MAX_TOKENS, ModelArgs, SessionFacade, Thinking, build_model, check_context_window_flag,
+    check_provider_flags, is_local_base_url, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::AuditSink;
 use radian_session::SessionJournal;

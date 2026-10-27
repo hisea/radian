@@ -724,6 +724,34 @@ async fn a_trailing_usage_chunk_is_captured_through_the_sse_stream() {
 }
 
 #[tokio::test]
+async fn usage_in_the_final_chunk_with_include_usage_is_counted_once() {
+    // ADR 0026 D0: when the request asked for usage, the provider sends one final usage-only
+    // chunk. The assembler keeps that object as reported: it is not added to anything, so the
+    // same tokens are never counted twice.
+    let server = MockServer::start(vec![Reply::sse(&[
+        chunk(
+            json!({ "role": "assistant", "content": "ok" }),
+            Some("stop"),
+        ),
+        json!({
+            "choices": [],
+            "usage": { "prompt_tokens": 21, "completion_tokens": 5, "total_tokens": 26 }
+        }),
+    ])])
+    .await;
+
+    let response = complete_once(&server, |c| c.include_usage = Some(true)).await;
+    assert_eq!(
+        server.requests()[0].json()["stream_options"],
+        json!({ "include_usage": true })
+    );
+    let usage = response.usage.expect("the final usage chunk is captured");
+    assert_eq!(usage.input, Some(21), "counted once, not twice");
+    assert_eq!(usage.output, Some(5));
+    assert_eq!(usage.total, Some(26));
+}
+
+#[tokio::test]
 async fn the_user_agent_names_radian() {
     // The endpoint's own documentation asks clients to identify themselves rather than
     // impersonate a generic SDK, so this header is part of the outward contract.
@@ -791,7 +819,12 @@ async fn total_is_not_invented_when_the_provider_omits_it() {
 
 #[test]
 fn include_usage_defaults_to_the_openai_host_only() {
-    for url in ["https://api.openai.com/v1", "https://api.openai.com:443/v1"] {
+    for url in [
+        "https://api.openai.com/v1",
+        "https://api.openai.com:443/v1",
+        "https://api.openai.com./v1",
+        "https://API.OPENAI.COM./v1",
+    ] {
         let model = OpenAiCompatible::new(OpenAiCompatibleConfig::new(url, "m")).unwrap();
         assert!(model.include_usage(), "{url}");
     }

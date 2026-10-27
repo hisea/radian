@@ -413,47 +413,32 @@ pub(crate) async fn setup(
     if let Some(notice) = compaction_notice {
         eprintln!("[compaction] {notice}");
     }
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
+    // read once here, before any session file exists; an invalid value is a startup refusal.
+    let extra_body = radian_host::read_extra_body().map_err(SetupError)?;
+    if let Some(extra) = &extra_body {
+        if let Some(line) = extra.applied_line() {
+            eprintln!("{line}");
+        }
+        if let Some(line) = extra.settings_warning(&settings.compaction_settings) {
+            eprintln!("{line}");
+        }
+    }
+    let extra_fields = extra_body
+        .map(radian_host::ExtraBody::into_fields)
+        .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
     let replays_reasoning = reasoning_replay.is_some();
-    let initial = build_model(ModelArgs {
-        provider: route.adapter(),
-        base_url: route.base_url.clone(),
-        model: model_name.clone(),
-        api_key: credential.as_ref().map(|key| key.key.clone()),
-        headers: route.headers.clone(),
-        include_usage: cli.include_usage,
-        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        thinking: thinking_of,
-        reasoning_effort: reasoning_effort.clone(),
-        reasoning_replay: reasoning_replay.clone(),
-        chatgpt_oauth,
-    })
-    .map_err(SetupError)?;
-    // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
-    // still carry a change the TUI wrote, so resume restores the right model (D8).
-    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
-    let model = radian_host::SwitchableModel::new(
-        initial,
-        radian_host::ModelRoute::new(&provider_name, &model_name),
-        config_slot.clone(),
-        radian_host::RouteContext {
-            providers: config.providers.clone(),
-            session_id: session_id.clone(),
-            user_headers: headers.clone(),
-            include_usage: cli.include_usage,
-            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            thinking,
-            thinking_budget,
-        },
+    // ADR 0018 §2: the output the request will really send. The chat route sends the
+    // catalog-derived `max_tokens` (`min(limit.output, ⌊C/4⌋)`), the Anthropic route its
+    // `max_tokens`, and the Responses route none. `R` and `B` count exactly this value.
+    let request_output = radian_host::route_output(
+        route.adapter(),
+        &route.base_url,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     );
-    let request_max_output = match provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        // Neither sends an explicit max-output field by default (the Responses adapter only
-        // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
-        Provider::OpenAiCompatible | Provider::ChatGpt => None,
-    };
     // The catalog groups by provider id: the resolved provider's own id when it is not the
     // generic descriptor (so a `chatgpt` route resolves through the descriptor table, which is
     // the only window source models.dev cannot answer for), else the hostname rule.
@@ -465,15 +450,84 @@ pub(crate) async fn setup(
         catalog_provider.clone(),
         catalog_base_url.clone(),
         model_name.clone(),
-        request_max_output,
+        request_output,
         true,
+    );
+    // The window comes from `--context-window`, the models.dev catalog, or the route's own
+    // descriptor table (ADR 0018; a `chatgpt` route has only the last). A fetch failure is not a
+    // startup failure: the window is then unknown and the guard stays off. This runs before the
+    // session file exists.
+    let window = radian_host::resolve(&radian_host::WindowQuery::production(
+        cli.context_window.or(config.model.context_window),
+        catalog_provider,
+        &catalog_base_url,
+        &model_name,
+        request_output,
+        cli.offline_catalog,
+    ))
+    .await;
+    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
+    // window (the budget is then off).
+    match window.startup_check() {
+        radian_host::WindowCheck::Ok => {}
+        radian_host::WindowCheck::Refuse(message) => return Err(SetupError(message)),
+        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
+    }
+    if let Some(warning) = radian_host::output_ceiling_warning(window.request_output, window.output)
+    {
+        eprintln!("{warning}");
+    }
+    let context_budget = window
+        .budget
+        .filter(|tokens| *tokens > 0)
+        .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning));
+    let initial = build_model(ModelArgs {
+        provider: route.adapter(),
+        base_url: route.base_url.clone(),
+        model: model_name.clone(),
+        api_key: credential.as_ref().map(|key| key.key.clone()),
+        headers: route.headers.clone(),
+        extra_body: extra_fields.clone(),
+        // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default;
+        // `--include-usage` overrides it in either direction.
+        include_usage: cli
+            .include_usage
+            .or_else(|| radian_host::default_include_usage(&provider_name)),
+        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        thinking: thinking_of,
+        reasoning_effort: reasoning_effort.clone(),
+        reasoning_replay: reasoning_replay.clone(),
+        max_output_tokens: window.request_output,
+        chatgpt_oauth,
+    })
+    .map_err(SetupError)?;
+    // ADR 0026 D5: switchable, like the TUI. The CLI has no `/model`, but the journal can
+    // still carry a change the TUI wrote, so resume restores the right model (D8).
+    let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let route_ctx = radian_host::RouteContext {
+        providers: config.providers.clone(),
+        session_id: session_id.clone(),
+        user_headers: headers.clone(),
+        extra_body: extra_fields,
+        include_usage: cli.include_usage,
+        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        thinking,
+        thinking_budget,
+    };
+    let model = radian_host::SwitchableModel::new(
+        initial,
+        radian_host::ModelRoute::new(&provider_name, &model_name),
+        config_slot.clone(),
+        route_ctx.clone(),
     );
     let budget_for = {
         let query = window_query.clone();
         let providers = config.providers.clone();
+        let route_ctx = route_ctx.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
+                request_output: route_ctx.output_for(provider, switch_model),
                 model: switch_model.to_owned(),
                 ..query.clone()
             });
@@ -527,39 +581,6 @@ pub(crate) async fn setup(
     let mut secrets: Vec<String> = radian_host::resolved_keys();
     secrets.extend(route.headers.iter().map(|(_, value)| value.clone()));
     secrets.retain(|secret| !secret.is_empty());
-    // ADR 0015: the flag's zero was refused as a usage error above, and the config's zero was
-    // mapped to `None` by the reader, so this is a window the user really asked for. The catalog
-    // decides when it is `None`.
-    let context_window = cli.context_window.or(config.model.context_window);
-    // The window comes from `--context-window`, the models.dev catalog, or the route's own
-    // descriptor table (ADR 0018; a `chatgpt` route has only the last). A fetch failure is not a
-    // startup failure: the window is then unknown and the guard stays off. This runs before the
-    // session file exists.
-    // ADR 0018: `R` comes from the request's own output setting; Anthropic sends
-    // `max_tokens`, OpenAI-compatible sends none.
-    let window = radian_host::resolve(&radian_host::WindowQuery::production(
-        context_window,
-        catalog_provider,
-        &catalog_base_url,
-        &model_name,
-        request_max_output,
-        cli.offline_catalog,
-    ))
-    .await;
-    // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
-    // window (the budget is then off).
-    match window.startup_check() {
-        radian_host::WindowCheck::Ok => {}
-        radian_host::WindowCheck::Refuse(message) => return Err(SetupError(message)),
-        radian_host::WindowCheck::Warn(message) => eprintln!("{message}"),
-    }
-    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
-        eprintln!("{warning}");
-    }
-    let context_budget = window
-        .budget
-        .filter(|tokens| *tokens > 0)
-        .map(|tokens| ContextBudget::new(tokens).with_reasoning(replays_reasoning));
     Ok(Setup {
         model,
         provider_id: provider_name.clone(),

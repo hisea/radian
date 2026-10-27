@@ -29,7 +29,8 @@ The catalog also keeps `modalities.input` (the models.dev list such as `["text",
 
 `B = min(I, C − R)`.
 
-- `R = max(min(16384, ⌊C/4⌋), largest output actually sent in this request)`: one quarter of the window, capped at 16K. The largest output actually sent in the request can raise it. The catalog `limit.output` never joins `R`. It only checks that the request value never exceeds it.
+- `R = max(min(16384, ⌊C/4⌋), largest output actually sent in this request)`: one quarter of the window, capped at 16K. The largest output actually sent in the request can raise it.
+- **The output the chat route sends**: when the route's catalog entry knows both `limit.context` (`C`) and `limit.output` (`O`), an OpenAI-compatible chat request sends `max_tokens = min(O, ⌊C/4⌋)`. That value is what `R` counts as the output actually sent. When either number is unknown (0 or missing), the request sends no `max_tokens`, as before. An explicit `max_tokens` already in the request (an `extra_body` field or a per-request setting) wins and is not overwritten. A route to `api.openai.com` also sends none: its newer chat models reject `max_tokens`, and Radian never invents `max_completion_tokens`. The catalog `limit.output` therefore joins `R` only through the value actually sent; it is never the reservation on its own, and it is still the ceiling that a request value is checked against.
 - With unknown `C`, `R` drops out. `C ≤ R` is a startup error. `B = 0` reads as unset.
 
 ### 3. Auto compaction

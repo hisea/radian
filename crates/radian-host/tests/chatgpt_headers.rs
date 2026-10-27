@@ -17,7 +17,7 @@ use radian_core::{
 };
 use radian_host::oauth_chatgpt::Endpoints;
 use radian_host::{AuthStore, ChatGptModel, OAuthEntry};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn isolated_home() -> std::path::PathBuf {
     static HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -96,6 +96,10 @@ async fn headers_carry_originator_radian_and_the_account_id_from_the_token() {
     .await;
 
     let model = ChatGptModel {
+        extra_body: serde_json::Map::from_iter([(
+            "thinking".to_owned(),
+            json!({"type": "enabled"}),
+        )]),
         base_url: server.base_url.clone(),
         model: "gpt-5.4".to_owned(),
         static_headers: vec![
@@ -146,4 +150,9 @@ async fn headers_carry_originator_radian_and_the_account_id_from_the_token() {
         Some("responses=experimental")
     );
     assert_eq!(recorded.header("session_id"), Some("sess-headers-test"));
+    assert_eq!(
+        recorded.json()["thinking"],
+        json!({"type": "enabled"}),
+        "the extra body reaches the OAuth Responses route too (ADR 0026 D13)"
+    );
 }

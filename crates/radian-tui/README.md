@@ -1593,8 +1593,10 @@ from models.dev` once.
 The effective input budget is **`B = min(I, C − R)`**, with **`R = max(min(16384, ⌊C/4⌋), the
 request's max output)`** (ADR 0018: a quarter of the window, capped at 16384, raised
 by the output the request itself sends). The startup notice names the source and every number
-(`C 1000000, I 922000, output 384000, R 16384, B 922000 from models.dev (opencode/…, cached 3 h
-ago)`, `B 15000 from --context-window` for C = 20000, or a `no budget` line). `C ≤ R` is refused
+(`C 1000000, I 922000, output 384000, R 250000, B 750000 from models.dev (opencode/…, cached 3 h
+ago)`, `B 15000 from --context-window` for C = 20000, or a `no budget` line). The 250000 is the
+`max_tokens` this chat route sends (ADR 0018); a route that sends nothing keeps `R 16384` and
+`B 922000`. `C ≤ R` is refused
 at startup: the window cannot hold the reservation (with the adaptive `R` it needs the request's
 own output to reach `C`).
 

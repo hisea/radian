@@ -9,6 +9,13 @@ use crate::config::OpenAiCompatibleConfig;
 /// since ADR 0018 it is a request-level setting that wins over `config.reasoning_effort`.
 const RESERVED: [&str; 5] = ["model", "messages", "tools", "stream", "stream_options"];
 
+/// The body keys this adapter owns, for a host that merges `extra_body` into every request
+/// (ADR 0026 D13). A caller refuses them before a request is sent; `build_body` refuses them
+/// again.
+pub fn reserved_body_keys() -> &'static [&'static str] {
+    &RESERVED
+}
+
 pub(crate) fn build_body(
     request: &ModelRequest,
     config: &OpenAiCompatibleConfig,
@@ -32,6 +39,13 @@ pub(crate) fn build_body(
     }
     body.insert("model".into(), json!(config.model));
     body.insert("stream".into(), json!(true));
+    // ADR 0018: the catalog-derived chat output cap. An explicit `max_tokens` the request
+    // already carries (extra_body or request settings) wins and is never overwritten.
+    if !body.contains_key("max_tokens")
+        && let Some(max_tokens) = config.max_tokens
+    {
+        body.insert("max_tokens".into(), json!(max_tokens));
+    }
     // ADR 0026 D11: the thinking level's wire value, when the route's map gives one. Absent
     // otherwise, so a level-less model keeps the pre-D11 request byte for byte. A request-level
     // value (ADR 0018) wins over it.
@@ -229,6 +243,7 @@ fn audio_format(mime_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::catalog_max_tokens;
     use radian_core::{InputSource, MessageId, MessageMeta, OpaqueJson, ToolConcurrency, ToolSpec};
 
     fn config() -> OpenAiCompatibleConfig {
@@ -616,6 +631,62 @@ mod tests {
         req.settings = json!([1, 2]);
         assert!(build_body(&req, &cfg, false).is_err());
     }
+    #[test]
+    fn the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window() {
+        // ADR 0018: C = 1000000, O = 384000 → 250000; C = 128000, O = 16384 → 16384.
+        assert_eq!(
+            catalog_max_tokens(Some(1_000_000), Some(384_000)),
+            Some(250_000)
+        );
+        assert_eq!(
+            catalog_max_tokens(Some(128_000), Some(16_384)),
+            Some(16_384)
+        );
+        // Either number unknown (missing or 0) means the request sends no field.
+        assert_eq!(catalog_max_tokens(None, Some(384_000)), None);
+        assert_eq!(catalog_max_tokens(Some(1_000_000), None), None);
+        assert_eq!(catalog_max_tokens(Some(0), Some(384_000)), None);
+        assert_eq!(catalog_max_tokens(Some(1_000_000), Some(0)), None);
+        // A window too small to give a token of output sends nothing either.
+        assert_eq!(catalog_max_tokens(Some(3), Some(1_000)), None);
+    }
+
+    #[test]
+    fn a_resolved_output_cap_is_sent_as_max_tokens() {
+        // ADR 0018 §2: C = 1000000, O = 384000 → 250000; C = 128000, O = 16384 → 16384.
+        let mut cfg = config();
+        cfg.max_tokens = catalog_max_tokens(Some(1_000_000), Some(384_000));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(250_000));
+
+        cfg.max_tokens = catalog_max_tokens(Some(128_000), Some(16_384));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(16_384));
+
+        // O unknown: nothing is sent.
+        cfg.max_tokens = catalog_max_tokens(Some(1_000_000), None);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert!(body.get("max_tokens").is_none(), "{body}");
+
+        // No cap: no field, byte-identical to the request before the rule.
+        let plain = build_body(&request(vec![Message::user("hi")]), &config(), false).unwrap();
+        assert!(plain.get("max_tokens").is_none(), "{plain}");
+    }
+
+    #[test]
+    fn an_explicit_max_tokens_wins_over_the_config_cap() {
+        let mut cfg = config();
+        cfg.max_tokens = Some(250_000);
+        cfg.extra_body.insert("max_tokens".into(), json!(100));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(100), "extra_body wins");
+
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"max_tokens": 64});
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(64), "per-request settings win");
+    }
+
     // ---------- cross-provider history (ADR 0026 D6) ----------
 
     /// A history written by the **other** adapter (an Anthropic run) must map cleanly: its

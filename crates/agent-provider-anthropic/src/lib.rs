@@ -24,3 +24,4 @@ pub mod testing;
 
 pub use config::{AnthropicConfig, ApiKey, CacheMode, ConfigError, ThinkingConfig};
 pub use model::Anthropic;
+pub use request::reserved_body_keys;

@@ -385,21 +385,32 @@ pub(super) fn resolve_window_and_route(
     resolved: &ResolvedModel,
     startup_log: &mut StartupLog,
 ) -> Result<ResolvedRoute, RunError> {
-    // `R` comes from the request's own output setting: Anthropic sends `max_tokens`,
-    // OpenAI-compatible sends none.
+    // `R` comes from the request's own output setting (ADR 0018 §2): the chat route sends
+    // the catalog-derived `max_tokens`, the Anthropic route its `max_tokens`, and the
+    // Responses route none.
     // The app was built before the model was resolved (review M1): the status bar's model name
     // is set here, once, from the effective route.
     app.session.model_name = resolved.model_name.clone();
-    let request_max_output = match resolved.provider {
-        Provider::Anthropic => Some(cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
-        // Neither sends an explicit max-output field by default (the Responses adapter only
-        // sends `max_output_tokens` when `extra_body` asks for it, same as openai-compatible).
-        Provider::OpenAiCompatible | Provider::ChatGpt => None,
-    };
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
     let catalog_base_url = resolved
         .provider_ref
         .endpoint_for(resolved.protocol, None)?;
+    let auth_base_url = resolved
+        .credential
+        .as_ref()
+        .and_then(|credential| credential.env.get(radian_host::RADIAN_BASE_URL))
+        .map(String::as_str);
+    let output_base_url = match resolved.base_url_override.clone() {
+        Some(url) if resolved.provider_ref.takes_base_url_override() => url,
+        _ => resolved
+            .provider_ref
+            .endpoint_for(resolved.protocol, auth_base_url)?,
+    };
+    let request_output = radian_host::route_output(
+        resolved.provider,
+        &output_base_url,
+        cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+    );
     // The catalog groups by provider id; the generic descriptor is not one, so its provider
     // is derived from the base URL hostname. A named provider is its own group only when its
     // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
@@ -417,7 +428,7 @@ pub(super) fn resolve_window_and_route(
         catalog_provider,
         &catalog_base_url,
         resolved.model_name.clone(),
-        request_max_output,
+        request_output,
         cli.offline_catalog,
     )));
     // ADR 0018: `C ≤ R` refuses an explicit `--context-window` and only warns for a catalog
@@ -427,7 +438,8 @@ pub(super) fn resolve_window_and_route(
         radian_host::WindowCheck::Refuse(message) => return Err(RunError::Startup(message)),
         radian_host::WindowCheck::Warn(message) => startup_log.line(message),
     }
-    if let Some(warning) = radian_host::output_ceiling_warning(request_max_output, window.output) {
+    if let Some(warning) = radian_host::output_ceiling_warning(window.request_output, window.output)
+    {
         startup_log.line(warning);
     }
 
@@ -502,6 +514,20 @@ pub(super) fn resolve_window_and_route(
     if let Some(notice) = compaction_notice {
         startup_log.line(format!("radian: [compaction] {notice}"));
     }
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
+    // read once here, before any session file exists; an invalid value is a startup refusal.
+    let extra_body = radian_host::read_extra_body()?;
+    if let Some(extra) = &extra_body {
+        if let Some(line) = extra.applied_line() {
+            startup_log.line(line);
+        }
+        if let Some(line) = extra.settings_warning(&settings.compaction_settings) {
+            startup_log.line(line);
+        }
+    }
+    let extra_fields = extra_body
+        .map(radian_host::ExtraBody::into_fields)
+        .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay =
@@ -516,30 +542,35 @@ pub(super) fn resolve_window_and_route(
             .as_ref()
             .map(|credential| credential.key.clone()),
         headers: route.headers.clone(),
-        // The TUI has no `--include-usage` flag; the adapter's default policy applies.
-        include_usage: None,
+        extra_body: extra_fields.clone(),
+        // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default. The
+        // TUI has no `--include-usage` flag.
+        include_usage: radian_host::default_include_usage(&resolved.provider_name),
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: thinking_of,
         reasoning_effort: reasoning_effort.clone(),
         reasoning_replay: reasoning_replay.clone(),
+        max_output_tokens: window.request_output,
         chatgpt_oauth: resolved.chatgpt_oauth,
     })?;
     // ADR 0026 D5: the model is switchable. The slot is shared with the driver (open_session
     // wires it), so a `/model` change reaches the next request without touching the key.
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
+    let route_ctx = radian_host::RouteContext {
+        providers: config.providers.clone(),
+        session_id: session_id.clone(),
+        user_headers: user_headers.clone(),
+        extra_body: extra_fields,
+        include_usage: None,
+        max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        thinking: resolved.thinking.clone(),
+        thinking_budget: resolved.thinking_budget,
+    };
     let model = radian_host::SwitchableModel::new(
         initial,
         radian_host::ModelRoute::new(&resolved.provider_name, &resolved.model_name),
         std::sync::Arc::clone(&config_slot),
-        radian_host::RouteContext {
-            providers: config.providers.clone(),
-            session_id: session_id.clone(),
-            user_headers: user_headers.clone(),
-            include_usage: None,
-            max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            thinking: resolved.thinking.clone(),
-            thinking_budget: resolved.thinking_budget,
-        },
+        route_ctx.clone(),
     );
     // ADR 0026 D7: a switch recomputes `B` from the warm local catalog, never the network.
     let window_query = radian_host::WindowQuery::production(
@@ -547,17 +578,20 @@ pub(super) fn resolve_window_and_route(
         (resolved.provider_name != radian_host::GENERIC_ID).then(|| resolved.provider_name.clone()),
         catalog_base_url.clone(),
         resolved.model_name.clone(),
-        request_max_output,
+        request_output,
         true,
     );
     let budget_for = {
         let query = window_query.clone();
         let providers = config.providers.clone();
+        let route_ctx = route_ctx.clone();
         std::sync::Arc::new(move |provider: &str, switch_model: &str| {
             // The switched route carries its own provider id, so the resolver uses it directly
-            // instead of deriving one from the startup base URL.
+            // instead of deriving one from the startup base URL. Its output setting is the
+            // switched route's own (ADR 0018 §2), not the startup route's.
             let window = radian_host::resolve_offline(&radian_host::WindowQuery {
                 catalog_provider: Some(provider.to_owned()),
+                request_output: route_ctx.output_for(provider, switch_model),
                 model: switch_model.to_owned(),
                 ..query.clone()
             });

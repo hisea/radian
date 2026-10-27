@@ -1,0 +1,15 @@
+# The default task set, chosen from the calibration run cal1 (2026-10-27).
+# The first group separated the agents' pass rate, so a run of it measures
+# whether a change moves capability.
+largest-eigenval
+query-optimize
+torch-tensor-parallelism
+db-wal-recovery
+adaptive-rejection-sampler
+# The second group is tasks every agent passed with a stable generated-token
+# gap, so a run of it compares reasoning volume rather than pass rate.
+git-multibranch
+llm-inference-batching-scheduler
+regex-log
+build-cython-ext
+write-compressor

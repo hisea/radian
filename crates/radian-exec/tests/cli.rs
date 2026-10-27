@@ -6744,13 +6744,19 @@ async fn the_startup_line_names_the_catalog() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("B 922000 from models.dev (opencode/deepseek-v4.1-flash"),
+        stderr.contains("B 750000 from models.dev (opencode/deepseek-v4.1-flash"),
         "{stderr}"
     );
     assert!(stderr.contains("C 1000000"), "{stderr}");
     assert!(stderr.contains("I 922000"), "{stderr}");
     assert!(stderr.contains("output 384000"), "{stderr}");
-    assert!(stderr.contains("R 16384"), "{stderr}");
+    // R is the output actually sent: min(384000, 1000000 / 4) = 250000.
+    assert!(stderr.contains("R 250000"), "{stderr}");
+    assert_eq!(
+        provider.requests()[0].json()["max_tokens"],
+        json!(250000),
+        "the catalog cap is sent as max_tokens"
+    );
     assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
 }
 
@@ -10077,4 +10083,59 @@ fn trust_commands_read_and_write_the_record() {
         "{}",
         String::from_utf8_lossy(&exec.stdout)
     );
+}
+
+// ---------- RADIAN_EXTRA_BODY (ADR 0026 D13) ----------
+
+/// The environment value reaches the request body through the host, and startup names the
+/// keys applied — never their values.
+#[tokio::test]
+async fn the_extra_body_env_reaches_the_request_and_the_startup_line_names_the_keys() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("RADIAN_EXTRA_BODY", r#"{"thinking":{"type":"enabled"}}"#)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "ok\n");
+    let body = server.requests()[0].json();
+    assert_eq!(body["thinking"], json!({"type": "enabled"}));
+    assert!(
+        stderr.contains("[body] RADIAN_EXTRA_BODY sets: thinking"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("enabled"),
+        "startup names the keys, never their values: {stderr}"
+    );
+}
+
+/// A reserved key and a non-object are startup refusals naming the variable (and the key),
+/// before any session file exists. Exit code 2 is the code every startup refusal uses.
+#[tokio::test]
+async fn a_bad_extra_body_stops_startup_with_the_named_error() {
+    for (value, needle) in [("{\"messages\":[]}", "messages"), ("[1]", "object")] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    "http://127.0.0.1:9/v1",
+                    "-p",
+                    "hi",
+                ],
+                &[("RADIAN_EXTRA_BODY", value)],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stderr.contains("RADIAN_EXTRA_BODY"), "{value}: {stderr}");
+        assert!(stderr.contains(needle), "{value}: {stderr}");
+    }
 }

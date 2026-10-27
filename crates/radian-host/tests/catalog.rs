@@ -8,7 +8,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{MockServer, Reply};
-use radian_host::{Catalog, FETCH_TIMEOUT, ModelLimit, WindowQuery, WindowSource, resolve};
+use radian_host::{
+    Catalog, FETCH_TIMEOUT, ModelLimit, RouteOutput, WindowQuery, WindowSource, resolve,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -51,8 +53,9 @@ fn query_at(cache: &Path, base_url: &str, model: &str) -> WindowQuery {
         catalog_provider: Some("opencode".into()),
         base_url: "https://opencode.ai/zen/go/v1".into(),
         model: model.into(),
-        // OpenAI-compatible sends no max_tokens, so R = the safety reservation (16384).
-        request_max_output: None,
+        // The route carries no output field in these resolver tests (ADR 0018 §2); a chat
+        // route's cap is exercised by `a_chat_route_reserves_its_catalog_max_tokens`.
+        request_output: RouteOutput::None,
         offline: false,
         cache_path: cache.join("catalog/models.json"),
         url: format!("{base_url}/api.json"),
@@ -77,6 +80,34 @@ fn cache_file(cache: &Path) -> PathBuf {
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// ADR 0018 §2: a chat route sends `max_tokens = min(limit.output, ⌊C/4⌋)`, and that sent
+/// value is what `R` and `B` count.
+#[tokio::test]
+async fn a_chat_route_reserves_its_catalog_max_tokens() {
+    let cache = scratch("chat-cap");
+    let server = MockServer::start(vec![Reply::status(200, API_JSON)]).await;
+    let mut q = query(&cache, &server, "deepseek-v4.1-flash");
+    q.request_output = RouteOutput::CatalogChat;
+    let window = resolve(&q).await;
+    assert_eq!(
+        window.request_output,
+        Some(250_000),
+        "min(384000, 1000000 / 4)"
+    );
+    assert_eq!(window.reservation, 250_000);
+    assert_eq!(
+        window.budget,
+        Some(750_000),
+        "min(922000, 1000000 - 250000)"
+    );
+    // The output ceiling did not raise R on its own: an unknown output or a request that
+    // sends nothing keeps the safety quarter.
+    let mut plain = query(&cache, &server, "deepseek-v4.1-flash");
+    plain.request_output = RouteOutput::None;
+    assert_eq!(resolve(&plain).await.budget, Some(922_000));
+    let _ = std::fs::remove_dir_all(&cache);
 }
 
 /// Acceptance 1: no cache → fetch → write cache → right window; the second run does not fetch.
@@ -337,7 +368,7 @@ async fn an_explicit_window_wins_and_does_not_fetch() {
     // C <= R needs the request's own output to reach C (ADR 0018): an Anthropic
     // request with max_tokens = 16384 against an 8192 window.
     q.explicit = Some(8_192);
-    q.request_max_output = Some(16_384);
+    q.request_output = RouteOutput::Fixed(16_384);
     let window = resolve(&q).await;
     assert_eq!(window.budget, None);
     assert!(window.error.is_some(), "C <= R must be an error");

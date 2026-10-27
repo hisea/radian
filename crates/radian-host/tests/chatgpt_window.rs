@@ -10,7 +10,7 @@
 
 mod common;
 
-use radian_host::{WindowQuery, WindowSource, resolve, resolve_offline};
+use radian_host::{RouteOutput, WindowQuery, WindowSource, resolve, resolve_offline};
 
 /// The descriptor's endpoint (`provider::CHATGPT_BASE`).
 const CHATGPT_BASE: &str = "https://chatgpt.com/backend-api/codex";
@@ -28,7 +28,7 @@ fn query(cache: &std::path::Path, model: &str) -> WindowQuery {
         model: model.into(),
         // The Responses adapter sends no max-output field by default, so `R` is the safety
         // reservation alone.
-        request_max_output: None,
+        request_output: RouteOutput::None,
         offline: false,
         cache_path: cache.join("catalog/models.json"),
         url: "http://127.0.0.1:1/api.json".into(),

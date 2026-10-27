@@ -229,6 +229,7 @@ fn sse_body(events: &[Value]) -> Vec<u8> {
 
 fn model(base_url: &str) -> ChatGptModel {
     ChatGptModel {
+        extra_body: Default::default(),
         base_url: base_url.to_owned(),
         model: "gpt-5.4".to_owned(),
         static_headers: vec![("originator".to_owned(), "radian".to_owned())],

@@ -62,6 +62,22 @@ CALIBRATE_TASKS = [
     "extract-elf",
 ]
 
+# The default set, chosen from the cal1 calibration run: five tasks that
+# separated the agents' pass rate, then five every agent passed with a stable
+# generated-token gap, for reasoning-volume comparisons.
+CORE_TASKS = [
+    "largest-eigenval",
+    "query-optimize",
+    "torch-tensor-parallelism",
+    "db-wal-recovery",
+    "adaptive-rejection-sampler",
+    "git-multibranch",
+    "llm-inference-batching-scheduler",
+    "regex-log",
+    "build-cython-ext",
+    "write-compressor",
+]
+
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # The test imports radian_command and the script under test; neither may leave a
@@ -148,6 +164,11 @@ class TaskSetFilesTest(unittest.TestCase):
     def test_calibrate_file_lists_the_calibration_tasks(self):
         self.assertEqual(
             parse_task_file(TASKS_DIR / "calibrate-2026-10.txt"), CALIBRATE_TASKS
+        )
+
+    def test_core_file_lists_the_default_tasks(self):
+        self.assertEqual(
+            parse_task_file(TASKS_DIR / "core-2026-10.txt"), CORE_TASKS
         )
 
 
@@ -285,6 +306,74 @@ class RadianSystemTest(unittest.TestCase):
         self.assertEqual(command, base)
 
 
+def load_radian_body(body_file):
+    """Import ``radian_body.py`` with a stub ``radian_agent`` module.
+
+    The real module needs Harbor; this test exercises only the trial environment the module
+    adds. The stub agent carries a `_trial_env` so the subclass has something to extend.
+    """
+    class StubAgent:
+        def _trial_env(self):
+            return {"RADIAN_HOME": "/tmp/radian-test-home"}
+
+    stub = types.ModuleType("radian_agent")
+    stub.RadianAgent = StubAgent
+    spec = importlib.util.spec_from_file_location(
+        "radian_body_under_test", AB / "radian_body.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    saved = os.environ.pop("RADIAN_AB_BODY_FILE", None)
+    try:
+        if body_file is not None:
+            os.environ["RADIAN_AB_BODY_FILE"] = str(body_file)
+        with mock.patch.dict(sys.modules, {"radian_agent": stub}):
+            saved_bytecode = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.dont_write_bytecode = saved_bytecode
+    finally:
+        os.environ.pop("RADIAN_AB_BODY_FILE", None)
+        if saved is not None:
+            os.environ["RADIAN_AB_BODY_FILE"] = saved
+    return module
+
+
+class RadianBodyTest(unittest.TestCase):
+    def write_body(self, text):
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        handle.write(text)
+        handle.close()
+        self.addCleanup(Path(handle.name).unlink)
+        return Path(handle.name)
+
+    def test_the_body_file_adds_the_variable(self):
+        path = self.write_body('{"thinking": {"type": "enabled"}}')
+        module = load_radian_body(path)
+        env = module.RadianBody()._trial_env()
+        self.assertEqual(env["RADIAN_HOME"], "/tmp/radian-test-home")
+        self.assertEqual(
+            json.loads(env["RADIAN_EXTRA_BODY"]), {"thinking": {"type": "enabled"}}
+        )
+        self.assertNotIn("\n", env["RADIAN_EXTRA_BODY"], "the value stays one line")
+
+    def test_without_the_body_file_the_environment_is_unchanged(self):
+        module = load_radian_body(None)
+        self.assertEqual(
+            module.RadianBody()._trial_env(), {"RADIAN_HOME": "/tmp/radian-test-home"}
+        )
+
+    def test_a_non_object_is_refused_before_the_run(self):
+        path = self.write_body("[1]")
+        with self.assertRaises(ValueError) as caught:
+            load_radian_body(path)
+        self.assertIn("RADIAN_AB_BODY_FILE", str(caught.exception))
+        self.assertIn("JSON object", str(caught.exception))
+
+
 # A stub `harbor` on PATH records each arm it was asked to run: the `-o` arm
 # label, the role file in the environment, and every remaining argument. It
 # exits with HARBOR_STUB_RC. The real Harbor, Docker and model stay out of
@@ -299,7 +388,7 @@ while [ $# -gt 0 ]; do
     *) args="$args $1"; shift ;;
   esac
 done
-printf '%s\\t%s\\t%s\\n' "${out##*/}" "${RADIAN_AB_SYSTEM_FILE-<unset>}" "$args" >> "$HARBOR_STUB_LOG"
+printf '%s\\t%s\\t%s\\t%s\\n' "${out##*/}" "${RADIAN_AB_SYSTEM_FILE-<unset>}" "${RADIAN_AB_BODY_FILE-<unset>}" "$args" >> "$HARBOR_STUB_LOG"
 exit "${HARBOR_STUB_RC:-0}"
 """
 
@@ -336,14 +425,21 @@ def stub_host(root):
 
 
 def stub_invocations(root):
-    """Every stub harbor call: its arm label, role-file value and arguments."""
+    """Every stub harbor call: its arm label, role-file value, body-file value and arguments."""
     log = root / "harbor-stub.log"
     if not log.exists():
         return []
     calls = []
     for line in log.read_text(encoding="utf-8").splitlines():
-        arm, system, args = line.split("\t", 2)
-        calls.append({"arm": arm, "system": system, "args": shlex.split(args)})
+        arm, system, body, args = line.split("\t", 3)
+        calls.append(
+            {
+                "arm": arm,
+                "system": system,
+                "body": body,
+                "args": shlex.split(args),
+            }
+        )
     return calls
 
 
@@ -421,6 +517,35 @@ class AbSystemEnvironmentTest(unittest.TestCase):
             self.assertEqual(lines, ["base rc=0", "concise rc=0"])
 
 
+class AbBodyEnvironmentTest(unittest.TestCase):
+    """The base arm must not inherit the caller's body file, and the body arm gets a copy."""
+
+    def test_base_arm_ignores_an_exported_body_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            body = root / "body.json"
+            body.write_text('{"thinking": {"type": "enabled"}}\n', encoding="utf-8")
+            env["RADIAN_AB_BODY_FILE"] = "/sentinel/from/the/caller"
+            rc, stderr = run_script(
+                AB / "ab-body.sh",
+                ["rework", "radian-test", str(body)],
+                env,
+                tmp,
+            )
+            self.assertEqual(rc, 0, stderr)
+            out = home / "tb2" / "jobs" / "rework"
+            records = {call["arm"]: call for call in stub_invocations(root)}
+            self.assertEqual(records["base"]["body"], "<unset>", stderr)
+            self.assertEqual(records["body"]["body"], str(out / "body.json"))
+            self.assertEqual(
+                (out / "body.json").read_text(encoding="utf-8"),
+                body.read_text(encoding="utf-8"),
+            )
+            lines = sorted((out / "done").read_text(encoding="utf-8").splitlines())
+            self.assertEqual(lines, ["base rc=0", "body rc=0"])
+
+
 class AbTaskSelectionTest(unittest.TestCase):
     """AB_TASKS selects the task list and AB_K the attempts for every script."""
 
@@ -440,7 +565,7 @@ class AbTaskSelectionTest(unittest.TestCase):
         path.write_text("\n".join(tasks) + "\n", encoding="utf-8")
         return path
 
-    def test_ab_sh_defaults_to_ab3_and_k_two(self):
+    def test_ab_sh_defaults_to_core_and_k_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home, env = stub_host(root)
@@ -448,14 +573,14 @@ class AbTaskSelectionTest(unittest.TestCase):
                 AB / "ab.sh", ["defaults", "radian-test"], env, tmp
             )
             out = home / "tb2" / "jobs" / "defaults"
-            self.assert_used(calls, OLD_TASKS, 2)
+            self.assert_used(calls, CORE_TASKS, 2)
             self.assertEqual(
                 sorted(call["arm"] for call in calls),
                 ["opencode", "pi", "radian-test"],
             )
             self.assertEqual(
                 (out / "tasks.txt").read_text(encoding="utf-8").splitlines(),
-                OLD_TASKS,
+                CORE_TASKS,
             )
             self.assertEqual(
                 sorted((out / "done").read_text(encoding="utf-8").splitlines()),
@@ -464,6 +589,19 @@ class AbTaskSelectionTest(unittest.TestCase):
                     "pi rc=0",
                     "radian-test rc=0",
                 ],
+            )
+
+    def test_ab_sh_explicit_ab3_still_passes_the_old_ten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            env["AB_TASKS"] = "ab3"
+            calls = self.run_ok(AB / "ab.sh", ["old", "radian-test"], env, tmp)
+            out = home / "tb2" / "jobs" / "old"
+            self.assert_used(calls, OLD_TASKS, 2)
+            self.assertEqual(
+                (out / "tasks.txt").read_text(encoding="utf-8").splitlines(),
+                OLD_TASKS,
             )
 
     def test_ab_sh_reads_ab_k_and_a_path_set(self):
@@ -503,6 +641,33 @@ class AbTaskSelectionTest(unittest.TestCase):
             self.assertEqual(
                 sorted((out / "done").read_text(encoding="utf-8").splitlines()),
                 ["base rc=0", "concise rc=0"],
+            )
+
+    def test_ab_body_reads_a_named_set_and_defaults_to_k_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            body = root / "body.json"
+            body.write_text('{"thinking": {"type": "enabled"}}\n', encoding="utf-8")
+            env["AB_TASKS"] = "calibrate-2026-10"
+            calls = self.run_ok(
+                AB / "ab-body.sh",
+                ["calibrate-body", "radian-test", str(body)],
+                env,
+                tmp,
+            )
+            out = home / "tb2" / "jobs" / "calibrate-body"
+            self.assert_used(calls, CALIBRATE_TASKS, 3)
+            self.assertEqual(
+                sorted(call["arm"] for call in calls), ["base", "body"]
+            )
+            self.assertEqual(
+                (out / "tasks.txt").read_text(encoding="utf-8").splitlines(),
+                CALIBRATE_TASKS,
+            )
+            self.assertEqual(
+                sorted((out / "done").read_text(encoding="utf-8").splitlines()),
+                ["base rc=0", "body rc=0"],
             )
 
     def test_ab_pi_reads_ab_k_and_writes_the_list(self):

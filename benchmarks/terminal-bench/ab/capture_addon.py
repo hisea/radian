@@ -1,6 +1,6 @@
 """mitmproxy addon: one JSON line per model request of one A/B arm.
 
-`smoke.sh`, `ab.sh` and `ab-system.sh` start one `mitmdump` per arm when
+`smoke.sh`, `ab.sh`, `ab-system.sh` and `ab-body.sh` start one `mitmdump` per arm when
 `AB_CAPTURE=1` and point that arm's agent at it (see `capture.py`):
 
     AB_CAPTURE_OUT=<label>/capture/<arm>.jsonl mitmdump --mode regular \\
