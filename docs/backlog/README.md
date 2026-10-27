@@ -57,6 +57,7 @@
 | `arc-serve.md` | decided（钩子排在 `arc-landing.md` 之后） | 0048、0013、0020、0008、0034 | 远程客户端的服务端：一个 hub 管本机登记的所有仓库，不持 `runner.lock`，owner 动作走 CLI 库函数与 `state.lock`；只听 loopback，token 必须；`/v1/` 读接口与 `list`/`show --json` 同构，加报告、verdict、diff；SSE 事件只是提示；通知走 `[hooks]` 加 `after_awaiting_human`/`after_proposed`，radian 不发推送；v1 不看实时会话 |
 | `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
+| `arc-acp-worker.md` | idea | 0048、0044、0043、0008 | arc 当 ACP 客户端起第三方 agent 当 worker（Codex、Claude Code、opencode 的 ACP 适配器）：flow 配一行 `acp = [...]`，`session/update` 进 `result.jsonl`，`stopReason` 映射 `Result`；提交与美元成本两件事 ACP 不解决；与 `acp-server.md`（radian 当服务端）独立 |
 | `acp-server.md` | idea（暂定不做） | 新 ADR；0032、0009、0024、0011、0010、0043 | ACP 服务端：先做外部适配器验证需求；审批→`request_permission`、inbox→`session/prompt`、live→`session/update`；在 exec jsonl 与控制口客户端之后 |
 | `hooks-stop-and-feedback.md` | idea | 0045、0037、0017、0012、0046 | `Stop` stdin 加 `stop_hook_active`/`background_tasks`/`session_crons`；`additionalContext` 非错误反馈与 `PostToolUse` `updatedToolOutput`；续跑计数在工具调用后清零、滑窗留作硬顶；`args` exec 形式与每次运行一行耗时 |
 | `hooks-async.md` | idea | 0045、0037、0011、0046 | `async: true` 的 hook 接到后台 job 上：exit 0 的 `additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；post-edit 测试不再拖慢回合 |
