@@ -85,16 +85,41 @@ Status: accepted
 
 ```toml
 [providers.<name>]
-kind = "openai-compatible"      # only openai-compatible and anthropic allowed
+kind = "openai-compatible"      # openai-compatible | anthropic | openai-responses
 base_url = "…"
 reasoning_replay = "reasoning_content"   # optional, overrides catalog
+prefer = ["anthropic", "openai-responses", "openai-compatible"]   # optional
+
+[providers.<name>.base_urls]    # optional: a per-protocol endpoint override
+anthropic = "…"
+openai-responses = "…"
+openai-compatible = "…"
+
+[[providers.<name>.models]]     # optional, ordered rules
+match = "claude/*"             # whole model id; `*` matches any run of characters
+kind = "anthropic"
 ```
 
 - `<name>` never clashes with built-in descriptor ids and is never `openai-compatible`. Rules: letters, digits, `-`, `_`.
 - `auth.json` stores the key under `<name>`. Multiple custom endpoints each hold their own key. Key lookup uses the **named provider name**.
 - Selection: `--provider <name>`, configuration `model.provider = "<name>"`, `/model <name>/<model>`. The model list comes from `GET <its base URL>/models` with its key — the declaration's or the entry's own `base_url`, never a built-in descriptor's — refreshed in the background and cached for 1 hour like every other provider (D0), plus hand-typed names.
-- `/login` "custom" writes name, protocol, base URL, and key all into that `auth.json` entry. Hand-written configuration also works. With a same-name entry in both places, **configuration wins** with one warning.
-- Named and custom providers **never read the catalog `npm`**. They follow the user-declared `kind`. A custom provider never chooses Responses.
+- `/login` "custom" writes name, protocol, base URL, and key all into that `auth.json` entry. Hand-written configuration also works. With a same-name **full** entry in both places, **configuration wins** with one warning (see the rules-only table below).
+- Named and custom providers **never read the catalog `npm`**. Their protocol and endpoint resolve **per model**, in this order:
+  1. **Rules**: the first `[[providers.<name>.models]]` whose `match` covers the whole model id wins. `*` matches any run of characters; nothing else is special. The rule names a `kind`; the endpoint is `base_urls[<kind>]` when set, else `base_url`.
+  2. **The provider's own model list**: the `GET <base_url>/models` entry whose `id` equals the model id. The entry advertises its wire APIs in one of three vocabularies, and the first field present is used, in this order:
+     - `endpoints[]` with `api`: `openai-completions` → `openai-compatible`, `openai-responses` → `openai-responses`, `anthropic-messages` → `anthropic`; other values are ignored. Paths are absolute from the host root.
+     - `supported_endpoint_types[]` (new-api/one-api): `openai` → `openai-compatible` at `/v1/chat/completions`, `openai-response` → `openai-responses` at `/v1/responses`, `anthropic` → `anthropic` at `/v1/messages`; other tokens are ignored.
+     - `native_endpoints[]`: a path ending `/chat/completions` → `openai-compatible`, `/responses` → `openai-responses`, `/messages` → `anthropic`; other paths are ignored.
+     Several usable protocols are narrowed by `prefer`, default `["anthropic", "openai-responses", "openai-compatible"]`: the native API first, chat last (a gateway can refuse chat for a model it also lists under chat). A custom `prefer` lists distinct kinds; a kind left out is never picked from the list. The endpoint is the **origin** (scheme, host and port) of `base_url` plus the advertised path with its `/chat/completions`, `/responses` or `/messages` suffix removed (`/apis/anthropic/v1/messages` → `<origin>/apis/anthropic/v1`); a `supported_endpoint_types` entry uses its default path above. An entry with no usable protocol, or no endpoint field at all, falls through to step 3. The API is never inferred from the model id.
+  3. **`kind`**, with `base_url`.
+- `base_urls` overrides that protocol's base URL from any step; a missing key keeps the step's own URL.
+- A provider declared in `auth.json` can take rules from configuration: a `[providers.<name>]` table with **no** `kind` and **no** `base_url` but with `models`, `prefer`, `base_urls` or `reasoning_replay` adds those to the auth-declared provider of that name, with no "config wins" warning. The same table with no auth entry of that name is refused with one line. A table with `kind` or `base_url` is a full declaration, as before.
+- `kind` (configuration, a rule, `prefer`, `base_urls` keys, `RADIAN_KIND`, `/login custom`) accepts `openai-responses` and pi's names as aliases: `openai-completions` = `openai-compatible`, `anthropic-messages` = `anthropic`, so a pi `models.json` provider copies over. Every line Radian prints uses Radian's names.
+- On a named provider `openai-responses` means the Responses adapter, the provider key as `Authorization: Bearer`, `store: false`, none of the ChatGPT/Codex headers and no refresh (D12's API-key path).
+- The model list keeps the three endpoint fields in the existing 1-hour cache. At startup with no cache the host fetches once with a 3 s timeout **before** building the route; a failed fetch falls through to `kind` with one startup line naming the reason, and a fetch never blocks a turn. Resolution runs at every route build: startup, `/model <name>/<model>`, resume and the `subagent` child's own startup. A `/model` switch inside one named provider can change adapter; the per-route `RADIAN_EXTRA_BODY` reserved-key check applies.
+- The resolved route records its source (`rule <match>`, `model list`, `kind`) for later code. Thinking map and reasoning replay follow the resolved protocol (`protocol_descriptor_id` maps `Responses` to the `chatgpt` descriptor for real).
+- The startup line and the `/model` switch line name the protocol, the endpoint (when it differs from the provider's base URL) and the source, for example `magpie/codex/gpt-5.6-sol (openai-responses, model list)`, `corp/anthropic:claude-haiku-4-5 (anthropic at https://…/apis/anthropic/v1, model list)` and `magpie/claude/claude-opus-5-5 (anthropic, rule claude/*)`.
+- Startup refuses with one line naming the key: an unknown kind in a rule, `prefer` or `base_urls`; a duplicate in `prefer` (aliases name the same kind); an empty `match` or URL; a rule missing `match` or `kind`; a rules-only table with no auth entry. Unknown keys inside a rule are skipped and named.
 
 ### D11 Unified thinking levels
 
@@ -112,7 +137,7 @@ reasoning_replay = "reasoning_content"   # optional, overrides catalog
 - **Keeps `openai` (API key)**: it still uses Chat Completions.
 - **Login**: `/login` adds "Sign in with ChatGPT": browser plus PKCE plus fixed callback `http://localhost:1455/auth/callback` (an occupied port errors explicitly and points at device code). Device code is the second entry. The token writes the `auth.json` `oauth` entry (0600). It **never enters logs, journal, or export** and enters the redaction list. Before expiry it auto-refreshes with the refresh token. Refresh failure prompts re-login. `account_id` decodes from the access token each time and never stores separately.
 - **Responses adapter** (`agent-provider-openai-responses`): streaming text, tool calls, reasoning (with `encrypted_content` replay, per ADR 0014), usage, error classes (`is_transient`, `retry_after`, `ContextOverflow`); `store: false`. It must pass the provider contract. Concepts a provider lacks declare absence per `crates/agent-provider-contract/README.md`.
-- **Responses works with an API key**: built-in-descriptor models through Responses use that provider key in `auth.json` as `Authorization: Bearer`, without the three ChatGPT and Codex headers and with no token refresh. The `chatgpt` descriptor OAuth path never changes. Custom providers still never choose Responses.
+- **Responses works with an API key**: built-in-descriptor models through Responses use that provider key in `auth.json` as `Authorization: Bearer`, without the three ChatGPT and Codex headers and with no token refresh. The `chatgpt` descriptor OAuth path never changes. A named provider reaches Responses through its `kind`, a rule or its model list (D10), on the same API-key path.
 - **Usage**: `GET https://chatgpt.com/backend-api/wham/usage` (same OAuth headers) returns `rate_limit.primary_window` and `secondary_window` plus `plan_type`. Response headers `x-codex-{primary,secondary}-*` also stay as a Headers source.
 
 ### D13 `RADIAN_EXTRA_BODY`
@@ -130,4 +155,4 @@ reasoning_replay = "reasoning_content"   # optional, overrides catalog
 
 ## Verification
 
-`radian-host` auth, provider, and model tests cover `auth.json` shape and unknown-entry preservation, the `keys` list (order, names, masking, `$ENV`, a refused `!command` item, an ignored oauth `keys`), the key pool (first key not resting, stickiness, the 429 rest durations, the soonest-free key when all rest, no rest for a `5xx`/`401`, the adapter's own error reaching core, one switch notice, the usage fetch's current key and title), `!command` rejection, over-wide-permission rejection, keys in no output, descriptor parsing, catalog `npm` interface choice, hardcoded addresses, built-in snapshot fallback, Responses plus API-key headers, OAuth refresh, ChatGPT usage, `/model` switch and window recompute, resume rules, `auto` four entries and `full` rules, and thinking-level clamp and mapping. `RADIAN_EXTRA_BODY` tests cover the field reaching each of the three request bodies, the request settings winning with one warning, the refusal of a non-object, the refusal of a key the startup route reserves, the acceptance of a key only another route reserves (chat `max_tokens`), and the refusal of a `/model` switch to a route that reserves a key the value sets. All three provider contracts (openai-compatible, anthropic, openai-responses) stay green. The sandbox matrix covers `credentials_unreadable`.
+`radian-host` auth, provider, and model tests cover `auth.json` shape and unknown-entry preservation, the per-model named-provider resolution (rules, the three model-list fields and their precedence, the default and custom `prefer`, endpoint derivation, `base_urls`, the rules-only overlay), the alias spellings, the `keys` list (order, names, masking, `$ENV`, a refused `!command` item, an ignored oauth `keys`), the key pool (first key not resting, stickiness, the 429 rest durations, the soonest-free key when all rest, no rest for a `5xx`/`401`, the adapter's own error reaching core, one switch notice, the usage fetch's current key and title), `!command` rejection, over-wide-permission rejection, keys in no output, descriptor parsing, catalog `npm` interface choice, hardcoded addresses, built-in snapshot fallback, Responses plus API-key headers, OAuth refresh, ChatGPT usage, `/model` switch and window recompute, resume rules, `auto` four entries and `full` rules, and thinking-level clamp and mapping. `RADIAN_EXTRA_BODY` tests cover the field reaching each of the three request bodies, the request settings winning with one warning, the refusal of a non-object, the refusal of a key the startup route reserves, the acceptance of a key only another route reserves (chat `max_tokens`), and the refusal of a `/model` switch to a route that reserves a key the value sets. All three provider contracts (openai-compatible, anthropic, openai-responses) stay green. The sandbox matrix covers `credentials_unreadable`.
