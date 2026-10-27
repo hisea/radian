@@ -707,10 +707,17 @@ fn check_flows(config: &mut Config) -> Result<(), String> {
                 ));
             }
             if !flow.exec_args.is_empty() {
+                let mut keys = vec![
+                    format!("`flows.{name}.command`"),
+                    format!("`flows.{name}.exec_args`"),
+                ];
+                if flow.acp.is_some() {
+                    keys.push(format!("`flows.{name}.acp`"));
+                }
                 return Err(format!(
-                    "`flows.{name}.command` and `flows.{name}.exec_args` are both set; \
-                     `flows.{name}.exec_args` belongs to the `radian exec` worker line only, so \
-                     set one or the other (the command is `{}`)",
+                    "{} are all set; `flows.{name}.command` and `flows.{name}.exec_args` belong \
+                     to different worker lines, so set one (the command is `{}`)",
+                    keys.join(" and "),
                     command[0]
                 ));
             }
