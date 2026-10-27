@@ -25,6 +25,8 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
+use agent_provider_openai_compatible::catalog_max_tokens;
+
 /// The public catalog. Overridable with `RADIAN_CATALOG_URL` (a test seam; not in `--help`).
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
 /// Re-fetch at most this often; inside it, the cache is used without any network call.
@@ -292,6 +294,53 @@ pub fn output_reservation(context: Option<u64>, request_max_output: Option<u32>)
     match context.filter(|tokens| *tokens > 0) {
         Some(context) => OUTPUT_RESERVATION_CAP.min(context / 4).max(request),
         None => request,
+    }
+}
+
+/// What a route's request sets as its output, which is what `R` counts as "the output actually
+/// sent" (ADR 0018 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteOutput {
+    /// The request carries no output field (the Responses adapter, and `api.openai.com`'s chat
+    /// route, whose newer models reject `max_tokens`).
+    None,
+    /// The request sends this exact value (Anthropic's `max_tokens`).
+    Fixed(u32),
+    /// An OpenAI-compatible chat request sends `min(limit.output, ⌊C/4⌋)` when the catalog
+    /// knows both numbers for the route's model (ADR 0018); nothing otherwise.
+    CatalogChat,
+}
+
+impl RouteOutput {
+    /// The concrete value the request sends, given the window `C` and the catalog output
+    /// ceiling `O`. `None` means the request carries no output field.
+    pub fn resolve(self, context: Option<u64>, output: Option<u64>) -> Option<u32> {
+        match self {
+            Self::None => None,
+            Self::Fixed(value) => Some(value),
+            Self::CatalogChat => catalog_max_tokens(context, output),
+        }
+    }
+}
+
+// The cap rule itself lives in the adapter (it is the wire contract), so the host and the
+// adapter's own request tests read one implementation.
+/// The output a route's request sends (ADR 0018 §2), from the adapter it resolved to and the
+/// endpoint it talks to. The Anthropic route sends its `max_tokens`; the chat route sends the
+/// catalog-derived cap; the Responses route sends none. `api.openai.com`'s chat route keeps
+/// sending none, because its newer models reject `max_tokens` and Radian never invents
+/// `max_completion_tokens`.
+pub fn route_output(adapter: crate::Provider, base_url: &str, max_tokens: u32) -> RouteOutput {
+    match adapter {
+        crate::Provider::Anthropic => RouteOutput::Fixed(max_tokens),
+        crate::Provider::OpenAiCompatible => {
+            if host_of(base_url).as_deref() == Some("api.openai.com") {
+                RouteOutput::None
+            } else {
+                RouteOutput::CatalogChat
+            }
+        }
+        crate::Provider::ChatGpt => RouteOutput::None,
     }
 }
 
@@ -641,6 +690,10 @@ pub struct Window {
     pub output: Option<u64>,
     /// `R`: the output reservation used to compute `B`.
     pub reservation: u64,
+    /// The output the request actually sends (ADR 0018 §2): Anthropic's `max_tokens`, the
+    /// catalog-derived chat cap, or `None` when the request carries no output field. The host
+    /// builds the model's `max_tokens` from this, so the sent value and `R` cannot drift.
+    pub request_output: Option<u32>,
     pub source: WindowSource,
     pub limit: Option<ModelLimit>,
     /// The model's unit prices (ADR 0027), when the catalog has them: the footer's
@@ -686,6 +739,7 @@ impl Window {
             output: None,
             // `C` is unknown, so `R` does not enter `B`; `describe` shows it as `?`.
             reservation: 0,
+            request_output: None,
             source: WindowSource::Unknown,
             limit: None,
             price: None,
@@ -767,9 +821,9 @@ pub struct WindowQuery {
     pub catalog_provider: Option<String>,
     pub base_url: String,
     pub model: String,
-    /// The output the request itself sets (`max_tokens`), for `R`; `None` for providers that
-    /// do not send one.
-    pub request_max_output: Option<u32>,
+    /// The output the request sets, for `R` (ADR 0018 §2): Anthropic's `max_tokens`, the
+    /// catalog-derived chat cap, or `None` for a route that sends no output field.
+    pub request_output: RouteOutput,
     pub offline: bool,
     pub cache_path: PathBuf,
     pub url: String,
@@ -783,7 +837,7 @@ impl WindowQuery {
         catalog_provider: Option<String>,
         base_url: impl Into<String>,
         model: impl Into<String>,
-        request_max_output: Option<u32>,
+        request_output: RouteOutput,
         offline: bool,
     ) -> Self {
         Self {
@@ -795,7 +849,7 @@ impl WindowQuery {
             catalog_provider,
             base_url: base_url.into(),
             model: model.into(),
-            request_max_output,
+            request_output,
             offline,
             cache_path: cache_path(),
             url: std::env::var("RADIAN_CATALOG_URL").unwrap_or_else(|_| CATALOG_URL.to_string()),
@@ -865,7 +919,7 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             Some(explicit),
             input,
             output,
-            query.request_max_output,
+            query.request_output,
             WindowSource::Explicit,
             limit,
             price,
@@ -886,7 +940,7 @@ pub async fn resolve(query: &WindowQuery) -> Window {
             limit.context,
             limit.input,
             limit.output,
-            query.request_max_output,
+            query.request_output,
             source,
             Some(limit),
             price,
@@ -913,7 +967,7 @@ pub fn resolve_offline(query: &WindowQuery) -> Window {
             limit.context,
             limit.input,
             limit.output,
-            query.request_max_output,
+            query.request_output,
             loaded.1.window_source(&provider, &query.model),
             Some(limit),
             price,
@@ -932,7 +986,7 @@ fn descriptor_window(query: &WindowQuery, provider: &str) -> Option<Window> {
         limit.context,
         limit.input,
         limit.output,
-        query.request_max_output,
+        query.request_output,
         WindowSource::Descriptor {
             provider: provider.to_owned(),
             model: query.model.clone(),
@@ -950,13 +1004,16 @@ fn build_window(
     context: Option<u64>,
     input: Option<u64>,
     output: Option<u64>,
-    request_max_output: Option<u32>,
+    request_output: RouteOutput,
     source: WindowSource,
     limit: Option<ModelLimit>,
     price: Option<ModelPrice>,
 ) -> Window {
-    let reservation = output_reservation(context, request_max_output);
-    match input_budget(context, input, request_max_output) {
+    // ADR 0018 §2: the chat cap is `min(output, ⌊context/4⌋)`. Resolve it before `R`, so the
+    // reservation and `B` count exactly the value the request will send.
+    let request_output = request_output.resolve(context, output);
+    let reservation = output_reservation(context, request_output);
+    match input_budget(context, input, request_output) {
         Ok(budget) => Window {
             budget,
             error: None,
@@ -964,6 +1021,7 @@ fn build_window(
             input,
             output,
             reservation,
+            request_output,
             source,
             limit,
             price,
@@ -975,6 +1033,7 @@ fn build_window(
             input,
             output,
             reservation,
+            request_output,
             source,
             limit,
             price,
@@ -1240,6 +1299,77 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_route_reserves_the_max_tokens_it_sends() {
+        // ADR 0018 §2: C = 1000000, O = 384000 → the chat request sends 250000, so
+        // R = 250000 and B = min(922000, 1000000 - 250000) = 750000.
+        let output = RouteOutput::CatalogChat.resolve(Some(1_000_000), Some(384_000));
+        assert_eq!(output, Some(250_000));
+        assert_eq!(output_reservation(Some(1_000_000), output), 250_000);
+        assert_eq!(
+            input_budget(Some(1_000_000), Some(922_000), output),
+            Ok(Some(750_000))
+        );
+        // C = 128000, O = 16384: the ceiling is below the quarter (32000).
+        assert_eq!(
+            RouteOutput::CatalogChat.resolve(Some(128_000), Some(16_384)),
+            Some(16_384)
+        );
+        // Either number unknown: the request sends nothing, so R stays the safety quarter.
+        assert_eq!(
+            RouteOutput::CatalogChat.resolve(Some(1_000_000), None),
+            None
+        );
+        assert_eq!(RouteOutput::CatalogChat.resolve(None, Some(384_000)), None);
+        // The other routes keep their old values.
+        assert_eq!(
+            RouteOutput::Fixed(16_384).resolve(Some(1_000_000), Some(384_000)),
+            Some(16_384)
+        );
+        assert_eq!(
+            RouteOutput::None.resolve(Some(1_000_000), Some(384_000)),
+            None
+        );
+    }
+
+    #[test]
+    fn api_openai_com_keeps_sending_no_max_tokens() {
+        // Its newer chat models reject `max_tokens`; Radian never invents
+        // `max_completion_tokens`.
+        assert_eq!(
+            route_output(
+                crate::Provider::OpenAiCompatible,
+                "https://api.openai.com/v1",
+                0
+            ),
+            RouteOutput::None
+        );
+        assert_eq!(
+            route_output(
+                crate::Provider::OpenAiCompatible,
+                "https://opencode.ai/inference/go/v1",
+                0
+            ),
+            RouteOutput::CatalogChat
+        );
+        assert_eq!(
+            route_output(
+                crate::Provider::Anthropic,
+                "https://api.anthropic.com",
+                16_384
+            ),
+            RouteOutput::Fixed(16_384)
+        );
+        assert_eq!(
+            route_output(
+                crate::Provider::ChatGpt,
+                "https://chatgpt.com/backend-api/codex",
+                0
+            ),
+            RouteOutput::None
+        );
+    }
+
+    #[test]
     fn the_output_reservation_scales_with_the_window_and_the_request() {
         // ADR 0018: R = max(min(16384, C/4), request).
         assert_eq!(output_reservation(Some(8_192), None), 2_048);
@@ -1305,12 +1435,26 @@ mod tests {
     /// by [`check_context_window_flag`].
     #[test]
     fn a_zero_window_is_unset() {
-        let zero = WindowQuery::production(Some(0), None, "http://127.0.0.1:1/v1", "m", None, true);
+        let zero = WindowQuery::production(
+            Some(0),
+            None,
+            "http://127.0.0.1:1/v1",
+            "m",
+            RouteOutput::None,
+            true,
+        );
         assert_eq!(
             zero.explicit, None,
             "a zero window is not an explicit window"
         );
-        let one = WindowQuery::production(Some(1), None, "http://127.0.0.1:1/v1", "m", None, true);
+        let one = WindowQuery::production(
+            Some(1),
+            None,
+            "http://127.0.0.1:1/v1",
+            "m",
+            RouteOutput::None,
+            true,
+        );
         assert_eq!(one.explicit, Some(1));
         // The resolver's own rule (ADR 0018: "0 or missing is unknown") already covers C/I.
         assert_eq!(input_budget(Some(0), Some(0), None), Ok(None));
@@ -1559,7 +1703,7 @@ mod tests {
             Some(8_192),
             None,
             None,
-            Some(16_384),
+            RouteOutput::Fixed(16_384),
             WindowSource::Explicit,
             None,
             None,
@@ -1574,7 +1718,7 @@ mod tests {
             Some(8_192),
             None,
             None,
-            Some(16_384),
+            RouteOutput::Fixed(16_384),
             WindowSource::Catalog {
                 provider: "p".into(),
                 model: "m".into(),
@@ -1593,7 +1737,7 @@ mod tests {
             Some(100_000),
             None,
             None,
-            Some(16_384),
+            RouteOutput::Fixed(16_384),
             WindowSource::Explicit,
             None,
             None,
@@ -1611,6 +1755,7 @@ mod tests {
                 input: None,
                 output: None,
                 reservation: 250,
+                request_output: None,
                 source: WindowSource::Explicit,
                 limit: None,
                 price: None
@@ -1625,6 +1770,7 @@ mod tests {
             input: Some(922_000),
             output: Some(384_000),
             reservation: 16_384,
+            request_output: None,
             source: WindowSource::Catalog {
                 provider: "opencode".into(),
                 model: "deepseek-v4.1-flash".into(),

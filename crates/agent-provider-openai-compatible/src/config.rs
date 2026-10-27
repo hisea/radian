@@ -49,6 +49,10 @@ pub struct OpenAiCompatibleConfig {
     /// `None` = the default policy (on for `api.openai.com`, off everywhere else),
     /// `Some(b)` = explicit override.
     pub include_usage: Option<bool>,
+    /// The output cap the request sends as `max_tokens` (ADR 0018): `min(limit.output,
+    /// ⌊C/4⌋)` when the route's catalog entry knows both. `None` sends no field. An explicit
+    /// `max_tokens` in `extra_body` or in the request settings wins and is never overwritten.
+    pub max_tokens: Option<u32>,
     /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
     /// `None` sends no key, which is byte-identical to the adapter before the feature.
     pub reasoning_effort: Option<String>,
@@ -73,6 +77,7 @@ impl fmt::Debug for OpenAiCompatibleConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("include_usage", &self.include_usage)
+            .field("max_tokens", &self.max_tokens)
             .field("reasoning_effort", &self.reasoning_effort)
             .field("reasoning_replay", &self.reasoning_replay)
             .finish()
@@ -91,6 +96,7 @@ impl OpenAiCompatibleConfig {
             idle_timeout: Duration::from_secs(120),
             max_response_bytes: 32 * 1024 * 1024,
             include_usage: None,
+            max_tokens: None,
             reasoning_effort: None,
             reasoning_replay: None,
         }
@@ -131,6 +137,16 @@ pub(crate) fn is_local_host(host: &str) -> bool {
 /// Compared by exact host, never by substring: `evil-openai.com.attacker.net` must not match.
 pub(crate) fn openai_host_is_default(host: &str) -> bool {
     host.eq_ignore_ascii_case("api.openai.com")
+}
+
+/// The `max_tokens` an OpenAI-compatible chat request sends when the route's catalog entry
+/// knows both the context window `C` and the output ceiling `O` (ADR 0018): `min(O, ⌊C/4⌋)`.
+/// A zero or missing number is unknown, and the request sends no field. Never returns zero.
+pub fn catalog_max_tokens(context: Option<u64>, output: Option<u64>) -> Option<u32> {
+    let context = context.filter(|value| *value > 0)?;
+    let output = output.filter(|value| *value > 0)?;
+    let cap = output.min(context / 4);
+    (cap > 0).then(|| cap.min(u64::from(u32::MAX)) as u32)
 }
 
 /// The URL without credentials: userinfo is dropped, query values and the fragment are

@@ -118,6 +118,7 @@ async fn open_with_records(
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
         reasoning_replay: None,
+        max_output_tokens: None,
         chatgpt_oauth: false,
     })
     .unwrap();
@@ -255,6 +256,7 @@ async fn a_local_session_accepts_a_declared_command() {
         thinking: radian_host::Thinking::Off,
         reasoning_effort: None,
         reasoning_replay: None,
+        max_output_tokens: None,
         chatgpt_oauth: false,
     })
     .unwrap();

@@ -33,6 +33,7 @@ fn api_key_model(server: &MockServer) -> radian_host::HostModel {
         thinking: Thinking::Off,
         reasoning_effort: Some("high".to_owned()),
         reasoning_replay: None,
+        max_output_tokens: None,
         chatgpt_oauth: false,
     })
     .expect("the API-key Responses model builds")
