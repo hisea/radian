@@ -2,7 +2,7 @@
 # Terminal-Bench A/B: radian variants vs pi 1.4.0 vs opencode 1.19.4, same model, thinking high, same run.
 # Usage: bash benchmarks/terminal-bench/ab/ab.sh <label> <radian-bin-name>...
 #   (names under $HOME/tb2/bin, e.g. radian-<sha>; the host keeps its binaries and jobs there)
-# The task set is AB_TASKS (default ab3; see README.md), -k ${AB_K:-2}, and
+# The task set is AB_TASKS (default core-2026-10; see README.md), -k ${AB_K:-2}, and
 # -n ${AB_N:-2} per agent. The list the run uses is written to <label>/tasks.txt.
 # AB_CAPTURE=1 records every arm's model requests through one mitmdump per arm
 # (AB_CAPTURE_PORT, default 18080; see README.md); unset, the commands below are
@@ -20,7 +20,7 @@ PP=$TB_DIR:$HERE
 export PATH="$HOME/.local/bin:$PATH"
 KEY=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')
 export RADIAN_BENCH_API_KEY="$KEY" OPENCODE_API_KEY="$KEY"; unset KEY
-TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-ab3}" "$HERE/tasks") || exit 1
+TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-core-2026-10}" "$HERE/tasks") || exit 1
 TASKS=()
 while IFS= read -r task; do TASKS+=("$task"); done <<< "$TASK_LIST"
 out=$HOME/tb2/jobs/$label; mkdir -p "$out"

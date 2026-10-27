@@ -1,7 +1,7 @@
 #!/bin/bash
 # Request-body A/B: one radian binary, no extra body vs `RADIAN_EXTRA_BODY` from a file, same
 # run (ADR 0026 D13). Usage: bash benchmarks/terminal-bench/ab/ab-body.sh <label> <radian-bin-name> <body-file>
-# The body file must hold one JSON object. Same task set (AB_TASKS, default ab3) and model as
+# The body file must hold one JSON object. Same task set (AB_TASKS, default core-2026-10) and model as
 # ab.sh; -k ${AB_K:-3}, -n ${AB_N:-3} per arm. The list the run uses is written to
 # <label>/tasks.txt and the body file to <label>/body.json. AB_CAPTURE=1 captures both arms'
 # model requests (AB_CAPTURE_PORT, default 18080; see README.md); unset, the commands below
@@ -18,7 +18,7 @@ PP=$TB_DIR:$HERE
 export PATH="$HOME/.local/bin:$PATH"
 KEY=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')
 export RADIAN_BENCH_API_KEY="$KEY"; unset KEY
-TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-ab3}" "$HERE/tasks") || exit 1
+TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-core-2026-10}" "$HERE/tasks") || exit 1
 TASKS=()
 while IFS= read -r task; do TASKS+=("$task"); done <<< "$TASK_LIST"
 out=$HOME/tb2/jobs/$label; mkdir -p "$out"; cp "$body" "$out/body.json"

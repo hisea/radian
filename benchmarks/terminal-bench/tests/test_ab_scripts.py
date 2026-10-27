@@ -62,6 +62,22 @@ CALIBRATE_TASKS = [
     "extract-elf",
 ]
 
+# The default set, chosen from the cal1 calibration run: five tasks that
+# separated the agents' pass rate, then five every agent passed with a stable
+# generated-token gap, for reasoning-volume comparisons.
+CORE_TASKS = [
+    "largest-eigenval",
+    "query-optimize",
+    "torch-tensor-parallelism",
+    "db-wal-recovery",
+    "adaptive-rejection-sampler",
+    "git-multibranch",
+    "llm-inference-batching-scheduler",
+    "regex-log",
+    "build-cython-ext",
+    "write-compressor",
+]
+
 TASK_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # The test imports radian_command and the script under test; neither may leave a
@@ -148,6 +164,11 @@ class TaskSetFilesTest(unittest.TestCase):
     def test_calibrate_file_lists_the_calibration_tasks(self):
         self.assertEqual(
             parse_task_file(TASKS_DIR / "calibrate-2026-10.txt"), CALIBRATE_TASKS
+        )
+
+    def test_core_file_lists_the_default_tasks(self):
+        self.assertEqual(
+            parse_task_file(TASKS_DIR / "core-2026-10.txt"), CORE_TASKS
         )
 
 
@@ -544,7 +565,7 @@ class AbTaskSelectionTest(unittest.TestCase):
         path.write_text("\n".join(tasks) + "\n", encoding="utf-8")
         return path
 
-    def test_ab_sh_defaults_to_ab3_and_k_two(self):
+    def test_ab_sh_defaults_to_core_and_k_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home, env = stub_host(root)
@@ -552,14 +573,14 @@ class AbTaskSelectionTest(unittest.TestCase):
                 AB / "ab.sh", ["defaults", "radian-test"], env, tmp
             )
             out = home / "tb2" / "jobs" / "defaults"
-            self.assert_used(calls, OLD_TASKS, 2)
+            self.assert_used(calls, CORE_TASKS, 2)
             self.assertEqual(
                 sorted(call["arm"] for call in calls),
                 ["opencode", "pi", "radian-test"],
             )
             self.assertEqual(
                 (out / "tasks.txt").read_text(encoding="utf-8").splitlines(),
-                OLD_TASKS,
+                CORE_TASKS,
             )
             self.assertEqual(
                 sorted((out / "done").read_text(encoding="utf-8").splitlines()),
@@ -568,6 +589,19 @@ class AbTaskSelectionTest(unittest.TestCase):
                     "pi rc=0",
                     "radian-test rc=0",
                 ],
+            )
+
+    def test_ab_sh_explicit_ab3_still_passes_the_old_ten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            env["AB_TASKS"] = "ab3"
+            calls = self.run_ok(AB / "ab.sh", ["old", "radian-test"], env, tmp)
+            out = home / "tb2" / "jobs" / "old"
+            self.assert_used(calls, OLD_TASKS, 2)
+            self.assertEqual(
+                (out / "tasks.txt").read_text(encoding="utf-8").splitlines(),
+                OLD_TASKS,
             )
 
     def test_ab_sh_reads_ab_k_and_a_path_set(self):
