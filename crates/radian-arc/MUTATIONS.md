@@ -1512,3 +1512,19 @@ pins both the lock check and the count. The test also passed 50 of 50 runs under
 processes on a 10-core host), as did
 `run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died`.
 
+## TK0199: a worker attempt waits on its model without a retry (2026-10-27, branch `work/TK0199-arc-worker-model-wait`)
+
+A worker attempt that ends failed on `model_error.kind` `unavailable` or `usage_limit` waits in
+`todo.retry_wait` without raising `retry_count` (ADR 0048 decision 9). The first mutation counts
+the wait as a retry; the second drops `usage_limit` from the kinds that wait. Each was applied
+by hand to the named file, the named test ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test attempt -E 'test(...)'`, and the source was restored from
+`.radian/mut/` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0199-M1 | a model wait raises `retry_count` again (`store/attempt_ops.rs`, `task.retry_count += 1` in the model-wait branch) | `attempt::consecutive_model_waits_double_cap_and_never_exhaust` (`attempt 1 is not a retry`) | ✅ 1 failed |
+| TK0199-M2 | `usage_limit` is not treated as a model wait (`review/mod.rs`, `MODEL_WAIT_KINDS` holds only `unavailable`) | `attempt::a_usage_limit_worker_waits_without_a_retry` (the applied result is not a model wait) | ✅ 1 failed |
+
+2/2 caught.
+
