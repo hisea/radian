@@ -1486,3 +1486,14 @@ the named test binary was run, and the source was restored from a copy under `.r
 |---|---|---|---|
 | TK0192-M1 | the chat adapter merges `settings` before `config.extra_body` (`for source in [&settings, &config.extra_body]`), so the env body wins over the request's own setting | ✅ 1 failed (rc=100) | `extra_body::a_request_setting_wins_over_the_extra_body_and_the_warning_names_the_key` (`assertion left == right` at "the request value wins": 0.1 instead of 0.9) |
 | TK0192-M2 | `parse_extra_body` skips the reserved-key check | ✅ 1 failed (rc=100) | `extra_body::reserved_keys_and_non_objects_are_refused` (`expect_err` on an `Ok` value for `{"messages":[]}`) |
+
+## TK0200: `RADIAN_EXTRA_BODY` reserved keys per route (2026-10-27)
+
+Branch `work/TK0200-extra-body-reserved-per-route`. Each mutation was applied in place, the
+named test binary was run, and the source was restored from a copy under `.radian/mut/`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0200-M1 | the startup check in `radian-exec/src/setup.rs` consults all three adapters again (the old union) instead of `route.adapter()` | ✅ 1 failed (rc=100) | `radian-exec::cli::the_extra_body_max_tokens_is_allowed_on_a_chat_route_and_refused_on_anthropic` (the chat half exited 2: ``RADIAN_EXTRA_BODY sets `max_tokens`…``) |
+| TK0200-M2 | the `/model` switch check in `radian-tui/src/cli/loop_context.rs` is removed | ✅ 1 failed (rc=100) | `radian-tui cli::loop_context::tests::a_model_switch_to_a_route_that_reserves_an_extra_body_key_is_refused` (the effect fell through to the credential/budget path instead of sending the refusal) |

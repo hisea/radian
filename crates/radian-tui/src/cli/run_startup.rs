@@ -255,6 +255,8 @@ pub(super) fn run_picker_phase(
             ),
             Arc::new(|_: &str, _: &str| None),
             &config.providers,
+            // The picking phase has no session, so no `/model` switch can run here.
+            None,
             config.tui.theme.clone(),
             cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             // The picker phase has no session and no sandbox yet.

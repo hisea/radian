@@ -366,6 +366,9 @@ pub(super) struct ResolvedRoute {
     pub(super) model: radian_host::SwitchableModel,
     pub(super) budget_for: radian_runtime::BudgetFor,
     pub(super) route_price: RoutePrice,
+    /// The parsed `RADIAN_EXTRA_BODY` (ADR 0026 D13), kept for the `/model` switch check:
+    /// the same value the routes were built with, checked against the target route's adapter.
+    pub(super) extra_body: Option<radian_host::ExtraBody>,
 }
 
 /// `run()`'s window/route phase: the status-bar model name, the window fetch and its
@@ -517,6 +520,12 @@ pub(super) fn resolve_window_and_route(
     // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
     // read once here, before any session file exists; an invalid value is a startup refusal.
     let extra_body = radian_host::read_extra_body()?;
+    if let Some(extra) = &extra_body
+        && let Some(refusal) = extra.refusal_for(route.adapter())
+    {
+        // Reserved keys are per route: only the startup route's adapter is consulted here.
+        return Err(RunError::from(refusal));
+    }
     if let Some(extra) = &extra_body {
         if let Some(line) = extra.applied_line() {
             startup_log.line(line);
@@ -526,6 +535,7 @@ pub(super) fn resolve_window_and_route(
         }
     }
     let extra_fields = extra_body
+        .clone()
         .map(radian_host::ExtraBody::into_fields)
         .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
@@ -631,5 +641,6 @@ pub(super) fn resolve_window_and_route(
         model,
         budget_for,
         route_price,
+        extra_body,
     })
 }

@@ -66,7 +66,7 @@ This flag is refused for `openai-compatible` requests.
 An OpenAI-compatible chat request sets its own output cap when the models catalog knows both numbers for the model: `max_tokens = min(O, ⌊C/4⌋)`, where `C` is the context window and `O` is the output limit.
 When either number is unknown, Radian sends no `max_tokens`.
 An explicit `max_tokens` in an extra request body or a per-request setting wins.
-Set `RADIAN_EXTRA_BODY` to merge top-level fields into every request body; see `environment` for the reserved keys, the startup line and the refusal.
+Set `RADIAN_EXTRA_BODY` to merge top-level fields into every request body; see `environment` for the per-route reserved keys, the startup line, and the refused `/model` switch.
 A route to `api.openai.com` sends none, because its newer chat models reject `max_tokens`.
 The same cap is the output reservation that the context budget subtracts from `C`.
 

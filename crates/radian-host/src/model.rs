@@ -507,6 +507,27 @@ pub fn route_replays_reasoning(
     }
 }
 
+/// The adapter a route resolves to, by provider **name** (ADR 0026 D10): the config's
+/// declarations, then the `auth.json` entry's env, then the catalog's protocol, else the
+/// descriptor table. `None` when the name resolves to no provider. Used to check
+/// `RADIAN_EXTRA_BODY`'s reserved keys against the route a switch would build (ADR 0026 D13).
+pub fn route_adapter_for(
+    provider_name: &str,
+    model: &str,
+    providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
+) -> Option<Provider> {
+    let auth_env = crate::AuthStore::open()
+        .ok()
+        .and_then(|store| store.entry_env(provider_name));
+    let (provider_ref, _) =
+        crate::resolve_provider(provider_name, providers, auth_env.as_ref()).ok()?;
+    let catalog = crate::protocol_catalog();
+    let protocol = provider_ref
+        .resolve_protocol(Some(&catalog), model)
+        .unwrap_or_else(|_| provider_ref.protocol_for(model));
+    Some(protocol.adapter())
+}
+
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
 /// hosts already printed for a bad `--base-url`.
 pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {

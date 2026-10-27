@@ -166,6 +166,7 @@ pub(super) fn ui_loop(
     startup_route: (String, String),
     route_price: RoutePrice,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    extra_body: Option<radian_host::ExtraBody>,
     // The configured theme name (`tui.theme`), for `/theme`'s current-value marker.
     current_theme: Option<String>,
     thinking_max_tokens: u32,
@@ -191,6 +192,7 @@ pub(super) fn ui_loop(
             startup_route: startup_route.clone(),
             route_price: Arc::clone(&route_price),
             config_providers: config_providers.clone(),
+            extra_body,
             current_thinking: app.session.thinking_level.clone().unwrap_or_default(),
             current_theme,
             thinking_max_tokens,

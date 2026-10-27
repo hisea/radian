@@ -4,8 +4,14 @@
 //! to every route a `/model` switch builds. Both hosts print the same two diagnostics — one
 //! line naming the keys applied, one warning naming a key a request setting also sets — so the
 //! wording lives here, beside the parser.
+//!
+//! Reserved keys are checked **per route**, never as a union: the caller names the route's
+//! adapter and gets back only the keys that adapter owns. A key another adapter reserves is
+//! accepted here and refused when a switch reaches that adapter.
 
 use serde_json::{Map, Value};
+
+use crate::model::Provider;
 
 /// The variable both hosts read at startup. Public so a test can name it without a literal.
 pub const EXTRA_BODY_ENV: &str = "RADIAN_EXTRA_BODY";
@@ -33,6 +39,29 @@ impl ExtraBody {
             format!(
                 "[body] {EXTRA_BODY_ENV} sets: {}",
                 self.fields.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
+    }
+
+    /// The keys this body sets that `adapter` reserves (ADR 0026 D13), in the adapter's own
+    /// list order. Empty when the route accepts every key.
+    pub fn refused_keys(&self, adapter: Provider) -> Vec<&'static str> {
+        reserved_keys_for(adapter)
+            .iter()
+            .copied()
+            .filter(|key| self.fields.contains_key(*key))
+            .collect()
+    }
+
+    /// The one refusal line for `adapter` (ADR 0026 D13), or `None` when the adapter reserves
+    /// none of the keys. The values never appear.
+    pub fn refusal_for(&self, adapter: Provider) -> Option<String> {
+        let refused = self.refused_keys(adapter);
+        (!refused.is_empty()).then(|| {
+            format!(
+                "{EXTRA_BODY_ENV} sets `{}`, which the request builder owns and cannot be \
+                 overridden; remove it",
+                refused.join("`, `")
             )
         })
     }
@@ -88,33 +117,17 @@ pub fn parse_extra_body(raw: Option<String>) -> Result<Option<ExtraBody>, String
             json_kind(&value)
         ));
     };
-    let reserved = reserved_keys();
-    if let Some(key) = fields.keys().find(|key| reserved.contains(&key.as_str())) {
-        return Err(format!(
-            "{EXTRA_BODY_ENV} sets `{key}`, which the request builder owns and cannot be \
-             overridden; remove it"
-        ));
-    }
     Ok((!fields.is_empty()).then_some(ExtraBody { fields }))
 }
 
-/// Every key at least one adapter owns (ADR 0026 D13). The same value reaches every route, so
-/// startup refuses the union: a key reserved only by a route the session might switch to must
-/// not wait for the switch to fail.
-pub fn reserved_keys() -> Vec<&'static str> {
-    let mut keys: Vec<&'static str> = Vec::new();
-    for group in [
-        agent_provider_openai_compatible::reserved_body_keys(),
-        agent_provider_openai_responses::reserved_body_keys(),
-        agent_provider_anthropic::reserved_body_keys(),
-    ] {
-        for key in group {
-            if !keys.contains(key) {
-                keys.push(key);
-            }
-        }
+/// The body keys one adapter owns (ADR 0026 D13). One source of truth per adapter: the list
+/// lives in the adapter crate, whose request builder refuses the same keys again.
+pub fn reserved_keys_for(adapter: Provider) -> &'static [&'static str] {
+    match adapter {
+        Provider::OpenAiCompatible => agent_provider_openai_compatible::reserved_body_keys(),
+        Provider::ChatGpt => agent_provider_openai_responses::reserved_body_keys(),
+        Provider::Anthropic => agent_provider_anthropic::reserved_body_keys(),
     }
-    keys
 }
 
 /// The JSON kind of a value, for the one error message that names it.
@@ -166,12 +179,35 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_key_is_refused_naming_the_variable_and_the_key() {
-        for key in reserved_keys() {
-            let raw = json!({key: true}).to_string();
-            let error = parse_extra_body(Some(raw)).expect_err(key);
-            assert!(error.contains(EXTRA_BODY_ENV), "{key}: {error}");
-            assert!(error.contains(&format!("`{key}`")), "{key}: {error}");
+    fn a_reserved_key_is_refused_per_adapter_and_named_in_the_line() {
+        // The chat route accepts `max_tokens` (its builder only inserts the catalog cap when
+        // the body has none); the Anthropic route reserves it.
+        let extra = parsed(r#"{"max_tokens":32000}"#);
+        assert!(extra.refused_keys(Provider::OpenAiCompatible).is_empty());
+        assert_eq!(extra.refused_keys(Provider::Anthropic), vec!["max_tokens"]);
+        let line = extra
+            .refusal_for(Provider::Anthropic)
+            .expect("the Anthropic route refuses the key");
+        assert!(line.contains(EXTRA_BODY_ENV), "{line}");
+        assert!(line.contains("`max_tokens`"), "{line}");
+        assert_eq!(extra.refusal_for(Provider::OpenAiCompatible), None);
+
+        // Every key an adapter owns is refused on that adapter alone, and never silently
+        // dropped: the line names each one.
+        for adapter in [
+            Provider::OpenAiCompatible,
+            Provider::ChatGpt,
+            Provider::Anthropic,
+        ] {
+            for &key in reserved_keys_for(adapter) {
+                let raw = json!({key: true}).to_string();
+                let extra = parsed(&raw);
+                let line = extra
+                    .refusal_for(adapter)
+                    .unwrap_or_else(|| panic!("{key} must be refused on {adapter:?}"));
+                assert!(line.contains(EXTRA_BODY_ENV), "{key}: {line}");
+                assert!(line.contains(&format!("`{key}`")), "{key}: {line}");
+            }
         }
     }
 

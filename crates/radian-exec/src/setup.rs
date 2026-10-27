@@ -416,6 +416,12 @@ pub(crate) async fn setup(
     // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
     // read once here, before any session file exists; an invalid value is a startup refusal.
     let extra_body = radian_host::read_extra_body().map_err(SetupError)?;
+    if let Some(extra) = &extra_body
+        && let Some(refusal) = extra.refusal_for(route.adapter())
+    {
+        // Reserved keys are per route: only the startup route's adapter is consulted here.
+        return Err(SetupError(refusal));
+    }
     if let Some(extra) = &extra_body {
         if let Some(line) = extra.applied_line() {
             eprintln!("{line}");
