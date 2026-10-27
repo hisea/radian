@@ -71,7 +71,7 @@ its transcript to the client. `initialize` advertises `loadSession: true`.
 | `initialize` | Negotiates protocol version 1 and advertises `loadSession: true`. |
 | `session/new` | Creates (or, with `--resume`, continues) the one session; see above. |
 | `session/load` | Opens an existing session by id, replays its transcript as updates, and continues it; see above. |
-| `session/prompt` | Sends the prompt's text as a user message (a resource link becomes a text line) and answers when the turn ends. |
+| `session/prompt` | Sends the prompt's text as a user message (a resource link becomes a text line) and answers once the turn's end is written to the session file. |
 | `session/cancel` | Interrupts the running turn, like ESC in the full-screen interface; the journal keeps the interrupted prefix. |
 | `session/request_permission` | Sent by radian for every approval and every `ask_user` question. |
 | `session/update` | Sent by radian for the live turn and for a `session/load` replay; see below. |
@@ -81,9 +81,10 @@ its transcript to the client. `initialize` advertises `loadSession: true`.
 another unfinished answer). `max_tokens` means the model's answer was truncated at the output token
 limit and the turn could not continue: two truncated responses in a row had already continued it.
 A truncated response with tool calls continues the turn, and a truncated response without calls
-continues it with a fixed notice until two earlier truncations in a row. A second prompt while a turn
-runs is refused. The response's
-`_meta.radian` carries what ACP has no field for:
+continues it with a fixed notice until two earlier truncations in a row. The answer waits for the
+driver to journal the turn end, so a client that reads the session file right after the response
+already sees it. A second prompt while a turn runs is refused. The response's `_meta.radian`
+carries what ACP has no field for:
 
 | Field | Meaning |
 |---|---|
