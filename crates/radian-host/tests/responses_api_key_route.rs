@@ -63,6 +63,7 @@ fn isolated_home(base_url: &str) -> PathBuf {
 
 fn context() -> RouteContext {
     RouteContext {
+        extra_body: Default::default(),
         providers: BTreeMap::new(),
         session_id: "responses-api-key".to_owned(),
         user_headers: Vec::new(),
@@ -185,6 +186,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
 
     // `--include-usage false` overrides the descriptor default.
     let off = RouteContext {
+        extra_body: Default::default(),
         include_usage: Some(false),
         ..context()
     };

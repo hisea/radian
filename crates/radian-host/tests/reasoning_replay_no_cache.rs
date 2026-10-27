@@ -87,6 +87,7 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
     // ADR 0014 R6: the budget's answer is exactly what the request carries when a `/model`
     // switch builds the route (`args_for`, the same call the startup path makes).
     let ctx = RouteContext {
+        extra_body: Default::default(),
         providers: BTreeMap::new(),
         session_id: "no-cache".to_owned(),
         user_headers: Vec::new(),
@@ -157,6 +158,7 @@ fn with_no_cache_the_bundled_snapshot_decides_reasoning_replay() {
         &providers
     ));
     let named_ctx = RouteContext {
+        extra_body: Default::default(),
         providers: providers.clone(),
         session_id: "no-cache-named".to_owned(),
         user_headers: Vec::new(),

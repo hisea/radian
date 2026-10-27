@@ -66,6 +66,7 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
     std::fs::create_dir_all(&session_dir).unwrap();
     let slot = radian_runtime::ConfigSlot::new(Value::Null);
     let initial = build_model(radian_host::ModelArgs {
+        extra_body: Default::default(),
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: "http://127.0.0.1:1".to_owned(),
         model: "mock".into(),
@@ -85,6 +86,7 @@ async fn open_inner(label: &str, scratch: &Path, resume: bool) -> Arc<LocalSessi
         radian_host::ModelRoute::new("openai-compatible", "mock"),
         Arc::clone(&slot),
         radian_host::RouteContext {
+            extra_body: Default::default(),
             providers: std::collections::BTreeMap::new(),
             session_id: label.to_owned(),
             user_headers: Vec::new(),

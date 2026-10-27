@@ -112,6 +112,7 @@ fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
 /// The startup route's model, built exactly as a host builds it (`build_model`).
 fn model(base_url: &str, slot: Arc<radian_runtime::ConfigSlot>) -> radian_host::SwitchableModel {
     let initial = build_model(radian_host::ModelArgs {
+        extra_body: Default::default(),
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: base_url.to_owned(),
         model: "old".into(),
@@ -133,6 +134,7 @@ fn model(base_url: &str, slot: Arc<radian_runtime::ConfigSlot>) -> radian_host::
         ModelRoute::new("openai-compatible", "old"),
         slot,
         radian_host::RouteContext {
+            extra_body: Default::default(),
             providers: BTreeMap::new(),
             session_id: "explore-test".to_owned(),
             user_headers: Vec::new(),

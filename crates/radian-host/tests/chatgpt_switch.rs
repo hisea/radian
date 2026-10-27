@@ -89,6 +89,7 @@ async fn switching_to_chatgpt_mid_session_resolves_a_working_route() {
     // Exactly what a `/model chatgpt/gpt-5.4` switch calls: no credential copied in, the
     // route resolved by name, like `RouteContext` would be built from the lead's settings.
     let ctx = RouteContext {
+        extra_body: Default::default(),
         providers: std::collections::BTreeMap::new(),
         session_id: "switch-test".to_owned(),
         user_headers: Vec::new(),
@@ -146,6 +147,7 @@ async fn switching_to_chatgpt_without_a_login_is_refused() {
     // the other test in this file writes (so the two cannot race each other).
     let _home = isolated_home();
     let ctx = RouteContext {
+        extra_body: Default::default(),
         providers: std::collections::BTreeMap::new(),
         session_id: "switch-test-2".to_owned(),
         user_headers: Vec::new(),

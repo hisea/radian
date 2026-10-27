@@ -1475,3 +1475,14 @@ the named test binary was run, and the source was restored from a copy under `.r
 |---|---|---|---|
 | TK0191-M2 | `default_include_usage` returns `None` for every provider (the old host-only default) | ✅ 1 failed (rc=100) | `provider::tests::only_the_opencode_go_descriptor_asks_for_streamed_usage_by_default`; `responses_api_key_route::a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_route` fails on `chat.include_usage == Some(true)` too |
 | TK0191-M3 | `build_window` passes `None` to `output_reservation`/`input_budget` (R ignores the value the request sends), while `Window.request_output` still carries it | ✅ 1 failed (rc=100) | `catalog::a_chat_route_reserves_its_catalog_max_tokens` (R 16 384 and B 922 000 instead of R 250 000 and B 750 000) |
+
+## TK0192: `RADIAN_EXTRA_BODY` and the A/B body arm (2026-10-26)
+
+Branch `work/TK0192-extra-request-body-env-and-ab-arm`. Each mutation was applied in place,
+the named test binary was run, and the source was restored from a copy under `.radian/mut/`
+(`cmp` empty, `git status --short` back to the same set).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0192-M1 | the chat adapter merges `settings` before `config.extra_body` (`for source in [&settings, &config.extra_body]`), so the env body wins over the request's own setting | ✅ 1 failed (rc=100) | `extra_body::a_request_setting_wins_over_the_extra_body_and_the_warning_names_the_key` (`assertion left == right` at "the request value wins": 0.1 instead of 0.9) |
+| TK0192-M2 | `parse_extra_body` skips the reserved-key check | ✅ 1 failed (rc=100) | `extra_body::reserved_keys_and_non_objects_are_refused` (`expect_err` on an `Ok` value for `{"messages":[]}`) |

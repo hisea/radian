@@ -21,6 +21,13 @@ const RESERVED: [&str; 7] = [
     "include",
 ];
 
+/// The body keys this adapter owns, for a host that merges `extra_body` into every request
+/// (ADR 0026 D13). A caller refuses them before a request is sent; `build_body` refuses them
+/// again.
+pub fn reserved_body_keys() -> &'static [&'static str] {
+    &RESERVED
+}
+
 pub(crate) fn build_body(
     request: &ModelRequest,
     config: &OpenAiResponsesConfig,

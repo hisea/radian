@@ -94,6 +94,8 @@ radian-host = { path = ".", features = ["testing"] }
 radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
+# The extra-body tests use this adapter's mock too (ADR 0026 D13).
+agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 # The chatgpt provider tests use this adapter's own local mock HTTP server (never the real
 # network).
 agent-provider-openai-responses = { path = "../agent-provider-openai-responses", features = ["testing"] }

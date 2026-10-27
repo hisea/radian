@@ -75,6 +75,7 @@ async fn open_with_leftover(
     }
     let config_slot = radian_runtime::ConfigSlot::new(serde_json::Value::Null);
     let model = build_model(radian_host::ModelArgs {
+        extra_body: Default::default(),
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: "http://127.0.0.1:1/v1".into(),
         model: "mock".into(),
@@ -94,6 +95,7 @@ async fn open_with_leftover(
         radian_host::ModelRoute::new("openai-compatible", "mock"),
         config_slot.clone(),
         radian_host::RouteContext {
+            extra_body: Default::default(),
             providers: std::collections::BTreeMap::new(),
             session_id: label.to_owned(),
             user_headers: Vec::new(),

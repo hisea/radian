@@ -18,6 +18,7 @@ use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
 use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
 use agent_provider_openai_responses::{OpenAiResponses, OpenAiResponsesConfig};
 use radian_core::{Model, ModelContext, ModelError, ModelRequest, ModelResponse};
+use serde_json::{Map, Value};
 
 use crate::key_pool::PoolKey;
 use crate::oauth_chatgpt;
@@ -139,6 +140,9 @@ pub struct ModelArgs {
     pub model: String,
     pub api_key: Option<String>,
     pub headers: Vec<(String, String)>,
+    /// Fields merged into every request body through the adapter's `extra_body` slot, under the
+    /// request's own settings (ADR 0026 D13). Empty by default.
+    pub extra_body: Map<String, Value>,
     /// `openai-compatible` only (`--include-usage`).
     pub include_usage: Option<bool>,
     /// `anthropic` only.
@@ -211,6 +215,8 @@ pub struct ChatGptModel {
     /// The descriptor's static headers only (`OpenAI-Beta`, `originator`, `session_id` —
     /// `chatgpt_headers` in `provider.rs`), **not** `Authorization`/`chatgpt-account-id`.
     pub static_headers: Vec<(String, String)>,
+    /// Fields merged into every request body (ADR 0026 D13), under the request settings.
+    pub extra_body: Map<String, Value>,
     pub reasoning_effort: Option<String>,
     /// The HTTP client every call sends through, built once at construction (a cheap `Arc`
     /// clone per call shares its connection pool).
@@ -238,6 +244,7 @@ impl Model for ChatGptModel {
         config = config
             .with_header("Authorization", format!("Bearer {access}"))
             .with_header("chatgpt-account-id", account_id);
+        config.extra_body = self.extra_body.clone();
         config.reasoning_effort = self.reasoning_effort.clone();
         let model = OpenAiResponses::with_client(config, self.client.clone()).map_err(|error| {
             ModelError::Protocol(format!("could not build the ChatGPT request: {error}"))
@@ -514,6 +521,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 config = config.with_api_key(agent_provider_openai_compatible::ApiKey::new(key));
             }
             config.headers = args.headers;
+            config.extra_body = args.extra_body;
             config.include_usage = args.include_usage;
             config.max_tokens = args.max_output_tokens;
             config.reasoning_effort = args.reasoning_effort;
@@ -540,6 +548,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 config = config.with_api_key(agent_provider_anthropic::ApiKey::new(key));
             }
             config.headers = args.headers;
+            config.extra_body = args.extra_body;
             config.max_tokens = args.max_tokens;
             if let Some(thinking) = args.thinking.to_config() {
                 config = config.with_thinking(thinking);
@@ -562,6 +571,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 for (name, value) in &args.headers {
                     config = config.with_header(name.clone(), value.clone());
                 }
+                config.extra_body = args.extra_body;
                 config.reasoning_effort = args.reasoning_effort;
                 return OpenAiResponses::new(config)
                     .map(HostModel::Responses)
@@ -578,6 +588,7 @@ pub fn build_model(args: ModelArgs) -> Result<HostModel, String> {
                 base_url: args.base_url,
                 model: args.model,
                 static_headers: args.headers,
+                extra_body: args.extra_body,
                 reasoning_effort: args.reasoning_effort,
                 client,
                 endpoints: oauth_chatgpt::Endpoints::default(),
@@ -645,6 +656,8 @@ pub struct RouteContext {
     pub session_id: String,
     /// The user's own headers (generic-descriptor only, `{session_id}` already expanded).
     pub user_headers: Vec<(String, String)>,
+    /// Fields merged into every request body on every route (ADR 0026 D13).
+    pub extra_body: Map<String, Value>,
     pub include_usage: Option<bool>,
     pub max_tokens: u32,
     /// The unified thinking level's **name** (ADR 0026 D11); clamped per route at build time.
@@ -726,6 +739,7 @@ impl RouteContext {
                 .map(str::to_owned)
                 .or_else(|| credential.as_ref().map(|credential| credential.key.clone())),
             headers: route.headers,
+            extra_body: self.extra_body.clone(),
             // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default;
             // an explicit `--include-usage` wins either way.
             include_usage: self

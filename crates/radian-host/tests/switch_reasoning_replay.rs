@@ -90,6 +90,7 @@ fn decl(base_url: &str, override_: Option<ReasoningReplayOverride>) -> ProviderD
 
 fn context() -> RouteContext {
     RouteContext {
+        extra_body: Default::default(),
         providers: BTreeMap::from([
             (
                 "acme".to_owned(),

@@ -20,6 +20,7 @@ use serde_json::Value;
 /// `@ai-sdk/openai` built-in descriptor model (`opencode-go`'s headers, no `chatgpt_oauth`).
 fn api_key_model(server: &MockServer) -> radian_host::HostModel {
     build_model(ModelArgs {
+        extra_body: Default::default(),
         provider: Provider::ChatGpt,
         base_url: server.base_url.clone(),
         model: "muse-spark-1.3-contributor".to_owned(),
