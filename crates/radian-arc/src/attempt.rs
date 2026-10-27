@@ -291,18 +291,20 @@ fn spawn_claim_with(
     Ok(Spawned { child })
 }
 
-/// Adds the worker arguments to the wrapper's command: one JSON array on the hidden `--command`
-/// flag for a command worker, or the `radian exec` extra arguments after `--`. Both come from the
-/// claim's [`WorkerLine`], never from a configuration read after the claim.
+/// Adds the worker arguments to the wrapper's command: one JSON array on the hidden `--acp` or
+/// `--command` flag, or the `radian exec` extra arguments after `--`. All come from the claim's
+/// [`WorkerLine`], never from a configuration read after the claim.
 fn add_worker_args(command: &mut Command, worker: &WorkerLine) -> Result<(), Error> {
-    match worker {
-        WorkerLine::Command { command: words, .. } => {
-            let json = serde_json::to_string(words).map_err(|error| {
-                Error::Failed(format!("cannot encode the flow's command: {error}"))
-            })?;
-            command.arg("--command").arg(json);
-        }
-        WorkerLine::Radian { .. } => {}
+    let flag = match worker {
+        WorkerLine::Command { command: words, .. } => Some(("--command", words)),
+        WorkerLine::Acp { acp, .. } => Some(("--acp", acp)),
+        WorkerLine::Radian { .. } => None,
+    };
+    if let Some((flag, words)) = flag {
+        let json = serde_json::to_string(words).map_err(|error| {
+            Error::Failed(format!("cannot encode the flow's worker program: {error}"))
+        })?;
+        command.arg(flag).arg(json);
     }
     command.arg("--");
     if let WorkerLine::Radian { exec_args, .. } = worker {

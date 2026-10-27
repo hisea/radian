@@ -81,7 +81,8 @@ Wire-level behaviour, over a real HTTP mock (`tests/http.rs`) and in unit tests:
 | A trailing usage chunk is captured through the SSE stream, and the last non-empty usage wins | `a_trailing_usage_chunk_is_captured_through_the_sse_stream`, `usage_in_every_chunk_takes_the_last_non_empty_one`, `usage_in_the_final_chunk_with_include_usage_is_counted_once` | `tests/http.rs` |
 | The user agent names radian | `the_user_agent_names_radian` | `tests/http.rs` |
 | A response without usage reports `None`; `total` is not invented when the provider omits it | `a_response_without_usage_reports_none`, `total_is_not_invented_when_the_provider_omits_it` | `tests/http.rs` |
-| `include_usage` defaults to the OpenAI host only; the body carries `stream_options` only when enabled; a 400 gets the hint and a 400 without it does not | `include_usage_defaults_to_the_openai_host_only`, `the_request_body_carries_stream_options_only_when_enabled`, `a_400_for_stream_options_tells_you_to_turn_it_off`, `a_400_without_stream_options_gets_no_hint` | `tests/http.rs` |
+| `include_usage` defaults to the OpenAI host only; the body carries `stream_options` only when enabled; a 400 whose body names the option gets the hint and any other 400 keeps its message | `include_usage_defaults_to_the_openai_host_only`, `the_request_body_carries_stream_options_only_when_enabled`, `a_400_for_stream_options_tells_you_to_turn_it_off`, `a_400_without_stream_options_gets_no_hint`, `a_400_that_does_not_name_stream_options_keeps_its_message` | `tests/http.rs` |
+| A Go plan limit (429, `error.type == "GoUsageLimitError"`) is `UsageLimit`, never retried, and never quotes the workspace id; any other 429 stays `Unavailable` | `a_go_usage_limit_fails_at_once_and_never_names_the_workspace`, `a_go_usage_limit_uses_retry_after_as_its_reset`, `another_429_body_stays_unavailable` | `tests/http.rs` |
 | A key is never sent over plain http to a remote host; bad configuration is reported; the key is hidden from `Debug` | `a_key_is_never_sent_over_plain_http_to_a_remote_host`, `bad_configuration_is_reported`, `the_key_is_hidden_from_debug_output` | `tests/http.rs` |
 | An HTTP error body, a stream error and a custom header value that echo the key are masked; `Debug` hides the key and header values; URLs never leak credentials through `Debug` or config errors | `an_http_error_body_that_echoes_the_key_is_masked`, `a_stream_error_that_echoes_the_key_is_masked`, `a_custom_header_value_echoed_by_the_server_is_masked`, `debug_output_hides_the_key_and_header_values`, `urls_never_leak_credentials_through_debug_or_config_errors` | `tests/http.rs` |
 | SSE parsing: events split at blank lines; any split point gives the same events; a multi-byte character split across chunks survives; a bare `\r` ends a line; a final event without a blank line is still returned; other fields and comments are ignored; invalid UTF-8 is a protocol error; an endless line is cut off | `events_are_split_at_blank_lines`, `a_split_anywhere_gives_the_same_events`, `a_multibyte_character_split_across_chunks_survives`, `a_bare_carriage_return_ends_a_line`, `the_final_event_without_a_blank_line_is_still_returned`, `other_fields_and_comments_are_ignored`, `invalid_utf8_is_a_protocol_error`, `an_endless_line_is_cut_off` | `src/sse.rs` |
@@ -108,20 +109,23 @@ compiled only under the feature (ADR 0013: no test server ships in the product).
   server may use another field name, and then its reasoning is simply not seen.
 - **`include_usage` is a heuristic.** The default is "on for `api.openai.com`, off elsewhere",
   compared by exact host; a compatible server that supports `stream_options` but is not OpenAI
-  gets no usage unless the host sets `include_usage` explicitly. A 400 is given a hint, not a
-  retry.
+  gets no usage unless the host sets `include_usage` explicitly. A 400 whose body names
+  `stream_options` or `include_usage` is given a hint, not a retry; any other 400 keeps its
+  own message.
 - **No total time limit.** A response may take as long as bytes keep arriving; `idle_timeout`
   only bounds silence. `max_response_bytes` bounds text and tool-call arguments, not the raw
   bytes off the wire.
 - **`[DONE]` without a finish reason is inferred** as `stop` (or `tool_calls` when calls are
   present). That is an inference, not something the provider said.
-- **Error classification is by status, with one narrow exception**: 5xx/408/429 →
-  `Transport`, other non-2xx → `Protocol`. A provider that signals a request error with a 500
-  is classified as transport. The exception is ADR 0018's **context overflow**: a 400/413 whose
-  JSON carries `error.code == "context_length_exceeded"` or a context-shaped `error.message`
-  (or, mid-stream, the same code/message) becomes `ContextOverflow`. 429/5xx are never an
-  overflow, and generic "too many tokens" wording is deliberately excluded (it is as likely to
-  be a rate limit).
+- **Error classification is by status, with two narrow exceptions**: 5xx/408/429 →
+  `Unavailable`, other non-2xx → `Protocol`. A provider that signals a request error with a 500
+  is classified as unavailable. The first exception is ADR 0018's **context overflow**: a
+  400/413 whose JSON carries `error.code == "context_length_exceeded"` or a context-shaped
+  `error.message` (or, mid-stream, the same code/message) becomes `ContextOverflow`. 429/5xx
+  are never an overflow, and generic "too many tokens" wording is deliberately excluded (it is
+  as likely to be a rate limit). The second is ADR 0017's **usage limit**: a 429 whose body is
+  the ChatGPT `usage_limit_reached` or opencode-go's `GoUsageLimitError` becomes `UsageLimit`,
+  which is never retried.
 - **The two adapters are not identical**, and this is intentional: the Anthropic one has no
   `stream_options`, no `include_usage`, and its own usage field names. The shared contract suite
   is what keeps them comparable.
@@ -136,5 +140,6 @@ compiled only under the feature (ADR 0013: no test server ships in the product).
 0003 (interrupted streaming prefix — this adapter's deltas are what the core accumulates) · 0005
 G4 (`meta` is provider-invisible) · 0007 (usage: `include_usage`, the three SSE shapes, and
 "never compute `total`") · 0010 (deltas are live projections) · 0013 (T1/T4: no telemetry, and an
-endpoint named in an error is redacted) · 0014 (reasoning content). The contract itself and its
+endpoint named in an error is redacted) · 0014 (reasoning content) · 0017 (a usage limit is
+never retried). The contract itself and its
 escape hatches are documented in `crates/agent-provider-contract/README.md`.

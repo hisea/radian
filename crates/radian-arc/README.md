@@ -126,12 +126,14 @@ is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks a
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
 --remote … --main-branch … --stall-timeout-secs … --max-wall-time-secs …
---cancel-grace-secs … [--resume] [--allow-noop] [--commit-dirty] [--command <JSON>] -- <[worker]
-exec_args>`,
+--cancel-grace-secs … [--resume] [--allow-noop] [--commit-dirty] [--command <JSON>]
+[--acp <JSON>] -- <[worker] exec_args>`,
 with the task body on stdin, and moves the task to `doing.running`. `--command` carries
 `[worker] command` as one JSON array (the program first); the wrapper then runs that program
 instead of `radian exec`, with the same brief, limits and delivery checks and the `ARC_*`
-environment of ADR 0048 decision 7. The claim picks the session from
+environment of ADR 0048 decision 7. `--acp` carries a flow's `acp` the same way: the wrapper
+is an ACP v1 client (`acp`) and starts that program as the agent, sends it the brief through
+`session/prompt`, and writes the turn's `stopReason` as the attempt's `Result`. The claim picks the session from
 `[worker] rework_session`: `<task>-<attempt>` with `fresh` (the default), the task id with
 `resume`, and only the latter sets `--resume`. The wrapper, not the caller, enforces the
 attempt's limits: no growth

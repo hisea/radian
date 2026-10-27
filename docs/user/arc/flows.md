@@ -5,7 +5,7 @@ description: What an arc flow is: the two-flow example, how a task picks one, th
 # arc: flows
 
 A **flow** is one named bundle of the settings a task's route needs: which worker runs its attempts, which gate profile verifies the result, how many of its tasks may run at once, and its defaults for `allow_noop` and `commit_dirty`.
-It is not a new worker kind and not a new state machine: every flow's worker is `radian exec` with its own arguments, or one program of its own ([the worker](worker.md)), and the claim, the delivery check, the gate, the merge and the ledger are the same for every flow.
+It is not a new worker kind and not a new state machine: every flow's worker is `radian exec` with its own arguments, one program of its own, or an ACP agent ([the worker](worker.md)), and the claim, the delivery check, the gate, the merge and the ledger are the same for every flow.
 One repository can hold several flows, so coding, image and writing tasks can share one plan: a plan knows nothing about flows, and `after` may join tasks of different flows.
 
 The authority for every key and field is [`config.toml`](files.md#configtoml) and [the task fields](files.md#task-fields); this page says what a flow is for and shows a complete setup.
@@ -49,6 +49,19 @@ commit_dirty = true
 Every key's type, default, allowed values and effect time is in the [`flows.<name>.*` rows](files.md#configtoml).
 The worker's session, brief and checks are in [the worker](worker.md), the stages in [the gate](gate.md), and the claim and the queue in [the scheduling loop](loop.md).
 
+A flow can run an ACP agent instead of `radian exec` or its own command: set `acp` to the program and its arguments, and the wrapper becomes the ACP client (see [An ACP agent as the worker](worker.md#an-acp-agent-as-the-worker)).
+With the Codex adapter installed globally, the `image` flow above reads as one line:
+
+```toml
+[flows.image]
+concurrency = 1
+gate_profile = "image-review"
+acp = ["codex-acp"]
+commit_dirty = true
+```
+
+A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never two, and `acp` cannot be combined with `[worker] rework_session = "resume"`.
+
 ## How a task picks its flow
 
 A task's [`flow` field](files.md#task-fields) names one `[flows.<name>]` section; a task whose file has no `flow` field runs `default`.
@@ -60,7 +73,7 @@ A flow the file does not define is not a silent fallback: the claim of a ready t
 
 The flow's settings reach the attempt at different moments, each stated in its own row:
 
-- the worker (`command` or `exec_args`) is chosen at the claim and recorded in the attempt's `start.json`, so a `config.toml` change takes effect at the next claim;
+- the worker (`acp`, `command` or `exec_args`) is chosen at the claim and recorded in the attempt's `start.json`, so a `config.toml` change takes effect at the next claim;
 - the gate's profile is resolved when the gate is planned, and the attempt's `profile.json` records the profile the verification ran under, so a later merge is approved and integrated by that profile;
 - `allow_noop` is read at the claim of each attempt, when the delivery check runs;
 - `commit_dirty` is read at the same claim: when it is `true`, a `completed` worker's uncommitted or untracked changes are committed on the branch before that attempt's delivery check.

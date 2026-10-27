@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use serde_json::{Value, json};
 
+use crate::acp;
 use crate::gate::{
     BeforeAttempt, BeforeAttemptCommand, DEFAULT_COMMAND_TIMEOUT_SECS, ShellWatch, run_shell,
 };
@@ -108,6 +109,10 @@ pub struct Options {
     /// it (ADR 0048 decision 7). arc reads it at the claim and passes it here; unset runs
     /// `radian exec`. Never set by a person; it is not in the manual.
     pub command: Option<Vec<String>>,
+    /// Internal: a flow's `acp`, the program first and its arguments after it: the wrapper is
+    /// the ACP client and starts this array as the agent (ADR 0048 decision 7). arc reads it at
+    /// the claim and passes it here. Never set by a person; it is not in the manual.
+    pub acp: Option<Vec<String>>,
     /// Internal: the task's flow, the name the attempt's records carry (ADR 0048 decision 15).
     /// arc passes the flow the claim resolved; a person does not set it.
     pub flow: String,
@@ -148,19 +153,22 @@ pub const WORKER_ENV: &[&str] = &[
     "ARC_STATE_DIR",
 ];
 
-/// The worker a run starts: the test-only shell, the configured command, or `radian exec`
-/// (ADR 0048 decision 7). The test-only shell takes precedence, so every existing forwarding
-/// test keeps its shape.
+/// The worker a run starts: the test-only shell, the configured ACP agent, the configured
+/// command, or `radian exec` (ADR 0048 decision 7). The test-only shell takes precedence, so
+/// every existing forwarding test keeps its shape.
 #[derive(Debug, Clone, Copy)]
 enum Worker<'a> {
     Radian,
     Command(&'a [String]),
+    Acp(&'a [String]),
     Shell(&'a str),
 }
 
 fn worker_of(o: &Options) -> Worker<'_> {
     if let Some(shell) = o.worker_command.as_deref() {
         Worker::Shell(shell)
+    } else if let Some(acp) = o.acp.as_deref() {
+        Worker::Acp(acp)
     } else if let Some(command) = o.command.as_deref() {
         Worker::Command(command)
     } else {
@@ -530,7 +538,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // The command worker's own state, outside the worktree and kept across the task's
     // attempts (ADR 0048 decision 7). It exists before the command starts.
     let state_dir = s.arc.join("attempts").join(&o.task).join("state");
-    if matches!(worker_of(o), Worker::Command(_)) {
+    if matches!(worker_of(o), Worker::Command(_) | Worker::Acp(_)) {
         fs::create_dir_all(&state_dir).map_err(|error| {
             Failure::error(format!("cannot create {}: {error}", state_dir.display()))
         })?;
@@ -543,26 +551,40 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "flow": o.flow,
             "program": words.first().cloned().unwrap_or_default(),
         }),
+        Worker::Acp(words) => json!({
+            "kind": "acp",
+            "flow": o.flow,
+            "program": words.first().cloned().unwrap_or_default(),
+        }),
         Worker::Shell(_) => json!({"kind": "command", "flow": o.flow, "program": "sh"}),
     };
-    let mut child = spawn_child(
-        o,
-        &Spawn {
-            worktree: &s.worktree,
-            deny: &deny,
-            state_dir: &state_dir,
-            control: &control,
-            result_path: &result_path,
-            stderr_path: &stderr_path,
-            brief: &brief,
-        },
-    )?;
+    let spawn = Spawn {
+        worktree: &s.worktree,
+        deny: &deny,
+        state_dir: &state_dir,
+        control: &control,
+        result_path: &result_path,
+        stderr_path: &stderr_path,
+        brief: &brief,
+    };
+    let (mut child, acp_log) = match worker_of(o) {
+        Worker::Acp(words) => {
+            let (child, log) = spawn_acp(o, &spawn, words)?;
+            (child, Some(log))
+        }
+        _ => (spawn_child(o, &spawn)?, None),
+    };
     let pid = child.id();
-    CHILD_PID.store(pid as i32, Ordering::SeqCst);
-    // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
-    // child to forward it to.
-    if STOP_REQUESTED.load(Ordering::SeqCst) {
-        process::signal_group(pid, process::SIGTERM);
+    // An ACP agent is stopped through the protocol first, so the SIGTERM handler must not
+    // forward the wrapper's own signal to its group before the wrapper sent `session/cancel`
+    // (ADR 0048 decision 9). The wrapper's monitor reads the signal instead.
+    if acp_log.is_none() {
+        CHILD_PID.store(pid as i32, Ordering::SeqCst);
+        // A SIGTERM that arrived during the worktree setup is forwarded as soon as there is a
+        // child to forward it to.
+        if STOP_REQUESTED.load(Ordering::SeqCst) {
+            process::signal_group(pid, process::SIGTERM);
+        }
     }
     let processor_started_at = process_start(pid).unwrap_or_else(|| started_at.clone());
     let wrapper_started_at = process::start_time(s.wrapper_pid);
@@ -590,16 +612,27 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     )?;
     // The limits belong to this process, not to the scheduling loop that started it: a
     // one-shot `run`, or a killed one, leaves the worker bounded (decision 7.8).
-    let status = monitor_child(
-        &mut child,
-        &result_path,
-        &s.runs.join(SIGNAL_FILE),
-        &Limits::of(o),
-        s.clock.deadline(),
-    )?;
+    let (status, acp_failure) = match acp_log {
+        Some(log) => {
+            let mut client = acp::Client::start(&mut child, s.worktree.clone(), log.clone())
+                .map_err(Failure::error)?;
+            let turn = run_acp_turn(o, s, &mut child, &mut client, &brief, &log)?;
+            (turn.exit_code, turn.failure)
+        }
+        None => {
+            let status = monitor_child(
+                &mut child,
+                &result_path,
+                &s.runs.join(SIGNAL_FILE),
+                &Limits::of(o),
+                s.clock.deadline(),
+            )?;
+            (exit_code_of(&status), None)
+        }
+    };
     CHILD_PID.store(0, Ordering::SeqCst);
     let ended_at = now();
-    let exit_code = exit_code_of(&status);
+    let exit_code = status;
 
     let result = last_result(&result_path);
     let outcome = result
@@ -614,9 +647,14 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // A control file the check cannot read back counts as a change and is restored too; a
     // restore that fails stops the attempt here, so no git command runs on files the wrapper
     // could not repair.
-    let mut failure = match control.check() {
-        ControlCheck::Unchanged => None,
+    let mut failure = acp_failure;
+    match control.check() {
+        ControlCheck::Unchanged => {}
         ControlCheck::Changed(change) if change.restore_failed.is_some() => {
+            let reason = match &failure {
+                Some(before) => format!("{}; {before}", change.reason()),
+                None => change.reason(),
+            };
             return write_finish(
                 o,
                 s,
@@ -628,13 +666,13 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
                     remote_sha: None,
                     outcome: &outcome,
                     exit_code,
-                    failure: Some(change.reason()),
+                    failure: Some(reason),
                     notes: &notes,
                 },
             );
         }
-        ControlCheck::Changed(change) => Some(change.reason()),
-    };
+        ControlCheck::Changed(change) => failure = Some(change.reason()),
+    }
 
     // `flows.<name>.commit_dirty` (ADR 0048 decision 8): after the control-file check and
     // before the delivery check, a `completed` worker's dirty worktree is committed on the
@@ -1113,6 +1151,12 @@ fn validate_rest(o: &Options) -> Result<(), Failure> {
     if o.command.as_ref().is_some_and(Vec::is_empty) {
         return Err(Failure::usage(
             "the configured worker command is empty; its first element must be the program",
+        ));
+    }
+    // The configured ACP program is one program and its arguments, as a command is.
+    if o.acp.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Failure::usage(
+            "the configured ACP agent is empty; its first element must be the program",
         ));
     }
     // The internal remote and main-branch names end up as git arguments, so keep them to
@@ -2449,9 +2493,9 @@ fn session_start(resume: bool, exists: bool) -> SessionStart {
     }
 }
 
-/// The environment a command worker receives (ADR 0048 decision 7). A program that contains
-/// a `/` already arrives absolute (the claim resolves it); the worktree, the git directories
-/// and the state directory are made absolute here.
+/// The environment a command worker or ACP agent receives (ADR 0048 decision 7). A program
+/// that contains a `/` already arrives absolute (the claim resolves it); the worktree, the git
+/// directories and the state directory are made absolute here.
 fn worker_env(
     o: &Options,
     worktree: &Path,
@@ -2527,6 +2571,12 @@ fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
             }
             command
         }
+        // An ACP agent is spawned by [`spawn_acp`], which pipes its stdout to the client.
+        Worker::Acp(_) => {
+            return Err(Failure::usage(
+                "the ACP agent is started by the wrapper's ACP client, not here",
+            ));
+        }
         Worker::Radian => {
             let executable = std::env::current_exe().map_err(|error| {
                 Failure::error(format!("cannot find the current executable: {error}"))
@@ -2587,6 +2637,402 @@ fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
         let _ = stdin.write_all(brief.as_bytes());
     }
     Ok(child)
+}
+
+/// Spawns one ACP agent: the flow's program in the task's worktree, in its own process group,
+/// with the command worker's environment and stderr stream (ADR 0048 decision 7). Its stdout
+/// is piped to the ACP client, and the attempt's `result.jsonl` is created here so the client
+/// writes the protocol's lines into it.
+fn spawn_acp(
+    o: &Options,
+    spawn: &Spawn<'_>,
+    words: &[String],
+) -> Result<(Child, acp::Log), Failure> {
+    let Spawn {
+        worktree,
+        deny,
+        state_dir,
+        control,
+        result_path,
+        stderr_path,
+        brief: _,
+    } = *spawn;
+    let Some((program, args)) = words.split_first() else {
+        return Err(Failure::usage(
+            "the configured ACP agent is empty; its first element must be the program",
+        ));
+    };
+    let mut command = Command::new(program);
+    command.args(args).current_dir(worktree);
+    let start = session_start(o.resume, session_exists(&o.session, &o.extra_args));
+    for (name, value) in worker_env(o, worktree, deny, state_dir, control, start) {
+        command.env(name, value);
+    }
+    // Its own process group, so the wrapper's SIGTERM reaches the agent and every child that
+    // stays in the group, and never this wrapper or the process above it (decision 9).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let log_file = File::create(result_path).map_err(|error| {
+        Failure::error(format!("cannot create {}: {error}", result_path.display()))
+    })?;
+    let stderr = File::create(stderr_path).map_err(|error| {
+        Failure::error(format!("cannot create {}: {error}", stderr_path.display()))
+    })?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr));
+    let child = command
+        .spawn()
+        .map_err(|error| Failure::error(format!("cannot start the worker: {error}")))?;
+    Ok((child, Arc::new(std::sync::Mutex::new(log_file))))
+}
+
+/// How long an ACP agent gets to end its turn after `session/cancel` before the wrapper sends
+/// SIGTERM. The attempt's own `cancel_grace_secs` starts with that signal, not before it
+/// (ADR 0048 decision 9).
+const CANCEL_TURN_WAIT: Duration = Duration::from_secs(2);
+
+/// What one ACP turn left: the process exit code and any protocol-level failure text.
+struct AcpTurn {
+    exit_code: i32,
+    failure: Option<String>,
+    /// The turn's end, when the agent answered `session/prompt`. The `Result` line is written
+    /// after the client has stopped, so it is the attempt's last line.
+    end: Option<acp::PromptEnd>,
+}
+
+/// Runs the one conversation of an ACP attempt, then stops the agent and writes the attempt's
+/// `Result` line (ADR 0048 decision 7): `initialize`, one `session/new` in the worktree, and
+/// one `session/prompt` with the brief. The response's `stopReason` decides the outcome; on a
+/// stall, the wall clock or a cancel the client sends `session/cancel` first.
+fn run_acp_turn(
+    o: &Options,
+    s: &Setup,
+    child: &mut Child,
+    client: &mut acp::Client,
+    brief: &str,
+    log: &acp::Log,
+) -> Result<AcpTurn, Failure> {
+    let limits = Limits::of(o);
+    let turn = acp_conversation(s, child, client, brief, &s.runs.join(SIGNAL_FILE), &limits);
+    if turn.is_err() {
+        // A request that could not be written means the agent's pipe is gone; stop whatever
+        // is left of its group so nothing of the worker outlives the attempt.
+        stop_agent(child, limits.grace);
+    }
+    client.finish();
+    // The wrapper, not the agent, writes the attempt's `Result` line, after the agent has ended
+    // and the reader has stopped, so nothing follows it in `result.jsonl` (ADR 0048 decision 7).
+    if let Ok(turn) = &turn
+        && let Some(end) = &turn.end
+    {
+        acp::append(
+            log,
+            &json!({
+                "type": "Result",
+                "outcome": acp_outcome(&end.stop_reason),
+                "text": end.text,
+            }),
+        );
+    }
+    turn
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acp_conversation(
+    s: &Setup,
+    child: &mut Child,
+    client: &acp::Client,
+    brief: &str,
+    signal: &Path,
+    limits: &Limits,
+) -> Result<AcpTurn, Failure> {
+    // No client capability is advertised: the agent writes its own files and runs no shell
+    // through this client, and it never asks `fs/*` or `terminal/*` (ADR 0048 decision 7).
+    let initialized = client
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": acp::PROTOCOL_VERSION,
+                "clientCapabilities": {},
+            }),
+        )
+        .map_err(|error| Failure::error(format!("initialize: {error}")))?;
+    match wait_acp(child, client, signal, limits, s.clock.deadline(), || {
+        client.has_response(initialized)
+    })? {
+        Wait::Done => {}
+        Wait::Stopped { exit_code, .. } | Wait::Exited { exit_code } => {
+            return Ok(AcpTurn {
+                exit_code,
+                failure: None,
+                end: None,
+            });
+        }
+    }
+    if let Some(Err(error)) = client.take_response(initialized) {
+        return Ok(AcpTurn {
+            exit_code: stop_agent(child, limits.grace).map_or(-1, |status| exit_code_of(&status)),
+            failure: Some(format!("initialize failed: {error}")),
+            end: None,
+        });
+    }
+
+    let created = client
+        .request(
+            "session/new",
+            json!({
+                "cwd": fs::canonicalize(&s.worktree)
+                    .unwrap_or_else(|_| s.worktree.clone())
+                    .display()
+                    .to_string(),
+                "mcpServers": [],
+            }),
+        )
+        .map_err(|error| Failure::error(format!("session/new: {error}")))?;
+    match wait_acp(child, client, signal, limits, s.clock.deadline(), || {
+        client.has_response(created)
+    })? {
+        Wait::Done => {}
+        Wait::Stopped { exit_code, .. } | Wait::Exited { exit_code } => {
+            return Ok(AcpTurn {
+                exit_code,
+                failure: None,
+                end: None,
+            });
+        }
+    }
+    let session = match client.take_response(created) {
+        Some(Ok(value)) => value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        Some(Err(error)) => {
+            return Ok(AcpTurn {
+                exit_code: stop_agent(child, limits.grace)
+                    .map_or(-1, |status| exit_code_of(&status)),
+                failure: Some(format!("session/new failed: {error}")),
+                end: None,
+            });
+        }
+        None => None,
+    };
+    let Some(session) = session else {
+        return Ok(AcpTurn {
+            exit_code: stop_agent(child, limits.grace).map_or(-1, |status| exit_code_of(&status)),
+            failure: Some("session/new answered without a sessionId".to_owned()),
+            end: None,
+        });
+    };
+    client.set_session(&session);
+
+    let prompted = client
+        .request(
+            "session/prompt",
+            json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": brief }],
+            }),
+        )
+        .map_err(|error| Failure::error(format!("session/prompt: {error}")))?;
+    let stopped = wait_acp(child, client, signal, limits, s.clock.deadline(), || {
+        client.has_response(prompted)
+    })?;
+    let response = client.take_response(prompted);
+    let (exit_code, end) = match stopped {
+        Wait::Done => {
+            let exit_code =
+                stop_agent(child, limits.grace).map_or(-1, |status| exit_code_of(&status));
+            (exit_code, prompt_end(response, client))
+        }
+        // `session/cancel` asked the agent to end the turn. If it answered `cancelled` in the
+        // moment before SIGTERM, that answer is the attempt's result; otherwise the wrapper
+        // wrote no result and the signal records the cancel (ADR 0048 decision 9).
+        Wait::Stopped {
+            reason: "cancel",
+            exit_code,
+        } => {
+            let cancelled = response
+                .as_ref()
+                .and_then(|response| response.as_ref().ok())
+                .and_then(|value| value.get("stopReason"))
+                .and_then(Value::as_str)
+                == Some("cancelled");
+            if cancelled {
+                (exit_code, prompt_end(response, client))
+            } else {
+                return Ok(AcpTurn {
+                    exit_code,
+                    failure: None,
+                    end: None,
+                });
+            }
+        }
+        Wait::Stopped { exit_code, .. } | Wait::Exited { exit_code } => {
+            return Ok(AcpTurn {
+                exit_code,
+                failure: None,
+                end: None,
+            });
+        }
+    };
+    let (end, failure) = match end {
+        Ok(end) => (Some(end), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(AcpTurn {
+        exit_code,
+        failure,
+        end,
+    })
+}
+
+/// The prompt response as a [`acp::PromptEnd`], or the line the attempt fails with when the
+/// agent answered with an error or without a `stopReason`.
+fn prompt_end(
+    response: Option<Result<Value, String>>,
+    client: &acp::Client,
+) -> Result<acp::PromptEnd, String> {
+    match response {
+        Some(Ok(value)) => match value.get("stopReason").and_then(Value::as_str) {
+            Some(stop_reason) => Ok(acp::PromptEnd {
+                stop_reason: stop_reason.to_owned(),
+                text: client.message_text(),
+            }),
+            None => Err("the agent's session/prompt answer carries no stopReason".to_owned()),
+        },
+        Some(Err(error)) => Err(format!("session/prompt failed: {error}")),
+        None => Err("the agent exited without answering session/prompt".to_owned()),
+    }
+}
+
+/// The outcome a `stopReason` records (ADR 0048 decisions 7 and 9): `end_turn` is the only
+/// pass; every other protocol reason is a failed outcome named after itself, and a reason this
+/// build does not know is `failed`.
+fn acp_outcome(stop_reason: &str) -> &'static str {
+    match stop_reason {
+        "end_turn" => "completed",
+        "max_tokens" => "max_tokens",
+        "max_turn_requests" => "max_turn_requests",
+        "refusal" => "refusal",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    }
+}
+
+/// One step's wait: the response arrived, the attempt was stopped, or the agent exited.
+enum Wait {
+    Done,
+    Stopped {
+        reason: &'static str,
+        exit_code: i32,
+    },
+    Exited {
+        exit_code: i32,
+    },
+}
+
+/// Waits for one ACP step while enforcing the attempt's limits (ADR 0048 decisions 7.8 and 9).
+/// `done` is the step's response. No new protocol line for the stall window, the wall clock,
+/// or a `radian arc cancel` (or a SIGTERM to the wrapper) sends `session/cancel`, gives the
+/// agent a moment to end its turn, and then sends SIGTERM, waits the grace period and sends
+/// SIGKILL. The wall clock and a stall also record `signal.json`; a cancel's record was
+/// written by the caller that signalled the wrapper. An agent that exits on its own is reaped
+/// here too.
+fn wait_acp(
+    child: &mut Child,
+    client: &acp::Client,
+    signal_path: &Path,
+    limits: &Limits,
+    wall_deadline: Option<Instant>,
+    done: impl Fn() -> bool,
+) -> Result<Wait, Failure> {
+    let mut last_growth = Instant::now();
+    let mut last_activity = client.activity();
+    loop {
+        if done() {
+            return Ok(Wait::Done);
+        }
+        if let Some(status) = exited(child)? {
+            stop_group(child.id(), limits.grace);
+            let _ = child.wait();
+            return Ok(Wait::Exited {
+                exit_code: exit_code_of(&status),
+            });
+        }
+        let now = Instant::now();
+        let activity = client.activity();
+        if activity != last_activity {
+            last_activity = activity;
+            last_growth = now;
+        }
+        // The order of the command worker's monitor: a cancel from another process first,
+        // then the wall clock, then the stall timer. A SIGTERM sent to the wrapper alone, with
+        // no `signal.json`, is a stop too: the ACP handler does not forward it, so the protocol
+        // cancel below is the only way the agent learns of it.
+        let (reason, record) = if signal_path.is_file() || STOP_REQUESTED.load(Ordering::SeqCst) {
+            (Some("cancel"), false)
+        } else if wall_deadline.is_some_and(|deadline| now >= deadline) {
+            (Some("wall_time"), true)
+        } else if !limits.stall.is_zero() && now.duration_since(last_growth) >= limits.stall {
+            (Some("stall"), true)
+        } else {
+            (None, false)
+        };
+        let Some(reason) = reason else {
+            std::thread::sleep(POLL);
+            continue;
+        };
+        if record {
+            write_signal(signal_path, reason)?;
+        }
+        // The protocol's own stop first: the agent ends the turn, and the reader answers a
+        // pending permission request `cancelled` from here on.
+        client.cancel();
+        let turn_ends = Instant::now() + CANCEL_TURN_WAIT;
+        while Instant::now() < turn_ends {
+            if done() || exited(child)?.is_some() {
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+        process::signal_group(child.id(), process::SIGTERM);
+        let kill_at = Instant::now() + limits.grace;
+        loop {
+            if exited(child)?.is_some() {
+                break;
+            }
+            if Instant::now() >= kill_at {
+                process::signal_group(child.id(), process::SIGKILL);
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+        let status = child
+            .wait()
+            .map_err(|error| Failure::error(format!("cannot wait for the agent: {error}")))?;
+        return Ok(Wait::Stopped {
+            reason,
+            exit_code: exit_code_of(&status),
+        });
+    }
+}
+
+/// The agent's exit status without reaping it.
+fn exited(child: &mut Child) -> Result<Option<ExitStatus>, Failure> {
+    process::exited_status(child.id())
+        .map_err(|error| Failure::error(format!("cannot wait for the agent: {error}")))
+}
+
+/// Stops the agent's process group and reaps the child. `None` when the status cannot be read
+/// (the child was already reaped elsewhere).
+fn stop_agent(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
+    stop_group(child.id(), grace);
+    child.wait().ok()
 }
 
 /// The repository's git control files, recorded before a worker starts and compared after it
@@ -3604,6 +4050,23 @@ mod tests {
             "x".repeat(72),
             "a line with no space is cut at the limit"
         );
+    }
+
+    /// The ACP `stopReason` mapping (ADR 0048 decisions 7 and 9): only `end_turn` passes, every
+    /// protocol reason keeps its own name as a failed outcome, and an unknown reason is
+    /// `failed`. Mutation: map `end_turn` to `failed` → this fails.
+    #[test]
+    fn the_acp_stop_reasons_map_to_outcomes() {
+        for (reason, outcome) in [
+            ("end_turn", "completed"),
+            ("max_tokens", "max_tokens"),
+            ("max_turn_requests", "max_turn_requests"),
+            ("refusal", "refusal"),
+            ("cancelled", "cancelled"),
+            ("something_new", "failed"),
+        ] {
+            assert_eq!(acp_outcome(reason), outcome, "{reason}");
+        }
     }
 
     /// The brief's sections keep their order, the footer last, and a missing one takes no

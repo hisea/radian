@@ -15,6 +15,8 @@
 //! - [`run`]: `radian arc run`, the scheduling loop that advances every auto level.
 //! - [`work`]: `radian arc work`, the trusted wrapper around one worker attempt. It is
 //!   internal: arc runs it, a person does not.
+//! - [`acp`]: a minimal synchronous Agent Client Protocol v1 client over stdio, independent of
+//!   the agent it starts. The wrapper uses it for a flow's `acp` worker.
 //! - [`worker_args`]: the worker's `radian exec` command line, parsed with the `radian exec`
 //!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
@@ -25,6 +27,7 @@
 //! Every git call of these modules is built by the private `git` module.
 //!
 //! The arc TUI lives in `radian-tui`; it reads through [`read`].
+pub mod acp;
 pub mod attempt;
 pub mod gate;
 mod git;
