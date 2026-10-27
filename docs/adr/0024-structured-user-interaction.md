@@ -95,6 +95,23 @@ Unattended runs **do not register** `ask_user`. The test is "a human sits at the
 - **Focus fields and question switching**: with no field focused, `←` and `→` move to the previous or next question. When an `Other` row, a `text` question, or a note is focused, `←` and `→` move the text cursor. `text` questions, notes, and selected `Other` rows treat space as text. An unselected `Other` row still uses space to select it.
 - **Keys**: `↑` and `↓` move. `⏎` **only confirms and advances to the next question, never selects**. After the last question it enters `Submit`. It advances even with zero selections (that question counts as unanswered). `Space` is the **only select key**: single selects, multi toggles, never advances. On `Other` `Space` selects and starts input at once (space in input is a space, `⏎` confirms and advances, `↑` and `↓` keep text on leave). `Tab` and `→`, `Shift-Tab` and `←` switch questions (cursor when a field is focused). `n` writes a note. `esc` declines (asks once to confirm). `alt-h` collapses the panel to one line; press again to restore.
 
+### Q8 The ACP host maps permissions and questions to `session/request_permission`
+
+- The ACP host (ADR 0049) registers `ask_user` and uses the session's pending queue for both
+  approvals and questions.
+- Every queue entry becomes one client request named `session/request_permission`. A
+  permission entry offers the three outcomes ADR 0012 already has: `allow_once`
+  (`AllowOnce`), `allow_always` (`AllowForSession`) and `reject_once`
+  (`Deny { reason }`). A `cancelled` outcome denies with its reason and cancels the turn.
+- An `ask_user` entry is asked one question at a time. The question's options become the
+  permission options and the selected option becomes the answer; a synthetic "Decline"
+  option is `PromptError::Declined`. `request_permission` carries one selection and no free
+  text, so a `text` question, a free-text `Other` answer and a multi-selection answer are not
+  representable on this surface; a text question fails the tool with `prompter_error` rather
+  than fabricating an answer.
+- The queue's abort outcomes are unchanged: a closing session denies an approval and gives a
+  question `PromptError::Gone`.
+
 ## No Changes to `radian-core`
 
 `ToolContext.cancellation`, `ToolOutput.structured`, `ToolConcurrency::Exclusive`, `ToolExecutionStarted` and `Settled`, and per-await `before_tool_call` all already exist. `ask_user` is a normal `ToolSession` member. Core never knows it waits on a human.

@@ -1,9 +1,13 @@
 # ACP 服务端 `radian acp`
 
-- 状态：decided（第一阶段：arc 需要的范围；owner 2026-10-27）；idea（第二阶段：编辑器）
+- 状态：in-progress（第一阶段除 `session/load` 已落地，见 ADR 0049；`session/load` 待补）；idea（第二阶段：编辑器）
 - 涉及 ADR：新 ADR；0032（一个二进制、保留的子命令）、0009（全屏 TUI 之外的宿主面）、0024（审批与提问映射到 `request_permission`）、0011（`session/prompt` 走 inbox）、0010（`session/update` 只发 live 事件）、0043（单会话、控制口）、0031（信任门）、0007（usage 与 cost）、0022（不 fork 会话）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥；owner 2026-10-27："arc 可以用 ACP 调用 radian"
 - 关系：`arc-acp-worker.md`（arc 当 ACP 客户端）是本条的第一个用户，先做；`arc-radian-worker-over-acp.md` 在两条之后，把 arc 的 radian worker 切到本条。
+
+## 落地状态
+
+第一阶段除 `session/load` 外已落地为 ADR 0049：`radian acp` 子命令、与 `radian exec` 共用的参数、一个进程一个 session、`session/prompt` 与 `stopReason`、live 事件到 `session/update`、`_meta.radian.*`、审批与 `ask_user` 的 `request_permission` 映射、非交互信任门、stdio `mcpServers`，以及不调 `fs/*`/`terminal/*`。`initialize` 目前回 `loadSession: false`，`session/load` 被拒绝并说明不支持；按 id 打开已有会话并用 `session/update` 回放 journal 的部分仍留在本条。
 
 ## 背景
 
@@ -16,7 +20,7 @@
 
 - **内建子命令 `radian acp`**，不做外部适配器：外部适配器要把审批接进控制口，而控制口不收审批答复（0043），内建直接用宿主的 Prompter（0024 Q1）反而便宜。它是 `radian-host` 之上与 TUI、`radian exec` 并列的第三个宿主面，不改 `radian-core`（0023 的分层本来就是为了加前端）。ADR 0032 的子命令表加 `acp`。
 - **flag 与 `radian exec` 同一套**：`--profile`、`--workspace`、`--session-id`、`--resume`、`--mcp-config`、`--model`、`--provider`、`--system-file` 等照收，语义不变，arc 与 `subagent` 工具设的隐藏内部 flag（`--tools`、`--deny-read`）也照收；没有 `-p`、`--output`、`--yes`（输入来自 `session/prompt`，输出走协议，审批走协议）。arc 的 wrapper 把今天拼给 `radian exec` 的那串原样拼给 `radian acp`。
-- **一个进程一个 session**（0043）：第一个 `session/new` 建会话，cwd 必须等于 `--workspace`（或在未给 `--workspace` 时成为它）；第二个 `session/new` 以错误拒绝。`session/load` 支持：按 id 打开已有会话并用 `session/update` 回放 journal 里的 transcript（0006、0022），等价于 `--resume`。
+- **一个进程一个 session**（0043）：第一个 `session/new` 建会话，cwd 必须等于 `--workspace`（或在未给 `--workspace` 时成为它）；第二个 `session/new` 以错误拒绝。`session/load` 待补：按 id 打开已有会话并用 `session/update` 回放 journal 里的 transcript（0006、0022），等价于 `--resume`；在补上之前 `loadSession: false`，`session/load` 返回“不支持”。
 - **映射**：`session/prompt` 的内容进 inbox 成为用户消息（0011），回合跑完以 `stopReason` 回应：正常结束 `end_turn`，被 `session/cancel` 中断 `cancelled`，模型以 `max_tokens` 停 `max_tokens`，模型或钩子错误结束回合（0017）按 `refusal` 回应并在 `_meta` 里带错误。live 事件（0010）逐条翻成 `session/update`：文本块 `agent_message_chunk`，推理内容（0014）`agent_thought_chunk`，工具调用 `tool_call` 与 `tool_call_update`（标题、kind、状态、位置、原始输入输出），usage（0007）`usage_update`。durable 事件只进 journal，与 TUI 会话可互相回放。
 - **成本走 `_meta`**：`session/prompt` 的回应在 `_meta.radian.cost` 带今天 `radian exec` 的 `Result.cost`（`micros`、`incomplete`、`estimated`），`_meta.radian.text` 带最后一条助手消息全文。读不懂 `_meta` 的客户端忽略它；arc 读到就记成本。
 - **审批全走 `request_permission`**：0024 的权限询问与 `ask_user` 都映射到它；`ask_user` 的选项成为 `request_permission` 的选项（0024 Q5 在这个宿主上就是这样注册）。`allow_always` 成为 0012 的 `AllowForSession` 授权：只活在这个进程里，不进 profile、不落盘，`session/load` 之后没有。客户端答 `cancelled` 时工具结果带原因，回合按中断处理（0003）。

@@ -152,6 +152,12 @@ It is never `null`.
 {"model_error": {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}}
 ```
 
+## `radian acp`
+
+`radian acp` serves the same session over the Agent Client Protocol on stdio.
+It accepts the conversation flags above with the same names and meanings, without `-p`, `--output`, `--yes`, and the print-and-exit modes.
+The one-session rule, the protocol methods, the `_meta.radian.*` fields, the permission and `ask_user` mapping, the stdio-only `mcpServers`, and the non-interactive trust gate are on [`acp`](acp.md).
+
 ## `radian arc`
 
 `radian arc` is the plan and task orchestrator.

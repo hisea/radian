@@ -14,6 +14,7 @@ radian exec                   interactive line mode
 radian exec "…" / -p "…"      one-shot: run one turn plus the chain it wakes (with background jobs wait for completion, see ADR 0044 §2a), stdout carries only model text
 radian exec -p "…" --image PATH  the same, with each image attached to the prompt's user message in order (repeatable)
 radian exec <other flags and subcommands>
+radian acp                    Agent Client Protocol over stdio: one session, prompts and approvals over the protocol (ADR 0049)
 radian arc                    the arc TUI: plans and tasks across worker processes (ADR 0048)
 radian arc <subcommand>       one arc CLI operation (ADR 0048)
 radian login | logout | memory | config import-pi | trust | theme | footer | docs   management commands at top level
@@ -25,7 +26,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 
 ### A2 Where each function lives
 
-- **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--image <PATH>` (repeatable, with `-p`) whose path the host reads itself, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks.
+- **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--image <PATH>` (repeatable, with `-p`) whose path the host reads itself, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks, and the `acp` host (ADR 0049), which shares `radian exec`'s conversation flags.
 - **Top level**: `memory`, `config import-pi`, `login`/`logout`, `trust`, `theme import`, `footer export`, `docs [topic]`. They touch no model. They open no session.
 - **`arc`**: `radian arc` opens the arc TUI and `radian arc <subcommand>` runs the arc CLI (ADR 0048). arc opens no session in its own process. It starts each worker as a separate `radian exec` process. Shared names match TUI `/login`, `/memory`, and similar.
 - **`exec` and TUI share** `radian_host::open_session`, config read, `~/.radian/` layout, tool set, auth, and session data layer.
