@@ -249,10 +249,15 @@ async fn an_empty_text_with_a_tool_call_still_dispatches() {
     assert_eq!(model.requests().len(), 2);
 }
 
-/// Empty text with `MaxTokens` keeps today's handling: `Incomplete(MaxTokens)`, no retry.
+/// Empty text with `MaxTokens` is a truncation, not an empty response: it is never retried in
+/// place, and it continues the turn like any other truncated answer (ADR 0017 §2).
 #[tokio::test]
-async fn an_empty_max_tokens_reply_stays_incomplete() {
-    let model = ScriptedModel::new([stop(StopReason::MaxTokens, "")]);
+async fn empty_max_tokens_replies_continue_the_turn() {
+    let model = ScriptedModel::new([
+        stop(StopReason::MaxTokens, ""),
+        stop(StopReason::MaxTokens, ""),
+        stop(StopReason::MaxTokens, ""),
+    ]);
     let mut chat = agent(model.clone(), NoTools).open_session().await.unwrap();
 
     let outcome = chat
@@ -264,7 +269,17 @@ async fn an_empty_max_tokens_reply_stays_incomplete() {
         outcome.status,
         RunStatus::Incomplete(IncompleteReason::MaxTokens)
     );
-    assert_eq!(model.requests().len(), 1, "no retry happened");
+    assert_eq!(
+        model.requests().len(),
+        3,
+        "each truncation is one model call, never an in-place empty retry"
+    );
+    assert_eq!(assistant_texts(chat.transcript()), ["", "", ""]);
+    assert_eq!(
+        chat.transcript().iter().filter(|m| m.is_user()).count(),
+        3,
+        "the input and two continuation notices"
+    );
 }
 
 /// Cancelling during the retry wait after an empty reply ends the turn `cancelled` and sends

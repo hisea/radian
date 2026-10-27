@@ -370,7 +370,7 @@ panic and without an error line.
 | `1` | The run failed: a model or turn error, a failed sandbox probe target, a missing record, a refused write. |
 | `2` | Bad use or refused setup: clap usage errors, a bad configuration, an unknown keybinding, a startup refusal, a reserved subcommand, an unknown `docs` topic or footer preset, a bad `memory` invocation. |
 | `3` | The budget ran out: `BudgetExceeded` or a exceeded deadline. |
-| `4` | The answer is unfinished: `Incomplete` or `Refused`. |
+| `4` | The answer is unfinished: `Incomplete` (a response truncated at the output token limit after two truncated responses in a row, a content-filtered answer, an unknown stop reason) or `Refused`. |
 | `101` | The app panicked. A crash log lands under `~/.radian/cache/diagnostics`. |
 | `130` | Requested cancellation, or a forced exit after a second Ctrl-C. |
 | `143` | SIGTERM (`128 + 15`). A signal-driven exit otherwise follows the shell rule `128 + signal`. |

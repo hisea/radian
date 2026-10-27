@@ -78,7 +78,11 @@ its transcript to the client. `initialize` advertises `loadSession: true`.
 
 `session/prompt` answers with `stopReason`: `end_turn`, `cancelled`, `max_tokens`,
 `max_turn_requests` (the model-call budget ran out) or `refusal` (a model or hook error, or
-another unfinished answer). A second prompt while a turn runs is refused. The response's
+another unfinished answer). `max_tokens` means the model's answer was truncated at the output token
+limit and the turn could not continue: two truncated responses in a row had already continued it.
+A truncated response with tool calls continues the turn, and a truncated response without calls
+continues it with a fixed notice until two earlier truncations in a row. A second prompt while a turn
+runs is refused. The response's
 `_meta.radian` carries what ACP has no field for:
 
 | Field | Meaning |

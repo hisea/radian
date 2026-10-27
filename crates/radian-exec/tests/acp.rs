@@ -396,6 +396,46 @@ async fn a_prompt_streams_updates_and_answers_with_cost_and_text() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// ADR 0017 §2 through ADR 0049: a truncated answer continues the turn with a notice, and the
+/// third truncated answer in a row answers `max_tokens`.
+#[tokio::test]
+async fn max_tokens_answers_after_two_continuations() {
+    let truncated = || {
+        Reply::sse(&[
+            chunk(json!({"content": "partial"}), None),
+            chunk(json!({}), Some("length")),
+        ])
+    };
+    let server = MockServer::start(vec![truncated(), truncated(), truncated()]).await;
+    let env = Env::fresh("max-tokens");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", &server.base_url], &env);
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+
+    let run = acp.prompt(&session, "hi", Decision::None).await;
+    let result = run.result();
+
+    assert_eq!(result["stopReason"], "max_tokens", "{result}");
+    assert_eq!(server.requests().len(), 3, "one model call per truncation");
+    // The continuation request carries the durable notice after the truncated answer.
+    let second = server.requests()[1].json();
+    let messages = second["messages"].as_array().expect("messages");
+    assert_eq!(messages[messages.len() - 2]["role"], json!("assistant"));
+    assert_eq!(
+        messages.last().expect("a message"),
+        &json!({
+            "role": "user",
+            "content": "Your last response hit the output token limit. Do not apologize, recap, or repeat yourself. Continue from where you stopped, and break the remaining work into smaller pieces.",
+        })
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 #[tokio::test]
 async fn a_rejected_permission_reaches_the_tool_result() {
     let server = MockServer::start(vec![

@@ -15,7 +15,7 @@ use crate::event::NoopSink;
 use crate::event::{AgentEvent, CompactionTrigger, EventSink};
 use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
-use crate::message::{ContentPart, Message, MessageMeta, ToolCall, ToolResult};
+use crate::message::{ContentPart, InputSource, Message, MessageMeta, ToolCall, ToolResult};
 use crate::model::{
     Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
 };
@@ -32,6 +32,16 @@ pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 4;
 
 /// Default time a tool gets to wind down after cancellation before its future is dropped.
 pub const DEFAULT_TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// How many truncated responses in a row may continue a turn (ADR 0017 §2). The next
+/// truncation with no tool calls ends the turn as `Incomplete(MaxTokens)`.
+const MAX_TOKENS_CONTINUATIONS: u32 = 2;
+
+/// The durable notice appended after a truncated response with no tool calls (ADR 0017 §2).
+/// It is an ordinary `User` message: journaled as a `Message` record and replayed like every
+/// other transcript write (ADR 0001 S2). Its `source` is `System`, never `User`, so a resumed
+/// session does not offer it as the user's own input history (ADR 0005 G2/G3).
+const MAX_TOKENS_CONTINUATION_NOTICE: &str = "Your last response hit the output token limit. Do not apologize, recap, or repeat yourself. Continue from where you stopped, and break the remaining work into smaller pieces.";
 
 #[derive(Debug, Clone)]
 pub struct TurnOptions {
@@ -1204,6 +1214,10 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
     /// 0018). The rest of the turn must not compact again; an over-budget request then fails
     /// as `InsufficientCompaction` instead.
     below_target_compaction: bool,
+    /// How many consecutive `MaxTokens` responses this turn has seen, with or without tool
+    /// calls (ADR 0017 §2). Any other stop reason resets it to 0. The third consecutive
+    /// truncation with no tool calls ends the turn instead of continuing.
+    max_tokens_streak: u32,
 }
 
 impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
@@ -1257,6 +1271,7 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
             batch: None,
             outcome: None,
             below_target_compaction: false,
+            max_tokens_streak: 0,
         }
     }
 
@@ -1861,6 +1876,14 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             return Err(self.run.fail_journal(e, events));
         }
 
+        // ADR 0017 §2: every consecutive truncated response in this turn counts, with or
+        // without tool calls; any other stop reason resets the streak. It must happen before
+        // `dispatch_tools`, which handles the tool-call case.
+        self.run.max_tokens_streak = if stop_reason == StopReason::MaxTokens {
+            self.run.max_tokens_streak.saturating_add(1)
+        } else {
+            0
+        };
         if !tool_calls.is_empty() {
             return self.dispatch_tools(&agent, tool_calls, stop_reason).await;
         }
@@ -1877,7 +1900,29 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             }
             StopReason::PauseTurn => return Ok(Step::Continue),
             StopReason::ToolUse => RunStatus::Incomplete(IncompleteReason::ToolUseWithoutCalls),
-            StopReason::MaxTokens => RunStatus::Incomplete(IncompleteReason::MaxTokens),
+            StopReason::MaxTokens => {
+                // A truncated answer with no tool calls: the response is already committed
+                // above, so reasoning and partial text stay. Two continuations in a row are
+                // allowed; the third ends the turn. The call cap wins over the continuation:
+                // a notice whose model call cannot happen is not written.
+                if self.run.max_tokens_streak > MAX_TOKENS_CONTINUATIONS {
+                    RunStatus::Incomplete(IncompleteReason::MaxTokens)
+                } else if self.run.model_calls >= self.run.max_model_calls {
+                    RunStatus::BudgetExceeded
+                } else {
+                    let notice = Message::User {
+                        content: vec![ContentPart::text(MAX_TOKENS_CONTINUATION_NOTICE)],
+                        meta: MessageMeta {
+                            source: Some(InputSource::System),
+                            ..MessageMeta::default()
+                        },
+                    };
+                    if let Err(e) = self.run.session.commit(notice, events).await {
+                        return Err(self.run.fail_journal(e, events));
+                    }
+                    return Ok(Step::Continue);
+                }
+            }
             StopReason::ContentFiltered => RunStatus::Incomplete(IncompleteReason::ContentFiltered),
             StopReason::Refusal => RunStatus::Refused,
             StopReason::Other(reason) => {
