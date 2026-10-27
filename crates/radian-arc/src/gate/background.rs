@@ -53,8 +53,8 @@ pub const ERROR: &str = "error";
 /// A record status: a gate process exited without writing any record at all (a panic before
 /// its first write, a store that could not be opened).
 pub const NO_RECORD: &str = "no_record";
-/// A record status: a gate process wrote its `running` record and then died, more often than
-/// `[limits] max_gate_deaths` allows for the same attempt and inputs.
+/// A record status: a gate start died once too often for the same attempt and inputs, so the
+/// gate is not started again until they change.
 pub const DIED: &str = "died";
 /// A record status: arc stopped the gate itself (a stop signal on the scheduling loop), so the
 /// next pass starts it again without counting a death.
@@ -133,7 +133,8 @@ pub struct Record {
     /// The digest of the inputs the gate saw (`plan_verification`'s `inputs`), when it could
     /// plan. A pass uses it to skip an unchanged refusal.
     pub inputs: Option<String>,
-    /// How many times a gate died after writing `running` for this attempt and these inputs
+    /// How many starts of this attempt and these inputs have died: a gate that wrote
+    /// `running` and is gone, or a `started` record with no digest whose gate is gone
     /// (ADR 0048 decision 10). A pass compares it with `[limits] max_gate_deaths`.
     pub deaths: u32,
     /// The profile a `done` verification planned, when the record carries one: a pass applies

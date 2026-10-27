@@ -199,8 +199,8 @@ pub struct Limits {
     /// How many times a task a command failure blocked may be re-verified by itself once the
     /// remote main moved (ADR 0048 decision 9). `0` turns the step off.
     pub max_auto_reverify: u32,
-    /// How many times a gate may die after writing `running` for the same attempt and inputs
-    /// before the pass records `died` instead of starting it again (ADR 0048 decision 10).
+    /// How many gate starts may die for the same attempt and inputs before the pass records
+    /// `died` instead of starting the gate again (ADR 0048 decision 10).
     pub max_gate_deaths: u32,
 }
 
