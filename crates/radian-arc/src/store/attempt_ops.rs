@@ -164,6 +164,10 @@ pub enum WorkerLine {
     /// The flow's `command`, with a program that contains a `/` made absolute from the
     /// repository root.
     Command { command: Vec<String>, flow: String },
+    /// The flow's `acp`: an agent the wrapper starts and speaks ACP to (ADR 0048 decision 7).
+    /// The program is resolved like a command's: a path from the repository root or a name on
+    /// `PATH`.
+    Acp { acp: Vec<String>, flow: String },
 }
 
 impl WorkerLine {
@@ -177,6 +181,11 @@ impl WorkerLine {
                 "flow": flow,
                 "program": command.first().cloned().unwrap_or_default(),
             }),
+            WorkerLine::Acp { acp, flow } => json!({
+                "kind": "acp",
+                "flow": flow,
+                "program": acp.first().cloned().unwrap_or_default(),
+            }),
         }
     }
 
@@ -184,7 +193,9 @@ impl WorkerLine {
     #[must_use]
     pub fn flow(&self) -> &str {
         match self {
-            WorkerLine::Radian { flow, .. } | WorkerLine::Command { flow, .. } => flow,
+            WorkerLine::Radian { flow, .. }
+            | WorkerLine::Command { flow, .. }
+            | WorkerLine::Acp { flow, .. } => flow,
         }
     }
 }
@@ -529,24 +540,40 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     // next claim. The wrapper is started with the same value, so a reader can tell a command
     // worker from `radian exec` from the claim on, and a later `config.toml` change cannot make
     // the record and the launched worker disagree (decision 4).
-    let worker = match &flow.command {
-        Some(words) => WorkerLine::Command {
+    let worker = if let Some(words) = &flow.acp {
+        WorkerLine::Acp {
+            acp: crate::worker_args::resolved(words, store.repo()),
+            flow: flow_name.to_owned(),
+        }
+    } else if let Some(words) = &flow.command {
+        WorkerLine::Command {
             command: crate::worker_args::resolved(words, store.repo()),
             flow: flow_name.to_owned(),
-        },
-        None => WorkerLine::Radian {
+        }
+    } else {
+        WorkerLine::Radian {
             exec_args: flow.exec_args.clone(),
             flow: flow_name.to_owned(),
-        },
+        }
     };
-    // A command worker reports no cost, so a task or plan cost limit cannot stop it. The
-    // warning is printed once per attempt by `start`, `run` and `serve` (ADR 0048 decisions
-    // 7 and 12).
+    // A command or ACP worker reports no cost, so a task or plan cost limit cannot stop it.
+    // The warning is printed once per attempt by `start`, `run` and `serve` (ADR 0048
+    // decisions 7 and 12).
     let cost_limited = task.max_cost_usd.or(config.limits.max_cost_usd).is_some()
         || plan.item.max_cost_usd.is_some();
-    let no_cost_warning = (flow.command.is_some() && cost_limited).then(|| {
-        format!("{task_id}: worker.command reports no cost; the cost limit does not apply")
-    });
+    let no_cost_warning = if cost_limited {
+        match &worker {
+            WorkerLine::Command { .. } => Some(format!(
+                "{task_id}: worker.command reports no cost; the cost limit does not apply"
+            )),
+            WorkerLine::Acp { .. } => Some(format!(
+                "{task_id}: worker.acp reports no cost; the cost limit does not apply"
+            )),
+            WorkerLine::Radian { .. } => None,
+        }
+    } else {
+        None
+    };
     task.attempt = number;
     task.attempt_id = Some(attempt_id.clone());
     task.token = Some(token.clone());

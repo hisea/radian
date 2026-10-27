@@ -49,6 +49,7 @@ pub fn valid_flow_name(name: &str) -> bool {
 pub const OPTIONAL_KEYS: &[&str] = &[
     "limits.max_cost_usd",
     "worker.command",
+    "flows.<name>.acp",
     "flows.<name>.command",
     "gate.review.exec_args",
     "gate.review.prompt_file",
@@ -313,6 +314,12 @@ pub struct Flow {
     /// is the program, the rest are its arguments, and no shell is involved. `None` keeps
     /// `radian exec` with this flow's `exec_args`. An empty array is refused.
     pub command: Option<Vec<String>>,
+    /// The program and its arguments of an ACP agent: the first element is the program, the
+    /// rest are its arguments, and no shell is involved. `None` keeps `radian exec` with this
+    /// flow's `exec_args`, or the flow's `command`. The wrapper is the ACP client and starts
+    /// this array as the agent (ADR 0048 decision 7). An empty array is refused, and a flow
+    /// sets at most one of `acp`, `command` and a non-empty `exec_args`.
+    pub acp: Option<Vec<String>>,
     /// How many tasks of this flow may be in `doing` at once. The implicit `default` flow of a
     /// file without `[flows]` has no limit of its own and counts against `[limits] concurrency`
     /// alone (ADR 0048 decision 13).
@@ -336,6 +343,7 @@ impl Default for Flow {
         Self {
             exec_args: Vec::new(),
             command: None,
+            acp: None,
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: None,
             allow_noop: false,
@@ -351,6 +359,7 @@ impl Flow {
         Self {
             exec_args: worker.exec_args.clone(),
             command: worker.command.clone(),
+            acp: None,
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: Some(gate_profile.to_owned()),
             allow_noop: false,
@@ -629,26 +638,29 @@ fn check_worker_shape(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `flows.<name>.command` must be an array of strings before the TOML deserializer reports a
-/// position without the key. A non-array value is refused by name. Returns whether the file
-/// writes a `[flows]` table at all: a bare table counts (ADR 0048 decision 13).
+/// `flows.<name>.command` and `flows.<name>.acp` must be arrays of strings before the TOML
+/// deserializer reports a position without the key. A non-array value is refused by name.
+/// Returns whether the file writes a `[flows]` table at all: a bare table counts (ADR 0048
+/// decision 13).
 fn check_flows_shape(text: &str) -> Result<bool, String> {
     let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
     let Some(flows) = document.get("flows").and_then(toml::Value::as_table) else {
         return Ok(false);
     };
     for (name, flow) in flows {
-        let Some(command) = flow.get("command") else {
-            continue;
-        };
-        if !command
-            .as_array()
-            .is_some_and(|items| items.iter().all(toml::Value::is_str))
-        {
-            return Err(format!(
-                "`flows.{name}.command` must be an array of strings (the program first, then its \
-                 arguments)"
-            ));
+        for key in ["command", "acp"] {
+            let Some(words) = flow.get(key) else {
+                continue;
+            };
+            if !words
+                .as_array()
+                .is_some_and(|items| items.iter().all(toml::Value::is_str))
+            {
+                return Err(format!(
+                    "`flows.{name}.{key}` must be an array of strings (the program first, then its \
+                     arguments)"
+                ));
+            }
         }
     }
     Ok(true)
@@ -679,6 +691,13 @@ fn check_flows(config: &mut Config) -> Result<(), String> {
             return Err(format!(
                 "`{name}` is not a flow name: 1 to {FLOW_NAME_MAX_CHARS} characters from \
                  [a-z0-9-], with no leading or trailing -"
+            ));
+        }
+        if let Some(acp) = &flow.acp
+            && acp.is_empty()
+        {
+            return Err(format!(
+                "`flows.{name}.acp` is empty; its first element must be the program"
             ));
         }
         if let Some(command) = &flow.command {
@@ -1302,5 +1321,66 @@ mod tests {
         for needle in ["flows.art.gate_profile", "gone", "no such profile exists"] {
             assert!(error.contains(needle), "{error}");
         }
+    }
+
+    /// `flows.<name>.acp` is optional: unset keeps the flow's `command` or `radian exec`, and a
+    /// set array is the program first and its arguments after it. The manual's table names it
+    /// as not set. An empty array and a non-array value are refused (ADR 0048 decision 7).
+    #[test]
+    fn the_flows_acp_is_an_optional_array_with_the_program_first() {
+        assert_eq!(Flow::default().acp, None, "unset by default");
+        assert!(
+            OPTIONAL_KEYS.contains(&"flows.<name>.acp"),
+            "the manual's table names it as not set"
+        );
+        let text = default_text("main");
+        assert_eq!(
+            parse(&text).expect("the default text parses").flows[DEFAULT_FLOW].acp,
+            None,
+            "a commented example is not a value"
+        );
+        let configured =
+            parse("schema_version = 1\n[flows.art]\nacp = [\"/usr/bin/codex-acp\", \"--flag\"]\n")
+                .expect("an acp array parses");
+        assert_eq!(
+            configured.flows["art"].acp,
+            Some(vec!["/usr/bin/codex-acp".to_owned(), "--flag".to_owned()])
+        );
+
+        let empty = parse("schema_version = 1\n[flows.art]\nacp = []\n")
+            .expect_err("an empty acp array must fail");
+        assert!(empty.contains("flows.art.acp"), "{empty}");
+        assert!(empty.contains("empty"), "{empty}");
+
+        let shape = parse("schema_version = 1\n[flows.art]\nacp = \"/usr/bin/codex-acp\"\n")
+            .expect_err("a string is not an array");
+        assert!(shape.contains("flows.art.acp"), "{shape}");
+        assert!(shape.contains("array of strings"), "{shape}");
+    }
+
+    /// `acp` beside `command` or a non-empty `exec_args` is refused by the worker check before
+    /// `start`, not when the file is read: the file still parses, so the command can exit `3`
+    /// naming every key (ADR 0048 decisions 1 and 7). `command` beside `exec_args` keeps its
+    /// older parse error.
+    #[test]
+    fn a_flow_with_acp_and_another_worker_line_still_parses() {
+        let acp_and_command = "schema_version = 1\n[flows.art]\nacp = [\"/usr/bin/codex-acp\"]\n\
+                               command = [\"/bin/sh\"]\n";
+        let config = parse(acp_and_command).expect("the worker check refuses this, not the parser");
+        assert!(config.flows["art"].acp.is_some());
+        assert!(config.flows["art"].command.is_some());
+
+        let acp_and_exec_args = "schema_version = 1\n[flows.art]\nacp = [\"/usr/bin/codex-acp\"]\n\
+                                 exec_args = [\"--model\", \"m\"]\n";
+        let config = parse(acp_and_exec_args).expect("the worker check refuses this too");
+        assert!(config.flows["art"].acp.is_some());
+        assert!(!config.flows["art"].exec_args.is_empty());
+
+        let command_and_exec_args = "schema_version = 1\n[flows.art]\ncommand = [\"/bin/sh\"]\n\
+                                     exec_args = [\"--model\", \"m\"]\n";
+        assert!(
+            parse(command_and_exec_args).is_err(),
+            "command beside exec_args keeps its config error"
+        );
     }
 }

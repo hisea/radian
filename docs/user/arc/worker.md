@@ -112,7 +112,7 @@ The wrapper adds these variables to the command's or the ACP agent's environment
 | `ARC_GIT_DIR` | `git rev-parse --absolute-git-dir` in the worktree. |
 | `ARC_GIT_COMMON_DIR` | The absolute common git directory. A linked worktree's objects and refs live there. A sandboxed agent that commits from inside its own sandbox needs it writable; Codex's `workspace-write` keeps `.git` read-only even when it is given, so the example below commits outside the sandbox instead. |
 | `ARC_DENY_READ` | The paths the wrapper would pass to `radian exec` as `--deny-read`, joined with `:`. A hint for your own sandbox, not a rule radian enforces on the command. |
-| `ARC_STATE_DIR` | An absolute directory outside the worktree, `attempts/<task>/state/`, kept across the task's attempts. The command may keep its own state there, for example a session map. |
+| `ARC_STATE_DIR` | An absolute directory outside the worktree, `attempts/<task>/state/`, kept across the task's attempts. The command or ACP agent may keep its own state there, for example a session map. |
 
 ### The stdout contract
 

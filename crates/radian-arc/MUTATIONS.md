@@ -1542,3 +1542,22 @@ the file was restored from `.radian/mut/mod.rs.orig` with `cp`, which `cmp` foun
 
 2/2 caught.
 
+
+## TK0202: a flow's `acp` runs an ACP agent as the worker (2026-10-27, branch `work/TK0202-arc-acp-worker`)
+
+`flows.<name>.acp` makes the wrapper an ACP v1 client: one agent process, `initialize`, one
+`session/new`, one `session/prompt`, the worktree permission policy, the `stopReason` mapping
+and `session/cancel` (ADR 0048 decision 7). The client lives in `crates/radian-arc/src/acp.rs`
+and the wrapper integration in `crates/radian-arc/src/work/mod.rs`. Each mutation was applied
+by hand to the named file, the binary rebuilt with `cargo build -p radian-tui --bin radian` (the
+integration tests refuse one older than its sources), the named test ran with `cargo nextest
+run -p radian-arc --locked --profile sandbox --no-fail-fast -E 'test(...)'`, and the file was
+restored from `.radian/` with `cp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0202-M1 | the permission answer ignores the path and always allows (`acp.rs`, `permission_choice` returns `Choice::Allow` without reading `toolCall`) | `acp::tests::the_permission_policy_is_inside_the_worktree` (an outside path answers `Allow`; the integration test's `reject_once` assertion fails too) | ✅ 1 failed |
+| TK0202-M2 | `session/cancel` is not sent before SIGTERM (`work/mod.rs`, `wait_acp` writes the signal and goes straight to SIGTERM) | `a_cancel_sends_session_cancel_and_records_cancelled` (`cancel-seen` never appears) | ✅ 1 failed |
+| TK0202-M3 | `end_turn` maps to a failed outcome (`work/mod.rs`, `acp_outcome` maps `end_turn` to `failed`) | `an_acp_turn_that_ends_with_end_turn_passes_and_commits` (the attempt ends `outcome failed`, nothing pushed) | ✅ 1 failed |
+
+3/3 caught.

@@ -120,7 +120,7 @@ A repository whose `config.toml` has no `[flows]` table prints no flow column.
 A `todo.ready` task that the next pass would not claim because a limit is full ends its line with `(waiting for a free <flow> slot)`, or with `(waiting for a free concurrency slot)` when the repository total is full and the task's flow has room; when both are full the flow's reason wins (see [the queue reason](#trying-it-first-dry-run)).
 A task held by an `after` task that has not merged, by a plan whose `auto` is `off`, by a flow `config.toml` does not define, or by its own file or its plan having changed outside arc gets no such reason.
 A task's `cost_usd` is what the budget counts (every worker attempt and every `review` stage) and what `reset-budget` sets back to `0`; its `total_cost_usd` is the same spend and is never reset.
-An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`) adds nothing to either number.
+An attempt whose worker reported no cost (a [`worker.command`](files.md#configtoml) that writes no `cost` in its `Result`, or a flow's [`acp`](files.md#configtoml) agent, whose protocol has no fee) adds nothing to either number.
 arc records that on the task as [`cost_unknown`](files.md#task-fields), and a task that carries it — or a plan with such a task — prints `unknown` instead of a number, even after a later attempt reports a cost.
 
 By default finished work is left out, so you see the work in progress:
@@ -378,7 +378,7 @@ radian arc start <TASK>
 Before it reconciles, claims or verifies anything, `start` checks the worker line (see the [`worker.exec_args` and `worker.command` rows](files.md#configtoml)).
 Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args`.
 A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
-With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](worker.md#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program.
+With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](worker.md#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program. A flow's `acp` or `command` program is checked the same way and named by its own key.
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 
@@ -397,7 +397,7 @@ The refusal names the full limit and its count: `flows.<name>.concurrency` or `l
 The claim is one transaction: the task's `attempt` goes up by one, `attempt_id` becomes `<task>-<attempt>`, a random `token` is written, and the task moves to `doing.starting`.
 arc then runs the hidden `radian arc work` wrapper as a child, with the brief on its stdin; the wrapper moves the task to `doing.running`.
 The worker itself — the session it runs in, the brief it receives, the steps before an attempt, the limits the wrapper enforces, and the checks after it exits — is in [the worker](worker.md).
-When [`worker.command`](files.md#configtoml) is set, another agent runs in its place: see [Another agent as the worker](worker.md#another-agent-as-the-worker).
+When [`worker.command`](files.md#configtoml) is set, another agent runs in its place: see [Another agent as the worker](worker.md#another-agent-as-the-worker). A flow can also start an ACP agent with [`flows.<name>.acp`](files.md#configtoml); see [An ACP agent as the worker](worker.md#an-acp-agent-as-the-worker).
 
 When the attempt ends, arc applies the result in one transaction (the [result table](gate.md#failures-retries-and-the-budget)) and prints one line:
 
