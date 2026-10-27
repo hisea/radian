@@ -618,6 +618,13 @@ pub(super) fn resolve_window_and_route(
         radian_host::ModelRoute::new(&resolved.provider_name, &resolved.model_name),
         std::sync::Arc::clone(&config_slot),
         route_ctx.clone(),
+    )
+    .with_config(
+        config
+            .source
+            .clone()
+            .or_else(|| radian_host::resolved_config_path(cli.config.as_deref())),
+        config.read_only,
     );
     // ADR 0026 D7: a switch recomputes `B` from the warm local catalog, never the network.
     let window_query = radian_host::WindowQuery::production(

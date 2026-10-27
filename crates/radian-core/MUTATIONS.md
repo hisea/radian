@@ -46,3 +46,12 @@ catching test binaries were run (`--no-fail-fast`), and the source was restored 
 |---|---|---|---|
 | TK0208-M1 | the streak never resets on an untruncated response (`else { self.run.max_tokens_streak }` instead of `else { 0 }`) | ✅ 1 failed (rc=100) | `tests/turn.rs::an_untruncated_response_resets_the_streak` (the turn ended `Incomplete(MaxTokens)` instead of `Completed` after the untruncated tool-call response no longer reset the streak) |
 | TK0208-M2 | the continuation adds no notice (the `commit` is dropped and `Step::Continue` still returns) | ✅ 5 failed (rc=100) | `tests/turn.rs::a_truncated_response_without_calls_continues_with_a_notice` (the second request carries no notice), `tests/turn.rs::three_truncated_responses_without_calls_end_incomplete_with_two_notices` (0 notices instead of 2), `tests/journal.rs::a_truncation_notice_is_journaled_and_replays` (the replay has no notice), `tests/turn.rs::a_truncated_tool_call_response_counts_toward_the_streak`, and `tests/turn.rs::an_untruncated_response_resets_the_streak` |
+
+## Probe status reads the response prefix (TK0214, 2026-10-27)
+
+Branch `work/TK0214-probe-and-remember-protocol`. The mutation was applied in place, the named
+test was run, and the source was restored from `.radian/core_model.rs.bak` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0214-M8 | `http_status_of` searches for `HTTP ` anywhere instead of requiring the prefix | ✅ 1 failed (rc=100) | `model::tests::http_status_is_read_from_the_response_prefix_only` (`the provider said HTTP 400` read as `Some(400)` instead of `None`) |

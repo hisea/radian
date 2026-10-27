@@ -120,6 +120,7 @@ pub use config::migrate_claude::{
 };
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::model_write::{ModelWriteError, write_model_route};
+pub use config::providers_write::{ProviderRuleOutcome, ProviderWriteError, write_protocol_rule};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
     CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
@@ -212,9 +213,9 @@ pub use provider::{
     origin_of, parse_thinking_level, pattern_matches, resolve_provider,
     resolve_provider_with_models, resolve_route, resolve_route_for, supported_thinking_levels,
     supported_thinking_levels_ref, supported_thinking_levels_ref_with,
-    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_ref,
-    thinking_rank, unsupported_api_message, usage_endpoint, usage_item_alias, valid_name,
-    wire_budget,
+    supported_thinking_levels_with, supported_wire, thinking_map_for, thinking_map_for_protocol,
+    thinking_map_for_ref, thinking_rank, unsupported_api_message, usage_endpoint, usage_item_alias,
+    valid_name, wire_budget,
 };
 pub use radian_runtime::ModelRoute;
 pub use secrets::{register as register_secret, registered as registered_secrets};

@@ -1510,3 +1510,18 @@ test binary was run, and the source was restored from a copy under `.radian/mut/
 | TK0213-M3 | `endpoint_from_path` returns the bare origin, dropping the advertised path | ✅ 1 failed (rc=100) | `provider::named_route_tests::the_endpoint_is_the_origin_plus_the_stripped_advertised_path` and `the_line_names_protocol_endpoint_and_source`; `named_model_routing::a_named_provider_sends_to_the_api_its_model_list_advertised` fails on the Anthropic request path |
 | TK0213-M4 | `Protocol::from_kind` drops pi's aliases (`openai-completions`, `anthropic-messages`) | ✅ 1 failed (rc=100) | `provider::named_route_tests::aliases_are_accepted_and_lines_print_radian_names`; `a_rules_only_table_overlays_an_auth_provider_and_needs_one` fails on `env.RADIAN_KIND = "openai-completions"` |
 | TK0213-M5 | `startup_model_list_at` swallows a failed fetch (returns `(None, None)` instead of the one line) | ✅ 1 failed (rc=100) | `catalog::provider_models_tests::a_failed_startup_fetch_falls_to_kind_with_one_line` (`expect("one startup line")` on `None`) |
+
+## TK0214: a named provider probes and remembers its protocol (2026-10-27)
+
+Branch `work/TK0214-probe-and-remember-protocol`. Each mutation was applied in place, the named
+test binary was run, and the source was restored from a copy under `.radian/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0214-M1 | `probe_status` accepts `Unavailable` and `PROBE_STATUSES` adds 429, so a rate limit probes | ✅ 1 failed (rc=100) | `named_probe::a_non_probe_status_never_probes` (the 429 round sent a probe request) |
+| TK0214-M2 | the rule-sourced failure no longer names the rule (`rule_pattern` forced to `None`) | ✅ 1 failed (rc=100) | `named_probe::a_rule_sourced_failure_names_the_rule_and_does_not_probe` (the error text has no `rule claude/*`) |
+| TK0214-M3 | the writer's already-present checks are disabled (outer `already_present` and the array's `match` test), so a second save duplicates the rule | ✅ 2 failed (rc=100) | `config::providers_write::tests::an_existing_match_is_left_alone` and `a_missing_file_is_created_with_the_rules_only_table` (two `kind = "anthropic"` rules / `Written` instead of `AlreadyPresent`) |
+| TK0214-M4 | `probe_candidates` stops putting the model-list endpoints first (`&& false` on that loop) | ✅ 1 failed (rc=100) | `named_probe::a_model_list_endpoint_is_probed_before_the_base_url` (responses tried before the advertised anthropic endpoint) |
+| TK0214-M5 | a failed probe returns the first error without the tried list and the rule hint (`Err(first)`) | ✅ 1 failed (rc=100) | `named_probe::every_attempt_failing_keeps_the_first_error_and_writes_nothing` (no `tried …` line) |
+| TK0214-M6 | `remember` always queues the probed route instead of respecting a queued switch | ✅ 1 failed (rc=100) | `named_probe::a_queued_model_switch_is_not_undone_by_a_probe` (the old route is the last queued change) |
+| TK0214-M7 | `save_rule` ignores the read-only verdict (`false` instead of `config_target.read_only`) | ✅ 1 failed (rc=100) | `named_probe::a_read_only_config_is_not_saved` (the schema-99 file was rewritten) |

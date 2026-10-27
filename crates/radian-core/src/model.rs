@@ -342,6 +342,39 @@ impl ModelError {
             _ => None,
         }
     }
+
+    /// The HTTP status the provider answered with, when the error came from a response.
+    ///
+    /// [`ModelError::Unavailable`] carries it explicitly. The two errors that are **not**
+    /// retried but still come from a response — [`ModelError::Protocol`] for a bad request and
+    /// [`ModelError::ContextOverflow`] — carry it only through the message every adapter builds
+    /// as `HTTP <status>: …` (the provider contract pins that shape). A host that must tell a
+    /// 400 from a malformed stream reads this method instead of matching the text itself
+    /// (ADR 0017; ADR 0026 D10's probe). An error that never saw a response has `None`, so a
+    /// stream that broke after it started never looks like an HTTP refusal.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            ModelError::Unavailable { status, .. } => *status,
+            ModelError::Protocol(message) | ModelError::ContextOverflow(message) => {
+                http_status_of(message)
+            }
+            ModelError::Transport(_)
+            | ModelError::UsageLimit { .. }
+            | ModelError::EmptyResponse => None,
+        }
+    }
+}
+
+/// Reads the status out of the `HTTP <status>[: ]…` prefix the adapters write for a response
+/// error. The leading `HTTP ` and the digits are required, so provider text that merely
+/// contains a status can never be read as one.
+fn http_status_of(message: &str) -> Option<u16> {
+    let rest = message.strip_prefix("HTTP ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() != 3 {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 pub struct ModelContext<'a> {
@@ -449,6 +482,54 @@ mod tests {
             ModelError::Unavailable { status: None, .. }
         ));
         assert!(overload.is_transient());
+    }
+
+    /// ADR 0026 D10: the probe must tell a pre-stream HTTP refusal (a `Protocol` error from a
+    /// non-2xx response) from a malformed stream, without matching text in the host. The
+    /// adapter's documented `HTTP <status>:` shape is the source; a message that only contains
+    /// a status somewhere is not one.
+    #[test]
+    fn http_status_is_read_from_the_response_prefix_only() {
+        assert_eq!(
+            ModelError::Protocol("HTTP 400 Bad Request: bad request".into()).http_status(),
+            Some(400)
+        );
+        assert_eq!(
+            ModelError::Protocol("HTTP 404: no such model".into()).http_status(),
+            Some(404)
+        );
+        assert_eq!(
+            ModelError::ContextOverflow("HTTP 413: prompt is too long".into()).http_status(),
+            Some(413)
+        );
+        assert_eq!(
+            ModelError::Unavailable {
+                message: "HTTP 503: busy".into(),
+                retry_after: None,
+                status: Some(503),
+            }
+            .http_status(),
+            Some(503)
+        );
+        // No response: a broken stream, a cancelled request, a request built badly.
+        assert_eq!(
+            ModelError::Protocol("unreadable stream event: expected value".into()).http_status(),
+            None
+        );
+        assert_eq!(
+            ModelError::Transport("connection refused".into()).http_status(),
+            None
+        );
+        // The provider's own body text cannot smuggle a status past the prefix rule.
+        assert_eq!(
+            ModelError::Protocol("the provider said HTTP 400".into()).http_status(),
+            None
+        );
+        assert_eq!(
+            ModelError::Protocol("xHTTP 400: y".into()).http_status(),
+            None
+        );
+        assert_eq!(ModelError::EmptyResponse.http_status(), None);
     }
 
     /// The `Result.model_error.kind` set is closed, one snake_case name per variant. The

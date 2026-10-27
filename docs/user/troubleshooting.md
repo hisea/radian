@@ -13,6 +13,8 @@ Use `anthropic` only for Anthropic endpoints.
 Pass `--offline-catalog` when the network blocks the catalog fetch.
 Pass `--context-window <TOKENS>` when the catalog has no entry.
 
+When a named provider refuses a protocol it still answers another way, Radian tries the other protocols and remembers the one that works (see `providers`). When every protocol fails, the error ends with `tried <protocol> (HTTP <status>), … Set the protocol: [[providers.<name>.models]] match = "<model>" kind = "<…>"`. Set exactly that rule in `~/.radian/config/config.toml` (or the file `--config` names), or set `[[providers.<name>.models]]` for the model and start again. A rule that later fails names itself and the file: fix its `kind`, or delete the rule and let Radian resolve the model again. A configuration that is read-only (a newer `schema_version`) or cannot be written still uses the probed protocol for the session, and the notice says `not saved: <reason>`.
+
 Check the workspace root when file tools refuse a path.
 Relative paths stay in the workspace.
 Absolute paths work only under the registry and tool chain roots.

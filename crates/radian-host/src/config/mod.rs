@@ -25,6 +25,7 @@ pub mod migrate_claude;
 pub mod migrate_pi;
 pub mod model_write;
 pub mod preserve;
+pub mod providers_write;
 pub mod theme_write;
 
 mod error;

@@ -9,10 +9,11 @@
 //! resolved values into a model, so the two hosts cannot build providers differently.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use radian_runtime::{ConfigSlot, ModelRoute};
+use radian_runtime::{ConfigQueue, ConfigSlot, ModelRoute};
 
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ThinkingConfig};
 use agent_provider_openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
@@ -760,6 +761,19 @@ impl RouteContext {
         model: &str,
         api_key: Option<&str>,
     ) -> Result<ModelArgs, String> {
+        self.args_for_route(provider_name, model, api_key, None)
+    }
+
+    /// [`RouteContext::args_for`] with a route already resolved by a **probe** (ADR 0026 D10):
+    /// the adapter, endpoint, headers and thinking map follow `forced` instead of the route's
+    /// own resolution. `None` is the ordinary path.
+    pub(crate) fn args_for_route(
+        &self,
+        provider_name: &str,
+        model: &str,
+        api_key: Option<&str>,
+        forced: Option<&crate::provider::NamedModelRoute>,
+    ) -> Result<ModelArgs, String> {
         // D10: the provider name resolves through the config's declarations and the auth
         // entry's env, and the key lives under the **name**. A model the catalog maps to an
         // npm Radian cannot speak is refused here, where a switch can still report it.
@@ -788,24 +802,38 @@ impl RouteContext {
         // ADR 0026: the wire protocol comes from the catalog (the cache,
         // else the bundled snapshot); a model the catalog does not carry uses the table.
         let catalog = crate::protocol_catalog();
-        let route = crate::provider::resolve_route_with_protocol(
-            &provider_ref,
-            model,
-            resolved.protocol,
-            None,
-            auth_base_url,
-            &self.user_headers,
-            &self.session_id,
-            Some(&catalog),
-        )?;
+        let (adapter, base_url, headers) = match forced {
+            Some(route) => (
+                route.protocol.adapter(),
+                route.base_url.clone(),
+                provider_ref.request_headers(&self.session_id),
+            ),
+            None => {
+                let route = crate::provider::resolve_route_with_protocol(
+                    &provider_ref,
+                    model,
+                    resolved.protocol,
+                    None,
+                    auth_base_url,
+                    &self.user_headers,
+                    &self.session_id,
+                    Some(&catalog),
+                )?;
+                (route.adapter(), route.base_url, route.headers)
+            }
+        };
         // The thinking level is clamped against **this route's** map (ADR 0026 D11): the same
-        // level can mean different wire values — or nothing — on different models.
-        let (thinking, reasoning_effort) = resolve_thinking_ref(
-            &provider_ref,
-            model,
+        // level can mean different wire values — or nothing — on different models. A probe
+        // uses the map of the protocol it is trying, not the route's old one.
+        let thinking_map = match forced {
+            Some(route) => crate::thinking_map_for_protocol(route.protocol),
+            None => crate::thinking_map_for_ref(&provider_ref, model),
+        };
+        let (thinking, reasoning_effort) = resolve_thinking_map(
+            thinking_map,
             &self.thinking,
             self.thinking_budget,
-            route.adapter(),
+            adapter,
             Some(self.max_tokens),
         );
         let reasoning_replay = resolve_reasoning_replay(&provider_ref, model);
@@ -813,19 +841,18 @@ impl RouteContext {
         // both. The same number goes into the model and into the switched route's budget
         // (`RouteContext::output_for`), so the sent value and `R` cannot drift.
         let limit = catalog.limit(provider_name, model);
-        let max_output_tokens =
-            crate::route_output(route.adapter(), &route.base_url, self.max_tokens).resolve(
-                limit.and_then(|limit| limit.context),
-                limit.and_then(|limit| limit.output),
-            );
+        let max_output_tokens = crate::route_output(adapter, &base_url, self.max_tokens).resolve(
+            limit.and_then(|limit| limit.context),
+            limit.and_then(|limit| limit.output),
+        );
         Ok(ModelArgs {
-            provider: route.adapter(),
-            base_url: route.base_url,
+            provider: adapter,
+            base_url,
             model: model.to_owned(),
             api_key: api_key
                 .map(str::to_owned)
                 .or_else(|| credential.as_ref().map(|credential| credential.key.clone())),
-            headers: route.headers,
+            headers,
             extra_body: self.extra_body.clone(),
             // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default;
             // an explicit `--include-usage` wins either way.
@@ -869,6 +896,74 @@ impl RouteContext {
     }
 }
 
+/// Where the probe's remembered rule goes (ADR 0026 D10): the user configuration the process
+/// read, and whether that read was read-only (a newer `schema_version`).
+#[derive(Debug, Clone, Default)]
+struct ConfigTarget {
+    path: Option<PathBuf>,
+    read_only: bool,
+}
+
+/// What the probe needs from the route's named-provider resolution (ADR 0026 D10): the
+/// provider itself (its `prefer`, `base_urls` and model list), where the current route came
+/// from, and the current route. Resolved once per route and cached.
+#[derive(Debug, Clone)]
+struct ProbePlan {
+    named: crate::provider::NamedProvider,
+    source: crate::provider::RouteSource,
+    current: crate::provider::NamedModelRoute,
+}
+
+/// The HTTP statuses that make a named-provider route probe another protocol (ADR 0026 D10).
+/// A 401/403, a 429, a 5xx, a transport error and a malformed stream are deliberately absent:
+/// they take the normal retry and error paths.
+const PROBE_STATUSES: &[u16] = &[400, 404, 405, 415, 422];
+
+/// The probe's status when `error` is a response refusal (ADR 0026 D10): a `Protocol` error
+/// that carries one of [`PROBE_STATUSES`]. A context overflow has its own variant and never
+/// probes; an error that never saw a response carries no status at all.
+fn probe_status(error: &ModelError) -> Option<u16> {
+    match error {
+        ModelError::Protocol(_) => error
+            .http_status()
+            .filter(|status| PROBE_STATUSES.contains(status)),
+        _ => None,
+    }
+}
+
+/// One attempt as the failure line names it: `anthropic (HTTP 404)`.
+fn attempt_text(protocol: crate::Protocol, error: &ModelError) -> String {
+    let detail = match error.http_status() {
+        Some(status) => format!("HTTP {status}"),
+        None => error.kind().as_str().to_owned(),
+    };
+    format!("{} ({detail})", protocol.kind())
+}
+
+/// `error` with one extra line, for the rule hint and the tried list (ADR 0026 D10). Only the
+/// two response variants carry a body a caller can extend; a probe never starts on the others.
+fn with_line(error: ModelError, line: String) -> ModelError {
+    match error {
+        ModelError::Protocol(message) => ModelError::Protocol(format!("{message}\n{line}")),
+        ModelError::Unavailable {
+            message,
+            retry_after,
+            status,
+        } => ModelError::Unavailable {
+            message: format!("{message}\n{line}"),
+            retry_after,
+            status,
+        },
+        other => other,
+    }
+}
+
+/// The route key the probe remembers a working protocol under: the `ConfigChanged` route
+/// carries no protocol, so the host keeps the probed protocol for this process (ADR 0026 D10).
+fn route_key(route: &ModelRoute) -> String {
+    format!("{}/{}", route.provider, route.model)
+}
+
 /// The model behind a `/model` switch: every request reads the current route out of the
 /// driver's [`ConfigSlot`] and dispatches to the matching adapter, built once per route and
 /// cached. The driver only changes the slot between turns (ADR 0004 path B), so one request
@@ -877,7 +972,18 @@ pub struct SwitchableModel {
     slot: Arc<ConfigSlot>,
     initial_route: ModelRoute,
     ctx: RouteContext,
-    cache: std::sync::Mutex<HashMap<String, Arc<HostModel>>>,
+    cache: Mutex<HashMap<String, Arc<HostModel>>>,
+    /// Where a successful probe appends its rule (ADR 0026 D10).
+    config_target: ConfigTarget,
+    /// The queue a successful probe writes its `ConfigChanged` route into, once
+    /// `open_session` has wired it. `None` in a bare test, which still probes.
+    config_queue: Option<Arc<ConfigQueue>>,
+    /// The named-provider resolution behind each route, or `None` when the route is not an
+    /// eligible named-provider route. Resolved once per route.
+    probe_plans: Mutex<HashMap<String, Option<ProbePlan>>>,
+    /// Working protocols a probe remembered, keyed by [`route_key`]. A route with an entry is
+    /// never probed again: the remembered protocol is what every later request uses.
+    probed: Mutex<HashMap<String, crate::provider::NamedModelRoute>>,
 }
 
 impl SwitchableModel {
@@ -893,7 +999,7 @@ impl SwitchableModel {
         let fingerprint = crate::key_pool::pool(&initial_route.provider)
             .and_then(|pool| pool.keys().first().map(PoolKey::fingerprint))
             .unwrap_or_default();
-        let cache = std::sync::Mutex::new(HashMap::from([(
+        let cache = Mutex::new(HashMap::from([(
             Self::cache_key(&initial_route, &ctx.thinking, &fingerprint),
             Arc::new(initial),
         )]));
@@ -902,7 +1008,26 @@ impl SwitchableModel {
             initial_route,
             ctx,
             cache,
+            config_target: ConfigTarget::default(),
+            config_queue: None,
+            probe_plans: Mutex::new(HashMap::new()),
+            probed: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The file a successful probe appends its rule to, and the reading process's read-only
+    /// verdict (ADR 0026 D10). Without this call a probe still runs, but the notice says the
+    /// rule was not saved.
+    pub fn with_config(mut self, path: Option<PathBuf>, read_only: bool) -> Self {
+        self.config_target = ConfigTarget { path, read_only };
+        self
+    }
+
+    /// The queue the driver drains at the next turn boundary. A successful probe queues the
+    /// same route value a `/model` switch writes, so the journal records the applied route
+    /// (ADR 0026 D10). `open_session` sets this once the queue exists.
+    pub fn set_config_queue(&mut self, queue: Arc<ConfigQueue>) {
+        self.config_queue = Some(queue);
     }
 
     /// The cache key: the route, the thinking level in force (ADR 0026 D11), and the chosen
@@ -932,8 +1057,51 @@ impl SwitchableModel {
             .unwrap_or_else(|| self.ctx.thinking.clone())
     }
 
+    /// The probe's view of `route`, or `None` when the route is not a named-provider route.
+    /// Cached: the resolution reads `auth.json` and the model-list cache.
+    fn probe_plan(&self, route: &ModelRoute) -> Option<ProbePlan> {
+        let key = route_key(route);
+        if let Some(plan) = self
+            .probe_plans
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+        {
+            return plan.clone();
+        }
+        let plan = self.resolve_probe_plan(route);
+        self.probe_plans
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, plan.clone());
+        plan
+    }
+
+    /// Resolves the named provider behind `route` (ADR 0026 D10). A built-in descriptor, a
+    /// provider without a credential and any resolution failure yield `None`: there is nothing
+    /// to probe and the ordinary error path is untouched.
+    fn resolve_probe_plan(&self, route: &ModelRoute) -> Option<ProbePlan> {
+        let resolved = resolve_route_name(
+            &route.provider,
+            &route.model,
+            &self.ctx.providers,
+            UnsupportedProtocol::BuiltInTable,
+        )
+        .ok()?;
+        let crate::ProviderRef::Named(named) = &resolved.provider_ref else {
+            return None;
+        };
+        let current = named.resolve_model(&route.model);
+        Some(ProbePlan {
+            named: named.clone(),
+            source: current.source.clone(),
+            current,
+        })
+    }
+
     /// The model for `route`, `thinking` and the chosen `api_key`, built and cached on first
-    /// use. The `Arc` comes out of the lock, so the lock is never held across the request.
+    /// use. The `Arc` comes out of the lock, so the lock is never held across the request. A
+    /// route a probe already resolved uses the remembered protocol (ADR 0026 D10).
     fn model_for(
         &self,
         route: &ModelRoute,
@@ -941,6 +1109,12 @@ impl SwitchableModel {
         api_key: Option<&str>,
         fingerprint: &str,
     ) -> Result<Arc<HostModel>, String> {
+        let forced = self
+            .probed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&route_key(route))
+            .cloned();
         let key = Self::cache_key(route, thinking, fingerprint);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(model) = cache.get(&key) {
@@ -950,10 +1124,131 @@ impl SwitchableModel {
             thinking: thinking.to_owned(),
             ..self.ctx.clone()
         };
-        let args = ctx.args_for(&route.provider, &route.model, api_key)?;
+        let args = ctx.args_for_route(&route.provider, &route.model, api_key, forced.as_ref())?;
         let model = build_model(args).map(Arc::new)?;
         cache.insert(key, model.clone());
         Ok(model)
+    }
+
+    /// Probes the other protocols for `route` (ADR 0026 D10) and returns the first success.
+    /// On success it remembers the route, queues the `ConfigChanged` and saves the rule. When
+    /// every attempt fails it returns `first` with the tried list and the rule hint appended.
+    #[allow(clippy::too_many_arguments)] // the request's own state, threaded without a struct
+    async fn probe(
+        &self,
+        route: &ModelRoute,
+        plan: &ProbePlan,
+        first: ModelError,
+        first_status: u16,
+        request: ModelRequest,
+        api_key: Option<&str>,
+        thinking: &str,
+        fingerprint: &str,
+        cancellation: &radian_core::CancellationToken,
+        events: &dyn radian_core::EventSink,
+    ) -> Result<ModelResponse, ModelError> {
+        let failed = plan.current.protocol;
+        let mut tried = vec![attempt_text(failed, &first)];
+        for protocol in plan.named.probe_candidates(&route.model, failed) {
+            let forced = plan.named.probe_route(&route.model, protocol);
+            let built = self
+                .ctx
+                .args_for_route(&route.provider, &route.model, api_key, Some(&forced))
+                .and_then(build_model)
+                .map(Arc::new);
+            let model = match built {
+                Ok(model) => model,
+                Err(message) => {
+                    // Building the attempt failed before it reached the provider. It still
+                    // counts as a tried protocol, with the message as its reason.
+                    let error = ModelError::Protocol(message);
+                    tried.push(attempt_text(protocol, &error));
+                    continue;
+                }
+            };
+            let result = model
+                .complete(
+                    request.clone(),
+                    ModelContext {
+                        cancellation: cancellation.clone(),
+                        events,
+                    },
+                )
+                .await;
+            match result {
+                Ok(response) => {
+                    self.remember(route, thinking, fingerprint, forced, model);
+                    let saved = self.save_rule(&plan.named.name, &route.model, protocol);
+                    crate::key_pool::push_notice(format!(
+                        "{}/{}: {} refused (HTTP {}); {} works; {}",
+                        plan.named.name,
+                        route.model,
+                        failed.kind(),
+                        first_status,
+                        protocol.kind(),
+                        saved
+                    ));
+                    return Ok(response);
+                }
+                Err(error) => tried.push(attempt_text(protocol, &error)),
+            }
+        }
+        let hint = format!(
+            "tried {}. Set the protocol: [[providers.{}.models]] match = \"{}\" kind = \"<{}>\"",
+            tried.join(", "),
+            plan.named.name,
+            route.model,
+            crate::provider::PROVIDER_KINDS.join("|")
+        );
+        Err(with_line(first, hint))
+    }
+
+    /// Remembers a probe's working route (in memory for later requests, and by the rule on
+    /// disk) and queues the same `ConfigChanged` a `/model` switch writes.
+    fn remember(
+        &self,
+        route: &ModelRoute,
+        thinking: &str,
+        fingerprint: &str,
+        forced: crate::provider::NamedModelRoute,
+        model: Arc<HostModel>,
+    ) {
+        self.probed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(route_key(route), forced);
+        self.cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(Self::cache_key(route, thinking, fingerprint), model);
+        if let Some(queue) = &self.config_queue {
+            let current = ModelRoute::new(&route.provider, &route.model);
+            // A `/model` switch queued mid-turn is the user's decision and lands first; queueing
+            // this (old) route after it would silently undo the switch. Only record the route
+            // when nothing else will replace it.
+            match queue.pending_model_route() {
+                Some(pending) if pending != current => {}
+                _ => queue.push(current.to_value()),
+            }
+        }
+    }
+
+    /// Appends the remembered rule and returns the notice's last clause (ADR 0026 D10):
+    /// `saved to <path>`, or `not saved: <reason>`.
+    fn save_rule(&self, provider: &str, model: &str, protocol: crate::Protocol) -> String {
+        let Some(path) = &self.config_target.path else {
+            return "not saved: no configuration path is known".to_owned();
+        };
+        match crate::config::providers_write::write_protocol_rule(
+            path,
+            self.config_target.read_only,
+            provider,
+            model,
+            protocol.kind(),
+        ) {
+            Ok(outcome) => format!("saved to {}", outcome.path().display()),
+            Err(error) => format!("not saved: {error}"),
+        }
     }
 }
 
@@ -983,13 +1278,100 @@ impl Model for SwitchableModel {
         let model = self
             .model_for(&route, &thinking, api_key.as_deref(), &fingerprint)
             .map_err(ModelError::Protocol)?;
-        let result = model.complete(request, cx).await;
-        // ADR 0026 D2: only a quota 429 rests the key the request used. The error itself is
-        // the adapter's own and reaches core unchanged (ADR 0017).
-        if let (Some(pool), Some(picked), Err(error)) = (pool.as_ref(), picked.as_ref(), &result) {
-            pool.rest_for_error(picked.index, error);
+
+        // ADR 0026 D10: the probe plan is resolved before the request so the same call can
+        // retry the other protocols. The request is cloned only when a probe may run.
+        let plan = self.probe_plan(&route);
+        let already_probed = self
+            .probed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&route_key(&route));
+        let source = plan.as_ref().map(|plan| plan.source.clone());
+        let probe_allowed = !already_probed
+            && matches!(
+                source,
+                Some(crate::provider::RouteSource::ModelList | crate::provider::RouteSource::Kind)
+            );
+        let retry_request = probe_allowed.then(|| request.clone());
+        let rule_pattern = match &source {
+            Some(crate::provider::RouteSource::Rule(pattern)) if !already_probed => {
+                Some(pattern.clone())
+            }
+            _ => None,
+        };
+
+        let ModelContext {
+            cancellation,
+            events,
+        } = cx;
+        let result = model
+            .complete(
+                request,
+                ModelContext {
+                    cancellation: cancellation.clone(),
+                    events,
+                },
+            )
+            .await;
+        let error = match result {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        // ADR 0026 D10: a rule that fails with a probe status names itself, so the user can fix
+        // or delete it. It never probes: the rule is the decision.
+        if let Some(pattern) = rule_pattern
+            && probe_status(&error).is_some()
+        {
+            let mut line = format!("rule {pattern}");
+            if let Some(path) = &self.config_target.path {
+                line.push_str(&format!(" in {}", path.display()));
+            }
+            return Err(with_line(error, line));
+        }
+        let Some(status) = probe_status(&error) else {
+            self.rest_key(pool.as_ref(), picked.as_ref(), &error);
+            return Err(error);
+        };
+        let Some(plan) = plan.filter(|_| probe_allowed) else {
+            self.rest_key(pool.as_ref(), picked.as_ref(), &error);
+            return Err(error);
+        };
+        let Some(request) = retry_request else {
+            return Err(error);
+        };
+        let result = self
+            .probe(
+                &route,
+                &plan,
+                error,
+                status,
+                request,
+                api_key.as_deref(),
+                &thinking,
+                &fingerprint,
+                &cancellation,
+                events,
+            )
+            .await;
+        if let Err(error) = &result {
+            self.rest_key(pool.as_ref(), picked.as_ref(), error);
         }
         result
+    }
+}
+
+impl SwitchableModel {
+    /// ADR 0026 D2: only a quota 429 rests the key the request used.
+    fn rest_key(
+        &self,
+        pool: Option<&Arc<crate::key_pool::KeyPool>>,
+        picked: Option<&crate::key_pool::PickedKey>,
+        error: &ModelError,
+    ) {
+        if let (Some(pool), Some(picked)) = (pool, picked) {
+            pool.rest_for_error(picked.index, error);
+        }
     }
 }
 
@@ -1122,6 +1504,65 @@ mod compaction_settings_tests {
         let (settings, notice) = compaction_settings_for(&provider, "gpt-5-nano", "low", 4096);
         assert_eq!(settings, serde_json::Value::Null);
         assert_eq!(notice, None);
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// ADR 0026 D10: only a response refusal with one of the five statuses probes. A context
+    /// overflow and a stream error (no HTTP prefix) do not; a plain 400 does.
+    #[test]
+    fn only_the_protocol_refusal_statuses_probe() {
+        for status in PROBE_STATUSES {
+            let error = ModelError::Protocol(format!("HTTP {status} Bad Request: no"));
+            assert_eq!(probe_status(&error), Some(*status), "{status}");
+        }
+        for status in [401, 402, 403, 408, 409, 413, 418, 429, 500, 503] {
+            let error = ModelError::Protocol(format!("HTTP {status}: no"));
+            assert_eq!(probe_status(&error), None, "{status}");
+        }
+        assert_eq!(
+            probe_status(&ModelError::ContextOverflow(
+                "HTTP 400: prompt is too long".into()
+            )),
+            None,
+            "an overflow has its own path"
+        );
+        assert_eq!(
+            probe_status(&ModelError::Protocol("unreadable stream event".into())),
+            None
+        );
+        assert_eq!(
+            probe_status(&ModelError::Unavailable {
+                message: "HTTP 500: busy".into(),
+                retry_after: None,
+                status: Some(500),
+            }),
+            None
+        );
+        assert_eq!(probe_status(&ModelError::Transport("down".into())), None);
+        assert_eq!(probe_status(&ModelError::EmptyResponse), None);
+    }
+
+    /// The failure line names each attempt the way the ADR does.
+    #[test]
+    fn the_attempt_text_names_the_protocol_and_the_status() {
+        assert_eq!(
+            attempt_text(
+                crate::Protocol::OpenAiCompatible,
+                &ModelError::Protocol("HTTP 400 Bad Request: no".into())
+            ),
+            "openai-compatible (HTTP 400)"
+        );
+        assert_eq!(
+            attempt_text(
+                crate::Protocol::Anthropic,
+                &ModelError::Transport("down".into())
+            ),
+            "anthropic (transport)"
+        );
     }
 }
 

@@ -487,6 +487,10 @@ pub async fn open_session(
     // The driver's model, shared with the side-question path: `/btw` sends
     // through the same route, thinking level and credentials as the next
     // formal request (`Arc` because `Agent` takes ownership).
+    // ADR 0026 D10: a successful probe queues the same route change a `/model` switch does,
+    // and the driver journals it at the next turn boundary; the queue exists only now.
+    let mut model = model;
+    model.set_config_queue(Arc::clone(&config_queue));
     let side_model = Arc::new(model);
     let agent = Arc::new(
         Agent::new(Arc::clone(&side_model), tools)

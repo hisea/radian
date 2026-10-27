@@ -127,6 +127,9 @@ kind = "anthropic"
 
 `magpie/codex/gpt-5.6-sol (openai-responses, model list)` sends the Responses request to `<base>/responses` with the provider key as a Bearer token and none of the ChatGPT headers.
 A model the list puts under chat and the native API picks the native API, because a gateway may refuse chat for it; a table with neither `kind` nor `base_url` adds only `models`, `prefer` or `base_urls` to the provider of that name already in `auth.json`.
+
+Radian recognises the protocol in three steps. First the model list and `kind` decide it, as above. Second, if that route is refused with HTTP 400, 404, 405, 415 or 422 before streaming, Radian tries the other protocols in `prefer` order (at most two extra attempts), skipping the failed one; a protocol the list names an endpoint for is tried on that endpoint, the rest on `base_urls[<kind>]` or `base_url`. The working protocol is used for the rest of the turn, one notice line says so, and the exact rule is appended to the configuration file (`not saved: <reason>` when the file is read-only or cannot be written). Third, if every protocol fails, the turn ends with the first error and one line `tried <protocol> (HTTP <status>), …` plus the rule to set. A 401, 403, 429, 5xx, a transport error or a stream that already started never probes. A rule never probes either: when a rule's protocol is refused, the error names the rule and the file so you can fix or delete it. See `configuration` for the saved rule and `troubleshooting` for the failure line.
+
 See `configuration` for every field.
 
 Read `cli` for every flag and exit code.

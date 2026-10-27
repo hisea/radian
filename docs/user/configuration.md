@@ -104,6 +104,18 @@ Several usable protocols are narrowed by `prefer`. The endpoint is the origin (s
 
 At startup with no cached model list, one fetch with a 3-second timeout runs before the route is built. A failed fetch uses `kind` and prints one line naming the reason; it never blocks a turn. Resolution runs again at every route build: startup, `/model <name>/<model>`, resume, and a `subagent` child's own startup. The startup and `/model` lines name the protocol, the endpoint when it differs from `base_url`, and the source, for example `magpie/codex/gpt-5.6-sol (openai-responses, model list)` or `magpie/claude/claude-opus-5-5 (anthropic, rule claude/*)`.
 
+When a named provider's request **fails with HTTP 400, 404, 405, 415 or 422 before the answer starts streaming**, Radian tries the other protocols in the `prefer` order (at most two extra attempts), skipping the one that failed. A protocol the model list names an endpoint for is tried first on that endpoint; the others use `base_urls[<kind>]`, else `base_url`. These attempts do not count against `model.retries`. A 401, 403, 429, 5xx, a transport error or a stream that already started never probes.
+
+When one works, the turn continues on it, one notice line names both protocols and where the rule was saved, and Radian appends one rule to the configuration file, after the existing rules:
+
+```toml
+[[providers.magpie.models]]
+match = "claude/claude-opus-5-5"
+kind = "anthropic"
+```
+
+A rule with the same `match` already present is left alone. A read-only configuration (a newer `schema_version`) or an unwritable one keeps the route for this session and the notice says `not saved: <reason>`. A route that came from a rule never probes; if it fails, the error names the rule and the file. When every protocol fails, the turn ends with the first error, followed by `tried <protocol> (HTTP <status>), …` and the rule to set. See `providers` for the three steps and `troubleshooting` for the failure line.
+
 A table with **no** `kind` and **no** `base_url` but with `models`, `prefer`, `base_urls` or `reasoning_replay` adds those to the provider of that name already declared in `auth.json`, with no "config wins" warning. The same table with no `auth.json` entry of that name is refused. A table with `kind` or `base_url` is a full declaration; with a same-name `auth.json` entry, configuration wins and warns once.
 
 The name uses letters, digits, `-`, and `_` only, and must not shadow a built-in provider.

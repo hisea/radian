@@ -556,32 +556,97 @@ impl NamedProvider {
         {
             let prefer = self.prefer.as_deref().unwrap_or(DEFAULT_PREFER);
             for protocol in prefer {
-                let Some(entry) = advertised
-                    .iter()
-                    .find(|entry| entry.protocol() == Some(*protocol))
-                else {
-                    continue;
-                };
-                if let Some(overridden) = self.base_urls.get(protocol).cloned() {
-                    return NamedModelRoute {
-                        protocol: *protocol,
-                        base_url: overridden.clone(),
-                        endpoint: overridden,
-                        source: RouteSource::ModelList,
-                    };
-                }
-                if let Some(endpoint) = endpoint_from_path(&self.base_url, &entry.path) {
-                    return NamedModelRoute {
-                        protocol: *protocol,
-                        base_url: adapter_base(*protocol, &endpoint),
-                        endpoint,
-                        source: RouteSource::ModelList,
-                    };
+                if let Some(route) = self.list_route(advertised, *protocol) {
+                    return route;
                 }
             }
         }
         // 3. The declared kind.
         self.kind_route()
+    }
+
+    /// The route one model-list entry offers for `protocol` (ADR 0026 D10 step 2), or `None`
+    /// when the entry does not advertise that protocol. `base_urls` wins over the advertised
+    /// path, as it does in [`NamedProvider::resolve_model`].
+    fn list_route(
+        &self,
+        advertised: &[crate::AdvertisedEndpoint],
+        protocol: Protocol,
+    ) -> Option<NamedModelRoute> {
+        let entry = advertised
+            .iter()
+            .find(|entry| entry.protocol() == Some(protocol))?;
+        if let Some(overridden) = self.base_urls.get(&protocol).cloned() {
+            return Some(NamedModelRoute {
+                protocol,
+                base_url: overridden.clone(),
+                endpoint: overridden,
+                source: RouteSource::ModelList,
+            });
+        }
+        let endpoint = endpoint_from_path(&self.base_url, &entry.path)?;
+        Some(NamedModelRoute {
+            protocol,
+            base_url: adapter_base(protocol, &endpoint),
+            endpoint,
+            source: RouteSource::ModelList,
+        })
+    }
+
+    /// The route a **probe** would use for `protocol` on `model` (ADR 0026 D10): the model
+    /// list's endpoint for that protocol when the list names one, else `base_urls[<kind>]` or
+    /// `base_url`. Unlike [`NamedProvider::resolve_model`], rules never take part: a rule is a
+    /// decision, and a route it picks is never probed.
+    pub fn probe_route(&self, model: &str, protocol: Protocol) -> NamedModelRoute {
+        if let Some(list) = &self.model_list
+            && let Some(advertised) = list.endpoints.get(model)
+            && let Some(route) = self.list_route(advertised, protocol)
+        {
+            return route;
+        }
+        let endpoint = self
+            .base_urls
+            .get(&protocol)
+            .cloned()
+            .unwrap_or_else(|| self.base_url.clone());
+        let base_url = if self.base_urls.contains_key(&protocol) {
+            endpoint.clone()
+        } else {
+            adapter_base(protocol, &endpoint)
+        };
+        NamedModelRoute {
+            protocol,
+            base_url,
+            endpoint,
+            source: RouteSource::Kind,
+        }
+    }
+
+    /// The other protocols a probe tries, in order (ADR 0026 D10): the provider's `prefer`
+    /// order without the protocol that failed; protocols the model list names an endpoint for
+    /// come first, each on that endpoint, then the rest. At most two attempts.
+    pub fn probe_candidates(&self, model: &str, failed: Protocol) -> Vec<Protocol> {
+        let prefer = self.prefer.as_deref().unwrap_or(DEFAULT_PREFER);
+        let mut candidates: Vec<Protocol> = Vec::new();
+        if let Some(list) = &self.model_list
+            && let Some(advertised) = list.endpoints.get(model)
+        {
+            for protocol in prefer {
+                if *protocol != failed
+                    && self.list_route(advertised, *protocol).is_some()
+                    && !candidates.contains(protocol)
+                {
+                    candidates.push(*protocol);
+                }
+            }
+        }
+        for protocol in prefer {
+            if *protocol != failed && !candidates.contains(protocol) {
+                candidates.push(*protocol);
+            }
+        }
+        candidates.truncate(2);
+        candidates
     }
 }
 
@@ -2731,18 +2796,20 @@ pub fn protocol_descriptor_id(protocol: Protocol) -> &'static str {
     }
 }
 
+/// The thinking map a protocol's descriptor carries (ADR 0026 D10/D11): the map a **probe**
+/// uses for the protocol it is trying, before the route remembers it.
+pub fn thinking_map_for_protocol(protocol: Protocol) -> Option<ThinkingMap> {
+    descriptor(protocol_descriptor_id(protocol))
+        .and_then(|descriptor| (!descriptor.thinking.is_empty()).then_some(descriptor.thinking))
+}
+
 /// The thinking map a [`ProviderRef`]'s model uses (ADR 0026 D11): a built-in descriptor's
 /// model/provider map, or the map of the descriptor the model's **resolved** protocol names
 /// (D10: rules, model list, kind).
 pub fn thinking_map_for_ref(provider: &ProviderRef, model: &str) -> Option<ThinkingMap> {
     match provider {
         ProviderRef::BuiltIn(descriptor) => thinking_map_for(descriptor, model),
-        ProviderRef::Named(named) => {
-            let protocol = named.resolve_model(model).protocol;
-            descriptor(protocol_descriptor_id(protocol)).and_then(|descriptor| {
-                (!descriptor.thinking.is_empty()).then_some(descriptor.thinking)
-            })
-        }
+        ProviderRef::Named(named) => thinking_map_for_protocol(named.resolve_model(model).protocol),
     }
 }
 

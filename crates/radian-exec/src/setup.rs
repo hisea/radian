@@ -556,6 +556,13 @@ pub(crate) async fn setup(
         radian_host::ModelRoute::new(&provider_name, &model_name),
         config_slot.clone(),
         route_ctx.clone(),
+    )
+    .with_config(
+        config
+            .source
+            .clone()
+            .or_else(|| radian_host::resolved_config_path(cli.config.as_deref())),
+        config.read_only,
     );
     let budget_for = {
         let query = window_query.clone();

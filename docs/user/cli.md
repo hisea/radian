@@ -78,6 +78,7 @@ radian --provider openai-compatible --model gpt-5 --profile workspace -w "$PWD" 
 `radian exec` runs one turn or a line session without a terminal.
 With `-p` it prints only the model text to stdout and exits; status goes to stderr.
 Without `-p` it runs a line prompt loop.
+A named-provider probe's one notice line goes to stderr after the turn, under `--output jsonl` too, like a key-switch notice.
 The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no model and read no key.
 
 | Flag | Value | Default | Conflicts | What it does |

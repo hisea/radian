@@ -70,6 +70,18 @@ impl ConfigQueue {
         self.len() == 0
     }
 
+    /// The last queued **model** route, when a route change is waiting for the next turn
+    /// boundary; `None` when no route change is queued. Reads without draining, so a host can
+    /// avoid queueing a redundant route after another switch (ADR 0026 D10).
+    pub fn pending_model_route(&self) -> Option<ModelRoute> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find_map(ModelRoute::from_value)
+    }
+
     pub(crate) fn drain(&self) -> Vec<Value> {
         std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -104,5 +116,33 @@ impl ModelRoute {
             provider: model.get("provider")?.as_str()?.to_owned(),
             model: model.get("model")?.as_str()?.to_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0026 D10: a host that wants to queue a route must see a switch already waiting,
+    /// without draining it. The last model change wins; other changes are not routes.
+    #[test]
+    fn the_pending_model_route_is_read_without_draining_the_queue() {
+        let queue = ConfigQueue::new();
+        assert_eq!(queue.pending_model_route(), None);
+        queue.push(serde_json::json!({"approval": "auto"}));
+        assert_eq!(queue.pending_model_route(), None);
+        queue.push(ModelRoute::new("magpie", "old").to_value());
+        assert_eq!(
+            queue.pending_model_route(),
+            Some(ModelRoute::new("magpie", "old"))
+        );
+        queue.push(ModelRoute::new("openai", "gpt").to_value());
+        assert_eq!(
+            queue.pending_model_route(),
+            Some(ModelRoute::new("openai", "gpt")),
+            "the last queued route is the one that will apply"
+        );
+        assert_eq!(queue.len(), 3, "reading did not drain");
+        assert_eq!(queue.drain().len(), 3);
     }
 }
