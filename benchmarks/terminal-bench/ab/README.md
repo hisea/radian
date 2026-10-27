@@ -47,7 +47,7 @@ still comes from `$HOME/tb2/bin`: build a static one with
 | Script | What it does | Arguments |
 |---|---|---|
 | `smoke.sh` | One task (`merge-diff-arc-agi-task`), one radian trial, one attempt: checks Harbor, Docker and the key. | `<binary-name> [label]`; the label defaults to `smoke` |
-| `ab.sh` | The selected task set (default `ab3`): each radian binary named on the command line, plus pi 1.4.0 and opencode 1.19.4, all started at once. Samples load. | `<label> <radian-bin-name>...` |
+| `ab.sh` | The selected task set (default `core-2026-10`): each radian binary named on the command line, plus pi 1.4.0 and opencode 1.19.4, all started at once. Samples load. | `<label> <radian-bin-name>...` |
 | `ab-pi.sh` | Re-runs only the pi arm of an existing label, against that label's saved task set. Moves a previous `pi/` and `pi.log` to `pi.failed-start*` first. | `<label>` |
 | `ab-system.sh` | One radian binary twice: the built-in role answer versus a role file passed as `--system`. Copies the role file to `<label>/role.txt`. Samples load. | `<label> <radian-bin-name> <role-file>` |
 | `run.sh` | One radian binary at `RADIAN_BENCH_BINARY`, pi and opencode, all started at once, with `-n 4` each. Extra arguments go to Harbor (for example `-i fix-git`). | `<label> [harbor args...]` |
@@ -179,29 +179,30 @@ empty, and it may not repeat a name.
 
 | File | What it holds |
 |---|---|
-| `tasks/ab3.txt` | The ten tasks that ab1, ab3 and absys1 ran, in their order. It is the default set, so a run that sets no `AB_TASKS` is unchanged. |
-| `tasks/calibrate-2026-10.txt` | The five tasks that separated the agents, plus ten medium-difficulty candidates, for one calibration run. The default set is chosen from its results. |
+| `tasks/core-2026-10.txt` | The default set, chosen from the cal1 calibration run: the first five tasks separated the agents' pass rate, and the last five are tasks every agent passed with a stable generated-token gap, for reasoning-volume comparisons. |
+| `tasks/ab3.txt` | The ten tasks that ab1, ab3 and absys1 ran, in their order. Kept unchanged so those labels stay reproducible. |
+| `tasks/calibrate-2026-10.txt` | The five tasks that separated the agents, plus ten medium-difficulty candidates, for the cal1 calibration run. |
 
 `AB_TASKS` selects the set for `ab.sh`, `ab-system.sh` and `ab-pi.sh`:
 
 - A bare name (no `/`) means `tasks/<name>.txt` next to the scripts, so
-  `AB_TASKS=ab3` and the default `ab3` are the same file.
+  `AB_TASKS=core-2026-10` and the default `core-2026-10` are the same file.
 - A value with a `/` is a path to a task set file, absolute or relative to the
   directory the script runs in.
 
-The default is `ab3`. An unknown bare name, a missing path, a set with no task
-names, a duplicate name, or a name that does not match the pattern stops the
-script before Harbor starts, with one line on stderr naming the problem. One
-shared helper, `task_set.py`, resolves and validates the list for all three
-scripts.
+The default is `core-2026-10`. A run meant for a decision uses `AB_K=5`. An
+unknown bare name, a missing path, a set with no task names, a duplicate name,
+or a name that does not match the pattern stops the script before Harbor starts,
+with one line on stderr naming the problem. One shared helper, `task_set.py`,
+resolves and validates the list for all three scripts.
 
 Each of the three scripts writes the resolved list it used to
 `<label>/tasks.txt`, one task name per line, with no comments. `ab-pi.sh` is the
 exception to selection: when `<label>/tasks.txt` already exists it re-runs that
 label's list. If `AB_TASKS` is also set, it must resolve to the same list (the
 same task names in the same order) or `ab-pi.sh` refuses to run, so one label
-never mixes sets. Without the file, `ab-pi.sh` resolves `AB_TASKS` (or `ab3`)
-and writes it.
+never mixes sets. Without the file, `ab-pi.sh` resolves `AB_TASKS` (or
+`core-2026-10`) and writes it.
 
 ## Environment variables
 
@@ -210,7 +211,7 @@ prepend `$HOME/.local/bin` to `PATH` so `harbor` resolves.
 
 | Variable | Read by | Default | Effect |
 |---|---|---|---|
-| `AB_TASKS` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `ab3` | The task set: a bare name under `tasks/`, or a path to a file. See [Choosing the tasks](#choosing-the-tasks) for the format and the refusals. |
+| `AB_TASKS` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `core-2026-10` | The task set: a bare name under `tasks/`, or a path to a file. See [Choosing the tasks](#choosing-the-tasks) for the format and the refusals. |
 | `AB_N` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `2` in `ab.sh` and `ab-pi.sh`; `3` in `ab-system.sh` | Passed as `-n` (trials per arm). `run.sh` ignores it and passes `-n 4`; `smoke.sh` passes `-n 1`. |
 | `AB_K` | `ab.sh`, `ab-system.sh`, `ab-pi.sh` | `2` in `ab.sh` and `ab-pi.sh`; `3` in `ab-system.sh` | Passed as `-k`. `run.sh` and `smoke.sh` pass no `-k` and use Harbor's default. |
 | `RADIAN_AB_SYSTEM_FILE` | `radian_system.py` | unset | Path to a UTF-8 role file. When set, the agent appends `--system <quoted text>` to the command; when unset, the command is unchanged. `ab-system.sh` sets it to `<label>/role.txt` for its concise arm and unsets it for its base arm, so a value exported by the caller cannot silently give both arms a `--system`. |
