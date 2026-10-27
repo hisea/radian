@@ -44,6 +44,8 @@ Two `stop_reason` values are fixed decisions, never judged from model text:
 - `terminated` covers only two abnormal ends: `Poisoned` (in-flight futures dropped, session uncontinuable) and the SIGTERM path (128 + 15). The second owns `cancelled` as `outcome`.
 - "Model quits after tool refusal" lists nothing separately: Core records `Completed`, model-text judging is unreliable, and it exits 0. Exhausted empty-response retries are model errors (ADR 0017), still exit 1, no `radian-core` change.
 
+`max_tokens` means the turn ended on a truncated response with no tool calls after two truncated responses in a row had already continued it (ADR 0017 §2). A truncated response with tool calls continues the turn and never makes this outcome by itself. A budget or the call cap that forbids the continuation wins instead (`budget`, ADR 0017 §2).
+
 Other off-path ends: `NotStarted` (input refused before turns) with stateless stops read `failed`/`failed`/1. Clean interactive leave with no turns reads `completed`/`completed`/0. Driver self-stop reads `completed` when clean, else `failed`.
 
 ### 2a. `-p` waits for background jobs before exit
