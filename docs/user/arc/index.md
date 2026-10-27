@@ -243,7 +243,7 @@ A proposed task you do not want is ended with `radian arc cancel` (`failed.cance
 |---|---|---|
 | `<ID>` | a plan id, or a task id | Required. An id that names both a plan and a task is refused (`3`), naming both files. |
 
-A plan confirm refuses with exit `3` when the plan has no tasks, when it is already confirmed, when it is cancelled, when its file changed outside arc, and when the worker's `radian exec` line is rejected (see `start` and [`worker.exec_args`](files.md#configtoml)).
+A plan confirm refuses with exit `3` when the plan has no tasks, when it is already confirmed, when it is cancelled, when its file changed outside arc, and when the worker's `radian acp` line is rejected (see `start` and [`worker.exec_args`](files.md#configtoml)).
 A task confirm refuses with exit `3` for a task in any state other than `todo.proposed`, for a task whose plan is `cancelled`, for a file that changed outside arc, and for a rejected worker line.
 A refusal writes nothing.
 
@@ -376,8 +376,8 @@ radian arc start <TASK>
 | `<TASK>` | `ID` | The task id. Required. |
 
 Before it reconciles, claims or verifies anything, `start` checks the worker line (see the [`worker.exec_args` and `worker.command` rows](files.md#configtoml)).
-Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian exec` arguments plus `[worker] exec_args`.
-A line `radian exec` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
+Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian acp` arguments plus `[worker] exec_args`.
+A line `radian acp` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
 With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](worker.md#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program. A flow's `acp` or `command` program is checked the same way and named by its own key.
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.

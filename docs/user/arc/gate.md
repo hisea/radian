@@ -314,13 +314,13 @@ A worker attempt that ends on an unavailable model waits the same way the review
 
 ### A worker wait on an unavailable model
 
-A `radian exec` worker whose failed attempt's last `Result` carries `model_error.kind` `unavailable` or `usage_limit` did not fail on the request: the task waits on the model's window and uses no retry.
+A command worker whose failed attempt's last `Result` carries `model_error.kind` `unavailable` or `usage_limit` did not fail on the request: the task waits on the model's window and uses no retry.
 arc records that `model_error` object on the attempt (`runs/<task>/attempts/<attempt id>/attempt_result.json`, with `model_wait` `true`), moves the task to `todo.retry_wait`, and leaves `retry_count` alone. The task therefore never reaches `failed.exhausted` from these waits, whatever `max_attempts` says.
 
 The wait is the task's `retry_at`: 5 minutes for the first model wait of the task, doubled for each further one in a row, capped at 60 minutes; when the failing session's `model_error.retry_after_secs` is longer than that step, it is used instead, still capped at 60 minutes.
 The next attempt that does not end in a model wait ends the run of waits.
 Every other failure keeps the class, backoff and count in the table above, and so does a model error of another kind (`protocol`, `context_overflow`, …): that one is the request's fault.
-A command worker (see [Another agent as the worker](worker.md#another-agent-as-the-worker)) is unchanged, because it has no exec `Result`.
+A command worker (see [Another agent as the worker](worker.md#another-agent-as-the-worker)) is unchanged, because its failures keep the ordinary retry rules; the radian worker's ACP response carries its model error as `_meta.radian.error` text with no `kind`, so it takes those rules too.
 
 The ordinary pass that moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready` ends the wait, and the next pass claims the task like any retry.
 `radian arc run` prints `<task> worker model unavailable -> retry at <UTC time>` when it applies the wait (see [the loop's lines](loop.md#radian-arc-run)); `radian arc show` prints the attempt's `attempt_model_error` and the task's `retry_at`.

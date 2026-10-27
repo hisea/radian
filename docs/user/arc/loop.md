@@ -18,7 +18,7 @@ A task of a `cancelled` plan is never claimed, gated or merged, and a cancelled 
 The arc TUI never runs this pass itself: when no loop holds the lock it starts `radian arc serve` as a detached process (see [`arc/tui`](tui.md#the-loop)). A TUI and a loop (`run` or `serve`) exclude each other through `runner.lock`: a second loop that cannot get it exits `4`.
 Quitting the TUI never stops a loop, whether the TUI started it or not.
 
-Before its first pass, and before each pass claims a task, it checks the worker's `radian exec` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](files.md#configtoml)).
+Before its first pass, and before each pass claims a task, it checks the worker's `radian acp` line the way `start` does: a rejected line exits `3`, claims nothing, and changes no file (see [`worker.exec_args`](files.md#configtoml)).
 
 `run` takes no option. The old form `radian arc run --watch`, with or without `--interval`, is refused: it is now `radian arc serve`. It exits `2` with one stderr line, ``radian arc: `run --watch` is now `radian arc serve` ``.
 
@@ -68,7 +68,7 @@ A ready task whose flow is full says `waiting for a free <flow> slot` (for examp
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
-`run` exits `0` when it ran to quiet, even when a task failed; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+`run` exits `0` when it ran to quiet, even when a task failed; `1` on a git or file error, `3` when the worker's `radian acp` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ### `loop.log`
 
@@ -118,4 +118,4 @@ A running worker is left alone: it is a separate process with its own limits and
 A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL, and so is one whose record is still `started` while it holds the gate lock; the gate forwards the signal to the stage it is running (the `commands` shell or the review session), waits for it, and exits without a record; once it is gone its record becomes `interrupted`, so a gate that did not finish is started again by the next loop as unverified and counts no death, and the verdicts it already wrote are reused, unless it exited before writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](gate.md#the-gate-run)).
 The loop then prints the summary, releases `runner.lock`, and exits `0`.
 
-It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM; `1` on a git or file error, `3` when the worker's `radian exec` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
+It exits `0` when it ran to quiet, even when a task failed, and `0` on SIGINT or SIGTERM; `1` on a git or file error, `3` when the worker's `radian acp` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.

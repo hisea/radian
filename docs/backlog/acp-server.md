@@ -3,7 +3,7 @@
 - 状态：idea（第二阶段：编辑器）；第一阶段已落地，见 ADR 0049 与手册 `radian acp` 页
 - 涉及 ADR：0049（`radian acp` 的全部决定）、0024（审批与提问映射到 `request_permission`）、0031（信任门）、0023（宿主面分层）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥；owner 2026-10-27："arc 可以用 ACP 调用 radian"
-- 关系：arc 当 ACP 客户端的部分已落地（ADR 0048 第 7 节；手册 `docs/user/arc/files.md` 的 `flows.<name>.acp` 行与 `docs/user/arc/worker.md` 的「An ACP agent as the worker」），它是第一阶段（给 arc 用的服务端）的第一个用户；`arc-radian-worker-over-acp.md` 在本条之后，把 arc 的 radian worker 切到本条。本条只剩编辑器场景。
+- 关系：arc 当 ACP 客户端的部分已落地（ADR 0048 第 7 节；手册 `docs/user/arc/files.md` 的 `flows.<name>.acp` 行与 `docs/user/arc/worker.md` 的「An ACP agent as the worker」），它是第一阶段（给 arc 用的服务端）的第一个用户，arc 的 radian worker 也已经切到本条（`radian acp`）。本条只剩编辑器场景。
 
 ## 第一阶段（已落地）
 

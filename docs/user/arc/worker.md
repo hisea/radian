@@ -13,10 +13,35 @@ The command that starts it, its arguments and its exit codes are in [`radian arc
 The worker runs in a session of its own: with [`worker.rework_session`](files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
 With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
 The claim records the attempt's session id in its `start.json` before the worker starts, and the wrapper records the same id in its `identity.json` and `execution.json`; `show` prints it as `session_id` from the first of those records that names one, so a running attempt's session is known from the claim on.
-A fresh attempt after the first cannot see the earlier conversation, so its stdin opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
+A fresh attempt after the first cannot see the earlier conversation, so the brief it receives opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
 The section says the full history is on the branch and to read the files rather than assume.
 The brief follows it, and a `merge-main` conflict section still comes first.
 When [`worker-brief.md`](files.md#worker-briefmd) exists, its content is the last section of every brief, so the order is: the `merge-main` conflict section, the hand-off, the task's brief, then the standing worker instructions.
+
+## The radian worker
+
+By default an attempt runs the radian worker: [`radian acp`](../acp.md), the same coding agent `radian exec` serves headless, spoken to over the [Agent Client Protocol](https://agentclientprotocol.com).
+The wrapper is its ACP client and passes the flags the `radian exec` worker used to get, without `-p -`, `--output jsonl` and `--yes`:
+
+```text
+radian acp --session-id <session> --workspace <worktree> --profile workspace --deny-read <path>... <exec_args>
+```
+
+with `--resume <session>` in place of `--session-id <session>` on a `resume`-mode attempt whose session file exists.
+The task's worktree is the session request's `cwd`, so `--workspace` and the cwd name the same directory.
+The worktree is the workspace the agent works in, and the `--deny-read` paths are every entry of `.radian/arc/` except `worktrees/`, so the worker cannot read the backlog, the ledger or another attempt's records.
+[`worker.exec_args`](files.md#configtoml) and [`flows.<name>.exec_args`](files.md#configtoml) are the extra arguments after those, exactly as they used to reach `radian exec`. Nothing in `config.toml` changes for this: the same keys name the same worker, and `flows.<name>.acp` still names some other agent.
+
+The brief arrives as the single content block of the attempt's one `session/prompt`.
+There is no second prompt, and the attempt ends when the turn ends.
+A `rework_session = "resume"` attempt opens the task's session with `session/load`, which replays the journal and continues it; every other attempt starts one with `session/new` (see [the session](#the-session-and-the-brief)).
+
+Approvals and `ask_user` questions arrive as `session/request_permission`, and the wrapper answers them with the ACP default policy described under [An ACP agent as the worker](#an-acp-agent-as-the-worker): `allow_once` when every path the request names is inside the worktree, `reject_once` when one is outside it. `--yes` is not passed, so a tool that asks is answered by the wrapper instead of being pre-approved.
+The shell still runs under the `workspace` tier: the policy answers the question, the sandbox decides what the command can do.
+
+The attempt's `Result` comes from the response's `_meta.radian`: `text` is the last assistant message in full, and `cost` is the same `{micros, incomplete, estimated}` object `radian exec` wrote, or `null` when no call had a price.
+The wrapper writes that line itself, as for any ACP worker, and the cost, budget, delivery and push rules are [the ones below](#what-the-wrapper-checks-after-the-worker-exits) and in [the result table](gate.md#failures-retries-and-the-budget).
+`radian exec` itself remains the headless command ([`radian exec`](../cli.md#radian-exec-the-headless-command)) and the gate's review session ([`gate`](gate.md)); it is no longer the worker.
 
 ## The steps before an attempt
 
@@ -51,7 +76,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL; a `before_attempt` command's group gets the same when a stop reaches it while it runs (see [The steps before an attempt](#the-steps-before-an-attempt)).
 
 A limit of `0` means no limit for that timer.
-The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), stops the worker (an ACP agent gets `session/cancel` first; see [An ACP agent as the worker](#an-acp-agent-as-the-worker)), and still writes its `AttemptFinished` record.
+The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), stops the worker (every ACP worker, the radian worker included, gets `session/cancel` first; see [An ACP agent as the worker](#an-acp-agent-as-the-worker)), and still writes its `AttemptFinished` record.
 On a cancel the wrapper is itself killed only after the grace and one more second, the window in which it reaps what it stopped and writes that record; the grace is never shortened to make room for the record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
@@ -67,16 +92,16 @@ On a cancel the wrapper is itself killed only after the grace and one more secon
 
 The wrapper compares the control files once after the `before_attempt` entries and before the worker starts, and again when the worker exits. A `before_attempt` command that changes one therefore fails the attempt before the worker starts, with the same restore and reason as a worker that changes one.
 
-A task whose flow sets [`flows.<name>.commit_dirty`](files.md#configtoml) `true` lets the wrapper commit a dirty worktree for a `completed` worker, after the control-file check and before the delivery checks. It does not run for a failed or cancelled worker, and a changed control file still fails the attempt with nothing committed. It applies to every worker kind: `radian exec`, a `command`, and any worker this build gains later. The commit's identity is the one arc's `merge-main` merge commit uses, `arc <arc@localhost>`; its subject is the first line of the worker's `Result.text` (or `<task id>: worker changes`), and the attempt's notes carry `committed dirty worktree: <short sha>`, which `radian arc show` prints. The key is read at the claim, so a change takes effect at the next claim.
+A task whose flow sets [`flows.<name>.commit_dirty`](files.md#configtoml) `true` lets the wrapper commit a dirty worktree for a `completed` worker, after the control-file check and before the delivery checks. It does not run for a failed or cancelled worker, and a changed control file still fails the attempt with nothing committed. It applies to every worker kind: the radian worker, a `command`, and any worker this build gains later. The commit's identity is the one arc's `merge-main` merge commit uses, `arc <arc@localhost>`; its subject is the first line of the worker's `Result.text` (or `<task id>: worker changes`), and the attempt's notes carry `committed dirty worktree: <short sha>`, which `radian arc show` prints. The key is read at the claim, so a change takes effect at the next claim.
 
 A failed check fails the attempt with its reason in `runs/<task>/attempts/<attempt id>/attempt_finished.json`, which [`show`](index.md#radian-arc-show-id-json) prints; nothing is pushed. The git control check also restores every recorded file to its recorded content and removes every file that was not there before, then fails the attempt with the reason `the worker changed git control files: <paths, comma-separated>`. A control file the wrapper cannot read back counts as a change and is restored the same way. When the restore itself fails, the reason carries both failures, and the wrapper runs no further git command for that attempt. The wrapper stops everything the worker left in its process group before it compares the files, so a background process the worker started cannot change one after the worker exits.
 
 ## Another agent as the worker
 
-`[worker] command` replaces the `radian exec` worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
-A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, `acp` for an ACP agent, or `exec_args` for `radian exec`, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
+`[worker] command` replaces the radian worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
+A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, `acp` for an ACP agent, or `exec_args` for the radian worker, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
 A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never two.
-A repository can then run, say, image tasks through a Codex script and code tasks through `radian exec` in the same plan:
+A repository can then run, say, image tasks through a Codex script and code tasks through the radian worker in the same plan:
 
 ```toml
 [flows.codex]
@@ -86,21 +111,21 @@ command = ["/absolute/path/to/codex-worker.sh"]
 exec_args = ["--model", "some-model", "--system-file", ".radian/arc/code.md"]
 ```
 
-A task with `flow = "codex"` starts the script; a task with no `flow` uses `default`, here `radian exec` with those arguments.
+A task with `flow = "codex"` starts the script; a task with no `flow` uses `default`, here the radian worker with those arguments.
 Without a `[flows.default]` section, `default` comes from the `[worker]` keys ([the flow rows](files.md#configtoml)).
 `[worker] rework_session` is a `[worker]` key, not a flow key, and it applies to every flow.
 The rest of this section describes the command worker; it applies to a flow's `command` exactly as it did to `[worker] command`. [An ACP agent as the worker](#an-acp-agent-as-the-worker) below describes `acp`.
 The array's first element is the program and the rest are its arguments; there is no shell in between, so a pipeline or a variable belongs in a script you pass as the program.
-Unset, a flow's worker is `radian exec` and this section does not apply to it.
+Unset, a flow's worker is the radian worker and this section does not apply to it.
 
-The program runs in the task's worktree, gets the same brief on stdin as a `radian exec` worker (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
+The program runs in the task's worktree, gets the same brief as the radian worker receives (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
 The arc TUI's conversation tab shows those rows while the attempt runs, under the program's name (see [the task page's conversation tab](tui.md#the-task-page)).
-The wrapper gives it its own process group and enforces the attempt's limits itself, exactly as it does for `radian exec`: no new stdout line for [`stall_timeout_secs`](files.md#task-fields), `max_wall_time_secs` in total, the cancel grace period after SIGTERM.
+The wrapper gives it its own process group and enforces the attempt's limits itself, exactly as it does for the radian worker: no new stdout line for [`stall_timeout_secs`](files.md#task-fields), `max_wall_time_secs` in total, the cancel grace period after SIGTERM.
 After it exits the wrapper runs the same git control-file check, [delivery check](#what-the-wrapper-checks-after-the-worker-exits), push and records; nothing about those changes. A flow with [`commit_dirty`](files.md#configtoml) `true` lets the wrapper commit the command's dirty worktree when its outcome is `completed`.
 
 ### The environment
 
-The wrapper adds these variables to the command's or the ACP agent's environment; they describe the attempt and are never read by radian itself.
+The wrapper adds these variables to the command's or a flow's ACP agent's environment; they describe the attempt and are never read by radian itself. The radian worker gets the wrapper's own environment and its flags instead.
 
 | Variable | Value |
 |---|---|
@@ -111,27 +136,27 @@ The wrapper adds these variables to the command's or the ACP agent's environment
 | `ARC_SESSION_START` | `new` or `resume`: `resume` on a `resume`-mode attempt whose session file exists, `new` on every other attempt. Always set. |
 | `ARC_GIT_DIR` | `git rev-parse --absolute-git-dir` in the worktree. |
 | `ARC_GIT_COMMON_DIR` | The absolute common git directory. A linked worktree's objects and refs live there. A sandboxed agent that commits from inside its own sandbox needs it writable; Codex's `workspace-write` keeps `.git` read-only even when it is given, so the example below commits outside the sandbox instead. |
-| `ARC_DENY_READ` | The paths the wrapper would pass to `radian exec` as `--deny-read`, joined with `:`. A hint for your own sandbox, not a rule radian enforces on the command. |
+| `ARC_DENY_READ` | The paths the wrapper passes to the radian worker as `--deny-read`, joined with `:`. A hint for your own sandbox, not a rule radian enforces on the command. |
 | `ARC_STATE_DIR` | An absolute directory outside the worktree, `attempts/<task>/state/`, kept across the task's attempts. The command or ACP agent may keep its own state there, for example a session map. |
 
 ### The stdout contract
 
 The program writes JSON lines to stdout.
-The last line whose `type` is `Result` decides the attempt, exactly as it does for `radian exec`:
+The last line whose `type` is `Result` decides the attempt, exactly as it does for the radian worker:
 
 - `outcome` `"completed"` passes, and any other value fails the attempt with that outcome;
 - no `Result` line at all fails it as `terminated`;
 - `text` (a string) is the attempt's final report; the next fresh attempt's hand-off section reads it;
 - `cost` is optional and has the shape `radian exec` writes (`{"micros": <integer>, "incomplete": <boolean>, "estimated": <boolean>}`). Without it the attempt's cost is unknown: it adds nothing to the task's or the plan's cost total, a budget never stops on it, and `show`, `list` and the arc TUI show it as unknown — and it stays unknown for the task after a later attempt reports a cost, because a number would leave this attempt out (see [`cost_unknown`](files.md#task-fields)). A `cost` that is `null`, or that carries no `micros`, is a reported zero, the shape `radian exec` writes when it recorded no fee. When a claim starts a command worker for a task or plan that has a cost limit, `start`, `run` and `serve` print one line for the attempt: `<task>: worker.command reports no cost; the cost limit does not apply`.
 
-The command writes no `Result` line on a crash, and the attempt then fails as `terminated`, as a crashed `radian exec` does.
+The command writes no `Result` line on a crash, and the attempt then fails as `terminated`, as a crashed radian worker does.
 
 ### What the command must do itself
 
 arc checks the result, not the work: the program must commit its change on the branch, leave the worktree clean, and print the `Result` line. A flow with [`commit_dirty`](files.md#configtoml) `true` takes the commit off its hands for a `completed` outcome: the wrapper commits the worktree after the program exits.
-A dirty or untracked file (without `commit_dirty`), no commit past the base, a commit that touches `.radian/arc/`, or a change to the repository's git control files fails the attempt exactly as it fails a `radian exec` worker.
+A dirty or untracked file (without `commit_dirty`), no commit past the base, a commit that touches `.radian/arc/`, or a change to the repository's git control files fails the attempt exactly as it fails the radian worker.
 
-### The differences from the `radian exec` worker
+### The differences from the radian worker
 
 - **`--deny-read` does not reach it.** radian does not sandbox the command, so what it reads is up to its own sandbox: the arc store and `~/.radian/credentials` are readable unless the command's own sandbox denies them. `ARC_DENY_READ` carries the paths the wrapper would deny so your program can deny them itself.
 - **Its sandbox is its own.** radian cannot select a profile or a tier for it. A sandboxed agent needs `ARC_WORKTREE` writable. One that commits from inside its sandbox also needs `ARC_GIT_COMMON_DIR` writable; Codex's `workspace-write` does not allow that, so the example below has Codex leave the commit to the script.
@@ -185,13 +210,14 @@ The wrapper's hand-off section still carries the previous attempt's report, and 
 
 ## An ACP agent as the worker
 
-A flow that sets [`flows.<name>.acp`](files.md#configtoml) makes the wrapper an [Agent Client Protocol](https://agentclientprotocol.com) client instead: it starts the program as the agent and talks ACP v1 to it over stdin and stdout.
+A flow that sets [`flows.<name>.acp`](files.md#configtoml) makes the wrapper an [Agent Client Protocol](https://agentclientprotocol.com) client with that program as the agent, instead of the radian worker's `radian acp`: it starts the program and talks ACP v1 to it over stdin and stdout.
 The first element of the array is the program and the rest are its arguments, with no shell in between, resolved exactly as a `command` program is.
 The agent works in the task's worktree, gets its own process group, and gets the [environment below](#the-environment), the `command` worker's on top of the wrapper's own.
-radian does not sandbox it: the agent's own sandbox decides what it may read, and `ARC_DENY_READ` names the paths the wrapper would deny to `radian exec`.
+radian does not sandbox it: the agent's own sandbox decides what it may read, and `ARC_DENY_READ` names the paths the wrapper denies the radian worker.
 
-One attempt is one agent process. The wrapper sends `initialize` with no `fs/*` or `terminal/*` client capability, one `session/new` with the attempt's worktree as `cwd` and `mcpServers` `[]`, and one `session/prompt` whose single content block is the brief a `radian exec` worker would receive on stdin (the `merge-main` conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)).
-It sends no second prompt: the turn's end is the attempt's end, and the agent is stopped then.
+The radian worker and this agent share one ACP path; only the program and the session rules differ.
+One attempt is one agent process. The wrapper sends `initialize` with no `fs/*` or `terminal/*` client capability, one `session/new` with the attempt's worktree as `cwd` and `mcpServers` `[]` (the radian worker calls `session/load` instead when it continues its session), and one `session/prompt` whose single content block is the brief the worker would receive (the `merge-main` conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)).
+It sends no second prompt: the turn's end is the attempt's end, and the agent is stopped then by closing its stdin and, after a moment, its process group.
 
 Every `session/update` the agent sends is written to `runs/<task>/attempts/<attempt id>/result.jsonl` as one line, in this envelope that keeps the protocol's own JSON whole:
 
@@ -199,7 +225,7 @@ Every `session/update` the agent sends is written to `runs/<task>/attempts/<atte
 {"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{...}}}
 ```
 
-The arc TUI's conversation tab draws a `tool_call` and a `tool_call_update` in the same row shape as a `radian exec` tool row, and an `agent_message_chunk` as its text (see [the task page's conversation tab](tui.md#the-task-page)).
+The arc TUI's conversation tab draws a `tool_call` and a `tool_call_update` in the same row shape as a radian worker's tool row, and an `agent_message_chunk` as its text (see [the task page's conversation tab](tui.md#the-task-page)).
 
 `session/request_permission` is answered by one fixed policy, with no configuration key:
 
@@ -227,14 +253,14 @@ The wrapper writes that `Result` line itself, after the agent has ended, in the 
 Nothing after it changes: the git control-file check, the delivery check, the push and `AttemptFinished` are the same.
 
 The protocol has no fee, only `usage_update` token counts, which stay in `result.jsonl`.
-An ACP attempt's cost is therefore unknown, exactly as a command worker's that reports none: it adds nothing to a task's or plan's totals, a budget never stops on it, and the task records [`cost_unknown`](files.md#task-fields).
-When a claim starts an ACP worker for a task or plan with a cost limit, `start`, `run` and `serve` print one line: `<task>: worker.acp reports no cost; the cost limit does not apply`.
+A flow's agent's attempt cost is therefore unknown, exactly as a command worker's that reports none: it adds nothing to a task's or plan's totals, a budget never stops on it, and the task records [`cost_unknown`](files.md#task-fields).
+When a claim starts a flow's ACP agent for a task or plan with a cost limit, `start`, `run` and `serve` print one line: `<task>: worker.acp reports no cost; the cost limit does not apply`. The radian worker reports `_meta.radian.cost` instead (see [the radian worker](#the-radian-worker)).
 
 `radian arc cancel`, a stall and the wall clock stop an ACP worker the same way: the wrapper first sends `session/cancel` and answers a pending permission request `cancelled`, gives the agent a moment to end its turn, and then sends SIGTERM to its process group, waits `[limits] cancel_grace_secs` and sends SIGKILL.
 An agent that ends its turn with `stopReason: cancelled` after an arc cancel is recorded as cancelled, not terminated.
 
 `[worker] rework_session = "resume"` cannot be combined with a flow that sets `acp`: the file is refused before `start`, naming both keys.
-Every ACP attempt is fresh, so an attempt after the first gets the hand-off section and a new agent session.
+A flow's ACP agent runs every attempt fresh, so an attempt after the first gets the hand-off section and a new agent session. The radian worker is not refused: `resume` opens its session with `session/load`.
 
 ### Installing an ACP agent
 

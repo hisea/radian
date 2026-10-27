@@ -5,14 +5,14 @@ description: What an arc flow is: the two-flow example, how a task picks one, th
 # arc: flows
 
 A **flow** is one named bundle of the settings a task's route needs: which worker runs its attempts, which gate profile verifies the result, how many of its tasks may run at once, and its defaults for `allow_noop` and `commit_dirty`.
-It is not a new worker kind and not a new state machine: every flow's worker is `radian exec` with its own arguments, one program of its own, or an ACP agent ([the worker](worker.md)), and the claim, the delivery check, the gate, the merge and the ledger are the same for every flow.
+It is not a new worker kind and not a new state machine: every flow's worker is the radian worker (`radian acp`) with its own arguments, one program of its own, or an ACP agent ([the worker](worker.md)), and the claim, the delivery check, the gate, the merge and the ledger are the same for every flow.
 One repository can hold several flows, so coding, image and writing tasks can share one plan: a plan knows nothing about flows, and `after` may join tasks of different flows.
 
 The authority for every key and field is [`config.toml`](files.md#configtoml) and [the task fields](files.md#task-fields); this page says what a flow is for and shows a complete setup.
 
 ## A complete example: `code` and `image`
 
-A repository with a `code` flow for its source tree and an `image` flow for its artwork. `code` runs `radian exec` and gates with a `commands` profile; `image` runs its own command worker and gates with `review` + `human`. The repository runs two attempts at once, one per flow:
+A repository with a `code` flow for its source tree and an `image` flow for its artwork. `code` runs the radian worker and gates with a `commands` profile; `image` runs its own command worker and gates with `review` + `human`. The repository runs two attempts at once, one per flow:
 
 ```toml
 schema_version = 1
@@ -42,14 +42,14 @@ command = ["/usr/local/bin/image-worker", "--assets", "art"]
 commit_dirty = true
 ```
 
-- `code` starts `radian exec` with `--model coding-model` on every attempt, and its gate runs the `code-check` profile: one `commands` stage on the gate's own checkout.
-- `image` starts `/usr/local/bin/image-worker` instead of `radian exec`, and its gate runs `image-review`: a `review` session, then the task stops at `review.awaiting_human` until you merge or reject it. A command worker receives the brief on standard input and writes its `Result` to standard output; [another agent as the worker](worker.md#another-agent-as-the-worker) gives the contract. Its `commit_dirty = true` lets the wrapper commit what the worker leaves uncommitted, so the worker may write its files and print a `completed` `Result` without running git itself.
+- `code` starts the radian worker with `--model coding-model` on every attempt, and its gate runs the `code-check` profile: one `commands` stage on the gate's own checkout.
+- `image` starts `/usr/local/bin/image-worker` instead of the radian worker, and its gate runs `image-review`: a `review` session, then the task stops at `review.awaiting_human` until you merge or reject it. A command worker receives the brief on standard input and writes its `Result` to standard output; [another agent as the worker](worker.md#another-agent-as-the-worker) gives the contract. Its `commit_dirty = true` lets the wrapper commit what the worker leaves uncommitted, so the worker may write its files and print a `completed` `Result` without running git itself.
 - `[limits] concurrency = 2` lets two attempts run in the repository, and each flow's `concurrency = 1` lets one `code` and one `image` attempt run at the same time.
 
 Every key's type, default, allowed values and effect time is in the [`flows.<name>.*` rows](files.md#configtoml).
 The worker's session, brief and checks are in [the worker](worker.md), the stages in [the gate](gate.md), and the claim and the queue in [the scheduling loop](loop.md).
 
-A flow can run an ACP agent instead of `radian exec` or its own command: set `acp` to the program and its arguments, and the wrapper becomes the ACP client (see [An ACP agent as the worker](worker.md#an-acp-agent-as-the-worker)).
+A flow can run an ACP agent instead of the radian worker or its own command: set `acp` to the program and its arguments, and the wrapper becomes the ACP client (see [An ACP agent as the worker](worker.md#an-acp-agent-as-the-worker)).
 With the Codex adapter installed globally, the `image` flow above reads as one line:
 
 ```toml
