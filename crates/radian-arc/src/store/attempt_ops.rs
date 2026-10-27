@@ -947,8 +947,9 @@ pub fn apply(
         }
         let reached_verification = matches!(next, Next::Verifying);
         // An unavailable model, or a used-up usage window, is not the request's fault: the
-        // attempt waits on the model's window and uses no retry (ADR 0048 decision 9).
-        let model_wait = signal.is_none()
+        // attempt waits on the model's window and uses no retry (ADR 0048 decision 9). A
+        // budget pause still wins, and then the attempt is not a model wait.
+        let mut model_wait = signal.is_none()
             && class == Some(Class::Model)
             && model_error.is_some()
             && !command_worker;
@@ -986,6 +987,7 @@ pub fn apply(
                     task.state = TaskState::Todo;
                     task.phase = "paused_budget".to_owned();
                     task.retry_at = None;
+                    model_wait = false;
                     pause_plan = plan_reached;
                 } else if model_wait {
                     let error = model_error

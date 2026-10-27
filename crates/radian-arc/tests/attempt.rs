@@ -663,6 +663,36 @@ fn a_reset_time_longer_than_the_step_is_used_and_capped() {
     }
 }
 
+/// A model error never bypasses a used-up budget: the task pauses for the budget, and the
+/// attempt records no model wait (ADR 0048 decisions 9 and 12).
+#[test]
+fn a_model_error_does_not_bypass_the_budget_pause() {
+    let (_repo, store) = setup("worker-model-error-budget");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.max_cost_usd = Some(0.0);
+            Ok(())
+        })
+        .expect("the task's budget");
+    attempt_ops::claim(&store, task).expect("claim");
+    write_result_stream(
+        &store,
+        task,
+        1,
+        Some(&json!({"kind": "usage_limit", "status": null, "retry_after_secs": null})),
+    );
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(!applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "paused_budget".into()));
+    assert_eq!(applied.retry_at, None);
+    assert!(attempt_result(&store, task, 1)["model_error"].is_null());
+}
+
 /// A run of model waits doubles and caps at 60 minutes and never reaches
 /// `failed.exhausted`, even with `max_attempts = 2`: none of them is a retry (ADR 0048
 /// decision 9). Mutation: raise `retry_count` for a model wait and the third attempt exhausts
