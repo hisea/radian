@@ -744,9 +744,11 @@ impl LoopContext<'_> {
                             .map(|report| report.projected_tokens);
                         // ADR 0026 D10: a named provider's line names its protocol,
                         // endpoint and source. The cache is local; a switch never fetches.
+                        // `queue_model` prints `provider/model` itself and wraps this detail
+                        // in the parentheses, so only the detail belongs here.
                         let route = {
                             let provider_ref = provider_ref_for(&provider, &self.config_providers);
-                            radian_host::describe_model_route(&provider_ref, &model)
+                            radian_host::describe_model_route_detail(&provider_ref, &model)
                         };
                         AppInput::ModelChecked {
                             provider,

@@ -1659,10 +1659,10 @@ impl Route {
     }
 }
 
-/// The description a startup or `/model` line shows for a named provider's route
-/// (ADR 0026 D10): `name/model (protocol[, at endpoint][, source])`. `None` for a built-in
-/// descriptor, whose line keeps its own wording.
-pub fn describe_model_route(provider: &ProviderRef, model: &str) -> Option<String> {
+/// The detail half of [`describe_model_route`]: `protocol[, at endpoint][, source]`, without
+/// the `name/model` prefix or the parentheses. A caller that prints the prefix itself (a
+/// `/model` switch notice) wraps this detail once (ADR 0026 D10).
+pub fn describe_model_route_detail(provider: &ProviderRef, model: &str) -> Option<String> {
     let ProviderRef::Named(named) = provider else {
         return None;
     };
@@ -1672,6 +1672,17 @@ pub fn describe_model_route(provider: &ProviderRef, model: &str) -> Option<Strin
         detail.push_str(&format!(" at {}", crate::redact_base_url(&route.endpoint)));
     }
     detail.push_str(&format!(", {}", route.source.describe()));
+    Some(detail)
+}
+
+/// The description a startup or `/model` line shows for a named provider's route
+/// (ADR 0026 D10): `name/model (protocol[, at endpoint][, source])`. `None` for a built-in
+/// descriptor, whose line keeps its own wording.
+pub fn describe_model_route(provider: &ProviderRef, model: &str) -> Option<String> {
+    let ProviderRef::Named(named) = provider else {
+        return None;
+    };
+    let detail = describe_model_route_detail(provider, model)?;
     Some(format!("{}/{} ({detail})", named.name, model))
 }
 
@@ -3423,7 +3434,19 @@ mod named_route_tests {
             Some("magpie/claude/opus-5-5 (anthropic, rule claude/*)")
         );
         assert_eq!(
+            describe_model_route_detail(&r, "codex/gpt-5.6-sol").as_deref(),
+            Some("openai-responses, model list"),
+            "the inner detail a switch notice wraps"
+        );
+        assert_eq!(
             describe_model_route(&ProviderRef::BuiltIn(descriptor("anthropic").unwrap()), "m"),
+            None
+        );
+        assert_eq!(
+            describe_model_route_detail(
+                &ProviderRef::BuiltIn(descriptor("anthropic").unwrap()),
+                "m"
+            ),
             None
         );
     }

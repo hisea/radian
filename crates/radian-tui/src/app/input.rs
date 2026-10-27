@@ -114,7 +114,9 @@ pub enum Input {
     /// A `/model` target was vetted by the loop (ADR 0026 D5/D7). `tokens` is the current
     /// context estimate `T` (`None` = unknown, so it cannot exceed anything), `budget` the
     /// new model's `B'` (`None` = unknown, so no comparison is possible), and `route` the
-    /// named provider's resolution line (`(openai-responses, model list)`), when it has one.
+    /// named provider's detail `protocol[, at endpoint][, source]` (`openai-responses, model
+    /// list`) — the inner half of `radian_host::describe_model_route`, without its
+    /// `name/model` prefix or parentheses, when the provider has one.
     ModelChecked {
         provider: String,
         model: String,

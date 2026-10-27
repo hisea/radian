@@ -2,6 +2,10 @@
 //! direct queue when the context fits, the confirm modal when it does not, and the paths that
 //! must never queue.
 
+use std::collections::BTreeMap;
+
+use radian_host::{AdvertisedEndpoint, ProviderDecl, ProviderModels, resolve_provider_with_models};
+use radian_tui::EntryKind;
 use radian_tui::app::{App, Effect, Input};
 use radian_tui::command::{self, Outcome};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -82,6 +86,71 @@ fn a_fitting_switch_queues_directly() {
     );
     assert_eq!(app.session.next_model.as_deref(), Some("anthropic/claude"));
     // The route is the whole change: no key, no header values anywhere in the effect.
+}
+
+/// The transcript's notices, in order.
+fn notices(app: &App) -> Vec<String> {
+    app.session
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Notice)
+        .map(|entry| entry.text.clone())
+        .collect()
+}
+
+/// A named provider whose model list advertises `/v1/responses` for one model (ADR 0026 D10).
+fn named_magpie() -> radian_host::ProviderRef {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "magpie".to_owned(),
+        ProviderDecl {
+            kind: "openai-compatible".to_owned(),
+            base_url: "http://127.0.0.1:3425/v1".to_owned(),
+            ..Default::default()
+        },
+    );
+    let endpoints = BTreeMap::from([(
+        "codex/gpt-5.6-sol".to_owned(),
+        vec![AdvertisedEndpoint {
+            kind: "openai-responses".to_owned(),
+            path: "/v1/responses".to_owned(),
+        }],
+    )]);
+    let list = ProviderModels {
+        key_fingerprint: "f".to_owned(),
+        models: vec!["codex/gpt-5.6-sol".to_owned()],
+        fetched_at: 0,
+        endpoints,
+    };
+    resolve_provider_with_models("magpie", &providers, None, Some(list))
+        .expect("a full declaration needs no auth")
+        .0
+}
+
+/// ADR 0026 D10: the switch notice names `provider/model` exactly once, followed by the
+/// route's **inner** detail. Passing the whole `describe_model_route` line made the notice read
+/// `magpie/m (magpie/m (…))`.
+#[test]
+fn a_named_route_notice_names_the_model_once() {
+    let provider_ref = named_magpie();
+    // `ModelChecked.route` is the detail `queue_model` wraps in its own parentheses.
+    let route = radian_host::describe_model_route_detail(&provider_ref, "codex/gpt-5.6-sol")
+        .expect("a named provider's route detail");
+    let mut app = App::new("m", "s");
+    app.update(Input::ModelChecked {
+        provider: "magpie".into(),
+        model: "codex/gpt-5.6-sol".into(),
+        tokens: None,
+        budget: None,
+        route: Some(route),
+    });
+    assert_eq!(
+        notices(&app).last().map(String::as_str),
+        Some(
+            "next turn: magpie/codex/gpt-5.6-sol (openai-responses, model list); the first \
+             turn after a switch will not hit the cache"
+        )
+    );
 }
 
 /// `T > B'` asks first (D7): the modal is up and nothing is queued yet.

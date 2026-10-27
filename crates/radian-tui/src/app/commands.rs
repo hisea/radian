@@ -412,8 +412,9 @@ impl App {
     }
 
     /// Queues the route (D5) and says what happens next. The cache warning is the accepted
-    /// cost of a switch (ADR 0026 已接受的代价). `route` carries a named provider's protocol,
-    /// endpoint and source (ADR 0026 D10), when the loop resolved one.
+    /// cost of a switch (ADR 0026 已接受的代价). `route` is a named provider's detail — protocol,
+    /// endpoint and source (ADR 0026 D10) — without the `provider/model` prefix the notice
+    /// prints itself, when the loop resolved one.
     fn queue_model(
         &mut self,
         provider: String,
