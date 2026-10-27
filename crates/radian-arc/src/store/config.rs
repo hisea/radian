@@ -324,6 +324,11 @@ pub struct Flow {
     /// The value a task of this flow uses at its delivery check when the task's own
     /// `allow_noop` is absent; an explicit task value wins (ADR 0048 decisions 8 and 15).
     pub allow_noop: bool,
+    /// Whether the wrapper commits what a `completed` worker left uncommitted or untracked
+    /// before the delivery check (ADR 0048 decision 8). A changed git control file still
+    /// fails the attempt, and a failed or cancelled worker's changes are not committed. Read
+    /// at the claim, so a change takes effect at the next claim.
+    pub commit_dirty: bool,
 }
 
 impl Default for Flow {
@@ -334,6 +339,7 @@ impl Default for Flow {
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: None,
             allow_noop: false,
+            commit_dirty: false,
         }
     }
 }
@@ -348,6 +354,7 @@ impl Flow {
             concurrency: DEFAULT_FLOW_CONCURRENCY,
             gate_profile: Some(gate_profile.to_owned()),
             allow_noop: false,
+            commit_dirty: false,
         }
     }
 
@@ -1196,6 +1203,7 @@ mod tests {
         assert_eq!(flow.command, None);
         assert_eq!(flow.concurrency, DEFAULT_FLOW_CONCURRENCY);
         assert!(!flow.allow_noop);
+        assert!(!flow.commit_dirty);
     }
 
     /// `flows.<name>.allow_noop` is a boolean, `false` when its section leaves it out, and the
@@ -1212,6 +1220,25 @@ mod tests {
         let without = parse("schema_version = 1\n").expect("a file without [flows]");
         assert!(!without.flow_allow_noop(DEFAULT_FLOW));
         assert!(!Config::default().flow_allow_noop(DEFAULT_FLOW));
+    }
+
+    /// `flows.<name>.commit_dirty` is a boolean, `false` when its section leaves it out; a
+    /// flow and the implicit `default` flow both default to it (ADR 0048 decision 8).
+    #[test]
+    fn a_flows_commit_dirty_defaults_to_false_and_parses() {
+        assert!(!Flow::default().commit_dirty);
+        assert!(!Config::default().flows[DEFAULT_FLOW].commit_dirty);
+
+        let config = parse("schema_version = 1\n[flows.art]\ncommit_dirty = true\n")
+            .expect("a flow with commit_dirty");
+        assert!(config.flows["art"].commit_dirty);
+        assert!(
+            !config.flows[DEFAULT_FLOW].commit_dirty,
+            "the implicit flow keeps false"
+        );
+
+        let without = parse("schema_version = 1\n[flows.art]\n").expect("a flow without the key");
+        assert!(!without.flows["art"].commit_dirty);
     }
 
     /// A task's gate profile is its flow's `gate_profile`; a repository without `[flows]`

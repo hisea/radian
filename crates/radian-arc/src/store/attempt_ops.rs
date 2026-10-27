@@ -203,7 +203,10 @@ pub struct Claim {
     /// `fresh` (ADR 0048 decision 4).
     pub session_id: String,
     pub allow_noop: bool,
-    /// The task body: the brief and every rework section.
+    /// Whether the wrapper commits what a `completed` worker leaves uncommitted or untracked
+    /// before the delivery check: the flow's `flows.<name>.commit_dirty`, read at this claim
+    /// (ADR 0048 decision 8).
+    pub commit_dirty: bool,
     pub brief: String,
     /// The worker this attempt runs, from the same configuration snapshot as its `start.json`
     /// record. The wrapper starts from this value, never from a later configuration read.
@@ -585,6 +588,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         resume,
         session_id,
         allow_noop: task.effective_allow_noop(&config),
+        commit_dirty: flow.commit_dirty,
         brief: task.body.clone(),
         worker,
         no_cost_warning,

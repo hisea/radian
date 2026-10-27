@@ -1366,6 +1366,7 @@ fn the_manual_names_the_flow_keys_and_the_task_field() {
     assert_eq!(default_cell("flows.<name>.exec_args"), "`[]`");
     assert!(default_cell("flows.<name>.command").contains("not set"));
     assert_eq!(default_cell("flows.<name>.concurrency"), "`1`");
+    assert_eq!(default_cell("flows.<name>.commit_dirty"), "`false`");
     assert!(default_cell("flows.<name>.gate_profile").contains("\"default\""));
 
     let task_fields = radian_coding::drift::table_under(&page, "arc/files.md", "### Task fields");

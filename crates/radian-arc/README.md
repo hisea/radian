@@ -126,7 +126,8 @@ is not confirmed, an `after` task is not done, or `[limits] concurrency` tasks a
 
 It then runs the current executable as `arc work --task … --attempt … --token … --session …
 --remote … --main-branch … --stall-timeout-secs … --max-wall-time-secs …
---cancel-grace-secs … [--resume] [--allow-noop] [--command <JSON>] -- <[worker] exec_args>`,
+--cancel-grace-secs … [--resume] [--allow-noop] [--commit-dirty] [--command <JSON>] -- <[worker]
+exec_args>`,
 with the task body on stdin, and moves the task to `doing.running`. `--command` carries
 `[worker] command` as one JSON array (the program first); the wrapper then runs that program
 instead of `radian exec`, with the same brief, limits and delivery checks and the `ARC_*`
@@ -359,7 +360,7 @@ still reads the current main.
 ## `work`: the trusted worker wrapper
 
 `radian arc work --task <id> --attempt <n> --token <token> [--session <id>] [--resume]
-[--allow-noop] [--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>]
+[--allow-noop] [--commit-dirty] [--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>]
 [--max-wall-time-secs <n>] [--cancel-grace-secs <n>] [-- <extra radian exec args>]` runs one
 attempt of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a
 person does not. It is hidden from `--help` and has no manual page. `--remote`,
@@ -374,6 +375,9 @@ worker SIGKILL right after SIGTERM.
 `--session-id <session>`, and only when the session file exists. A `fresh` attempt
 (ADR 0048 decision 4: `[worker] rework_session`, the default) never gets the flag, so it never
 resumes; an attempt after the first also gets the hand-off section described in step 4.
+`--commit-dirty` is the claim's `flows.<name>.commit_dirty`: with it, a `completed` worker's
+dirty worktree is committed after the control-file check (step 5) and before the delivery
+check, with the `merge-main` identity and a subject from `Result.text` (ADR 0048 decision 8).
 
 One run:
 
@@ -415,11 +419,16 @@ One run:
    clock runs from `run_inner`'s first step; every wrapper git command (`crate::git::
    run_with_timeout`) gets the time that is left, and a command still running at the deadline
    is killed with its group, so the setup fetch and the push are bounded as well.
-5. After the child exits, reads the last `Result` line and the exit code, reads
-   `head_sha`, lists uncommitted and untracked paths, and checks: the branch exists,
-   `head_sha` descends from `base_sha` and from the tip the attempt started on, the worktree
-   HEAD is on the branch, the tree is clean, and the delivery check (a branch with no change
-   past the base fails unless `--allow-noop`; any changed path under `.radian/arc/` fails).
+5. After the child exits, compares the repository's git control files with the record and
+   restores them on a change (a changed control file fails the attempt). With
+   `--commit-dirty` and a `completed` outcome, commits an uncommitted or untracked worktree
+   (`git add -A`, then `git commit` with `-c user.name=arc -c user.email=arc@localhost`, and
+   a subject from `Result.text`), and adds `committed dirty worktree: <short sha>` to the
+   attempt's notes. Then reads the last `Result` line and the exit code, reads `head_sha`,
+   lists uncommitted and untracked paths, and checks: the branch exists, `head_sha` descends
+   from `base_sha` and from the tip the attempt started on, the worktree HEAD is on the
+   branch, the tree is clean, and the delivery check (a branch with no change past the base
+   fails unless `--allow-noop`; any changed path under `.radian/arc/` fails).
 6. Pushes `work/<task>` to the configured remote only when the outcome is `completed` and
    every check passed, then verifies the remote ref with `git ls-remote`.
 7. Prints one `AttemptFinished` JSON line as its last stdout line (and writes it to
