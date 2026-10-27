@@ -315,6 +315,21 @@ enum RadianCommand {
         args: Vec<String>,
     },
 
+    /// Serve one session over the Agent Client Protocol (stdio).
+    /// `radian acp` accepts `radian exec`'s conversation flags, without `-p`, `--output` and
+    /// `--yes`; the `acp` parser owns its flags and help, so everything after `acp` is passed
+    /// through.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Acp {
+        /// Everything `radian acp` accepts, passed through unchanged.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<String>,
+    },
+
     /// Store an API key for a provider. The same code `radian exec login` runs.
     Login {
         /// A built-in provider id, or `custom` to name a new endpoint. Omitted: a numbered
@@ -962,6 +977,12 @@ fn run_subcommand(command: RadianCommand, config: Option<&Path>) -> ExitCode {
             // the user ran.
             ExitCode::from(radian_exec::parse_and_run(
                 std::iter::once("radian exec".to_string()).chain(args),
+            ) as u8)
+        }
+        RadianCommand::Acp { args } => {
+            // The `acp` parser owns `--help`/`--version`/usage errors, like `exec`.
+            ExitCode::from(radian_exec::parse_and_run_acp(
+                std::iter::once("radian acp".to_string()).chain(args),
             ) as u8)
         }
         // The management commands build the same `Cli` the `agent` parser would and run the
