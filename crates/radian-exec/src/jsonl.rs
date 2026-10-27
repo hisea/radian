@@ -404,7 +404,7 @@ pub(crate) fn model_error_value(error: &ModelError) -> serde_json::Value {
         _ => None,
     };
     serde_json::json!({
-        "kind": error.kind(),
+        "kind": error.kind().as_str(),
         "status": status,
         "retry_after_secs": retry_after.map(ceil_seconds),
     })
@@ -963,9 +963,135 @@ mod tests {
         }
     }
 
+    /// A `UsageLimit` error travels the real path: a scripted model fails the turn, the driver
+    /// hands the structured error to the exec runtime sink (`on_model_error`), and the `Result`
+    /// writer serializes what the sink kept. The direct mapper test above cannot prove the
+    /// callback carries this variant. Mutation: the sink stops storing the error (or the driver
+    /// stops calling it) → there is no `model_error` here.
+    #[tokio::test]
+    async fn a_usage_limit_error_reaches_the_result_through_the_driver() {
+        use std::sync::Arc;
+
+        use radian_core::{
+            Agent, AgentConfig, AgentEvent, EventSink, InputSource, Model, ModelContext,
+            ModelRequest, ModelResponse, NoTools, TurnOptions,
+        };
+        use radian_runtime::{Driver, Inbox};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        struct UsageLimitModel;
+
+        impl Model for UsageLimitModel {
+            async fn complete(
+                &self,
+                _request: ModelRequest,
+                _cx: ModelContext<'_>,
+            ) -> Result<ModelResponse, ModelError> {
+                Err(ModelError::UsageLimit {
+                    message: "HTTP 429: the ChatGPT plus plan's 300 min usage window is used \
+                              up; it resets in 104 min; /model switches to another provider"
+                        .into(),
+                    resets_in: Some(Duration::from_secs(6240)),
+                })
+            }
+        }
+
+        /// Waits for the turn boundary, so the driver is idle before it is closed.
+        #[derive(Default)]
+        struct Finished(tokio::sync::Notify);
+
+        impl EventSink for Finished {
+            fn emit(&self, event: AgentEvent) {
+                if matches!(event, AgentEvent::RunFinished { .. }) {
+                    self.0.notify_one();
+                }
+            }
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("radian-jsonl-model-error-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let journal = Arc::new(
+            SessionJournal::create(
+                &path,
+                "sid-model-error",
+                SessionCreatedData::new(
+                    "/work/example",
+                    serde_json::json!({"model": {"provider": "example", "model": "m-1"}}),
+                ),
+            )
+            .unwrap(),
+        );
+        let inbox = Inbox::durable(8, Arc::clone(&journal));
+        let agent = Arc::new(
+            Agent::new(UsageLimitModel, NoTools).with_config(AgentConfig {
+                retries: 0,
+                ..Default::default()
+            }),
+        );
+        let finished = Arc::new(Finished::default());
+        let mut driver = Driver::open(
+            &agent,
+            Arc::clone(&journal),
+            Arc::clone(&inbox),
+            Arc::clone(&finished) as Arc<dyn EventSink>,
+            TurnOptions::default(),
+        )
+        .await
+        .expect("open the driver");
+        // The exec host's own sink, not a stand-in: it stores the structured error the runtime
+        // callback receives, and the `Result` writer below reads that store.
+        let (sink, last_model_error) = crate::chat::ExecRuntimeEvents::new(Arc::new(Vec::new()));
+        driver.set_runtime_events(Arc::new(sink));
+        let handle = tokio::spawn(async move { driver.run().await });
+
+        inbox.followup("hi", InputSource::User).await.unwrap();
+        finished.0.notified().await;
+        inbox.close();
+        handle
+            .await
+            .expect("the driver task does not panic")
+            .expect("the driver ends cleanly");
+        assert_eq!(
+            last_model_error
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(ModelError::kind),
+            Some(radian_core::ModelErrorKind::UsageLimit),
+            "the runtime callback carried the structured variant"
+        );
+
+        let summary = summarize_journal(&path);
+        let stored = last_model_error.lock().unwrap();
+        let line = result_line(
+            "sid-model-error",
+            &ExecEnd::Status(Some(RunStatus::Failed)),
+            &summary,
+            &summary,
+            false,
+            stored.as_ref(),
+        );
+        let value: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!(
+            value.get("model_error"),
+            Some(&serde_json::json!({
+                "kind": "usage_limit",
+                "status": serde_json::Value::Null,
+                "retry_after_secs": 6240,
+            })),
+            "{value}"
+        );
+        drop(stored);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Every `model_error.kind` value the serializer can write is named in the manual. The
-    /// source is `radian_core::MODEL_ERROR_KINDS`, the same list `kind()` and the serializer
-    /// read, so a new variant fails here until `docs/user/cli.md` documents its value.
+    /// source is `radian_core::MODEL_ERROR_KINDS`, generated from the same `model_error_kinds!`
+    /// declaration the serializer reads, so a new variant fails here until `docs/user/cli.md`
+    /// documents its value.
     #[test]
     fn every_model_error_kind_appears_in_the_manual() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

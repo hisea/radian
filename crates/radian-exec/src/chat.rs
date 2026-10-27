@@ -26,9 +26,25 @@ use super::{Cli, Setup, SetupError};
 /// keeps the structured `ModelError` of the latest turn that started, for the `Result` record
 /// (ADR 0044 §2b). A `TurnStarted` clears it, so only the run's final turn can contribute;
 /// a hook error reports no model error and leaves the field out.
-struct ExecRuntimeEvents {
+pub(crate) struct ExecRuntimeEvents {
     secrets: Arc<Vec<String>>,
     last_model_error: Arc<Mutex<Option<ModelError>>>,
+}
+
+impl ExecRuntimeEvents {
+    /// The sink plus the slot the `Result` writer reads (ADR 0044 §2b): the runtime hands the
+    /// structured error to [`radian_runtime::RuntimeEvents::on_model_error`], and
+    /// [`jsonl::result_line`] serializes the last one.
+    pub(crate) fn new(secrets: Arc<Vec<String>>) -> (Self, Arc<Mutex<Option<ModelError>>>) {
+        let last_model_error = Arc::new(Mutex::new(None));
+        (
+            Self {
+                secrets,
+                last_model_error: Arc::clone(&last_model_error),
+            },
+            last_model_error,
+        )
+    }
 }
 
 impl radian_runtime::RuntimeEvents for ExecRuntimeEvents {
@@ -142,13 +158,12 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     let signals = spawn_signals();
     let driver_ended = Arc::new(Notify::new());
     // The last turn's structured model error, for the `Result` record (ADR 0044 §2b).
-    let last_model_error: Arc<Mutex<Option<ModelError>>> = Arc::new(Mutex::new(None));
-    let runtime_events_inner: Arc<dyn radian_runtime::RuntimeEvents> = {
-        let secrets = Arc::new(setup.secrets.clone());
-        Arc::new(ExecRuntimeEvents {
-            secrets,
-            last_model_error: Arc::clone(&last_model_error),
-        })
+    let (runtime_events_inner, last_model_error): (
+        Arc<dyn radian_runtime::RuntimeEvents>,
+        Arc<Mutex<Option<ModelError>>>,
+    ) = {
+        let (sink, slot) = ExecRuntimeEvents::new(Arc::new(setup.secrets.clone()));
+        (Arc::new(sink), slot)
     };
 
     // ADR 0043: the process control port. Bound before the session so its fan-out can

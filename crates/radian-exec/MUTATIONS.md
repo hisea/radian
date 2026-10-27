@@ -479,3 +479,14 @@ restored from a `cp` under `.radian/mut-backup`.
 |---|---|---|---|
 | TK0184-M2 | the `Result` writer drops `model_error` (the insertion block removed from `result_line`) | ✅ 1 failed | `jsonl::tests::the_result_line_carries_model_error_only_on_a_failed_model_error` (the failed line has no `model_error`) |
 | TK0184-M3 | `retry_after_secs` read from `Unavailable.retry_after` only (the `UsageLimit.resets_in` arm removed) | ✅ 2 failed | `jsonl::tests::the_model_error_field_carries_kind_status_and_wait` (`usage_limit` reports `null` instead of `6240`) and `jsonl::tests::the_result_line_carries_model_error_only_on_a_failed_model_error` |
+
+## Rework 2: the runtime callback carries `UsageLimit` to the `Result` (TK0184, 2026-10-27)
+
+Branch `work/TK0184-exec-result-model-error`. The mutation was applied in place, only the new
+test was run (`cargo nextest run -p radian-exec --locked --profile sandbox --lib -E
+'test(a_usage_limit_error_reaches_the_result_through_the_driver)'`), and the source was restored
+from `.radian/mut-backup/chat.rs` (`cmp` identical). The restored lib then passed 32/32.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0184-M4 | `ExecRuntimeEvents::on_model_error` stores nothing (the callback body is a no-op) | ✅ 1 failed | `jsonl::tests::a_usage_limit_error_reaches_the_result_through_the_driver` (the stored slot stays `None`, so the `Result` has no `model_error`) |
