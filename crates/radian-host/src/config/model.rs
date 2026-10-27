@@ -122,7 +122,8 @@ pub(super) fn parse_providers(
                                 reason: format!("must be one of {KIND_DESCRIPTION}"),
                             });
                         };
-                        let canonical = canonical_kind(path, name, "prefer", kind)?;
+                        let canonical =
+                            canonical_kind(path, name, &format!("prefer[{index}]"), kind)?;
                         if prefer.contains(&canonical) {
                             return Err(ConfigError::InvalidProviderField {
                                 path: path.to_path_buf(),
@@ -160,7 +161,8 @@ pub(super) fn parse_providers(
                                 reason: "must not be empty".into(),
                             });
                         }
-                        let canonical = canonical_kind(path, name, "base_urls", key)?;
+                        let canonical =
+                            canonical_kind(path, name, &format!("base_urls.{key}"), key)?;
                         decl.base_urls.insert(canonical, url.clone());
                     }
                 }
@@ -207,8 +209,12 @@ pub(super) fn parse_providers(
                                     ));
                                 }
                                 ("kind", Value::String(kind)) => {
-                                    decl_rule.kind =
-                                        canonical_kind(path, name, "models.kind", kind)?;
+                                    decl_rule.kind = canonical_kind(
+                                        path,
+                                        name,
+                                        &format!("models[{index}].kind"),
+                                        kind,
+                                    )?;
                                     has_kind = true;
                                 }
                                 ("kind", _) => {

@@ -733,6 +733,17 @@ impl ProviderRef {
         }
     }
 
+    /// A **named** provider's per-model resolution, including its source (ADR 0026 D10), for
+    /// code that needs the decision without building the adapter (`Route::source` carries the
+    /// same value once a route is built). `None` for a built-in descriptor, whose protocol
+    /// comes from the catalog or its own table.
+    pub fn named_route(&self, model: &str) -> Option<NamedModelRoute> {
+        match self {
+            Self::BuiltIn(_) => None,
+            Self::Named(named) => Some(named.resolve_model(model)),
+        }
+    }
+
     /// The `auth.json` entry this provider's key lives under: the descriptor id for built-ins,
     /// the name for named ones. This is D10's fix: every custom endpoint gets its own key
     /// instead of sharing the generic descriptor's slot.

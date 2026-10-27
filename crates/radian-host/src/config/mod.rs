@@ -1421,6 +1421,111 @@ theme = "light"
         );
     }
 
+    /// ADR 0026 D10: every refusal names its key, and unknown keys inside a rule are skipped
+    /// and named.
+    #[test]
+    fn provider_rules_refuse_naming_their_key() {
+        let cases: &[(&str, &str)] = &[
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "[[providers.ok-name.models]]\n",
+                    "match = \"a\"\n",
+                    "kind = \"grpc\"\n",
+                ),
+                "providers.ok-name.models[0].kind",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "prefer = [\"anthropic\", \"anthropic-messages\"]\n",
+                ),
+                "providers.ok-name.prefer",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "prefer = [\"grpc\"]\n",
+                ),
+                "providers.ok-name.prefer[0]",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "[[providers.ok-name.models]]\n",
+                    "match = \"\"\n",
+                    "kind = \"anthropic\"\n",
+                ),
+                "providers.ok-name.models[0].match",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "[[providers.ok-name.models]]\n",
+                    "match = \"a\"\n",
+                ),
+                "providers.ok-name.models[0].kind",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "[providers.ok-name.base_urls]\n",
+                    "grpc = \"https://y\"\n",
+                ),
+                "providers.ok-name.base_urls.grpc",
+            ),
+            (
+                concat!(
+                    "schema_version = 1\n",
+                    "[providers.ok-name]\n",
+                    "base_url = \"https://x\"\n",
+                    "[providers.ok-name.base_urls]\n",
+                    "anthropic = \"\"\n",
+                ),
+                "providers.ok-name.base_urls.anthropic",
+            ),
+        ];
+        for (text, key) in cases {
+            let error = parse_str(text).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+
+        // Unknown keys inside a rule are skipped and named, never refused.
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.ok-name]\n",
+            "base_url = \"https://x\"\n",
+            "[[providers.ok-name.models]]\n",
+            "match = \"a*\"\n",
+            "kind = \"anthropic-messages\"\n",
+            "future = true\n",
+        ))
+        .unwrap();
+        assert!(
+            config
+                .skipped
+                .contains(&"providers.ok-name.models[0].future".to_owned()),
+            "{:?}",
+            config.skipped
+        );
+        assert_eq!(
+            config.providers["ok-name"].models[0].kind, "anthropic",
+            "the alias is canonical"
+        );
+    }
+
     /// The removed `[shell] auto_background_secs` warns once and is ignored, never an
     /// error: every value shape (an integer, `0`, a negative, a wrong type) parses and
     /// lands in `skipped`. Dropping the warning fails this test.
