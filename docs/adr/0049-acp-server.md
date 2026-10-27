@@ -61,7 +61,11 @@ With `--resume` the first `session/new` opens that existing session, exactly as
 URI and label. Other content blocks are refused with an invalid-parameters error because
 this host advertises no image, audio or embedded-context capability.
 
-The response is sent when the turn ends with `stopReason`:
+The response is sent after the driver has **journaled** the turn end
+(`RuntimeEvent::TurnFinished`), not when the core's live `RunFinished` fires: the journal then
+holds the turn end, so a client that reads the session file after the answer sees it, and the
+`_meta` cost and text are folded from the completed turn. The live `RunFinished` still supplies
+the turn's status for `stopReason`:
 
 | Turn end | `stopReason` |
 |---|---|
@@ -198,10 +202,11 @@ session has none: the first call that needs an approval asks again.
 
 `crates/radian-exec/tests/acp.rs` drives `radian acp` as a child over stdio: initialize,
 `session/new`, `session/prompt`, the update stream, the prompt `_meta`, a permission
-rejection, a cancellation with the interrupted journal prefix, a model error, the
-one-session refusal, the shared flag set, and `session/load` — a session written by one process
-and loaded by a second, whose replay and continued journal the test checks by folding the
-journal. `journal-selfcheck` replays the sessions the suite writes. The touched crates'
-mutation records name the tests that catch a cancelled turn answering `end_turn`, a second
-`session/new` being accepted, and a `session/load` that starts a new journal instead of
-continuing the loaded one.
+rejection, a cancellation with the interrupted journal prefix, a model error, a prompt whose
+journaled turn end is delayed (the answer must wait for it), the one-session refusal, the shared
+flag set, and `session/load` — a session written by one process and loaded by a second, whose
+replay and continued journal the test checks by folding the journal. `journal-selfcheck` replays
+the sessions the suite writes. The touched crates' mutation records name the tests that catch a
+cancelled turn answering `end_turn`, a second `session/new` being accepted, a `session/load` that
+starts a new journal instead of continuing the loaded one, and a prompt answer that follows the
+live `RunFinished` instead of the journaled turn end.
