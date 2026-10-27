@@ -91,6 +91,10 @@ pub const DIE_AFTER_RUNNING_ENV: &str = "RADIAN_ARC_GATE_TEST_DIE_AFTER_RUNNING"
 /// signal the loop while only the pass's `started` record exists. Milliseconds. Never set by
 /// arc.
 pub const SLOW_START_ENV: &str = "RADIAN_ARC_GATE_TEST_SLOW_START_MS";
+/// Test-only: how long a pass waits between reading the `started` record and naming the process
+/// it started in it, so a test can make the window a loaded machine widens deterministic.
+/// Milliseconds. Never set by arc.
+pub const SLOW_PID_ENV: &str = "RADIAN_ARC_GATE_TEST_SLOW_PID_MS";
 /// How often [`stop`] looks at a signalled gate.
 const STOP_POLL: Duration = Duration::from_millis(100);
 /// How long [`stop`] waits for a gate that was started just before the signal to name its
@@ -204,7 +208,34 @@ pub fn clear(store: &Store, task: &str) {
     let _ = fs::remove_file(record_path(store, task));
 }
 
+/// The lock a pass and the gate process take around a write of one task's record. A write
+/// replaces the file with a rename, so two that overlap do not tear it; the lock is what orders
+/// them, so a pass that names the process it started cannot put its `started` record back over
+/// the `running` one the gate wrote in between (ADR 0048 decision 10).
+fn lock_record(store: &Store, task: &str) -> io::Result<File> {
+    let path = record_path(store, task).with_extension("json.lock");
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+/// Writes the record, taking its lock first. [`write_locked`] is for a caller that already holds
+/// the lock and has to read the record before it writes.
 fn write(store: &Store, task: &str, value: &Value) -> io::Result<()> {
+    let _lock = lock_record(store, task)?;
+    write_locked(store, task, value)
+}
+
+/// Writes the record with [`lock_record`] already held.
+fn write_locked(store: &Store, task: &str, value: &Value) -> io::Result<()> {
     let path = record_path(store, task);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -533,16 +564,30 @@ fn inherit(file: &File, path: &Path) -> Result<(), Error> {
 /// Names the gate process in the pass's `started` record, unless the gate has already written
 /// its own `running` record (which carries the same pid). A stop that arrives between the
 /// spawn and that write finds the process here.
+///
+/// The gate writes `running` as its first act, so the read and the write of this record are one
+/// step under its lock: a pass that read `started` just before the gate's write would otherwise
+/// put the stale record back over it, and every later pass would read `started` with a digest
+/// and report a gate that wrote `running` as one that exited without a record (ADR 0048
+/// decision 10).
 fn remember_pid(store: &Store, task: &str, pid: u32) {
+    let Ok(_lock) = lock_record(store, task) else {
+        return;
+    };
     let Some(mut value) = read_value(store, task) else {
         return;
     };
     if value.get("status").and_then(Value::as_str) != Some(STARTED) {
         return;
     }
+    // Test-only (see [`SLOW_PID_ENV`]): the window a pass has between reading the `started`
+    // record and naming the process in it, wide enough to hold the gate's own write.
+    if let Some(millis) = slow_pid() {
+        std::thread::sleep(Duration::from_millis(millis));
+    }
     value["pid"] = json!(pid);
     value["process_started_at"] = json!(crate::process::start_time(pid));
-    let _ = write(store, task, &value);
+    let _ = write_locked(store, task, &value);
 }
 
 /// Signals the task's gate and gives it `grace` before SIGKILL, then records that arc stopped
@@ -689,6 +734,16 @@ pub fn run(options: Options) -> i32 {
 /// Test-only (see [`SLOW_START_ENV`]): how long the gate waits before its `running` record.
 fn slow_start() -> Option<u64> {
     std::env::var_os(SLOW_START_ENV)?
+        .to_str()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Test-only (see [`SLOW_PID_ENV`]): how long a pass waits between reading the `started` record
+/// and naming the process in it.
+fn slow_pid() -> Option<u64> {
+    std::env::var_os(SLOW_PID_ENV)?
         .to_str()?
         .trim()
         .parse()
