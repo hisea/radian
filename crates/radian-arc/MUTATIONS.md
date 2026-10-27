@@ -1443,3 +1443,20 @@ test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test
 
 1/1 caught.
 
+## TK0193: the `info/refs` exclusion is one path, not a subtree (2026-10-26, branch `work/TK0193-arc-control-check-ignores-info-refs-followups`)
+
+ADR 0048 decision 7 leaves exactly `<common dir>/info/refs` out of the control record.
+`ControlScan::tree_except` used to skip that path before it looked at the entry's kind, so a
+worker that replaced `info/refs` with a directory hid every file below it from the scan. The
+mutation put the exact-path `continue` back in front of the `file_type` match. The binary was
+rebuilt with `cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture`
+(the work tests refuse an older one), and the test ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test work -E 'test(replaces_info_refs_with_a_directory)'`. The
+source was restored from `.radian/mut/work_mod_fixed.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0193-M1 | skip the excluded path before reading the entry's kind, so a directory there is never walked (the fix reverted) | `work::a_worker_that_replaces_info_refs_with_a_directory_fails_and_its_files_are_removed` (the failure is `outcome terminated`, not the control-file reason) | ✅ 1 failed |
+
+1/1 caught.
+
