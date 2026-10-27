@@ -3,6 +3,7 @@
 - 状态：idea（暂定，不排期；生态兼容的另外四件先做）
 - 涉及 ADR：新 ADR；0032（一个二进制、保留的子命令）、0009（全屏 TUI 之外的宿主面）、0024（审批与提问映射到 `request_permission`）、0011（`session/prompt` 走 inbox）、0010（`session/update` 只发 live 事件）、0043（控制口）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥；总报告 README 第 32 条（入口顺序：先 `exec --output jsonl`，再控制口客户端，最后 `radian acp`）
+- 另一条：arc 当 ACP **客户端**起第三方 agent 当 worker 是 `arc-acp-worker.md`，与本条独立，先做那条不影响本条。
 - 依赖：`exec-jsonl-output.md` 先落地；控制口客户端（总报告第 32 条，尚无 backlog 文件）
 
 ## 背景
