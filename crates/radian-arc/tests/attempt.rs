@@ -339,10 +339,15 @@ fn a_claim_records_the_worker_it_decided_on() {
         start(&tasks[1])["worker"],
         "the claim and `start.json` carry the same worker"
     );
+    let program = repo
+        .canonical_clone()
+        .join("tools/codex")
+        .display()
+        .to_string();
     assert_eq!(
         second.worker,
         WorkerLine::Command {
-            command: vec![repo.clone.join("tools/codex").display().to_string()],
+            command: vec![program.clone()],
             flow: "default".to_owned(),
         },
         "the claim carries the resolved command the wrapper starts"
@@ -352,7 +357,7 @@ fn a_claim_records_the_worker_it_decided_on() {
         json!({
             "kind": "command",
             "flow": "default",
-            "program": repo.clone.join("tools/codex").display().to_string(),
+            "program": program,
         }),
         "the claim names the command worker the wrapper will start"
     );

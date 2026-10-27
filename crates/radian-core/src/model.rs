@@ -193,7 +193,49 @@ pub const CONTEXT_OVERFLOW_PREFIX: &str = "model context overflow:";
 /// **never** transient and never retried (ADR 0017).
 pub const CANCELLATION_MESSAGE: &str = "the request was cancelled";
 
-#[derive(Debug, thiserror::Error)]
+/// Declares the [`ModelError`] `kind` set once: each variant's tag and its snake_case wire
+/// name. [`ModelErrorKind`], its [`ModelErrorKind::as_str`] and [`MODEL_ERROR_KINDS`] are all
+/// generated from this one list, so no second place names a kind. Add a variant here (and to
+/// [`ModelError`]) or change a name; nothing else to update.
+macro_rules! model_error_kinds {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// One `Result.model_error.kind` value (ADR 0044 §2b): the closed set of
+        /// [`ModelError`] kinds, snake_case.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ModelErrorKind {
+            $($variant),+
+        }
+
+        impl ModelErrorKind {
+            /// Every kind, in the order the declaration lists them.
+            pub const ALL: &[ModelErrorKind] = &[$(ModelErrorKind::$variant),+];
+
+            /// The wire name of this kind: one entry of [`MODEL_ERROR_KINDS`].
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(ModelErrorKind::$variant => $name),+
+                }
+            }
+        }
+
+        /// The `kind` names of [`ModelError`], one per variant, snake_case, in declaration
+        /// order. This is the closed set the exec `Result` record's `model_error.kind` carries
+        /// (ADR 0044 §2b). The serializer writes [`ModelErrorKind::as_str`], and the docs
+        /// drift test and `docs/schema/check-fixtures.sh` read this same declaration.
+        pub const MODEL_ERROR_KINDS: &[&str] = &[$($name),+];
+    };
+}
+
+model_error_kinds! {
+    Transport => "transport",
+    Protocol => "protocol",
+    Unavailable => "unavailable",
+    UsageLimit => "usage_limit",
+    ContextOverflow => "context_overflow",
+    EmptyResponse => "empty_response",
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ModelError {
     #[error("model transport error: {0}")]
     Transport(String),
@@ -217,6 +259,20 @@ pub enum ModelError {
         message: String,
         retry_after: Option<Duration>,
         status: Option<u16>,
+    },
+    /// The provider's plan usage window is used up (a ChatGPT Plus/Pro `429` whose body says
+    /// `error.type == "usage_limit_reached"`). The same request cannot succeed until the
+    /// window resets, so this is **never** transient: the turn fails at once rather than
+    /// spending the ordinary retries (ADR 0017).
+    ///
+    /// `message` names the plan, the window, the reset and `/model`, read from the body.
+    /// `resets_in` is the body's own `resets_in_seconds`, when it carries one. It is not a
+    /// retry wait (this error is never retried); a host reports it as
+    /// `Result.model_error.retry_after_secs` so a caller can wait out the window (ADR 0044).
+    #[error("model usage limit reached: {message}")]
+    UsageLimit {
+        message: String,
+        resets_in: Option<Duration>,
     },
     /// The provider refused the request because the input is over its context window.
     ///
@@ -246,19 +302,37 @@ impl ModelError {
     ///   temporary failure (ADR 0017).
     /// - [`ModelError::Transport`]: yes for a connection failure, a stream that ended early or
     ///   an idle timeout — **unless** it is the cancellation sentinel, which is never transient.
-    /// - [`ModelError::Protocol`], [`ModelError::ContextOverflow`]: no. A 400/401/403/404, a
-    ///   malformed stream and a provider-recognized context overflow are the request's fault,
-    ///   not the provider's mood; the overflow has its own path (ADR 0018).
+    /// - [`ModelError::Protocol`], [`ModelError::ContextOverflow`], [`ModelError::UsageLimit`]:
+    ///   no. A 400/401/403/404, a malformed stream, a provider-recognized context overflow and
+    ///   a used-up plan window are the request's or the window's state, not the provider's
+    ///   mood; the overflow has its own path (ADR 0018) and the window fails at once
+    ///   (ADR 0017).
     pub fn is_transient(&self) -> bool {
         match self {
             ModelError::Unavailable { .. } | ModelError::EmptyResponse => true,
             ModelError::Transport(message) => message != CANCELLATION_MESSAGE,
-            ModelError::Protocol(_) | ModelError::ContextOverflow(_) => false,
+            ModelError::Protocol(_)
+            | ModelError::ContextOverflow(_)
+            | ModelError::UsageLimit { .. } => false,
+        }
+    }
+
+    /// The [`ModelErrorKind`] of this error (ADR 0044 §2b); its wire name is
+    /// [`ModelErrorKind::as_str`], one value of [`MODEL_ERROR_KINDS`].
+    pub fn kind(&self) -> ModelErrorKind {
+        match self {
+            ModelError::Transport(_) => ModelErrorKind::Transport,
+            ModelError::Protocol(_) => ModelErrorKind::Protocol,
+            ModelError::Unavailable { .. } => ModelErrorKind::Unavailable,
+            ModelError::UsageLimit { .. } => ModelErrorKind::UsageLimit,
+            ModelError::ContextOverflow(_) => ModelErrorKind::ContextOverflow,
+            ModelError::EmptyResponse => ModelErrorKind::EmptyResponse,
         }
     }
 
     /// The provider's requested wait before a retry, if it sent one. Only
-    /// [`ModelError::Unavailable`] can carry it.
+    /// [`ModelError::Unavailable`] can carry it: [`ModelError::UsageLimit`] is never retried,
+    /// so its `resets_in` is a report for the host, not a wait.
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             ModelError::Unavailable { retry_after, .. } => *retry_after,
@@ -334,6 +408,14 @@ mod tests {
         assert!(!ModelError::Transport(CANCELLATION_MESSAGE.into()).is_transient());
         assert!(!ModelError::Protocol("HTTP 400: bad request".into()).is_transient());
         assert!(!ModelError::ContextOverflow("HTTP 400: prompt is too long".into()).is_transient());
+        assert!(
+            !ModelError::UsageLimit {
+                message: "HTTP 429: the plan window is used up".into(),
+                resets_in: Some(Duration::from_secs(3516)),
+            }
+            .is_transient(),
+            "a used-up plan window is not retried (ADR 0017)"
+        );
     }
 
     /// ADR 0017 §2: `Unavailable` carries the HTTP status when a response produced it, so the
@@ -364,6 +446,61 @@ mod tests {
             ModelError::Unavailable { status: None, .. }
         ));
         assert!(overload.is_transient());
+    }
+
+    /// The `Result.model_error.kind` set is closed, one snake_case name per variant. The
+    /// serializer and the docs drift test read the same declaration (ADR 0044 §2b), and each
+    /// variant's own name is pinned so a swapped arm cannot pass. Mutation: a variant missing
+    /// from the declaration, a renamed name, or two variants sharing a name → this fails.
+    #[test]
+    fn every_model_error_kind_is_in_the_closed_list() {
+        // Each variant names its own declared value; the names themselves exist only in the
+        // `model_error_kinds!` declaration.
+        let named = [
+            (ModelError::Transport("network down".into()), "transport"),
+            (ModelError::Protocol("HTTP 400".into()), "protocol"),
+            (
+                ModelError::Unavailable {
+                    message: "HTTP 429".into(),
+                    retry_after: None,
+                    status: Some(429),
+                },
+                "unavailable",
+            ),
+            (
+                ModelError::UsageLimit {
+                    message: "HTTP 429".into(),
+                    resets_in: None,
+                },
+                "usage_limit",
+            ),
+            (
+                ModelError::ContextOverflow("HTTP 400".into()),
+                "context_overflow",
+            ),
+            (ModelError::EmptyResponse, "empty_response"),
+        ];
+        for (error, expected) in named {
+            assert_eq!(error.kind().as_str(), expected, "kind for {error}");
+        }
+        // The generated enum, its names and the const list are one declaration: same length,
+        // same order, same names.
+        assert_eq!(ModelErrorKind::ALL.len(), MODEL_ERROR_KINDS.len());
+        for (kind, name) in ModelErrorKind::ALL.iter().zip(MODEL_ERROR_KINDS) {
+            assert_eq!(kind.as_str(), *name, "{kind:?} names {name:?}");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name:?} is not snake_case"
+            );
+        }
+        let mut unique = MODEL_ERROR_KINDS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            MODEL_ERROR_KINDS.len(),
+            "every kind has its own name"
+        );
     }
 
     /// Only a provider that sent `Retry-After` can ask for a specific wait.

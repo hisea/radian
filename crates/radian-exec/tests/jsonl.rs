@@ -263,6 +263,14 @@ async fn a_key_switch_notice_goes_to_stderr_in_jsonl_mode() {
     );
 }
 
+/// A config file that turns the retry policy off, so a single `429` reaches the turn's end
+/// without the ordinary backoff retries (ADR 0017).
+fn no_retry_config(env: &Env) -> String {
+    let path = env.home.join("no-retry.toml");
+    std::fs::write(&path, "schema_version = 1\n[model]\nretries = 0\n").unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
 /// The golden stdout: every durable line is byte-identical to the journal file, live lines
 /// carry only their deltas, and the `Result` line matches its fixture's field set.
 #[tokio::test]
@@ -324,12 +332,18 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
         }),
         "the Result line carries the run and the session totals"
     );
-    // ... and its field set is the checked-in fixture's field set (each fixture line).
+    // ... and its field set is the checked-in fixture's field set (each fixture line that
+    // carries no `model_error`: that optional field belongs to a failed run only, ADR 0044 §2b).
     let fixture_text =
         std::fs::read_to_string(repo_root().join("docs/schema/fixtures/exec-result.jsonl"))
             .unwrap();
+    let mut checked = 0;
     for (i, line) in fixture_text.lines().enumerate() {
         let fixture: Value = serde_json::from_str(line).unwrap();
+        if fixture.get("model_error").is_some() {
+            continue;
+        }
+        checked += 1;
         let mut result_keys: Vec<&str> = result
             .as_object()
             .unwrap()
@@ -349,6 +363,7 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
             "the Result line matches its fixture line {i}"
         );
     }
+    assert!(checked >= 2, "the completed fixture lines were checked");
 }
 
 /// Runs one `-p` turn with `--output jsonl` on a resumed session and splits stdout the
@@ -480,6 +495,88 @@ async fn a_completed_turn_exits_zero() {
     assert_eq!(result.get("exit_code"), Some(&json!(0)));
     assert_eq!(result.get("outcome"), Some(&json!("completed")));
     assert_eq!(result.get("stop_reason"), Some(&json!("completed")));
+    assert!(
+        result.get("model_error").is_none(),
+        "a completed run carries no model_error: {result}"
+    );
+}
+
+/// A failed turn on an `Unavailable` error reports its variant, the HTTP status and the
+/// provider's `Retry-After` in whole seconds. Mutation: drop `model_error` from the writer →
+/// this fails.
+#[tokio::test]
+async fn an_unavailable_error_reports_its_kind_status_and_retry_after() {
+    let server = MockServer::start(vec![Reply::Status {
+        code: 429,
+        headers: vec![("Retry-After".into(), "30".into())],
+        body: "slow down".into(),
+    }])
+    .await;
+    let env = Env::fresh("model-error-unavailable");
+    let config = no_retry_config(&env);
+    let (code, _, _, result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "me-unavailable",
+        &["--config", &config],
+        "hi",
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        result.get("model_error"),
+        Some(&json!({
+            "kind": "unavailable",
+            "status": 429,
+            "retry_after_secs": 30,
+        })),
+        "{result}"
+    );
+}
+
+/// A failed turn on a `Protocol` error reports the variant with no status and no wait.
+#[tokio::test]
+async fn a_protocol_error_reports_its_kind_with_nulls() {
+    let server = MockServer::start(vec![Reply::status(400, "bad request")]).await;
+    let env = Env::fresh("model-error-protocol");
+    let (code, _, _, result, err) =
+        run_jsonl(&server.base_url, &env, "me-protocol", &[], "hi", "").await;
+
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        result.get("model_error"),
+        Some(&json!({
+            "kind": "protocol",
+            "status": null,
+            "retry_after_secs": null,
+        })),
+        "{result}"
+    );
+}
+
+/// A cancelled run carries no `model_error`: the field belongs only to a failed model error.
+#[tokio::test]
+async fn a_cancelled_run_has_no_model_error() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let env = Env::fresh("model-error-cancelled");
+    let (code, _, _, result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "me-cancelled",
+        &["--turn-timeout-secs", "1"],
+        "hi",
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(result.get("outcome"), Some(&json!("cancelled")), "{result}");
+    assert!(
+        result.get("model_error").is_none(),
+        "a cancelled run carries no model_error: {result}"
+    );
 }
 
 /// Exit 1 is a failed turn. Mutation: map `Failed` back to 1's neighbors → this fails.

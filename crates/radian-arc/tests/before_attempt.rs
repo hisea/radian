@@ -247,9 +247,11 @@ fn a_failing_command_ends_the_attempt_before_the_worker() {
     );
     let text = failure(&run);
     let log = repo.run_dir(task, 1).join("before/1.log");
+    // The failure record names the canonical path: arc canonicalizes the repository root.
+    let recorded_log = fs::canonicalize(&log).expect("the log canonicalizes");
     assert!(text.contains("before_attempt entry 1"), "{text}");
     assert!(text.contains("exit code 7"), "{text}");
-    assert!(text.contains(&log.display().to_string()), "{text}");
+    assert!(text.contains(&recorded_log.display().to_string()), "{text}");
     assert!(
         fs::read_to_string(&log).expect("the log").contains("boom"),
         "the command's output is in its log"

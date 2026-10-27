@@ -134,6 +134,24 @@ radian exec --search "bubblewrap"
 radian exec --fork demo --at 12
 ```
 
+### The `--output jsonl` `Result` record
+
+`--output jsonl` prints a closing `Result` object as the last stdout line.
+When the run ended because a turn failed on a model error, `Result` carries a `model_error` object with no message text (the message stays on stderr, and the exit code does not change):
+
+| Member | Type | Meaning |
+|---|---|---|
+| `kind` | string | One value per model-error variant: `transport`, `protocol`, `unavailable`, `usage_limit`, `context_overflow`, `empty_response`. |
+| `status` | number or null | The HTTP status when the error carries one (an `unavailable` error), else `null`. |
+| `retry_after_secs` | number or null | The provider's `Retry-After` (`unavailable`) or the plan window's reset wait (`usage_limit`) in whole seconds, rounded up, else `null`. |
+
+The field is absent on every other run end: completed, cancelled, budget, a hook error, or a tool failure.
+It is never `null`.
+
+```json
+{"model_error": {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}}
+```
+
 ## `radian arc`
 
 `radian arc` is the plan and task orchestrator.

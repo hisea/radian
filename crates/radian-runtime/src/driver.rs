@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use radian_core::{
     Agent, AgentEvent, AgentSession, CancelReason, CancellationToken, CompactionFailure,
     ContextBudget, EventSink, Hooks, IncompleteReason, InputSource, JournalError, JournalRecord,
-    Message, MessageId, Model, RunError, RunOutcome, RunStatus, SessionError, SteeringHandle, Step,
-    ToolProvider, TranscriptJournal, TurnOptions,
+    Message, MessageId, Model, ModelError, RunError, RunOutcome, RunStatus, SessionError,
+    SteeringHandle, Step, ToolProvider, TranscriptJournal, TurnOptions,
 };
 use radian_session::{
     EventData, InboxLane, ReadError, RuntimeEvent, Session, SessionJournal, TurnOutcome, TurnReason,
@@ -83,6 +83,14 @@ pub enum DriverError {
 /// `driver.set_runtime_events(Arc::new(move |event| { ... }))`.
 pub trait RuntimeEvents: Send + Sync {
     fn on_runtime_event(&self, event: &RuntimeEvent);
+
+    /// The structured error behind the `TurnFailed` this driver is about to write (ADR 0044
+    /// §2b): called only when the turn failed on a [`radian_core::ModelError`]. The event
+    /// itself carries text, so a host that reports a machine-readable kind reads this instead
+    /// of parsing the message. The default ignores it, so an existing sink is unchanged.
+    fn on_model_error(&self, error: &ModelError) {
+        let _ = error;
+    }
 
     /// A generic host-side hook event: the control port forwards it to subscribers with the
     /// stable name and a JSON payload. The default is a no-op, so a plain sink (or the closure
@@ -630,6 +638,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 };
                 journal.append_runtime_event(failed.clone()).await?;
                 if let Some(sink) = &runtime_events {
+                    // ADR 0044 §2b: the structured error reaches the host before the text
+                    // event, so a host can report its kind without parsing the message.
+                    if let RunError::Model(model_error) = &error {
+                        sink.on_model_error(model_error);
+                    }
                     sink.on_runtime_event(&failed);
                 }
                 if let Some(delay) = self.commit_delay {

@@ -896,6 +896,10 @@ mod tests {
                 status: *status,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(text.clone()),
+            ModelError::UsageLimit { message, resets_in } => ModelError::UsageLimit {
+                message: message.clone(),
+                resets_in: *resets_in,
+            },
             ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
