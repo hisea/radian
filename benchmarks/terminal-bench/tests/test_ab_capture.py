@@ -168,6 +168,41 @@ class SummaryTest(unittest.TestCase):
             },
         )
 
+    def test_anthropic_system_as_text_blocks(self):
+        body = fixture_body("system_blocks.json")
+        summary = capture_addon.summarize(body, "/v1/messages")
+        self.assertEqual(
+            summary,
+            {
+                "body_bytes": len(body),
+                "model": "claude-sonnet-4-5",
+                "stream": True,
+                "stream_options": None,
+                "max_tokens": 4096,
+                "max_completion_tokens": None,
+                "max_output_tokens": None,
+                "temperature": None,
+                "top_p": None,
+                "tools": None,
+                # The two text blocks, joined like a message's content.
+                "system": {"chars": 50, "sha256_prefix": "a94c3dd93e3b"},
+                "messages": {"count": 2, "assistant": 1, "assistant_reasoning": 0},
+            },
+        )
+
+    def test_instructions_as_text_blocks(self):
+        body = json.dumps(
+            {
+                "model": "some-responses-model",
+                "instructions": [{"type": "text", "text": "Be terse."}],
+                "input": [],
+            }
+        ).encode()
+        summary = capture_addon.summarize(body, "/v1/responses")
+        self.assertEqual(
+            summary["system"], {"chars": 9, "sha256_prefix": "28c7339ead79"}
+        )
+
     def test_responses_body_uses_instructions_and_input(self):
         body = fixture_body("responses.json")
         summary = capture_addon.summarize(body, "/v1/responses")
@@ -708,6 +743,29 @@ class CheckerTest(unittest.TestCase):
             self.assertEqual(self.run_checker(label).returncode, 1)
             selected = self.run_checker(label, "--expect-equal", "model,max_tokens")
             self.assertEqual(selected.returncode, 0, selected.stdout)
+
+    def test_an_empty_arm_differs_from_an_arm_with_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            label = self.copy_label(tmp)
+            # A proxy the arm ignored: the script created the file, nothing wrote it.
+            (label / "capture" / "b.jsonl").write_text("", encoding="utf-8")
+            checked = self.run_checker(label)
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            differences = checked.stdout.split("DIFFERENCES", 1)[1]
+            for field in self.FIELDS:
+                with self.subTest(field=field):
+                    self.assertIn(field, differences)
+            self.assertIn("b: no captured request", differences)
+
+    def test_every_arm_empty_is_not_a_clean_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            label = self.copy_label(tmp)
+            for path in (label / "capture").glob("*.jsonl"):
+                path.write_text("", encoding="utf-8")
+            checked = self.run_checker(label)
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            self.assertNotIn("Traceback", checked.stderr)
+            self.assertIn("every arm captured no request", checked.stdout)
 
     def test_a_label_without_capture_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:

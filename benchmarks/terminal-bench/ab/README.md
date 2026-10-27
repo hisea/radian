@@ -111,7 +111,7 @@ One capture line per model request is appended to `<label>/capture/<arm>.jsonl`
   `strict: true`, and the sorted names;
 - `system`: the character count and the first 12 hex of the SHA-256 of the
   system text (a `system` role message, an `instructions` field or a top-level
-  `system`) — never the text;
+  `system`, each as a string or as a list of text blocks) — never the text;
 - `messages`: count, how many are assistant turns, how many of those carry
   `reasoning_content` or `reasoning`;
 - `body_bytes`.
@@ -148,9 +148,11 @@ distinct values with counts — once for the first request of each trial and onc
 for all requests — with every `capture.json` IP mapped to its trial. Then a
 `DIFFERENCES` block for the `--expect-equal` fields (default
 `model,reasoning_effort,thinking,max_tokens,stream_options`): each field whose
-value set is not the same in every arm. Exit 1 means at least one such field;
-exit 0 means the arms sent the same values; exit 2 means the label has no
-capture to read.
+value set is not the same in every arm. An arm whose proxy was ignored captured
+no request, so its empty value set differs from an arm that sent values. Exit 1
+means at least one such field, or that no arm captured a request at all; exit 0
+means every arm sent the same values; exit 2 means the label has no capture to
+read.
 
 For an `ab-system.sh` label a reader passes every field but `system` — the
 arms differ in exactly that one input. `messages`, `tools` and `body_bytes`

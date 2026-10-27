@@ -124,7 +124,12 @@ def _parts_text(content) -> str | None:
 
 
 def _system_text(payload: dict) -> str | None:
-    """The system prompt text: a `system` message, `instructions`, `system`."""
+    """The system prompt text: a `system` message, `instructions`, `system`.
+
+    Every form may be a string or a list of text blocks: Anthropic's `/messages`
+    sends a top-level `system` as blocks, so `_parts_text` reads it the same way
+    it reads a `system` message's content.
+    """
     messages = payload.get("messages")
     if isinstance(messages, list):
         for message in messages:
@@ -133,9 +138,9 @@ def _system_text(payload: dict) -> str | None:
                 if text is not None:
                     return text
     for key in ("instructions", "system"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            return value
+        text = _parts_text(payload.get(key))
+        if text is not None:
+            return text
     return None
 
 

@@ -12,9 +12,11 @@ Per arm it prints the number of requests and, for every captured field, the
 distinct values with counts — once for the first request of each trial and once
 for all requests. Then a `DIFFERENCES` block for the `--expect-equal` fields
 (default `model,reasoning_effort,thinking,max_tokens,stream_options`): every
-field whose value set is not the same in every arm. Exit 1 when there is at
-least one such field, 0 otherwise. For an `ab-system.sh` label, pass every
-field but `system`: the two arms differ exactly in their system prompt.
+field whose value set is not the same in every arm. An arm that captured no
+request has the empty value set, so it differs from an arm that sent values.
+Exit 1 when there is at least one such field, and when no arm captured a request
+at all; 0 otherwise. For an `ab-system.sh` label, pass every field but `system`:
+the two arms differ exactly in their system prompt.
 
 Exit 2 means the label has no capture to read (no `capture/*.jsonl`).
 """
@@ -174,21 +176,27 @@ def main(argv: list[str] | None = None) -> int:
 
     differences = []
     for field in expected:
-        sets = {
-            arm: set(values.get(field, {}))
-            for arm, values in per_arm_values.items()
-        }
-        non_empty = [values for values in sets.values() if values]
-        if any(values != non_empty[0] for values in non_empty):
+        # Every arm takes part, an arm with no request included: its empty value
+        # set differs from an arm that sent values, and an ignored proxy is
+        # exactly the failure this field comparison must not hide.
+        value_sets = {frozenset(per_arm_values[arm][field]) for arm in arms}
+        if len(value_sets) > 1:
             differences.append(field)
 
     print("DIFFERENCES")
+    if not any(arms.values()):
+        # Capture produced no data at all; equality is unknown, not proven.
+        print(f"  every arm captured no request: {', '.join(arms)}")
+        return 1
     if not differences:
         print(f"  none in: {', '.join(expected) if expected else '(no fields)'}")
         return 0
     for field in differences:
         print(f"  {field}")
         for arm in arms:
+            if not arms[arm]:
+                print(f"    {arm}: no captured request")
+                continue
             counts = per_arm_values[arm][field]
             shown = ", ".join(f"{value} ({count})" for value, count in counts.items())
             print(f"    {arm}: {shown or ABSENT}")
