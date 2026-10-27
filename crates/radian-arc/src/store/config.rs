@@ -288,13 +288,13 @@ impl<'de> Deserialize<'de> for ReworkSession {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Worker {
-    /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the worker uses
-    /// the host's normal model configuration. It belongs to the `radian exec` worker line
+    /// Extra `radian acp` arguments, after the wrapper's fixed ones. Empty: the worker uses
+    /// the host's normal model configuration. It belongs to the `radian acp` worker line
     /// only: a file that sets it together with [`Worker::command`] is refused.
     pub exec_args: Vec<String>,
-    /// The program and its arguments of a worker that is not `radian exec` (ADR 0048
+    /// The program and its arguments of a worker that is not `radian acp` (ADR 0048
     /// decision 7): the first element is the program, the rest are its arguments, and no
-    /// shell is involved. `None` (the default) keeps `radian exec`. An empty array is refused.
+    /// shell is involved. `None` (the default) keeps `radian acp`. An empty array is refused.
     pub command: Option<Vec<String>>,
     /// Whether a later attempt of a task gets a session of its own (`fresh`, the default) or
     /// continues the task's one session (`resume`).
@@ -306,16 +306,16 @@ pub struct Worker {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Flow {
-    /// Extra `radian exec` arguments, after the wrapper's fixed ones. Empty: the host's normal
-    /// model configuration. It belongs to the `radian exec` worker line only: a flow that sets
+    /// Extra `radian acp` arguments, after the wrapper's fixed ones. Empty: the host's normal
+    /// model configuration. It belongs to the `radian acp` worker line only: a flow that sets
     /// it together with [`Flow::command`] is refused.
     pub exec_args: Vec<String>,
-    /// The program and its arguments of a worker that is not `radian exec`: the first element
+    /// The program and its arguments of a worker that is not `radian acp`: the first element
     /// is the program, the rest are its arguments, and no shell is involved. `None` keeps
-    /// `radian exec` with this flow's `exec_args`. An empty array is refused.
+    /// `radian acp` with this flow's `exec_args`. An empty array is refused.
     pub command: Option<Vec<String>>,
     /// The program and its arguments of an ACP agent: the first element is the program, the
-    /// rest are its arguments, and no shell is involved. `None` keeps `radian exec` with this
+    /// rest are its arguments, and no shell is involved. `None` keeps `radian acp` with this
     /// flow's `exec_args`, or the flow's `command`. The wrapper is the ACP client and starts
     /// this array as the agent (ADR 0048 decision 7). An empty array is refused, and a flow
     /// sets at most one of `acp`, `command` and a non-empty `exec_args`.
@@ -354,7 +354,7 @@ impl Default for Flow {
 
 impl Flow {
     /// The `default` flow built from today's global keys: the worker line, the gate profile,
-    /// concurrency `1`, and `allow_noop` `false`.
+    /// concurrency `1`, `allow_noop` `false`, and `commit_dirty` `false`.
     fn from_worker(worker: &Worker, gate_profile: &str) -> Self {
         Self {
             exec_args: worker.exec_args.clone(),
@@ -470,9 +470,9 @@ max_auto_reverify = 2         # 0 turns the automatic reverify off
 max_gate_deaths = 2           # 0 stops at the first gate death
 
 [worker]
-exec_args = []                 # extra `radian exec` arguments for the worker
+exec_args = []                 # extra `radian acp` arguments for the worker
 rework_session = "fresh"       # `fresh`: a session per attempt; `resume`: the task's one session
-# command = ["codex", "exec"]  # not set: the worker is `radian exec`; do not combine it with exec_args
+# command = ["codex", "exec"]  # not set: the worker is `radian acp`; do not combine it with exec_args
 
 [ids]
 plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
@@ -537,7 +537,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         if !config.worker.exec_args.is_empty() {
             return Err(format!(
                 "`worker.command` and `worker.exec_args` are both set; `worker.exec_args` belongs \
-                 to the `radian exec` worker line only, so set one or the other (the command is \
+                 to the `radian acp` worker line only, so set one or the other (the command is \
                  `{}`)",
                 command[0]
             ));
@@ -706,18 +706,14 @@ fn check_flows(config: &mut Config) -> Result<(), String> {
                     "`flows.{name}.command` is empty; its first element must be the program"
                 ));
             }
-            if !flow.exec_args.is_empty() {
-                let mut keys = vec![
-                    format!("`flows.{name}.command`"),
-                    format!("`flows.{name}.exec_args`"),
-                ];
-                if flow.acp.is_some() {
-                    keys.push(format!("`flows.{name}.acp`"));
-                }
+            // An `acp` beside these is deferred to `worker_args::check_flow`, so every
+            // combination that involves `acp` is refused (exit `3`) by the worker check and
+            // names all the keys the flow set. `command` beside `exec_args` alone keeps this
+            // parse-time error.
+            if !flow.exec_args.is_empty() && flow.acp.is_none() {
                 return Err(format!(
-                    "{} are all set; `flows.{name}.command` and `flows.{name}.exec_args` belong \
-                     to different worker lines, so set one (the command is `{}`)",
-                    keys.join(" and "),
+                    "`flows.{name}.command` and `flows.{name}.exec_args` are both set; they \
+                     belong to different worker lines, so set one (the command is `{}`)",
                     command[0]
                 ));
             }
@@ -1038,7 +1034,7 @@ mod tests {
         assert_eq!(ReworkSession::parse("sometimes"), None);
     }
 
-    /// `worker.command` is optional: unset keeps `radian exec`, and a set array is the program
+    /// `worker.command` is optional: unset keeps `radian acp`, and a set array is the program
     /// first and its arguments after it (ADR 0048 decisions 7 and 15).
     #[test]
     fn the_worker_command_is_an_optional_array_with_the_program_first() {
@@ -1104,7 +1100,7 @@ mod tests {
                 .get(DEFAULT_FLOW)
                 .map(|flow| (flow.exec_args.clone(), flow.command.clone())),
             Some((Vec::new(), None)),
-            "the code's default is an empty `radian exec` flow"
+            "the code's default is an empty `radian acp` flow"
         );
         let text =
             default_text("main").replace("exec_args = []", "exec_args = [\"--model\", \"m\"]");
@@ -1330,7 +1326,7 @@ mod tests {
         }
     }
 
-    /// `flows.<name>.acp` is optional: unset keeps the flow's `command` or `radian exec`, and a
+    /// `flows.<name>.acp` is optional: unset keeps the flow's `command` or `radian acp`, and a
     /// set array is the program first and its arguments after it. The manual's table names it
     /// as not set. An empty array and a non-array value are refused (ADR 0048 decision 7).
     #[test]
@@ -1389,5 +1385,14 @@ mod tests {
             parse(command_and_exec_args).is_err(),
             "command beside exec_args keeps its config error"
         );
+
+        // All three names are a worker-check refusal too, so the command exits `3` for every
+        // combination that involves `acp`, exactly as the manual's `acp` row says.
+        let all_three = "schema_version = 1\n[flows.art]\nacp = [\"/usr/bin/codex-acp\"]\n\
+                         command = [\"/bin/sh\"]\nexec_args = [\"--model\", \"m\"]\n";
+        let config = parse(all_three).expect("the worker check refuses this, not the parser");
+        assert!(config.flows["art"].acp.is_some());
+        assert!(config.flows["art"].command.is_some());
+        assert!(!config.flows["art"].exec_args.is_empty());
     }
 }

@@ -1287,7 +1287,8 @@ fn result_model_error(store: &Store, task: &str, attempt: u32) -> Option<Value> 
 
 /// Whether the attempt's recorded worker is a command worker (ADR 0048 decision 7): its
 /// `execution.json`, then `identity.json`, then the claim's `start.json`, the same precedence
-/// the session id uses. An attempt that names no worker keeps the `radian exec` rules.
+/// the session id uses. An attempt that names no worker is not a command worker: it keeps the
+/// radian worker's rules.
 fn worker_is_command(store: &Store, task: &str, attempt: u32) -> bool {
     [
         run_dir(store, task, attempt).join("execution.json"),

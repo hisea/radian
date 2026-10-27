@@ -387,11 +387,16 @@ async fn open_session_request(
         }
         None => requested,
     };
-    common.workspace = Some(workspace.to_string_lossy().into_owned());
+    // The session's copy of the arguments is built here and written back only once the
+    // session is open. A failed `setup` therefore leaves the process's arguments as they were:
+    // a retried `session/new` may name another cwd, and a failed `session/load` does not leave
+    // its `--resume` behind for the retry.
+    let mut session_common = common.clone();
+    session_common.workspace = Some(workspace.to_string_lossy().into_owned());
     // ADR 0049: `session/load` opens the named session exactly as `radian exec --resume` does.
     // An unknown id is an error from the opener that names it.
     if let Some(session_id) = &load {
-        common.resume = Some(session_id.clone());
+        session_common.resume = Some(session_id.clone());
     }
     let mcp = match protocol::parse_mcp_servers(&request.mcp_servers.unwrap_or_default()) {
         Ok(mcp) => mcp,
@@ -402,7 +407,10 @@ async fn open_session_request(
             return;
         }
     };
-    let Some(headers) = child_headers.take() else {
+    // The headers are only consumed once the session is open: a `setup` that fails (a refused
+    // config, a missing key) leaves them in place, so the client can fix the cause and retry
+    // `session/new` in the same process.
+    let Some(headers) = child_headers.as_ref() else {
         state.out().respond_error(
             id,
             protocol::INTERNAL_ERROR,
@@ -411,10 +419,10 @@ async fn open_session_request(
         return;
     };
     let cli = Cli {
-        common: common.clone(),
+        common: session_common.clone(),
         ..Default::default()
     };
-    let setup = match super::setup::setup(&cli, headers).await {
+    let setup = match super::setup::setup(&cli, headers.clone()).await {
         Ok(setup) => setup,
         Err(error) => {
             state
@@ -471,6 +479,10 @@ async fn open_session_request(
     *state.audit_task.lock().unwrap() = Some(audit_task);
     *state.session.lock().unwrap() = Some(Arc::clone(&session));
     *state.session_id.lock().unwrap() = Some(session_id.clone());
+    // The session is open, so the one-session rule now answers every later `session/new`; the
+    // headers and the session arguments have done their one job.
+    *child_headers = None;
+    *common = session_common;
     let task = bridge::spawn(
         Arc::clone(state),
         Arc::clone(&session),

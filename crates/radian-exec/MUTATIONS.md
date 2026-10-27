@@ -532,3 +532,17 @@ passed 12/12.
 |---|---|---|---|
 | TK0204-M1 | `session/load` does not set `--resume`, so the opener generates a new id and starts a new journal instead of continuing the loaded one | ✅ 1 failed | `acp::session_load_replays_the_journal_and_continues_it` ("the transcript is replayed": the loaded session's recovered history is empty, so no `session/update` is sent) |
 
+## `radian acp`: a failed `session/new` is retryable (TK0207, 2026-10-27)
+
+Branch `work/TK0207-arc-acp-worker-followups`. The child headers are consumed only once the
+session is open, so a `setup` failure (a refused config) leaves them for a retried
+`session/new`. The mutation was applied in place to `crates/radian-exec/src/acp/mod.rs`, the
+`radian` binary was rebuilt (`cargo build -p radian-tui --bin radian`), and the source was
+restored from `.radian/mut/acp-mod.rs` (`cmp` identical). The catching test ran in the sandbox
+profile: `cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(a_failed_session_new_can_be_retried)'`. Unmutated, the whole `acp` binary passed 13/13.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0207-M2 | `session/new` takes the child headers before `setup` succeeds (`child_headers.take()` instead of `as_ref()` plus a clone) | ✅ 1 failed | `acp::a_failed_session_new_can_be_retried` (the retry answers `internal`: "the internal child headers were already consumed") |
+

@@ -598,6 +598,48 @@ async fn a_cancelled_turn_answers_cancelled_and_keeps_the_interrupted_prefix() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// A failed `session/new` consumes nothing, so the client can fix the cause and retry in the
+/// same process (ADR 0049). Mutation: take the child headers before `setup` succeeds → the
+/// retry answers the internal "already consumed" error instead of opening the session.
+#[tokio::test]
+async fn a_failed_session_new_can_be_retried() {
+    let env = Env::fresh("retry");
+    let config = env.home.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let file = config.join("config.toml");
+    std::fs::write(
+        &file,
+        "schema_version = 1\n[permissions]\napproval = \"sometimes\"\n",
+    )
+    .unwrap();
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    acp.initialize().await;
+    let failed = acp.new_session(&env.workspace).await;
+    let message = failed["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("permissions.approval"),
+        "the refused config is reported: {failed}"
+    );
+    std::fs::write(&file, "schema_version = 1\n").unwrap();
+    // A different cwd proves the failed attempt left no session state behind either: the
+    // workspace it was refused for does not become this process's one workspace.
+    let other = env.home.join("ws2");
+    std::fs::create_dir_all(&other).unwrap();
+    let retried = acp.new_session(&other).await;
+    assert!(
+        retried.get("error").is_none(),
+        "the fixed config opens the session: {retried}"
+    );
+    assert!(
+        retried["result"]["sessionId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "the retry answers a session id: {retried}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 #[tokio::test]
 async fn one_process_holds_one_session() {
     let env = Env::fresh("one-session");

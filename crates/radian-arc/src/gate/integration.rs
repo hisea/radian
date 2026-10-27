@@ -276,21 +276,9 @@ struct MergeOutcome {
 /// leaves the checkout on that main commit, so the next run can reuse it.
 fn merge_onto(checkout: &GateCheckout, task: &str, sha: &str) -> Result<MergeOutcome, GateError> {
     let message = merge_message(task, sha);
-    let output = git::run(
-        &checkout.path(),
-        &[
-            "-c",
-            "user.name=arc",
-            "-c",
-            "user.email=arc@localhost",
-            "merge",
-            "--no-ff",
-            "--no-edit",
-            "-m",
-            message.as_str(),
-            sha,
-        ],
-    )?;
+    let mut args = crate::git::IDENTITY.to_vec();
+    args.extend(["merge", "--no-ff", "--no-edit", "-m", message.as_str(), sha]);
+    let output = git::run(&checkout.path(), &args)?;
     if output.success() {
         let candidate_sha = git::ok(&checkout.path(), &["rev-parse", "HEAD"])?;
         return Ok(MergeOutcome {

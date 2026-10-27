@@ -60,7 +60,7 @@ acp = ["codex-acp"]
 commit_dirty = true
 ```
 
-A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never two, and `acp` cannot be combined with `[worker] rework_session = "resume"`.
+A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never more than one, and `acp` cannot be combined with `[worker] rework_session = "resume"`.
 
 ## How a task picks its flow
 

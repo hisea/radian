@@ -724,7 +724,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             "started_at": started_at,
             "ended_at": ended_at,
             // Which worker ran this attempt, so `show` and the arc TUI can tell a command
-            // worker from `radian exec` (ADR 0048 decision 7).
+            // worker from `radian acp` (ADR 0048 decision 7).
             "worker": worker,
             // A line such as `worker-brief.md skipped: not UTF-8`; `show` prints it
             // (ADR 0048 decision 7). Nothing to report leaves an empty list.
@@ -3808,19 +3808,9 @@ fn commit_dirty(
     }
     let subject = commit_subject(&o.task, result);
     git(&s.worktree, &["add", "-A"], &s.clock)?;
-    git(
-        &s.worktree,
-        &[
-            "-c",
-            "user.name=arc",
-            "-c",
-            "user.email=arc@localhost",
-            "commit",
-            "-m",
-            &subject,
-        ],
-        &s.clock,
-    )?;
+    let mut args = crate::git::IDENTITY.to_vec();
+    args.extend(["commit", "-m", subject.as_str()]);
+    git(&s.worktree, &args, &s.clock)?;
     let sha = git(&s.worktree, &["rev-parse", "HEAD"], &s.clock)?;
     let sha = sha.trim();
     notes.push(format!(

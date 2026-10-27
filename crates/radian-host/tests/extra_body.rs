@@ -211,16 +211,34 @@ fn reserved_keys_are_checked_per_adapter_and_non_objects_are_refused() {
 }
 
 /// ADR 0026 D13: the switch check resolves the target route's adapter and consults only that
-/// adapter. A chat-to-chat switch with the same body is allowed; a chat-to-Anthropic switch
-/// with `max_tokens` is refused.
+/// adapter. A switch between two chat routes with the same body is allowed; a chat-to-Anthropic
+/// switch with `max_tokens` is refused.
 #[test]
 fn a_switch_between_chat_routes_is_allowed_and_a_switch_to_anthropic_is_refused() {
     let extra = parsed(r#"{"max_tokens":32000}"#);
-    let providers = std::collections::BTreeMap::new();
+    // Two chat-resolving route names: the generic descriptor and a named provider that declares
+    // `openai-compatible`. Both accept `max_tokens`; the Anthropic route refuses it.
+    let mut providers = std::collections::BTreeMap::new();
+    providers.insert(
+        "second-chat".to_owned(),
+        radian_host::ProviderDecl {
+            kind: "openai-compatible".to_owned(),
+            base_url: "http://127.0.0.1:9".to_owned(),
+            reasoning_replay: None,
+        },
+    );
     let chat = radian_host::route_adapter_for("openai-compatible", "m", &providers)
         .expect("the generic descriptor resolves");
     assert_eq!(chat, Provider::OpenAiCompatible);
+    let second_chat = radian_host::route_adapter_for("second-chat", "m", &providers)
+        .expect("the named chat provider resolves");
+    assert_eq!(second_chat, Provider::OpenAiCompatible);
     assert_eq!(extra.refusal_for(chat), None, "chat accepts max_tokens");
+    assert_eq!(
+        extra.refusal_for(second_chat),
+        None,
+        "a second chat route accepts max_tokens too"
+    );
 
     let anthropic = radian_host::route_adapter_for("anthropic", "claude-x", &providers)
         .expect("the anthropic descriptor resolves");

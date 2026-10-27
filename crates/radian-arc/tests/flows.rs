@@ -2,7 +2,7 @@
 //!
 //! Every test builds a throwaway repository with a throwaway bare `origin` under the system
 //! temp directory. The end-to-end tests drive the real `radian` binary: a command flow's
-//! script commits its own change, and a `radian exec` flow runs under the mock model.
+//! script commits its own change, and a `radian acp` flow runs under the mock model.
 
 mod common;
 
@@ -152,7 +152,7 @@ fn record(dir: &Path, name: &str) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// A file without `[flows]`: the attempt starts the same `radian exec` worker it always did,
+/// A file without `[flows]`: the attempt starts the same radian worker it always did,
 /// and the claim and wrapper records name the `default` flow.
 #[test]
 fn a_file_without_flows_keeps_the_worker_line_and_names_the_default_flow() {
@@ -212,7 +212,7 @@ fn a_file_without_flows_keeps_the_worker_line_and_names_the_default_flow() {
     assert!(!file.contains("flow:"), "the field stays absent:\n{file}");
 }
 
-/// Two flows, one command and one `radian exec`, with one task each: every attempt starts its
+/// Two flows, one command and one radian worker, with one task each: every attempt starts its
 /// own flow's worker, and the claim and wrapper records name that flow.
 #[test]
 fn each_task_runs_its_flows_worker_and_the_records_name_the_flow() {

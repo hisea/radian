@@ -1,6 +1,6 @@
 //! `radian arc run`: the scheduling loop (ADR 0048 decision 13).
 //!
-//! The auto-level cases run the real `radian arc run` and a real `radian exec` worker under
+//! The auto-level cases run the real `radian arc run` and a real `radian acp` worker under
 //! the mock model; the digest, lock and retry cases drive the real CLI against a temp
 //! repository with a bare `origin`.
 
@@ -98,7 +98,7 @@ fn key_commands(repo: &Repo, line: &str) {
     .expect("write config.toml");
 }
 
-/// The worker's model route: the mock server, plus any extra `radian exec` arguments.
+/// The worker's model route: the mock server, plus any extra `radian acp` arguments.
 fn worker_args_with(repo: &Repo, base_url: &str, extra: &[&str]) {
     let path = repo.arc().join("config.toml");
     let text = fs::read_to_string(&path).expect("config.toml");

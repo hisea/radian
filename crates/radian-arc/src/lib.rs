@@ -17,7 +17,7 @@
 //!   internal: arc runs it, a person does not.
 //! - [`acp`]: a minimal synchronous Agent Client Protocol v1 client over stdio, independent of
 //!   the agent it starts. The wrapper uses it for a flow's `acp` worker.
-//! - [`worker_args`]: the worker's `radian exec` command line, parsed with the `radian exec`
+//! - [`worker_args`]: the worker's `radian acp` command line, parsed with the `radian acp`
 //!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
 //! - [`read`]: the read-only views the arc TUI draws (the remote main, attempts and their
