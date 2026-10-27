@@ -1,6 +1,6 @@
 # arc 的 ACP worker：用 Agent Client Protocol 起第三方 agent
 
-- 状态：idea（方向已定，三个待决问题见下）
+- 状态：decided（owner 2026-10-27 定了下面五条）
 - 涉及 ADR：0048（§7 worker 的两种起法、§3 `start.json` 的 `worker` 记录、§9 取消、§12 成本）、0044（`Result` 回传契约）、0043（子进程边界）、0008（配置 schema）
 - 来源：owner 2026-10-27（tkrs 仓库的 image flow 用一个 40 行脚本包 `codex exec`，"有 ACP 就简单了"）；`acp-server.md` 的协议事实；agentclientprotocol.com 协议页与 `agentclientprotocol/codex-acp` README（2026-10-27 核对）
 - 与 `acp-server.md` 的关系：那条是 radian **当 ACP 服务端**给编辑器用；这条是 arc **当 ACP 客户端**起别人的 agent 当 worker。两条独立，这条小得多，先做这条不影响那条。
@@ -28,13 +28,13 @@ ACP（Agent Client Protocol）把 agent 当 stdio 子进程，JSON-RPC。客户�
 - **提交。** Codex 的 `workspace-write` 写不了 `.git`，这是 Codex 的事，不是协议的事。脚本的"沙箱外 commit"只能由 arc 接手，否则脚本还得留一半。这是独立的通用小功能，见待决第 3 条。
 - **成本。** 协议有 `usage_update`（token 数），没有美元。arc 只有 token，没有价目表就算不出钱；attempt 的成本在 0048 §12 的意义上仍是 unknown，预算仍不生效，`cost_unknown` 照旧。要给钱，得 flow 配单价或复用 radian 的模型目录（0018），另议。
 
-## 待决问题
+## 决定（已定）
 
-1. **配置键的名字与形状。** `flows.<name>.acp = ["npx", "-y", "@agentclientprotocol/codex-acp"]`（与 `command` 互斥，同设报错）是最直接的；要不要再给 agent 传环境变量（`INITIAL_AGENT_MODE`、`CODEX_PATH` 之类）用一个 `acp_env` 表，还是让用户自己包一层脚本。
-2. **审批策略的缺省值。** `request_permission` 的选项是 `allow_once` / `allow_always` / `reject_once` / `reject_always`。候选缺省：worktree 内的读写与执行一律 `allow_once`，worktree 外一律 `reject_once`，并把每次询问与答复记进 `result.jsonl`。要不要让 flow 覆盖（`acp_permissions = "allow-all" | "worktree" | "deny-all"`），以及 `ARC_DENY_READ` 那些路径怎么表达（协议里客户端看不到 agent 读了什么，除非 agent 走 `fs/read_text_file`）。
-3. **"脏则 arc 提交"。** worker 结束后 worktree 有未提交改动时，由 wrapper `git add -A && git commit`，commit message 取 `Result.text` 第一段。这对三种 worker 都有用，但改变了 0048 §8 "脏 worktree 即失败"的规则：是作为 flow 的显式开关（缺省关），还是只对 ACP worker 开。
-4. **会话复用。** `[worker] rework_session = "resume"` 对应 ACP 的 `session/load`，但它是可选能力，codex-acp README 没写清楚是否支持。v0 可以只支持 `fresh`，`resume` 配 ACP flow 时报配置错误。
-5. **适配器的安装。** `npx -y` 第一次要联网下载，worker 没有网络时失败；是文档里写清"先全局安装"，还是 arc 在 `start` 前做一次可执行性检查（与 `command` 的检查同款）。
+1. **一个 flow 只配一种 worker。** `flows.<name>.acp`（数组，程序在前、参数在后，无 shell，与 `command` 同款解析与可执行性检查）与 `command`、`exec_args` 互斥：同一个 flow 设了两个及以上是配置错误，报错点名全部键。不加 `acp_env` 之类的第二个键：要给适配器传环境变量（`INITIAL_AGENT_MODE`、`CODEX_PATH`、`NO_BROWSER`）就把它包在一个脚本里，脚本是 `acp` 数组的程序。
+2. **审批缺省：worktree 内全允许，worktree 外一律拒绝。** `request_permission` 里路径落在 `ARC_WORKTREE` 内的读、写、执行答 `allow_once`，其余答 `reject_once`；一个不带路径的请求按 worktree 内处理。每次询问与答复各写一行进 `result.jsonl`。v0 不加覆盖键（同第 1 条，键尽量少）；`ARC_DENY_READ` 的路径在 worktree 外，自然落在拒绝一侧。
+3. **"脏则 arc 提交"是一个 flow 开关，对三种 worker 都有效。** 新键 `flows.<name>.commit_dirty`（布尔，缺省 `false`）：为 `true` 时 worker 退出后若 worktree 有未提交或未跟踪的改动，wrapper 先跑 git 控制文件检查，再 `git add -A && git commit`，message 第一行取 `Result.text` 的第一段（空则 `<task>: worker changes`），身份与 `merge-main` 的 merge commit 相同；然后才做交付检查。缺省 `false` 时 0048 §8 的规则不变：脏 worktree 即失败。落地时 0048 §8 加这一段。
+4. **会话复用 v0 只支持 `fresh`。** `[worker] rework_session = "resume"` 与一个设了 `acp` 的 flow 同时存在是配置错误，报错点名两个键；`session/load` 留到适配器普遍支持后再议。
+5. **可执行性检查与 `command` 同款，并在手册里写清先安装。** `start`、`run`、`confirm` 前解析 `acp` 数组的程序（含 `/` 的按仓库根解析，否则查 `PATH`），解析不到退出 `3` 并点名 `flows.<name>.acp`；手册的例子用全局安装后的 `codex-acp`，并说明 `npx -y` 第一次要联网，worker 没有网络时会失败。
 
 ## 验收
 
@@ -42,4 +42,6 @@ ACP（Agent Client Protocol）把 agent 当 stdio 子进程，JSON-RPC。客户�
 - arc TUI 的 conversation tab 显示 ACP 的 `tool_call` / `tool_call_update` 行，与 `radian exec` worker 的显示同一种形状。
 - `radian arc cancel` 让 agent 以 `cancelled` 结束，attempt 记录为取消，而不是 `terminated`。
 - 同一配置把命令换成 Claude Code 的 ACP 适配器也能跑完一个 task（有一次手工核对即可）。
-- 落地时同分支改 0048 §3、§7、§9（docs-only commit），手册 `docs/user/arc/worker.md` 与 `files.md` 加每个新键，并删掉本文件。
+- `commit_dirty = true` 的 flow：worker 留下未提交改动时 attempt 仍通过，commit 在分支上，message 第一行来自 `Result.text`；`false` 时照旧失败。
+- 同一 flow 设 `acp` 与 `command`、`acp` 与 `rework_session = "resume"`、解析不到 `acp` 的程序，三种情况都在 `start` 前以退出码 `3` 拒绝并点名键。
+- 落地时同分支改 0048 §3、§7、§8、§9（docs-only commit），手册 `docs/user/arc/worker.md` 与 `files.md` 加 `flows.<name>.acp` 与 `flows.<name>.commit_dirty` 每个键，并删掉本文件。
