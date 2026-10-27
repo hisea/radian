@@ -1,9 +1,9 @@
 # arc 的 radian worker 切到 ACP
 
-- 状态：decided（owner 2026-10-27）；排在 `arc-acp-worker.md` 与 `acp-server.md` 第一阶段之后
+- 状态：decided（owner 2026-10-27）；排在 `acp-server.md` 第一阶段之后；arc 即 ACP 客户端已落地
 - 涉及 ADR：0048（§3 `start.json` 的 `worker` 记录、§7 worker 的起法、§9 取消、§12 成本）、0043
 - 来源：owner 2026-10-27："arc 可以用 ACP 调用 radian"
-- 依赖：`arc-acp-worker.md`（ACP 客户端）、`acp-server.md` 第一阶段（`radian acp`）
+- 依赖：`acp-server.md` 第一阶段（`radian acp`）；ACP 客户端已落地，其审批缺省与「v0 只 `fresh`」现由 ADR 0048 第 7 节与手册 `flows.<name>.acp`（`docs/user/arc/files.md`、`docs/user/arc/worker.md`）持有
 
 ## 背景
 
@@ -14,8 +14,8 @@
 - `Radian` 起法改为经 ACP 起 `radian acp`：wrapper 把今天拼给 `radian exec` 的那串 flag（`--profile workspace`、`--workspace`、`--session-id` / `--resume`、`--deny-read ...`、flow 的 `exec_args`）原样拼给 `radian acp`，worktree 走 `session/new` 的 cwd；`-p -`、`--output jsonl`、`--yes` 不再传。
 - 配置不变：`flows.<name>.exec_args` 与 `worker.exec_args` 仍是"给 radian 的额外参数"，用户不用改 `config.toml`；`flows.<name>.acp` 仍是"起别的 agent"。`start.json` 的 `worker` 记录 `{"kind": "radian", ...}` 不变，`kind` 说的是起谁，不是协议。
 - 成本从 `_meta.radian.cost` 读，与今天读 `Result.cost` 等价；`Result.text` 从 `_meta.radian.text` 读。radian worker 的预算行为不变。
-- `rework_session = "resume"` 对 radian worker 走 `session/load`；`arc-acp-worker.md` 第 4 条"v0 只 fresh"只对第三方 `acp` flow 成立。
-- 审批对 radian worker 也走 `request_permission`，用 `arc-acp-worker.md` 第 2 条的缺省（worktree 内允许、外拒绝）；`--yes` 在 worker 里不再使用。
+- `rework_session = "resume"` 对 radian worker 走 `session/load`；ADR 0048 第 7 节的「v0 只 `fresh`」只对第三方 `acp` flow 成立（`acp` 与 `resume` 同时存在会被拒绝）。
+- 审批对 radian worker 也走 `request_permission`，用 ADR 0048 第 7 节的缺省（worktree 内允许、外拒绝；见手册 `flows.<name>.acp`）；`--yes` 在 worker 里不再使用。
 - gate 的 review session 与 `radian exec -p` 的 headless 用法不动（0048 §10、0032）。
 - 落地后 wrapper 里的 `radian exec` 起法删除，ADR 0048 §7 只剩两种：ACP 与 `command`。
 

@@ -263,6 +263,9 @@ fn row_line(raw: &str, width: usize, theme: &Theme) -> Line<'static> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(raw) else {
         return Line::from(spans_row(vec![(raw.to_owned(), theme.text)], width));
     };
+    if object.get("type").and_then(Value::as_str) == Some("acp") {
+        return acp_row(&object, width, theme);
+    }
     let kind = object.get("type").and_then(Value::as_str).unwrap_or("-");
     let mut parts = vec![(kind.to_owned(), theme.hint)];
     // A `Result` row's outcome is the state of the attempt: done when `completed`, failed for
@@ -319,6 +322,87 @@ fn first_summary(object: &Map<String, Value>) -> Option<&str> {
 /// A summary is one row: its line breaks become spaces.
 fn line_breaks_to_spaces(text: &str) -> String {
     text.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// One ACP line (ADR 0048 decision 7): the wrapper writes every protocol line into
+/// `result.jsonl` as `{"type": "acp", "message": <the protocol object>}`, and a permission
+/// request's answer as `{"type": "acp", "answer": {...}}`. A `tool_call` or
+/// `tool_call_update` draws like a `radian exec` tool row, the update's kind in the weak style
+/// and then its title; a message chunk is its text.
+fn acp_row(object: &Map<String, Value>, width: usize, theme: &Theme) -> Line<'static> {
+    if let Some(answer) = object.get("answer").and_then(Value::as_object) {
+        let kind = answer.get("kind").and_then(Value::as_str).unwrap_or("-");
+        return Line::from(spans_row(
+            vec![
+                ("permission ".to_owned(), theme.hint),
+                (kind.to_owned(), theme.text),
+            ],
+            width,
+        ));
+    }
+    let Some(message) = object.get("message") else {
+        return Line::from(spans_row(
+            vec![(Value::Object(object.clone()).to_string(), theme.text)],
+            width,
+        ));
+    };
+    let method = message.get("method").and_then(Value::as_str).unwrap_or("-");
+    if method != "session/update" {
+        return Line::from(spans_row(vec![(method.to_owned(), theme.hint)], width));
+    }
+    let update = message.pointer("/params/update");
+    let update_kind = update
+        .and_then(|update| update.get("sessionUpdate"))
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    match update_kind {
+        "agent_message_chunk" => {
+            let text = update
+                .and_then(|update| update.pointer("/content/text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Line::from(spans_row(
+                vec![(line_breaks_to_spaces(text), theme.text)],
+                width,
+            ))
+        }
+        "tool_call" | "tool_call_update" => {
+            let title = update
+                .and_then(|update| {
+                    update
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .or_else(|| update.get("kind").and_then(Value::as_str))
+                })
+                .unwrap_or_default();
+            let mut parts = vec![
+                (update_kind.to_owned(), theme.hint),
+                (" ".to_owned(), theme.text),
+                (line_breaks_to_spaces(title), theme.text),
+            ];
+            if let Some(status) = update
+                .and_then(|update| update.get("status"))
+                .and_then(Value::as_str)
+            {
+                parts.push((" ".to_owned(), theme.text));
+                parts.push((status.to_owned(), theme.hint));
+            }
+            Line::from(spans_row(parts, width))
+        }
+        _ => {
+            let body = update
+                .map(Value::to_string)
+                .unwrap_or_else(|| "-".to_owned());
+            Line::from(spans_row(
+                vec![
+                    (update_kind.to_owned(), theme.hint),
+                    (" ".to_owned(), theme.text),
+                    (body, theme.text),
+                ],
+                width,
+            ))
+        }
+    }
 }
 
 /// The styled parts of one row, cut to `width` cells. A row that is too long keeps the start of
@@ -423,6 +507,41 @@ mod tests {
             panic!("an object");
         };
         assert_eq!(first_summary(&object), Some("nested"));
+    }
+
+    /// An ACP `tool_call` row is the update's kind in the weak style and its title, the shape
+    /// of a `radian exec` tool row; a message chunk is its text (ADR 0048 decision 7).
+    #[test]
+    fn an_acp_tool_call_row_names_the_tool_and_its_title() {
+        let theme = Theme::default();
+        let call = row_line(
+            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Edit image.txt","kind":"edit","status":"pending"}}}}"#,
+            80,
+            &theme,
+        );
+        assert_eq!(
+            text(&call),
+            "tool_call Edit image.txt pending",
+            "the tool row names the update and its title"
+        );
+        let update = row_line(
+            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","title":"Edit image.txt","status":"completed"}}}}"#,
+            80,
+            &theme,
+        );
+        assert_eq!(text(&update), "tool_call_update Edit image.txt completed");
+        let chunk = row_line(
+            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"the image is ready"}}}}}"#,
+            80,
+            &theme,
+        );
+        assert_eq!(text(&chunk), "the image is ready");
+        let answer = row_line(
+            r#"{"type":"acp","answer":{"requestId":7,"kind":"allow_once","optionId":"allow"}}"#,
+            80,
+            &theme,
+        );
+        assert_eq!(text(&answer), "permission allow_once");
     }
 
     #[test]

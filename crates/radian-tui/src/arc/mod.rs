@@ -1212,14 +1212,14 @@ impl ArcApp {
         };
         let id = page.id.clone();
         let attempt = page.attempt;
-        let command = attempt.and_then(|attempt| command_worker(&self.store, &id, attempt));
+        let stdout = attempt.and_then(|attempt| stdout_worker(&self.store, &id, attempt));
         let stdout_path = attempt.map(|attempt| {
             radian_arc::store::attempt_ops::run_dir(&self.store, &id, attempt).join("result.jsonl")
         });
         let Some(page) = self.task.as_mut() else {
             return;
         };
-        if let (Some(program), Some(attempt), Some(path)) = (command, attempt, stdout_path) {
+        if let (Some(program), Some(attempt), Some(path)) = (stdout, attempt, stdout_path) {
             page.journal = None;
             page.journal_error = None;
             match &mut page.stdout {
@@ -2842,15 +2842,16 @@ impl ArcApp {
     }
 }
 
-/// The program of the command worker that ran, or is running, one attempt; `None` when the
-/// attempt's worker is `radian exec` (ADR 0048 decisions 4, 7 and 13).
+/// The program of the worker whose conversation is its stdout (`command` or `acp`) that ran,
+/// or is running, one attempt; `None` when the attempt's worker is `radian exec` (ADR 0048
+/// decisions 4, 7 and 13).
 ///
 /// The attempt's own records decide, never the current configuration: the claim writes the
 /// worker it decided on to `start.json` (the key takes effect at the next claim), the wrapper
 /// writes the worker it started to `identity.json`, and its end record `execution.json` names it
 /// too. A reader takes the first record that names a worker, so a `[worker] command` change
 /// while an attempt runs cannot switch the tab between its journal and its stdout.
-fn command_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
+fn stdout_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
     let run = radian_arc::store::attempt_ops::run_dir(store, task, attempt);
     let attempt_dir = radian_arc::store::attempt_ops::attempt_dir(store, task, attempt);
     let worker = [
@@ -2860,7 +2861,11 @@ fn command_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
     ]
     .into_iter()
     .find_map(|path| worker_in(&path))?;
-    (worker.get("kind").and_then(serde_json::Value::as_str) == Some("command")).then(|| {
+    let kind = worker
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    (kind == "command" || kind == "acp").then(|| {
         worker
             .get("program")
             .and_then(serde_json::Value::as_str)

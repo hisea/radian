@@ -575,6 +575,11 @@ enum ArcCommand {
         /// manual.
         #[arg(long, value_name = "JSON", hide = true)]
         command: Option<String>,
+        /// Internal: a flow's `acp`, as one JSON array with the program first. arc passes it
+        /// for an ACP worker; unset runs `radian exec` or the configured command. Not in the
+        /// manual.
+        #[arg(long, value_name = "JSON", hide = true)]
+        acp: Option<String>,
         /// Internal: the task's flow, the name the attempt's records carry. arc passes the
         /// flow the claim resolved. Not in the manual.
         #[arg(long, value_name = "NAME", hide = true)]
@@ -874,6 +879,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
             main_branch,
             extra,
             command,
+            acp,
             flow,
             worker_command,
             stall_timeout_secs,
@@ -894,6 +900,16 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 },
                 None => None,
             };
+            let acp = match acp {
+                Some(json) => match serde_json::from_str::<Vec<String>>(&json) {
+                    Ok(acp) => Some(acp),
+                    Err(error) => {
+                        eprintln!("radian arc work: --acp is not a JSON array of strings: {error}");
+                        return ExitCode::from(2);
+                    }
+                },
+                None => None,
+            };
             ExitCode::from(radian_arc::work::run(radian_arc::work::Options {
                 task,
                 attempt,
@@ -906,6 +922,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 main_branch,
                 extra_args: extra,
                 command,
+                acp,
                 flow: flow.unwrap_or_else(|| radian_arc::store::config::DEFAULT_FLOW.to_owned()),
                 worker_command,
                 stall_timeout_secs: stall_timeout_secs.unwrap_or(0),

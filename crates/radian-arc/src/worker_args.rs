@@ -82,6 +82,18 @@ fn line(exec_args: &[String]) -> Vec<String> {
 /// parser rejects the line. The message names `worker.command`, `worker.exec_args`,
 /// `flows.<name>.command` or `flows.<name>.exec_args`. Nothing is claimed or written.
 pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
+    // `[worker] rework_session = "resume"` and a flow that runs an ACP agent are refused
+    // together: v0 runs every ACP attempt fresh and never uses `session/load` (ADR 0048
+    // decision 7). The message names both keys.
+    if config.worker.rework_session == crate::store::config::ReworkSession::Resume
+        && let Some((name, _)) = config.flows.iter().find(|(_, flow)| flow.acp.is_some())
+    {
+        return Err(Error::Refused(format!(
+            "`worker.rework_session` is `resume` and `flows.{name}.acp` is set; an ACP worker \
+             runs every attempt fresh, so set `worker.rework_session = \"fresh\"` or remove \
+             `flows.{name}.acp`"
+        )));
+    }
     match &config.worker.command {
         Some(command) => check_command("worker.command", command, repo)?,
         None => check_named("worker.exec_args", &config.worker.exec_args)?,
@@ -92,12 +104,38 @@ pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Checks one flow's worker: its `command` program resolves, or its `exec_args` is a valid
-/// `radian exec` argument list (ADR 0048 decision 15). The error names the flow's keys.
+/// Checks one flow's worker: its `command` or `acp` program resolves, or its `exec_args` is a
+/// valid `radian exec` argument list (ADR 0048 decision 15). The error names the flow's keys.
+///
+/// A flow sets at most one worker line: two or more of `acp`, `command` and a non-empty
+/// `exec_args` are refused here, naming every key the flow set (ADR 0048 decisions 1 and 7).
+/// `acp` beside `[worker] rework_session = "resume"` is refused by [`check_config`], because
+/// v0 runs every ACP attempt fresh.
 pub fn check_flow(name: &str, flow: &crate::store::config::Flow, repo: &Path) -> Result<(), Error> {
-    match &flow.command {
-        Some(command) => check_command(&format!("flows.{name}.command"), command, repo),
-        None => check_named(&format!("flows.{name}.exec_args"), &flow.exec_args),
+    let mut set = Vec::new();
+    if flow.acp.is_some() {
+        set.push(format!("flows.{name}.acp"));
+    }
+    if flow.command.is_some() {
+        set.push(format!("flows.{name}.command"));
+    }
+    if !flow.exec_args.is_empty() {
+        set.push(format!("flows.{name}.exec_args"));
+    }
+    if set.len() > 1 {
+        return Err(Error::Refused(format!(
+            "{} are all set; a flow sets at most one of `acp`, `command` and a non-empty \
+             `exec_args`, so set one",
+            set.iter()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )));
+    }
+    match (&flow.acp, &flow.command) {
+        (Some(acp), _) => check_command(&format!("flows.{name}.acp"), acp, repo),
+        (None, Some(command)) => check_command(&format!("flows.{name}.command"), command, repo),
+        (None, None) => check_named(&format!("flows.{name}.exec_args"), &flow.exec_args),
     }
 }
 
@@ -365,5 +403,97 @@ mod tests {
             vec!["worker".to_owned()],
             "a bare name is left for PATH"
         );
+    }
+
+    /// A flow that sets two worker lines is refused before `start`, naming every key it set
+    /// (ADR 0048 decision 7). Mutation: check only the first key and the pair passes.
+    #[test]
+    fn a_flow_with_two_worker_lines_is_refused_naming_every_key() {
+        let repo = std::path::Path::new("/a/repo");
+        let cases = [
+            (
+                vec![vec!["sh".to_owned()], vec!["/bin/sh".to_owned()]],
+                vec!["flows.art.acp", "flows.art.command"],
+            ),
+            (
+                vec![vec!["sh".to_owned()]],
+                vec!["flows.art.acp", "flows.art.exec_args"],
+            ),
+        ];
+        for (set, keys) in cases {
+            let mut flow = crate::store::config::Flow::default();
+            match set.len() {
+                1 => {
+                    flow.acp = Some(set[0].clone());
+                    flow.exec_args = vec!["--model".to_owned(), "m".to_owned()];
+                }
+                _ => {
+                    flow.acp = Some(set[0].clone());
+                    flow.command = Some(set[1].clone());
+                }
+            }
+            let error = check_flow("art", &flow, repo).expect_err("two worker lines");
+            assert_eq!(error.exit(), Exit::State, "exit 3");
+            for key in keys {
+                assert!(
+                    error.message().contains(key),
+                    "the error names `{key}`: {}",
+                    error.message()
+                );
+            }
+        }
+    }
+
+    /// `acp` beside `[worker] rework_session = "resume"` is refused by name: v0 runs every ACP
+    /// attempt fresh (ADR 0048 decisions 4 and 7).
+    #[test]
+    fn acp_beside_resume_is_refused_naming_both_keys() {
+        let dir = std::env::temp_dir();
+        let mut config = crate::store::config::Config::default();
+        let flow = crate::store::config::Flow {
+            acp: Some(vec!["sh".to_owned()]),
+            ..Default::default()
+        };
+        config.flows.insert("art".to_owned(), flow);
+        config.worker.rework_session = crate::store::config::ReworkSession::Resume;
+        let error = check_config(&config, &dir).expect_err("acp and resume together");
+        assert_eq!(error.exit(), Exit::State, "exit 3");
+        assert!(
+            error.message().contains("worker.rework_session"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("flows.art.acp"),
+            "{}",
+            error.message()
+        );
+    }
+
+    /// A configured ACP program is checked exactly as a command program is: the message names
+    /// `flows.<name>.acp` and the program (ADR 0048 decisions 5 and 7).
+    #[cfg(unix)]
+    #[test]
+    fn an_acp_program_must_resolve_by_name() {
+        let dir = crate::test_support::TempDir::named("radian-arc-worker-acp");
+        let mut flow = crate::store::config::Flow {
+            acp: Some(vec!["definitely-not-a-program-xyz".to_owned()]),
+            ..Default::default()
+        };
+        let error = check_flow("art", &flow, &dir).expect_err("a missing name");
+        assert_eq!(error.exit(), Exit::State, "exit 3");
+        assert!(
+            error.message().contains("flows.art.acp"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("definitely-not-a-program-xyz"),
+            "{}",
+            error.message()
+        );
+
+        flow.acp = Some(vec!["sh".to_owned()]);
+        check_flow("art", &flow, &dir).expect("a bare name on PATH passes");
     }
 }
