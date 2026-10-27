@@ -504,3 +504,17 @@ catching test is in the sandbox profile's `/tmp` exclusion group (`scratch` hard
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0191-M1 | the startup route's `request_output` is `RouteOutput::None` (the catalog cap is never resolved), so the sent `max_tokens`, `R` and `B` all fall back to the old none / 16384 / 922000 | ✅ 1 failed (rc=100) | `cli::the_startup_line_names_the_catalog` (cli.rs:6746, the `B 750000` assertion; the line printed `[budget] C 1000000, I 922000, output 384000, R 16384, B 922000`, and the mock request carried no `max_tokens`) |
+
+## `radian acp`: one session and a cancelled turn (TK0203, 2026-10-27)
+
+Branch `work/TK0203-radian-acp-server`. Each mutation was applied in place, the `radian`
+binary was rebuilt (`cargo build -p radian-tui --bin radian`, so the test does not refuse a
+stale binary), and the source was restored from `.radian/mut-backup/acp-mod.rs` (`cmp`
+identical). The catching tests run in the sandbox profile:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E 'test(<name>)'`.
+Unmutated, each test passed.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0203-M1 | `stop_reason` maps `RunStatus::Cancelled` to `end_turn` instead of `cancelled` | ✅ 1 failed | `acp::a_cancelled_turn_answers_cancelled_and_keeps_the_interrupted_prefix` (the response says `stopReason: end_turn`) |
+| TK0203-M2 | the existing-session branch of `session/new` returns the current session id instead of the one-session error | ✅ 1 failed | `acp::one_process_holds_one_session` (the second `session/new` succeeds; its error message is empty) |

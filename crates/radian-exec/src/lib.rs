@@ -10,11 +10,13 @@
 //! the credential store (see `radian docs providers`), and is redacted from everything this
 //! program prints — and from everything it writes to disk.
 
+mod acp;
 mod approval;
 mod chat;
 mod command;
 mod error;
 mod events;
+mod host;
 mod inspect;
 mod jsonl;
 /// `radian login` / `radian logout` (ADR 0026 D3).
@@ -41,23 +43,11 @@ use radian_host::memory::commands::MemoryCommand;
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
 
-/// How many inputs may wait in the inbox. Bounded on purpose (ADR 0011 L4): a full queue
-/// refuses and hands the message back instead of dropping it.
-
-#[derive(Parser, Default)]
-#[command(
-    // The command is `radian exec` now: its help, usage and `--version` name the program the
-    // user actually ran (ADR 0032; the `agent` binary is gone).
-    name = "radian",
-    version,
-    about = "Chat with a model, with optional MCP tools",
-    // A subcommand (`radian memory …`) is a mode of its own, like `--list`: it must not need
-    // `--model`. `--model` is not clap-required at all now (the config file may supply it),
-    // so this is a no-op today; it stays so a future required argument cannot leak into the
-    // subcommand modes.
-    subcommand_negates_reqs = true
-)]
-pub struct Cli {
+/// The flags that shape a conversation. `radian exec` and `radian acp` flatten the same
+/// struct (ADR 0049), so a renamed, added or defaulted conversation input reaches both
+/// parsers at once and the two commands cannot drift.
+#[derive(clap::Args, Default, Clone)]
+pub struct CommonArgs {
     /// The model name sent to the API — a bare name, never `<provider>/<model>`; choose the
     /// provider with `--provider`. Required to run a conversation (`-p` or interactive)
     /// unless the config file's `model.model` provides it; the print-and-exit modes
@@ -138,26 +128,6 @@ pub struct Cli {
     #[arg(long, value_name = "POLICY")]
     approval: Option<String>,
 
-    /// Approve every tool call without asking: shorthand for `--approval auto`.
-    #[arg(long)]
-    yes: bool,
-
-    /// One-shot mode: run this prompt, then exit. `-p -` reads the prompt from stdin to
-    /// EOF; a literal `-` prompt is not possible.
-    #[arg(short, long, conflicts_with = "list")]
-    prompt: Option<String>,
-
-    /// Attach an image to the `-p` prompt's user message (repeatable). The path is read by
-    /// the host; PNG, JPEG, GIF or WebP only, at most 5 MiB and 8000 px per side.
-    #[arg(long = "image", value_name = "PATH", requires = "prompt")]
-    image: Vec<PathBuf>,
-
-    /// Machine-readable output: `--output jsonl` prints every durable journal line, the
-    /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
-    /// line. Omitted, stdout carries only the model text.
-    #[arg(long, value_name = "FORMAT", value_enum)]
-    output: Option<jsonl::OutputMode>,
-
     /// Extra request headers, repeatable: `--header NAME=VALUE`. The value is never
     /// printed; `Authorization` is refused because the key comes only from
     /// `~/.radian/credentials/auth.json`.
@@ -168,79 +138,12 @@ pub struct Cli {
     /// A stable session identifier for this process: used verbatim as the session file's
     /// name, and available to `--header` values as `{session_id}`. Generated once per
     /// process when omitted.
-    #[arg(
-        long,
-        value_name = "VALUE",
-        conflicts_with_all = ["resume", "list", "search"]
-    )]
+    #[arg(long, value_name = "VALUE", conflicts_with = "resume")]
     session_id: Option<String>,
 
     /// Resume an existing session by id.
-    #[arg(long, value_name = "SESSION_ID", conflicts_with = "list")]
+    #[arg(long, value_name = "SESSION_ID")]
     resume: Option<String>,
-
-    /// List this workspace's sessions and exit.
-    #[arg(long)]
-    list: bool,
-
-    /// Export one session of this workspace and exit. Markdown by default; `--format json`
-    /// for the raw event document. Only the current workspace's sessions can be exported.
-    #[arg(
-        long,
-        value_name = "SESSION_ID",
-        conflicts_with_all = ["prompt", "resume", "list", "search"]
-    )]
-    export: Option<String>,
-
-    /// Search this workspace's sessions for message text and exit. Prints one
-    /// `session-id`/time/one-line-snippet row per hit; no match exits 0 with a note on stderr.
-    #[arg(
-        long,
-        value_name = "TEXT",
-        conflicts_with_all = ["prompt", "resume", "list", "export"]
-    )]
-    search: Option<String>,
-
-    /// Fork a session: create a new session whose initial history is the parent's
-    /// effective history at a turn boundary. Needs no model and reads no key.
-    #[arg(
-        long,
-        value_name = "SESSION_ID",
-        conflicts_with_all = ["prompt", "resume", "list", "export", "search"]
-    )]
-    fork: Option<String>,
-
-    /// The parent seq to fork at. Omitted, the parent's last turn boundary is used.
-    #[arg(long, value_name = "SEQ", requires = "fork")]
-    at: Option<u64>,
-
-    /// A mode of its own: `radian memory …` or `radian config …`.
-    /// Neither
-    /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
-    /// shared across sessions and resolved per project (a git repository, shared by its
-    /// worktrees).
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Export format: `markdown` (the readable transcript) or `json` (the event document).
-    #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
-    format: ExportFormat,
-
-    /// Write the export here instead of stdout. Refuses to overwrite unless `--force`.
-    #[arg(long, value_name = "FILE", requires = "export")]
-    out: Option<PathBuf>,
-
-    /// Overwrite `--out` if it exists.
-    #[arg(long, requires = "out")]
-    force: bool,
-
-    /// Include the assistant reasoning in the export. Off by default.
-    #[arg(long, requires = "export")]
-    include_reasoning: bool,
-
-    /// Include the raw provider payloads in the export. Off by default.
-    #[arg(long, requires = "export")]
-    include_provider_payload: bool,
 
     /// Where session files live. Overrides `RADIAN_SESSION_DIR` and the user data directory.
     #[arg(long, value_name = "DIR")]
@@ -320,6 +223,137 @@ pub struct Cli {
     tool_cancel_grace_ms: Option<u64>,
 }
 
+#[derive(Parser, Default)]
+#[command(
+    // The command is `radian exec` now: its help, usage and `--version` name the program the
+    // user actually ran (ADR 0032; the `agent` binary is gone).
+    name = "radian",
+    version,
+    about = "Chat with a model, with optional MCP tools",
+    // A subcommand (`radian memory …`) is a mode of its own, like `--list`: it must not need
+    // `--model`. `--model` is not clap-required at all now (the config file may supply it),
+    // so this is a no-op today; it stays so a future required argument cannot leak into the
+    // subcommand modes.
+    subcommand_negates_reqs = true
+)]
+pub struct Cli {
+    /// The conversation-shaping flags, shared with `radian acp` (ADR 0049).
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Approve every tool call without asking: shorthand for `--approval auto`.
+    #[arg(long)]
+    yes: bool,
+
+    /// One-shot mode: run this prompt, then exit. `-p -` reads the prompt from stdin to
+    /// EOF; a literal `-` prompt is not possible.
+    #[arg(short, long, conflicts_with = "list")]
+    prompt: Option<String>,
+
+    /// Attach an image to the `-p` prompt's user message (repeatable). The path is read by
+    /// the host; PNG, JPEG, GIF or WebP only, at most 5 MiB and 8000 px per side.
+    #[arg(long = "image", value_name = "PATH", requires = "prompt")]
+    image: Vec<PathBuf>,
+
+    /// Machine-readable output: `--output jsonl` prints every durable journal line, the
+    /// live-only delta lines and a closing `Result` record to stdout, one JSON object per
+    /// line. Omitted, stdout carries only the model text.
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    output: Option<jsonl::OutputMode>,
+
+    /// List this workspace's sessions and exit.
+    #[arg(long, conflicts_with_all = ["session_id", "resume"])]
+    list: bool,
+
+    /// Export one session of this workspace and exit. Markdown by default; `--format json`
+    /// for the raw event document. Only the current workspace's sessions can be exported.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["prompt", "resume", "list", "search"]
+    )]
+    export: Option<String>,
+
+    /// Search this workspace's sessions for message text and exit. Prints one
+    /// `session-id`/time/one-line-snippet row per hit; no match exits 0 with a note on stderr.
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with_all = ["session_id", "prompt", "resume", "list", "export"]
+    )]
+    search: Option<String>,
+
+    /// Fork a session: create a new session whose initial history is the parent's
+    /// effective history at a turn boundary. Needs no model and reads no key.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with_all = ["prompt", "resume", "list", "export", "search"]
+    )]
+    fork: Option<String>,
+
+    /// The parent seq to fork at. Omitted, the parent's last turn boundary is used.
+    #[arg(long, value_name = "SEQ", requires = "fork")]
+    at: Option<u64>,
+
+    /// A mode of its own: `radian memory …` or `radian config …`.
+    /// Neither
+    /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
+    /// shared across sessions and resolved per project (a git repository, shared by its
+    /// worktrees).
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Export format: `markdown` (the readable transcript) or `json` (the event document).
+    #[arg(long, value_name = "FORMAT", value_enum, default_value_t = ExportFormat::Markdown, requires = "export")]
+    format: ExportFormat,
+
+    /// Write the export here instead of stdout. Refuses to overwrite unless `--force`.
+    #[arg(long, value_name = "FILE", requires = "export")]
+    out: Option<PathBuf>,
+
+    /// Overwrite `--out` if it exists.
+    #[arg(long, requires = "out")]
+    force: bool,
+
+    /// Include the assistant reasoning in the export. Off by default.
+    #[arg(long, requires = "export")]
+    include_reasoning: bool,
+
+    /// Include the raw provider payloads in the export. Off by default.
+    #[arg(long, requires = "export")]
+    include_provider_payload: bool,
+}
+
+impl std::ops::Deref for Cli {
+    type Target = CommonArgs;
+
+    fn deref(&self) -> &CommonArgs {
+        &self.common
+    }
+}
+
+impl std::ops::DerefMut for Cli {
+    fn deref_mut(&mut self) -> &mut CommonArgs {
+        &mut self.common
+    }
+}
+
+/// `radian acp`: the same conversation flags, served over the Agent Client Protocol
+/// (ADR 0049). It has no line prompt, no `--output` and no `--yes`: input and approvals
+/// arrive over the protocol.
+#[derive(Parser, Default)]
+#[command(
+    name = "radian acp",
+    version,
+    about = "Serve one session over the Agent Client Protocol (stdio)"
+)]
+pub struct AcpCli {
+    /// The conversation-shaping flags, shared with `radian exec` (ADR 0049).
+    #[command(flatten)]
+    pub(crate) common: CommonArgs,
+}
+
 impl Cli {
     /// A `Cli` carrying only one management command, everything else at its default. The
     /// top-level `radian memory`/`login`/`config` build this so they run the **same** dispatch
@@ -336,7 +370,10 @@ impl Cli {
     pub fn for_memory(workspace: Option<String>, command: MemoryCommand) -> Self {
         Self {
             command: Some(Command::Memory { command }),
-            workspace,
+            common: CommonArgs {
+                workspace,
+                ..CommonArgs::default()
+            },
             ..Self::default()
         }
     }
@@ -346,7 +383,10 @@ impl Cli {
     pub fn for_trust(workspace: Option<String>, command: TrustCommand) -> Self {
         Self {
             command: Some(Command::Trust { command }),
-            workspace,
+            common: CommonArgs {
+                workspace,
+                ..CommonArgs::default()
+            },
             ..Self::default()
         }
     }
@@ -382,6 +422,33 @@ pub fn run_blocking(cli: Cli) -> i32 {
     // The session is closed on every path inside `run`. Dropping a runtime waits for its
     // blocking threads, and the stdin reader's blocking read cannot be interrupted: with stdin
     // still open it would hold the process here until the user typed another line.
+    runtime.shutdown_background();
+    code
+}
+
+/// Parses an `acp` command line (program name included) and serves it to completion.
+///
+/// The `radian` binary's `acp` subcommand passes the arguments after `acp`; clap's own
+/// errors (`--help`, `--version`, a usage error) exit inside [`AcpCli::parse_from`], as they
+/// do for `radian exec`.
+pub fn parse_and_run_acp<I, T>(args: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_acp_blocking(AcpCli::parse_from(args))
+}
+
+/// Runs `radian acp` to completion and returns the process exit code. The runtime is built
+/// here and torn down with a bound, and the child headers are taken before the runtime exists,
+/// exactly as [`run_blocking`] does.
+pub fn run_acp_blocking(cli: AcpCli) -> i32 {
+    let child_headers = radian_host::take_child_headers_from_env();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let code = runtime.block_on(acp::run(cli.common, child_headers));
     runtime.shutdown_background();
     code
 }
@@ -461,6 +528,101 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use std::collections::BTreeSet;
+
+    /// The long options of a parser's own command object (not its subcommands).
+    fn top_level_long_options(command: &clap::Command) -> BTreeSet<String> {
+        command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect()
+    }
+
+    /// `radian acp` accepts exactly `radian exec`'s conversation flags: the line-prompt and
+    /// print-and-exit inputs are the only difference, and the hidden internal flags are
+    /// accepted too. Mutation: drop a shared flag from `CommonArgs`, or add an exec-only flag
+    /// to `AcpCli` → this fails naming it.
+    #[test]
+    fn acp_accepts_execs_conversation_flags_and_nothing_else() {
+        let exec = top_level_long_options(&Cli::command());
+        let acp = top_level_long_options(&AcpCli::command());
+        let exec_only: BTreeSet<String> = [
+            "--prompt",
+            "--image",
+            "--output",
+            "--yes",
+            "--list",
+            "--export",
+            "--search",
+            "--fork",
+            "--at",
+            "--format",
+            "--out",
+            "--force",
+            "--include-reasoning",
+            "--include-provider-payload",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let expected: BTreeSet<String> = exec.difference(&exec_only).cloned().collect();
+        assert_eq!(
+            acp, expected,
+            "radian acp must accept every conversation flag radian exec accepts"
+        );
+        // The brief's named flags are absent, including the short `-p`.
+        for flag in ["--prompt", "--output", "--yes"] {
+            assert!(!acp.contains(flag), "{flag} must be absent from radian acp");
+        }
+        assert!(
+            !AcpCli::command()
+                .get_arguments()
+                .any(|arg| arg.get_short() == Some('p')),
+            "radian acp has no -p"
+        );
+        assert!(
+            AcpCli::try_parse_from(["radian acp", "-p", "hi"]).is_err(),
+            "the parser refuses -p"
+        );
+        // The hidden internal flags a wrapper sets are accepted.
+        for flag in [
+            "--tools",
+            "--deny-read",
+            "--no-config-mcp",
+            "--parent",
+            "--parent-seq",
+            "--tool-cancel-grace-ms",
+        ] {
+            assert!(acp.contains(flag), "radian acp misses the shared {flag}");
+        }
+    }
+
+    /// Every visible long option of `radian acp` is documented somewhere in
+    /// `docs/user/cli.md`, and the page names the subcommand. The flags are the `radian exec`
+    /// rows, so this is the `acp` half of the same drift test. Mutation: rename a shared flag
+    /// without updating the page → this fails naming it.
+    #[test]
+    fn every_acp_long_option_appears_in_cli_md() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let cli_md = std::fs::read_to_string(manifest.join("../../docs/user/cli.md"))
+            .expect("cli.md exists");
+        assert!(cli_md.contains("radian acp"), "cli.md names radian acp");
+        let options: Vec<String> = AcpCli::command()
+            .get_arguments()
+            .filter(|arg| !arg.is_hide_set())
+            .filter(|arg| arg.get_id() != "help" && arg.get_id() != "version")
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect();
+        assert!(!options.is_empty(), "radian acp has options");
+        let missing: Vec<_> = options
+            .iter()
+            .filter(|option| !cli_md.contains(option.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these radian acp long options are missing from docs/user/cli.md: {missing:?}"
+        );
+    }
 
     /// `radian exec`'s per-turn model call limit defaults to the
     /// value both hosts share (1000), **not** radian-core's own `DEFAULT_MAX_MODEL_CALLS` (32).
