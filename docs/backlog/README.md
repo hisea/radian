@@ -62,6 +62,11 @@
 | `hooks-async.md` | idea | 0045、0037、0011、0046 | `async: true` 的 hook 接到后台 job 上：exit 0 的 `additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；post-edit 测试不再拖慢回合 |
 | `hooks-permission-request.md` | idea | 0045、0012、0043、0048、0024、0011 | `PermissionRequest` 事件让脚本回答 ask（只回答 ask，不扩权）；headless worker 与 arc 的审批出口，`addRules` 到 `session` 记住选择；与 `subagent-ask-forwarding.md`、`arc-serve.md` 第 4 条同一需求 |
 | `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021、0034、0017、0013 | 五个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`Notification`（只两个 matcher）、`PreCompact`/`PostCompact`、`StopFailure`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
+| `provider-gemini-native.md` | idea（方向已定：做） | 0026、0014、0007、0015、0017 | Gemini 原生 `generateContent` adapter，过 provider contract；第二步 Vertex（同协议加 GCP 认证） |
+| `provider-azure-responses.md` | idea | 0026 | Azure OpenAI 走 Responses：同一 adapter 的配置变体（deployment URL、`api-version`、`api-key` header），有用户需要再做 |
+| `provider-bedrock-converse.md` | idea | 0026、0020、0013 | Bedrock Converse：SigV4 签名加 AWS 二进制事件流，没有明确需求不做；先看 OpenAI 兼容接口能否替代 |
+| `provider-compat-flags.md` | idea | 0026、0014、0008 | 照 pi 的 `compat` 按真实故障逐个加模型兼容开关，不一次照搬；首个候选是会话粘性 header |
+| `provider-mistral-and-pi-messages.md` | idea（不做） | 0026 | Mistral 已有 OpenAI 兼容 chat；pi-messages 是 pi 自家网关私有协议；写明重新考虑的条件 |
 
 只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：
 
