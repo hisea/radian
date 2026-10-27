@@ -193,17 +193,47 @@ pub const CONTEXT_OVERFLOW_PREFIX: &str = "model context overflow:";
 /// **never** transient and never retried (ADR 0017).
 pub const CANCELLATION_MESSAGE: &str = "the request was cancelled";
 
-/// The `kind` names of [`ModelError`], one per variant, snake_case. This is the closed set
-/// the exec `Result` record's `model_error.kind` carries (ADR 0044 §2b); the serializer and
-/// the docs drift test both read this list, so a new variant gains its name here first.
-pub const MODEL_ERROR_KINDS: &[&str] = &[
-    "transport",
-    "protocol",
-    "unavailable",
-    "usage_limit",
-    "context_overflow",
-    "empty_response",
-];
+/// Declares the [`ModelError`] `kind` set once: each variant's tag and its snake_case wire
+/// name. [`ModelErrorKind`], its [`ModelErrorKind::as_str`] and [`MODEL_ERROR_KINDS`] are all
+/// generated from this one list, so no second place names a kind. Add a variant here (and to
+/// [`ModelError`]) or change a name; nothing else to update.
+macro_rules! model_error_kinds {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        /// One `Result.model_error.kind` value (ADR 0044 §2b): the closed set of
+        /// [`ModelError`] kinds, snake_case.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ModelErrorKind {
+            $($variant),+
+        }
+
+        impl ModelErrorKind {
+            /// Every kind, in the order the declaration lists them.
+            pub const ALL: &[ModelErrorKind] = &[$(ModelErrorKind::$variant),+];
+
+            /// The wire name of this kind: one entry of [`MODEL_ERROR_KINDS`].
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(ModelErrorKind::$variant => $name),+
+                }
+            }
+        }
+
+        /// The `kind` names of [`ModelError`], one per variant, snake_case, in declaration
+        /// order. This is the closed set the exec `Result` record's `model_error.kind` carries
+        /// (ADR 0044 §2b). The serializer writes [`ModelErrorKind::as_str`], and the docs
+        /// drift test and `docs/schema/check-fixtures.sh` read this same declaration.
+        pub const MODEL_ERROR_KINDS: &[&str] = &[$($name),+];
+    };
+}
+
+model_error_kinds! {
+    Transport => "transport",
+    Protocol => "protocol",
+    Unavailable => "unavailable",
+    UsageLimit => "usage_limit",
+    ContextOverflow => "context_overflow",
+    EmptyResponse => "empty_response",
+}
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ModelError {
@@ -287,16 +317,16 @@ impl ModelError {
         }
     }
 
-    /// The `Result.model_error.kind` name of this error (ADR 0044 §2b): one value of
-    /// [`MODEL_ERROR_KINDS`], snake_case.
-    pub fn kind(&self) -> &'static str {
+    /// The [`ModelErrorKind`] of this error (ADR 0044 §2b); its wire name is
+    /// [`ModelErrorKind::as_str`], one value of [`MODEL_ERROR_KINDS`].
+    pub fn kind(&self) -> ModelErrorKind {
         match self {
-            ModelError::Transport(_) => "transport",
-            ModelError::Protocol(_) => "protocol",
-            ModelError::Unavailable { .. } => "unavailable",
-            ModelError::UsageLimit { .. } => "usage_limit",
-            ModelError::ContextOverflow(_) => "context_overflow",
-            ModelError::EmptyResponse => "empty_response",
+            ModelError::Transport(_) => ModelErrorKind::Transport,
+            ModelError::Protocol(_) => ModelErrorKind::Protocol,
+            ModelError::Unavailable { .. } => ModelErrorKind::Unavailable,
+            ModelError::UsageLimit { .. } => ModelErrorKind::UsageLimit,
+            ModelError::ContextOverflow(_) => ModelErrorKind::ContextOverflow,
+            ModelError::EmptyResponse => ModelErrorKind::EmptyResponse,
         }
     }
 
@@ -419,36 +449,58 @@ mod tests {
     }
 
     /// The `Result.model_error.kind` set is closed, one snake_case name per variant. The
-    /// serializer and the docs drift test read this same list (ADR 0044 §2b). Mutation: a
-    /// variant missing from the list, or `kind()` naming a value outside it → this fails.
+    /// serializer and the docs drift test read the same declaration (ADR 0044 §2b), and each
+    /// variant's own name is pinned so a swapped arm cannot pass. Mutation: a variant missing
+    /// from the declaration, a renamed name, or two variants sharing a name → this fails.
     #[test]
     fn every_model_error_kind_is_in_the_closed_list() {
-        let errors = [
-            ModelError::Transport("network down".into()),
-            ModelError::Protocol("HTTP 400".into()),
-            ModelError::Unavailable {
-                message: "HTTP 429".into(),
-                retry_after: None,
-                status: Some(429),
-            },
-            ModelError::UsageLimit {
-                message: "HTTP 429".into(),
-                resets_in: None,
-            },
-            ModelError::ContextOverflow("HTTP 400".into()),
-            ModelError::EmptyResponse,
+        // Each variant names its own declared value; the names themselves exist only in the
+        // `model_error_kinds!` declaration.
+        let named = [
+            (ModelError::Transport("network down".into()), "transport"),
+            (ModelError::Protocol("HTTP 400".into()), "protocol"),
+            (
+                ModelError::Unavailable {
+                    message: "HTTP 429".into(),
+                    retry_after: None,
+                    status: Some(429),
+                },
+                "unavailable",
+            ),
+            (
+                ModelError::UsageLimit {
+                    message: "HTTP 429".into(),
+                    resets_in: None,
+                },
+                "usage_limit",
+            ),
+            (
+                ModelError::ContextOverflow("HTTP 400".into()),
+                "context_overflow",
+            ),
+            (ModelError::EmptyResponse, "empty_response"),
         ];
-        let mut named: Vec<&str> = errors.iter().map(ModelError::kind).collect();
-        named.sort_unstable();
-        let mut listed = MODEL_ERROR_KINDS.to_vec();
-        listed.sort_unstable();
-        assert_eq!(named, listed, "every variant has one name in the list");
-        for kind in MODEL_ERROR_KINDS {
+        for (error, expected) in named {
+            assert_eq!(error.kind().as_str(), expected, "kind for {error}");
+        }
+        // The generated enum, its names and the const list are one declaration: same length,
+        // same order, same names.
+        assert_eq!(ModelErrorKind::ALL.len(), MODEL_ERROR_KINDS.len());
+        for (kind, name) in ModelErrorKind::ALL.iter().zip(MODEL_ERROR_KINDS) {
+            assert_eq!(kind.as_str(), *name, "{kind:?} names {name:?}");
             assert!(
-                kind.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
-                "{kind:?} is not snake_case"
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name:?} is not snake_case"
             );
         }
+        let mut unique = MODEL_ERROR_KINDS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            MODEL_ERROR_KINDS.len(),
+            "every kind has its own name"
+        );
     }
 
     /// Only a provider that sent `Retry-After` can ask for a specific wait.

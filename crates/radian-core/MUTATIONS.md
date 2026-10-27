@@ -25,3 +25,13 @@ catching test binary was run, and the source was restored from a `cp` under
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0184-M1 | `UsageLimit` made transient (`is_transient` lists it in the `true` arm) | ✅ 1 failed | `tests/retry.rs::a_usage_limit_error_is_never_retried` (the turn sent four requests instead of one and announced a retry) |
+
+## Rework 2: the kind list is declared once (TK0184, 2026-10-27)
+
+Branch `work/TK0184-exec-result-model-error`. `model_error_kinds!` generates `ModelErrorKind`,
+`as_str()` and `MODEL_ERROR_KINDS` together. The mutation renamed one declared wire name in that
+one declaration; the source was restored from `.radian/mut-backup/model.rs` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0184-M5 | rename one declared kind (`UsageLimit => "usageLimit"`) | ✅ 2 failed | `model::tests::every_model_error_kind_is_in_the_closed_list` (the variant's pinned name differs, and `usageLimit` is not snake_case) and `bash docs/schema/check-fixtures.sh` (`exec-result.jsonl` line 3: `model_error.kind 'usage_limit'` is not in the closed set parsed from the same declaration) |

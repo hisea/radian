@@ -927,11 +927,33 @@ RESULT_FIELDS = {
 }
 RESULT_OPTIONAL_FIELDS = {"model_error"}
 RESULT_MODEL_ERROR_FIELDS = {"kind", "status", "retry_after_secs"}
-# ADR 0044 §2b 的 closed set，与 `radian_core::MODEL_ERROR_KINDS` 一致。
-RESULT_MODEL_ERROR_KINDS = {
-    "transport", "protocol", "unavailable", "usage_limit",
-    "context_overflow", "empty_response",
-}
+
+
+def model_error_kinds():
+    """ADR 0044 §2b 的 closed set，从它的唯一声明处读取。
+
+    `model_error_kinds!`（crates/radian-core/src/model.rs）同时生成 `ModelErrorKind`、
+    `as_str()` 与 `MODEL_ERROR_KINDS`，exec 序列化器写的就是它；这里解析同一段声明，而不是
+    再抄一份字面量集合，所以新增或改名一个 variant 不会让两边悄悄漂移。
+    """
+    path = "../../crates/radian-core/src/model.rs"
+    source = open(path, encoding="utf-8").read()
+    marker = "model_error_kinds! {"
+    start = source.find(marker)
+    if start < 0:
+        raise Corruption(f"{path}: model_error_kinds! 声明未找到")
+    body_start = start + len(marker)
+    end = source.find("\n}", body_start)
+    if end < 0:
+        raise Corruption(f"{path}: model_error_kinds! 声明未闭合")
+    names = re.findall(r'=>\s*"([a-z_]+)"', source[body_start:end])
+    if not names:
+        raise Corruption(f"{path}: model_error_kinds! 没有名字")
+    return set(names)
+
+
+# ADR 0044 §2b 的 closed set：与 `radian_core` 的序列化器读同一份声明。
+RESULT_MODEL_ERROR_KINDS = model_error_kinds()
 RESULT_OUTCOMES = {
     "completed", "refused", "budget_exceeded", "failed",
     "poisoned", "incomplete", "cancelled", "unknown",
