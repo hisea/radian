@@ -25,8 +25,9 @@
 //!    to judge liveness (decision 7.9);
 //! 5. after the child exits, compare the repository's git control files with the record taken
 //!    before the child started, restore them on a change, and fail the attempt (decision 7);
-//!    then read the `Result` line and the exit code, read `head_sha`, list uncommitted and
-//!    untracked files, and run the delivery checks;
+//!    when the flow sets `commit_dirty` and the outcome is `completed`, commit a worktree the
+//!    worker left dirty (decision 8); then read the `Result` line and the exit code, read
+//!    `head_sha`, list uncommitted and untracked files, and run the delivery checks;
 //! 6. push `work/<task>` only when the outcome is `completed`, the git control files are
 //!    unchanged, and every check passed, then verify the remote ref with `ls-remote`;
 //! 7. print one `AttemptFinished` JSON line as its last stdout line and exit with the
@@ -89,6 +90,10 @@ pub struct Options {
     /// decision 8). The claim resolves this to the task's effective `allow_noop`: its own
     /// value when its file carries one, else its flow's `flows.<name>.allow_noop`.
     pub allow_noop: bool,
+    /// Commit what a `completed` worker left uncommitted or untracked before the delivery
+    /// check (ADR 0048 decision 8). The claim passes its flow's `flows.<name>.commit_dirty`;
+    /// `false` keeps the rule that a dirty worktree fails the attempt.
+    pub commit_dirty: bool,
     /// The remote the wrapper fetches the main branch from and pushes `work/<task>` to.
     /// Internal: `arc` sets it from the repository configuration (default `origin`); a
     /// person does not.
@@ -630,6 +635,14 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         }
         ControlCheck::Changed(change) => Some(change.reason()),
     };
+
+    // `flows.<name>.commit_dirty` (ADR 0048 decision 8): after the control-file check and
+    // before the delivery check, a `completed` worker's dirty worktree is committed on the
+    // branch. A changed control file already gave the attempt its reason, and a failed or
+    // cancelled worker's changes stay uncommitted.
+    if failure.is_none() && outcome == "completed" && o.commit_dirty {
+        commit_dirty(o, s, result.as_ref(), &mut notes)?;
+    }
 
     let head_sha = match git(&s.worktree, &["rev-parse", "HEAD"], &s.clock) {
         Ok(sha) => Some(sha.trim().to_owned()).filter(|sha| !sha.is_empty()),
@@ -3192,6 +3205,75 @@ fn dirty_paths(worktree: &Path, clock: &Clock) -> Result<Vec<String>, Failure> {
         .collect())
 }
 
+/// The longest first line of a `Result.text` the wrapper commits as its subject (ADR 0048
+/// decision 8).
+const COMMIT_SUBJECT_MAX_CHARS: usize = 72;
+
+/// `flows.<name>.commit_dirty`: commit what a `completed` worker left uncommitted or
+/// untracked, after the control-file check and before the delivery check (ADR 0048 decision
+/// 8). `git add -A` and `git commit` go through the crate's one git helper, with the identity
+/// the `merge-main` merge commit uses (`arc <arc@localhost>`). The attempt's notes gain
+/// `committed dirty worktree: <short sha>`.
+fn commit_dirty(
+    o: &Options,
+    s: &Setup,
+    result: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Result<(), Failure> {
+    if dirty_paths(&s.worktree, &s.clock)?.is_empty() {
+        return Ok(());
+    }
+    let subject = commit_subject(&o.task, result);
+    git(&s.worktree, &["add", "-A"], &s.clock)?;
+    git(
+        &s.worktree,
+        &[
+            "-c",
+            "user.name=arc",
+            "-c",
+            "user.email=arc@localhost",
+            "commit",
+            "-m",
+            &subject,
+        ],
+        &s.clock,
+    )?;
+    let sha = git(&s.worktree, &["rev-parse", "HEAD"], &s.clock)?;
+    let sha = sha.trim();
+    notes.push(format!(
+        "committed dirty worktree: {}",
+        &sha[..sha.len().min(7)]
+    ));
+    Ok(())
+}
+
+/// The wrapper's commit subject (ADR 0048 decision 8): the first paragraph of the worker's
+/// `Result.text`, trimmed, first line only, cut at a word boundary to at most 72 characters;
+/// `<task id>: worker changes` when the text is missing or empty.
+fn commit_subject(task: &str, result: Option<&Value>) -> String {
+    let text = result
+        .and_then(|value| value.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let first = text.trim().lines().next().unwrap_or_default().trim();
+    if first.is_empty() {
+        return format!("{task}: worker changes");
+    }
+    if first.chars().count() <= COMMIT_SUBJECT_MAX_CHARS {
+        return first.to_owned();
+    }
+    let cut: String = first.chars().take(COMMIT_SUBJECT_MAX_CHARS).collect();
+    // The 73rd character decides whether the cut ends on a word: a space there means the
+    // 72-character prefix is the whole word.
+    if first.chars().nth(COMMIT_SUBJECT_MAX_CHARS) == Some(' ') {
+        return cut.trim_end().to_owned();
+    }
+    match cut.rfind(' ') {
+        Some(index) => cut[..index].trim_end().to_owned(),
+        None => cut,
+    }
+}
+
 fn push(repo: &Path, remote: &str, branch: &str, clock: &Clock) -> Result<(), Failure> {
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     let out = git_remote_raw(repo, &["push", remote, &refspec], clock)?;
@@ -3475,6 +3557,53 @@ mod tests {
             "an earlier attempt that never reached the model left nothing to resume"
         );
         assert_eq!(session_start(true, true), SessionStart::Continue);
+    }
+
+    /// The wrapper's commit subject is the first paragraph's first line of `Result.text`,
+    /// trimmed, cut at a word boundary to 72 characters, else `<task>: worker changes`
+    /// (ADR 0048 decision 8).
+    #[test]
+    fn the_commit_subject_is_the_first_line_of_the_result_text_or_the_task() {
+        let text = |value: &str| json!({"type": "Result", "outcome": "completed", "text": value});
+        assert_eq!(
+            commit_subject("TK0001-a", Some(&text("  Add the image\n\nmore  "))),
+            "Add the image"
+        );
+        assert_eq!(
+            commit_subject("TK0001-a", Some(&text("   \n\nsecond"))),
+            "second"
+        );
+        assert_eq!(
+            commit_subject("TK0001-a", Some(&text(""))),
+            "TK0001-a: worker changes"
+        );
+        assert_eq!(commit_subject("TK0001-a", None), "TK0001-a: worker changes");
+        assert_eq!(
+            commit_subject(
+                "TK0001-a",
+                Some(&json!({"type": "Result", "outcome": "completed"}))
+            ),
+            "TK0001-a: worker changes",
+            "a Result without text uses the task line"
+        );
+
+        let long = "Add the image asset to the gallery and update every reference that names it";
+        let subject = commit_subject("TK0001-a", Some(&text(long)));
+        assert!(subject.chars().count() <= 72, "{subject}");
+        assert_eq!(
+            subject,
+            "Add the image asset to the gallery and update every reference that names"
+        );
+        assert!(
+            !subject.ends_with(' '),
+            "the cut leaves no trailing space: {subject:?}"
+        );
+        let unbroken = "x".repeat(100);
+        assert_eq!(
+            commit_subject("TK0001-a", Some(&text(&unbroken))),
+            "x".repeat(72),
+            "a line with no space is cut at the limit"
+        );
     }
 
     /// The brief's sections keep their order, the footer last, and a missing one takes no

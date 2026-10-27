@@ -535,6 +535,10 @@ enum ArcCommand {
         /// Let a branch with no change past the base pass the delivery check.
         #[arg(long, hide = true)]
         allow_noop: bool,
+        /// Commit what a completed worker left uncommitted or untracked before the delivery
+        /// check (the task's flow `flows.<name>.commit_dirty`).
+        #[arg(long, hide = true)]
+        commit_dirty: bool,
         /// Internal: the remote to fetch the main branch from and push to. arc sets it from
         /// the repository configuration; a person does not. Not in the manual.
         #[arg(long, value_name = "NAME", hide = true)]
@@ -850,6 +854,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
             session,
             resume,
             allow_noop,
+            commit_dirty,
             remote,
             main_branch,
             extra,
@@ -881,6 +886,7 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 session,
                 resume,
                 allow_noop,
+                commit_dirty,
                 remote,
                 main_branch,
                 extra_args: extra,

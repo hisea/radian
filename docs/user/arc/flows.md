@@ -4,7 +4,7 @@ description: What an arc flow is: the two-flow example, how a task picks one, th
 
 # arc: flows
 
-A **flow** is one named bundle of the settings a task's route needs: which worker runs its attempts, which gate profile verifies the result, how many of its tasks may run at once, and the default `allow_noop`.
+A **flow** is one named bundle of the settings a task's route needs: which worker runs its attempts, which gate profile verifies the result, how many of its tasks may run at once, and its defaults for `allow_noop` and `commit_dirty`.
 It is not a new worker kind and not a new state machine: every flow's worker is `radian exec` with its own arguments, or one program of its own ([the worker](worker.md)), and the claim, the delivery check, the gate, the merge and the ledger are the same for every flow.
 One repository can hold several flows, so coding, image and writing tasks can share one plan: a plan knows nothing about flows, and `after` may join tasks of different flows.
 
@@ -39,10 +39,11 @@ exec_args = ["--model", "coding-model"]
 concurrency = 1
 gate_profile = "image-review"
 command = ["/usr/local/bin/image-worker", "--assets", "art"]
+commit_dirty = true
 ```
 
 - `code` starts `radian exec` with `--model coding-model` on every attempt, and its gate runs the `code-check` profile: one `commands` stage on the gate's own checkout.
-- `image` starts `/usr/local/bin/image-worker` instead of `radian exec`, and its gate runs `image-review`: a `review` session, then the task stops at `review.awaiting_human` until you merge or reject it. A command worker receives the brief on standard input and writes its `Result` to standard output; [another agent as the worker](worker.md#another-agent-as-the-worker) gives the contract.
+- `image` starts `/usr/local/bin/image-worker` instead of `radian exec`, and its gate runs `image-review`: a `review` session, then the task stops at `review.awaiting_human` until you merge or reject it. A command worker receives the brief on standard input and writes its `Result` to standard output; [another agent as the worker](worker.md#another-agent-as-the-worker) gives the contract. Its `commit_dirty = true` lets the wrapper commit what the worker leaves uncommitted, so the worker may write its files and print a `completed` `Result` without running git itself.
 - `[limits] concurrency = 2` lets two attempts run in the repository, and each flow's `concurrency = 1` lets one `code` and one `image` attempt run at the same time.
 
 Every key's type, default, allowed values and effect time is in the [`flows.<name>.*` rows](files.md#configtoml).
@@ -61,7 +62,8 @@ The flow's settings reach the attempt at different moments, each stated in its o
 
 - the worker (`command` or `exec_args`) is chosen at the claim and recorded in the attempt's `start.json`, so a `config.toml` change takes effect at the next claim;
 - the gate's profile is resolved when the gate is planned, and the attempt's `profile.json` records the profile the verification ran under, so a later merge is approved and integrated by that profile;
-- `allow_noop` is read at the claim of each attempt, when the delivery check runs.
+- `allow_noop` is read at the claim of each attempt, when the delivery check runs;
+- `commit_dirty` is read at the same claim: when it is `true`, a `completed` worker's uncommitted or untracked changes are committed on the branch before that attempt's delivery check.
 
 ## The two concurrency limits
 

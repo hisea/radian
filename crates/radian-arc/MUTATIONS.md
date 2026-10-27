@@ -1512,3 +1512,20 @@ pins both the lock check and the count. The test also passed 50 of 50 runs under
 processes on a 10-core host), as did
 `run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died`.
 
+## TK0201: a flow's `commit_dirty` commits a completed worker's dirty worktree (2026-10-27, branch `work/TK0201-arc-flow-commit-dirty`)
+
+`flows.<name>.commit_dirty` makes the wrapper commit what a `completed` worker left
+uncommitted or untracked, after the git control-file check and before the delivery check
+(ADR 0048 decision 8). Each mutation was applied by hand to
+`crates/radian-arc/src/work/mod.rs`, the binary rebuilt with `cargo build -p radian-tui --bin
+radian` (the integration tests refuse one older than its sources), the suite ran with `cargo
+nextest run -p radian-arc --locked --profile sandbox --test commit_dirty --no-fail-fast`, and
+the file was restored from `.radian/mut/mod.rs.orig` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0201-M1 | the commit step never runs, even when the key is true (`if false && failure.is_none() && outcome == "completed" && o.commit_dirty`) | `commit_dirty::a_dirty_worktree_is_committed_with_the_result_text_as_its_subject`, `commit_dirty::an_empty_result_text_uses_the_task_subject` (the attempt fails `uncommitted or untracked files: image.txt`) | ✅ 2 failed |
+| TK0201-M2 | the commit runs before the control-file check (the block moved above `let mut failure = match control.check()`) | `commit_dirty::a_changed_control_file_fails_before_any_commit` (the branch tip moved past main, so a commit was made) | ✅ 1 failed |
+
+2/2 caught.
+
