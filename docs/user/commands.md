@@ -54,6 +54,10 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 | `/yolo` | `/yolo on\|off` | Alias of `/auto` with the same two words. |
 | `/access` | `/access [workspace\|full]` | With no argument, show the current tier and where it came from. With a name, switch tiers. The switch takes effect at the next tool call, and `full` asks for confirmation first because it removes the sandbox. Applies at once. Example: `/access workspace`. |
 
+A `/model` switch is refused when the target route's adapter reserves a key
+`RADIAN_EXTRA_BODY` sets; the session keeps its current model and route (see
+[`environment`](environment.md) for the per-route keys and the exact line).
+
 ## Trust
 
 | Command | Syntax | What it does |

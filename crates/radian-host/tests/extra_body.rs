@@ -175,13 +175,29 @@ async fn a_request_setting_wins_over_the_extra_body_and_the_warning_names_the_ke
     );
 }
 
-/// The parser's startup rules: a reserved key and a non-object are refusals naming the
-/// variable; unset changes nothing.
+/// ADR 0026 D13: reserved keys are checked per route, not as a union. A chat route accepts
+/// `max_tokens` (its builder inserts the catalog cap only when the body has none); the
+/// Anthropic route reserves it. A non-object is still a parser refusal.
 #[test]
-fn reserved_keys_and_non_objects_are_refused() {
-    let error = parse_extra_body(Some(r#"{"messages":[]}"#.to_owned())).expect_err("reserved");
-    assert!(error.contains("RADIAN_EXTRA_BODY"), "{error}");
-    assert!(error.contains("messages"), "{error}");
+fn reserved_keys_are_checked_per_adapter_and_non_objects_are_refused() {
+    let extra = parsed(r#"{"max_tokens":32000}"#);
+    assert!(extra.refused_keys(Provider::OpenAiCompatible).is_empty());
+    assert!(extra.refused_keys(Provider::ChatGpt).is_empty());
+    assert_eq!(extra.refused_keys(Provider::Anthropic), vec!["max_tokens"]);
+    let line = extra
+        .refusal_for(Provider::Anthropic)
+        .expect("the Anthropic route refuses the key");
+    assert!(line.contains("RADIAN_EXTRA_BODY"), "{line}");
+    assert!(line.contains("max_tokens"), "{line}");
+
+    // `messages` is reserved by chat and Anthropic, but not by Responses.
+    let extra = parsed(r#"{"messages":[]}"#);
+    assert_eq!(
+        extra.refused_keys(Provider::OpenAiCompatible),
+        vec!["messages"]
+    );
+    assert_eq!(extra.refused_keys(Provider::Anthropic), vec!["messages"]);
+    assert!(extra.refused_keys(Provider::ChatGpt).is_empty());
 
     let error = parse_extra_body(Some("[1]".to_owned())).expect_err("non-object");
     assert!(error.contains("RADIAN_EXTRA_BODY"), "{error}");
@@ -192,4 +208,58 @@ fn reserved_keys_and_non_objects_are_refused() {
         parse_extra_body(Some(String::new())).expect("empty is fine"),
         None
     );
+}
+
+/// ADR 0026 D13: the switch check resolves the target route's adapter and consults only that
+/// adapter. A chat-to-chat switch with the same body is allowed; a chat-to-Anthropic switch
+/// with `max_tokens` is refused.
+#[test]
+fn a_switch_between_chat_routes_is_allowed_and_a_switch_to_anthropic_is_refused() {
+    let extra = parsed(r#"{"max_tokens":32000}"#);
+    let providers = std::collections::BTreeMap::new();
+    let chat = radian_host::route_adapter_for("openai-compatible", "m", &providers)
+        .expect("the generic descriptor resolves");
+    assert_eq!(chat, Provider::OpenAiCompatible);
+    assert_eq!(extra.refusal_for(chat), None, "chat accepts max_tokens");
+
+    let anthropic = radian_host::route_adapter_for("anthropic", "claude-x", &providers)
+        .expect("the anthropic descriptor resolves");
+    assert_eq!(anthropic, Provider::Anthropic);
+    let line = extra
+        .refusal_for(anthropic)
+        .expect("the switch to Anthropic is refused");
+    assert!(line.contains("RADIAN_EXTRA_BODY"), "{line}");
+    assert!(line.contains("max_tokens"), "{line}");
+}
+
+/// ADR 0026 D13: an explicit `max_tokens` in the body wins over the catalog-derived cap, so
+/// a chat route sends the user's number rather than overwriting it.
+#[tokio::test]
+async fn a_chat_route_sends_an_explicit_max_tokens_over_the_catalog_cap() {
+    let server = ChatServer::start(vec![ChatReply::sse(&[
+        chunk(json!({"role": "assistant", "content": "ok"}), None),
+        chunk(json!({}), Some("stop")),
+    ])])
+    .await;
+    let model = build_model(ModelArgs {
+        extra_body: fields(&parsed(r#"{"max_tokens":32000}"#)),
+        provider: Provider::OpenAiCompatible,
+        base_url: server.base_url.clone(),
+        model: "mock".to_owned(),
+        api_key: Some("sk-test".to_owned()),
+        headers: Vec::new(),
+        include_usage: None,
+        max_tokens: 1024,
+        thinking: Thinking::Off,
+        reasoning_effort: None,
+        reasoning_replay: None,
+        // The catalog cap the adapter would insert when the body has none.
+        max_output_tokens: Some(4096),
+        chatgpt_oauth: false,
+    })
+    .expect("the chat model builds");
+    complete(&model, request(vec![Message::user("hi")])).await;
+
+    let body = server.requests()[0].json();
+    assert_eq!(body["max_tokens"], json!(32000), "{body}");
 }

@@ -1597,6 +1597,7 @@ fn run_one_session(
         model,
         budget_for,
         route_price,
+        extra_body,
     } = run_resolve::resolve_window_and_route(
         cli,
         config,
@@ -1707,6 +1708,7 @@ fn run_one_session(
             model,
             budget_for,
             route_price: route_price.clone(),
+            extra_body: extra_body.clone(),
         },
         dir,
         workspace_path,
@@ -1809,6 +1811,7 @@ fn run_one_session(
         &provider_name,
         &model_name,
         &route_price,
+        extra_body,
         bash_sandbox,
         usage_gate,
         chatgpt_usage_gate,

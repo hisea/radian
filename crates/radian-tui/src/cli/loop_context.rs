@@ -14,6 +14,9 @@ pub(super) struct LoopContext<'a> {
     /// The config's `[providers.<name>]` declarations (ADR 0026 D10), for `/model`'s provider
     /// completion.
     pub(super) config_providers: std::collections::BTreeMap<String, radian_host::ProviderDecl>,
+    /// The parsed `RADIAN_EXTRA_BODY` (ADR 0026 D13), for the `/model` switch check: a route
+    /// whose adapter reserves a key the body sets is refused before the switch is queued.
+    pub(super) extra_body: Option<radian_host::ExtraBody>,
     /// The applied thinking level (ADR 0026 D11), kept in step with the app, for `/thinking`'s
     /// current-value marker.
     pub(super) current_thinking: String,
@@ -708,6 +711,23 @@ impl LoopContext<'_> {
                 Ok(())
             }
             Effect::ModelSwitch { provider, model } => {
+                // ADR 0026 D13: reserved keys are checked **per route**, against the route the
+                // switch would build. A route whose adapter reserves a key the body sets is
+                // refused here, before anything is queued, so the session keeps its current
+                // model and route; the key is never dropped silently. A name that does not
+                // resolve has no adapter to check and fails later with its own error.
+                if let Some(extra) = &self.extra_body
+                    && let Some(adapter) =
+                        radian_host::route_adapter_for(&provider, &model, &self.config_providers)
+                    && let Some(refusal) = extra.refusal_for(adapter)
+                {
+                    self.send(AppInput::CommandRefused(radian_host::CommandRefused {
+                        command: format!("/model {provider}/{model}"),
+                        reason: refusal,
+                        capability: None,
+                    }));
+                    return Ok(());
+                }
                 // D6: the target needs a credential. `resolve_key` reads `auth.json` (file I/O,
                 // fine in the loop): without one the switch dies here with the `/login` hint.
                 // `resolve_key` only resolves an `api_key` entry; `chatgpt`'s login is an `oauth`
@@ -1332,6 +1352,7 @@ mod tests {
             startup_route: ("p".to_owned(), "m".to_owned()),
             route_price: Arc::new(|_: &str, _: &str| None),
             config_providers: Default::default(),
+            extra_body: None,
             current_thinking: String::new(),
             current_theme: None,
             thinking_max_tokens: 0,
@@ -1433,6 +1454,7 @@ mod tests {
             startup_route: ("p".to_owned(), "m".to_owned()),
             route_price: Arc::new(|_: &str, _: &str| None),
             config_providers: Default::default(),
+            extra_body: None,
             current_thinking: String::new(),
             current_theme: None,
             thinking_max_tokens: 0,
@@ -1547,6 +1569,7 @@ mod tests {
             startup_route: ("p".to_owned(), "m".to_owned()),
             route_price: Arc::new(|_: &str, _: &str| None),
             config_providers: Default::default(),
+            extra_body: None,
             current_thinking: String::new(),
             current_theme: None,
             thinking_max_tokens: 0,
@@ -1665,6 +1688,7 @@ mod tests {
             startup_route: ("p".to_owned(), "m".to_owned()),
             route_price: Arc::new(|_: &str, _: &str| None),
             config_providers: Default::default(),
+            extra_body: None,
             current_thinking: String::new(),
             current_theme: None,
             thinking_max_tokens: 0,
@@ -1737,5 +1761,99 @@ mod tests {
             trusted_at_start, "",
             "a trusted-at-start session must carry none"
         );
+    }
+
+    /// ADR 0026 D13: a `/model` switch to a route whose adapter reserves a key the extra body
+    /// sets is refused before anything is queued, so the session keeps its current model and
+    /// route. The facade is `NeverFacade`: reaching the budget or projection lookup would
+    /// panic, which proves the refusal runs first. Removing the switch check makes this test
+    /// fall through to that panic instead of the expected refusal.
+    #[test]
+    fn a_model_switch_to_a_route_that_reserves_an_extra_body_key_is_refused() {
+        let dir = std::env::temp_dir().join(format!("radian-loop-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let journal = Arc::new(
+            radian_session::SessionJournal::create(
+                dir.join("s.jsonl"),
+                "sid",
+                radian_session::SessionCreatedData::new("/work/example", serde_json::json!({})),
+            )
+            .unwrap(),
+        );
+        let host = SessionHost {
+            dir: dir.clone(),
+            workspace: ws.to_string_lossy().into_owned(),
+            session_id: "sid".to_owned(),
+            secrets: Arc::new(std::sync::RwLock::new(Vec::new())),
+            journal,
+            config_snapshot: serde_json::json!({}),
+            theme_colors: Vec::new(),
+            theme_write_path: None,
+            config_read_only: false,
+            started_without_model: false,
+        };
+        let facade: Arc<dyn radian_host::SessionFacade> = Arc::new(NeverFacade { hardening: true });
+        let queue = radian_host::SessionQueue::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let app = crate::app::App::new("m", "s");
+        let extra_body = radian_host::parse_extra_body(Some(r#"{"max_tokens":32000}"#.into()))
+            .expect("valid JSON")
+            .expect("a non-empty object");
+        let mut ctx = LoopContext {
+            startup_route: ("openai-compatible".to_owned(), "m".to_owned()),
+            route_price: Arc::new(|_: &str, _: &str| None),
+            config_providers: Default::default(),
+            extra_body: Some(extra_body),
+            current_thinking: String::new(),
+            current_theme: None,
+            thinking_max_tokens: 0,
+            workspace: &ws,
+            runtime: &rt,
+            session: &facade,
+            memory: &None,
+            host: &host,
+            tx: &tx,
+            queue: &queue,
+            signal: None,
+            clipboard: app.clipboard,
+            clipboard_reader: Arc::clone(&app.clipboard_reader),
+            bell_rang: false,
+            herdr: None,
+            bash_sandbox: None,
+            bash_cancel: None,
+            side_cancel: None,
+            usage_gate: None,
+            chatgpt_usage_gate: None,
+            model_writeback_done: false,
+            command_hooks: None,
+        };
+        ctx.execute(Effect::ModelSwitch {
+            provider: "anthropic".to_owned(),
+            model: "claude-x".to_owned(),
+        })
+        .expect("the effect runs");
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(UiEvent::Command(AppInput::CommandRefused(refused))) => {
+                assert_eq!(refused.command, "/model anthropic/claude-x");
+                assert!(
+                    refused.reason.contains("RADIAN_EXTRA_BODY"),
+                    "{}",
+                    refused.reason
+                );
+                assert!(refused.reason.contains("max_tokens"), "{}", refused.reason);
+            }
+            _ => panic!("expected the reserved-key refusal, got another event"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no second event (no ModelChecked) follows a refusal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -138,7 +138,9 @@ pub use diagnostics::{
     diagnostics_dir, is_diagnostic_file, job_notice_log_name, now_millis, panic_log_name,
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
-pub use extra_body::{EXTRA_BODY_ENV, ExtraBody, parse_extra_body, read_extra_body, reserved_keys};
+pub use extra_body::{
+    EXTRA_BODY_ENV, ExtraBody, parse_extra_body, read_extra_body, reserved_keys_for,
+};
 pub use headers::{
     CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
     take_child_headers_from_env,
@@ -166,7 +168,7 @@ pub use model::{
     HostModel, MIN_THINKING_BUDGET, ModelArgs, Provider, RouteContext, SwitchableModel, Thinking,
     build_model, check_provider_flags, compaction_settings_for, compaction_settings_for_route,
     redact_base_url, resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref,
-    route_replays_reasoning,
+    route_adapter_for, route_replays_reasoning,
 };
 pub use oauth_chatgpt::{
     BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,

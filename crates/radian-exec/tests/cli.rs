@@ -10139,3 +10139,38 @@ async fn a_bad_extra_body_stops_startup_with_the_named_error() {
         assert!(stderr.contains(needle), "{value}: {stderr}");
     }
 }
+
+/// ADR 0026 D13: reserved keys are checked per route. A chat route accepts `max_tokens` and
+/// the captured request carries it; the Anthropic route reserves it, so the same value stops
+/// startup with exit 2 and a line naming the variable and the key.
+#[tokio::test]
+async fn the_extra_body_max_tokens_is_allowed_on_a_chat_route_and_refused_on_anthropic() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("RADIAN_EXTRA_BODY", r#"{"max_tokens":32000}"#)],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "ok\n");
+    let body = server.requests()[0].json();
+    assert_eq!(body["max_tokens"], 32000, "{body}");
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "claude-x", "--provider", "anthropic", "-p", "hi"],
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-test-key"),
+                ("RADIAN_EXTRA_BODY", r#"{"max_tokens":32000}"#),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("RADIAN_EXTRA_BODY"), "{stderr}");
+    assert!(stderr.contains("max_tokens"), "{stderr}");
+}
