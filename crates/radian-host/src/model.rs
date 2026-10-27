@@ -507,25 +507,70 @@ pub fn route_replays_reasoning(
     }
 }
 
-/// The adapter a route resolves to, by provider **name** (ADR 0026 D10): the config's
-/// declarations, then the `auth.json` entry's env, then the catalog's protocol, else the
-/// descriptor table. `None` when the name resolves to no provider. Used to check
-/// `RADIAN_EXTRA_BODY`'s reserved keys against the route a switch would build (ADR 0026 D13).
+/// A route name resolved by [`resolve_route_name`] (ADR 0026 D10): the provider the name
+/// names, the auth entry's `env` it came with, and the model's protocol.
+struct ResolvedRouteName {
+    provider_ref: crate::ProviderRef,
+    auth_env: Option<std::collections::BTreeMap<String, String>>,
+    protocol: crate::Protocol,
+}
+
+/// What a model whose catalog `npm` Radian cannot speak does (ADR 0026): the switch builder
+/// must refuse it, while a budget or reserved-key query has no protocol to use and falls back
+/// to the built-in table.
+#[derive(Clone, Copy)]
+enum UnsupportedProtocol {
+    Refuse,
+    BuiltInTable,
+}
+
+/// The one spelling of a route name's lookup (ADR 0026 D10): the auth entry's env, then the
+/// provider (the config's declarations, that env, the descriptor table), then the model's
+/// protocol (the catalog, else the table). [`RouteContext::args_for`],
+/// [`RouteContext::output_for`] and [`route_adapter_for`] all resolve a route through it, so a
+/// future protocol change lands in one place.
+fn resolve_route_name(
+    provider_name: &str,
+    model: &str,
+    providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
+    unsupported: UnsupportedProtocol,
+) -> Result<ResolvedRouteName, String> {
+    let auth_env = crate::AuthStore::open()
+        .ok()
+        .and_then(|store| store.entry_env(provider_name));
+    let (provider_ref, _warning) =
+        crate::resolve_provider(provider_name, providers, auth_env.as_ref())?;
+    let catalog = crate::protocol_catalog();
+    let protocol = match provider_ref.resolve_protocol(Some(&catalog), model) {
+        Ok(protocol) => protocol,
+        Err(error) => match unsupported {
+            UnsupportedProtocol::Refuse => return Err(error),
+            UnsupportedProtocol::BuiltInTable => provider_ref.protocol_for(model),
+        },
+    };
+    Ok(ResolvedRouteName {
+        provider_ref,
+        auth_env,
+        protocol,
+    })
+}
+
+/// The adapter a route resolves to, by provider **name** (ADR 0026 D10). `None` when the name
+/// resolves to no provider. Used to check `RADIAN_EXTRA_BODY`'s reserved keys against the
+/// route a switch would build (ADR 0026 D13).
 pub fn route_adapter_for(
     provider_name: &str,
     model: &str,
     providers: &std::collections::BTreeMap<String, crate::ProviderDecl>,
 ) -> Option<Provider> {
-    let auth_env = crate::AuthStore::open()
-        .ok()
-        .and_then(|store| store.entry_env(provider_name));
-    let (provider_ref, _) =
-        crate::resolve_provider(provider_name, providers, auth_env.as_ref()).ok()?;
-    let catalog = crate::protocol_catalog();
-    let protocol = provider_ref
-        .resolve_protocol(Some(&catalog), model)
-        .unwrap_or_else(|_| provider_ref.protocol_for(model));
-    Some(protocol.adapter())
+    resolve_route_name(
+        provider_name,
+        model,
+        providers,
+        UnsupportedProtocol::BuiltInTable,
+    )
+    .ok()
+    .map(|route| route.protocol.adapter())
 }
 
 /// Builds the provider adapter named by `args.provider`. The error is the same shape the
@@ -677,7 +722,8 @@ pub struct RouteContext {
     pub session_id: String,
     /// The user's own headers (generic-descriptor only, `{session_id}` already expanded).
     pub user_headers: Vec<(String, String)>,
-    /// Fields merged into every request body on every route (ADR 0026 D13).
+    /// Fields merged into every request body — on the startup route and on every later
+    /// `/model` route (ADR 0026 D13).
     pub extra_body: Map<String, Value>,
     pub include_usage: Option<bool>,
     pub max_tokens: u32,
@@ -699,12 +745,15 @@ impl RouteContext {
         api_key: Option<&str>,
     ) -> Result<ModelArgs, String> {
         // D10: the provider name resolves through the config's declarations and the auth
-        // entry's env, and the key lives under the **name**.
-        let auth_env = crate::AuthStore::open()
-            .ok()
-            .and_then(|store| store.entry_env(provider_name));
-        let (provider_ref, _warning) =
-            crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())?;
+        // entry's env, and the key lives under the **name**. A model the catalog maps to an
+        // npm Radian cannot speak is refused here, where a switch can still report it.
+        let resolved = resolve_route_name(
+            provider_name,
+            model,
+            &self.providers,
+            UnsupportedProtocol::Refuse,
+        )?;
+        let provider_ref = resolved.provider_ref;
         let credential = crate::auth::resolve_key(provider_name).map_err(|e| e.to_string())?;
         // `resolve_key` only ever resolves an `api_key` entry; `chatgpt`'s login is the oauth
         // entry slice ① wrote (ADR 0026), which has no single static key to
@@ -723,9 +772,10 @@ impl RouteContext {
         // ADR 0026: the wire protocol comes from the catalog (the cache,
         // else the bundled snapshot); a model the catalog does not carry uses the table.
         let catalog = crate::protocol_catalog();
-        let route = crate::resolve_route_for(
+        let route = crate::provider::resolve_route_with_protocol(
             &provider_ref,
             model,
+            resolved.protocol,
             None,
             auth_base_url,
             &self.user_headers,
@@ -782,26 +832,24 @@ impl RouteContext {
     /// query uses the route's own protocol and endpoint, so a cross-provider switch does not
     /// inherit the startup route's reservation.
     pub fn output_for(&self, provider_name: &str, model: &str) -> crate::RouteOutput {
-        let auth_env = crate::AuthStore::open()
-            .ok()
-            .and_then(|store| store.entry_env(provider_name));
-        let Ok((provider_ref, _)) =
-            crate::resolve_provider(provider_name, &self.providers, auth_env.as_ref())
-        else {
+        let Ok(route) = resolve_route_name(
+            provider_name,
+            model,
+            &self.providers,
+            UnsupportedProtocol::BuiltInTable,
+        ) else {
             return crate::RouteOutput::None;
         };
-        let catalog = crate::protocol_catalog();
-        let protocol = provider_ref
-            .resolve_protocol(Some(&catalog), model)
-            .unwrap_or_else(|_| provider_ref.protocol_for(model));
-        let auth_base_url = auth_env
+        let auth_base_url = route
+            .auth_env
             .as_ref()
             .and_then(|env| env.get(crate::RADIAN_BASE_URL))
             .map(String::as_str);
-        let base_url = provider_ref
-            .endpoint_for(protocol, auth_base_url)
+        let base_url = route
+            .provider_ref
+            .endpoint_for(route.protocol, auth_base_url)
             .unwrap_or_default();
-        crate::route_output(protocol.adapter(), &base_url, self.max_tokens)
+        crate::route_output(route.protocol.adapter(), &base_url, self.max_tokens)
     }
 }
 
