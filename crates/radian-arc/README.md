@@ -476,9 +476,10 @@ carries a digest of the shas, the config text and the remote main; a pass report
 record and starts no new gate while the digest is unchanged. A gate process that exits having
 written nothing leaves the `started` record: the pass rewrites it as `no_record` with those
 inputs, reports it in the summary and does not count the pass as changed, so a gate that fails
-at once is not started on every pass. One that wrote `running` and died is
-`background::count_death`'s business: the death goes up, and past `[limits] max_gate_deaths`
-the record becomes `died`, which behaves like `no_record`. A gate the loop stops itself (`stop`) is `interrupted`, and
+at once is not started on every pass. Every start whose gate is gone without a `done`,
+`refused` or `error` record is `background::count_death`'s business (a `running` record, or
+a `started` one with no digest): the death goes up, and past `[limits] max_gate_deaths` the
+record becomes `died`, which behaves like `no_record`. A gate the loop stops itself (`stop`) is `interrupted`, and
 the next pass starts it again without counting. It never changes the task's state; the pass
 holding `runner.lock` does that from the record.
 

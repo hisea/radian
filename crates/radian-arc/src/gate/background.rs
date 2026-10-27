@@ -134,7 +134,7 @@ pub struct Record {
     /// plan. A pass uses it to skip an unchanged refusal.
     pub inputs: Option<String>,
     /// How many starts of this attempt and these inputs have died: a gate that wrote
-    /// `running` and is gone, or a `started` record with no digest whose gate is gone
+    /// `running` and is gone, or a `started` record with no digest whose gate lock is free
     /// (ADR 0048 decision 10). A pass compares it with `[limits] max_gate_deaths`.
     pub deaths: u32,
     /// The profile a `done` verification planned, when the record carries one: a pass applies

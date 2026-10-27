@@ -3317,9 +3317,9 @@ pub fn rework_reason(store: &Store, task: &model::TaskFile) -> Option<String> {
     {
         parts.push(text.to_owned());
     }
-    // A gate that exited without a record, or one that died once too often after it wrote
-    // `running`: the pass recorded the fact in the gate record, and `show` reports the same
-    // text `radian arc run` prints (ADR 0048 decision 10).
+    // A gate that exited without a record, or a start that died once too often (a `started`
+    // record with no digest included): the pass recorded the fact in the gate record, and
+    // `show` reports the same text `radian arc run` prints (ADR 0048 decision 10).
     if parts.is_empty()
         && let Some(record) = crate::gate::background::read(store, &task.id)
         && record.kind == "verify"
