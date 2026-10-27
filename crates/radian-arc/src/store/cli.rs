@@ -642,6 +642,13 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             {
                 field(&mut out, "attempt_failure", &reason);
             }
+            // The model error a worker attempt waited on (ADR 0048 decision 9), as the review
+            // verdict records it.
+            if let Some(error) =
+                super::attempt_ops::attempt_model_error(store, &item.id, item.attempt)
+            {
+                field(&mut out, "attempt_model_error", &json_text(&error));
+            }
             field(&mut out, "token", &optional_text(item.token.as_deref()));
             field(&mut out, "cost_usd", &task_cost_text(item));
             field(
@@ -822,6 +829,12 @@ fn joined_items(items: &[crate::gate::ReviewItem]) -> String {
 
 fn optional_text(value: Option<&str>) -> String {
     value.unwrap_or("-").to_owned()
+}
+
+/// One JSON value on one line, for a field such as `attempt_model_error` whose value is an
+/// object (ADR 0048 decision 9).
+fn json_text(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned())
 }
 
 fn optional_number<T: std::fmt::Display>(value: Option<T>) -> String {
@@ -1326,6 +1339,14 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                             })
                             .flatten()
                     ),
+                );
+                object.insert(
+                    "attempt_model_error".to_owned(),
+                    json!(super::attempt_ops::attempt_model_error(
+                        store,
+                        &task.item.id,
+                        task.item.attempt
+                    )),
                 );
                 object.insert(
                     "gate_profile".to_owned(),

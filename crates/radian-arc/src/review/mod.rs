@@ -67,6 +67,10 @@ pub const AUTO_REVERIFY_REASONS: &[&str] = &["command_failed", "timeout"];
 pub const REVIEW_WAIT_BASE_SECS: u64 = 5 * 60;
 /// The longest backoff a run of `review_unavailable` waits reaches: 60 minutes.
 pub const REVIEW_WAIT_CAP_SECS: u64 = 60 * 60;
+/// The `model_error.kind` values that make a session wait on its model rather than retry:
+/// `unavailable` or `usage_limit` (ADR 0044 §2b). One list for the review stage's wait and a
+/// worker attempt's wait (ADR 0048 decision 9).
+pub const MODEL_WAIT_KINDS: &[&str] = &["unavailable", "usage_limit"];
 /// A `model_error.retry_after_secs` wait is at least this long (ADR 0048 decision 9).
 pub const REVIEW_RETRY_AFTER_MIN_SECS: u64 = 60;
 /// A `model_error.retry_after_secs` wait is at most this long: 6 hours.
@@ -1709,12 +1713,17 @@ fn review_retry_at(model_error: Option<&Value>, run: u32) -> String {
         .and_then(|error| error.get("retry_after_secs"))
         .and_then(Value::as_u64)
         .map(|secs| secs.clamp(REVIEW_RETRY_AFTER_MIN_SECS, REVIEW_RETRY_AFTER_MAX_SECS))
-        .unwrap_or_else(|| {
-            let exponent = run.saturating_sub(1).min(4);
-            (REVIEW_WAIT_BASE_SECS << exponent).min(REVIEW_WAIT_CAP_SECS)
-        });
+        .unwrap_or_else(|| wait_step_secs(run));
     let at = chrono::Utc::now() + chrono::Duration::seconds(seconds as i64);
     at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// The step of a run of model waits (ADR 0048 decision 9): 5 minutes for the first, doubled for
+/// each further one in a row, capped at 60 minutes. The review wait and the worker wait share
+/// this backoff; the minutes are in a `u64` shift, so the cap also bounds the shift.
+pub(crate) fn wait_step_secs(run: u32) -> u64 {
+    let exponent = run.saturating_sub(1).min(4);
+    (REVIEW_WAIT_BASE_SECS << exponent).min(REVIEW_WAIT_CAP_SECS)
 }
 
 /// The `rework_reason` of a `review_unavailable` wait (ADR 0048 decision 9): the model's kind,

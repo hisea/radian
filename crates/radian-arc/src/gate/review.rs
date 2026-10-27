@@ -670,7 +670,9 @@ fn unavailable_model_error(ran: &Ran) -> Option<&Value> {
     }
     let error = ran.result.as_ref()?.get("model_error")?;
     let kind = error.get("kind").and_then(Value::as_str)?;
-    matches!(kind, "unavailable" | "usage_limit").then_some(error)
+    crate::review::MODEL_WAIT_KINDS
+        .contains(&kind)
+        .then_some(error)
 }
 
 /// The cost a `Result` line reports, in micros of a US dollar.

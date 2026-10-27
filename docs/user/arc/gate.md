@@ -244,7 +244,7 @@ A scheduling pass reverifies the task by itself once `retry_at` has passed, the 
 
 `radian arc run` prints `<task> review model unavailable -> retry at <UTC time>` when the stage fails and `<task> review retry_at passed -> auto reverify` when it starts the reverify ([the loop's lines](loop.md#radian-arc-run)). `radian arc show` prints the reason as `rework_reason` and the wait as `retry_at`, and `radian arc list` ends the task line with `retry at <UTC time>`.
 
-A worker attempt that ends on an unavailable model keeps the ordinary worker retry rules; only the review stage waits on the model's window.
+A worker attempt that ends on an unavailable model waits like the review stage, and uses no retry (see [A worker wait on an unavailable model](#a-worker-wait-on-an-unavailable-model)).
 
 ## A gate for this repository
 
@@ -309,6 +309,21 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 | `wall_time` (the wrapper sent SIGTERM) | `wall_time` | retry |
 | `cancelled` by `radian arc cancel` | `cancel` | `failed.cancelled` (never retries) |
 | `reverify` (no worker: `radian arc reverify`) | `reverify` | `review.verifying`, verified at once |
+
+A worker attempt that ends on an unavailable model waits the same way the review stage does; see [A worker wait on an unavailable model](#a-worker-wait-on-an-unavailable-model).
+
+### A worker wait on an unavailable model
+
+A `radian exec` worker whose failed attempt's last `Result` carries `model_error.kind` `unavailable` or `usage_limit` did not fail on the request: the task waits on the model's window and uses no retry.
+arc records that `model_error` object on the attempt (`runs/<task>/attempts/<attempt id>/attempt_result.json`, with `model_wait` `true`), moves the task to `todo.retry_wait`, and leaves `retry_count` alone. The task therefore never reaches `failed.exhausted` from these waits, whatever `max_attempts` says.
+
+The wait is the task's `retry_at`: 5 minutes for the first model wait of the task, doubled for each further one in a row, capped at 60 minutes; when the failing session's `model_error.retry_after_secs` is longer than that step, it is used instead, still capped at 60 minutes.
+The next attempt that does not end in a model wait ends the run of waits.
+Every other failure keeps the class, backoff and count in the table above, and so does a model error of another kind (`protocol`, `context_overflow`, …): that one is the request's fault.
+A command worker (see [Another agent as the worker](worker.md#another-agent-as-the-worker)) is unchanged, because it has no exec `Result`.
+
+The ordinary pass that moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready` ends the wait, and the next pass claims the task like any retry.
+`radian arc run` prints `<task> worker model unavailable -> retry at <UTC time>` when it applies the wait (see [the loop's lines](loop.md#radian-arc-run)); `radian arc show` prints the attempt's `attempt_model_error` and the task's `retry_at`.
 
 A retry moves the task to `todo.retry_wait` with `retry_at` = now + a backoff: 10 seconds for the first retry, doubled for each later one, capped at 5 minutes.
 `max_attempts` (the task's, else [`limits.max_attempts`](files.md#configtoml)) counts retries, not attempts: every retry raises the task's `retry_count`, and when the count has reached the limit the task goes to `failed.exhausted` instead.
