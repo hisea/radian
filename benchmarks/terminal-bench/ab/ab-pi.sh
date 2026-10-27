@@ -3,8 +3,8 @@
 # writes its done line even on failure.
 # Usage: bash benchmarks/terminal-bench/ab/ab-pi.sh <label>
 # The task set is the label's <label>/tasks.txt when it exists, and AB_TASKS
-# (default ab3) otherwise. An AB_TASKS that resolves to a different list than
-# the saved file is refused, so one label never mixes sets.
+# (default core-2026-10) otherwise. An AB_TASKS that resolves to a different
+# list than the saved file is refused, so one label never mixes sets.
 # Output: $HOME/tb2/jobs/<label>/pi/; the host keeps its binaries and jobs under
 # $HOME/tb2. PYTHONPATH comes from this script's own checkout.
 label=${1:?label}
@@ -25,7 +25,7 @@ if [ -f "$out/tasks.txt" ]; then
     fi
   fi
 else
-  TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-ab3}" "$HERE/tasks") || exit 1
+  TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-core-2026-10}" "$HERE/tasks") || exit 1
 fi
 TASKS=()
 while IFS= read -r task; do TASKS+=("$task"); done <<< "$TASK_LIST"

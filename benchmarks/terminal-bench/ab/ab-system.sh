@@ -1,7 +1,7 @@
 #!/bin/bash
 # System-prompt A/B: one radian binary, `<role>` default vs `<role>` from a file, same run.
 # Usage: bash benchmarks/terminal-bench/ab/ab-system.sh <label> <radian-bin-name> <role-file>
-# Same task set (AB_TASKS, default ab3) and model as ab.sh; -k ${AB_K:-3},
+# Same task set (AB_TASKS, default core-2026-10) and model as ab.sh; -k ${AB_K:-3},
 # -n ${AB_N:-3} per arm. The list the run uses is written to <label>/tasks.txt.
 # AB_CAPTURE=1 captures both arms' model requests (AB_CAPTURE_PORT, default
 # 18080; see README.md); unset, the commands below are exactly what this script
@@ -18,7 +18,7 @@ PP=$TB_DIR:$HERE
 export PATH="$HOME/.local/bin:$PATH"
 KEY=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.radian/credentials/auth.json")))["opencode-go"]["key"])')
 export RADIAN_BENCH_API_KEY="$KEY"; unset KEY
-TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-ab3}" "$HERE/tasks") || exit 1
+TASK_LIST=$(python3 "$HERE/task_set.py" resolve "${AB_TASKS:-core-2026-10}" "$HERE/tasks") || exit 1
 TASKS=()
 while IFS= read -r task; do TASKS+=("$task"); done <<< "$TASK_LIST"
 out=$HOME/tb2/jobs/$label; mkdir -p "$out"; cp "$role" "$out/role.txt"
