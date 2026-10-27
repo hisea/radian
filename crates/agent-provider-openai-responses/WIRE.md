@@ -148,14 +148,14 @@ verbatim in the slice's brief):
 | `error.type` | recognized as the discriminator (this body; omp reads `error.code ?? error.type` — `pi-ai/src/error/flags.ts:487`, `pi-ai/src/providers/openai-codex/response-handler.ts:72`) | the error is this kind at all |
 | `error.plan_type` | omp's handler formats it as `(plus plan)` for the same body | the plan named in the message |
 | `error.limit_window_minutes` | this body only (omp reads no such field) | the window named in the message |
-| `error.resets_in_seconds` | this body only (omp converts `resets_at` itself) | the countdown in the message |
+| `error.resets_in_seconds` | this body only (omp converts `resets_at` itself) | the countdown in the message and `ModelError::UsageLimit.resets_in` |
 
 - The adapter never reads `resets_at` or the local clock: the body's own `resets_in_seconds` is
   the only countdown it reports, so no number is invented when the body omits it.
 - `error.message` ("The usage limit has been reached") is **not** quoted: it carries nothing the
   composed message does not, and the raw JSON is exactly what the user should not have to read.
-- The error is returned as `ModelError::Protocol` (never retried); every other `429` stays
-  `ModelError::Unavailable` (ADR 0017).
+- The error is returned as `ModelError::UsageLimit { message, resets_in }` (never retried);
+  every other `429` stays `ModelError::Unavailable` (ADR 0017).
 
 ## 8. The API-key route vs the Codex route (ADR 0026)
 

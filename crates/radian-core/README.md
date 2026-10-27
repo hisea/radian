@@ -32,12 +32,15 @@ Model, tools and hooks are traits, not types: `Model` (`ModelRequest` → `Model
 `ToolDecision`). `Model`, `Hooks` and `ToolProvider` are implemented for `Arc<T>`; `Hooks` is
 also implemented for `()` and for `(A, B)`.
 
-`ModelError` has three variants: `Transport` (the provider's own trouble — 5xx/408/429 and
-connection failures), `Protocol` (the request's — other non-2xx and unreadable streams), and
-`ContextOverflow` (ADR 0018: a provider error an adapter recognized as "the input is over the
-context window"). All three end the turn `failed` today (ADR 0017); the automatic compaction
-that would retry an overflow is a later slice. A host that only has the error text recognizes
-the last by `CONTEXT_OVERFLOW_PREFIX`.
+`ModelError` has one variant per failure class: `Transport` (the provider's own trouble — 5xx/408/429 and
+connection failures), `Protocol` (the request's — other non-2xx and unreadable streams),
+`Unavailable` (a retryable 408/429/5xx or an explicit overload, carrying `retry_after` and
+`status`), `UsageLimit` (ADR 0017: a used-up plan window, never retried, carrying the body's
+`resets_in`), `ContextOverflow` (ADR 0018: a provider error an adapter recognized as "the input
+is over the context window") and `EmptyResponse` (an empty final answer, retried). Every one
+ends the turn `failed` today; only the transient kinds are retried. `kind()` names each for the
+exec `Result.model_error` field (ADR 0044), and a host that only has the error text recognizes
+the overflow by `CONTEXT_OVERFLOW_PREFIX`.
 
 `ModelUsage` carries the provider's own numbers unmodified (ADR 0007 J1), so it also records
 **what those numbers mean**: `input_includes_cache` is `Some(true)` when `input` already

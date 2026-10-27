@@ -410,6 +410,10 @@ impl RuntimeEvents for RuntimeFanout {
         self.inner.on_runtime_event(event);
     }
 
+    fn on_model_error(&self, error: &radian_core::ModelError) {
+        self.inner.on_model_error(error);
+    }
+
     fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
         self.server.push(json!({
             "event": {

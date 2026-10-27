@@ -19,9 +19,9 @@ is also the protocol of a built-in descriptor's `@ai-sdk/openai` model (e.g. `op
   next request (ADR 0014 R10); a payload from another provider is ignored, not
   misread (ADR 0026 D6); `total` is never computed; a context-overflow error is its own kind
   (ADR 0018); a `429` whose body is the plan's used-up usage window
-  (`error.type == "usage_limit_reached"`) is a `Protocol` error naming the plan, its window and
-  the reset — never retried, and never the raw JSON (`crates/agent-provider-openai-responses/WIRE.md`
-  §7).
+  (`error.type == "usage_limit_reached"`) is a `UsageLimit` error carrying the body's
+  `resets_in_seconds`, naming the plan, its window and the reset — never retried, and never the
+  raw JSON (`crates/agent-provider-openai-responses/WIRE.md` §7).
 - **Rate-limit headers** (`x-codex-primary-*`, `x-codex-secondary-*`) are kept raw on
   `ModelResponse.limits` for a later slice (ADR 0027 slice ④).
 

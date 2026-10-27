@@ -7,7 +7,7 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agent_provider_anthropic::testing::{
     MockServer, Reply, block_stop, message_delta, message_start, message_stop, text_delta,
@@ -15,9 +15,11 @@ use agent_provider_anthropic::testing::{
 };
 use agent_provider_anthropic::{Anthropic, AnthropicConfig, ApiKey};
 use common::{Recorder, TempDir, created};
-use radian_core::{Agent, AgentEvent, EventSink, InputSource, NoTools, RunStatus, TurnOptions};
-use radian_runtime::{Driver, Inbox};
-use radian_session::{EventData, Session, SessionJournal};
+use radian_core::{
+    Agent, AgentEvent, EventSink, InputSource, ModelError, NoTools, RunStatus, TurnOptions,
+};
+use radian_runtime::{Driver, Inbox, RuntimeEvents};
+use radian_session::{EventData, RuntimeEvent, Session, SessionJournal};
 
 const SECRET: &str = "sk-ant-failure-test";
 
@@ -268,5 +270,68 @@ async fn the_turn_failed_message_never_contains_the_key() {
     assert!(
         !file.contains(SECRET),
         "the key leaked into the session file"
+    );
+}
+
+/// The runtime sink receives the structured `ModelError` itself, not only the text (ADR 0044
+/// §2b), so a host can report `kind`/`status`/`retry_after_secs` without parsing a message.
+/// Mutation: the driver stops calling `on_model_error` → the recorded list is empty and this
+/// fails.
+#[derive(Default)]
+struct ErrorSink {
+    errors: Mutex<Vec<ModelError>>,
+}
+
+impl RuntimeEvents for ErrorSink {
+    fn on_runtime_event(&self, _event: &RuntimeEvent) {}
+
+    fn on_model_error(&self, error: &ModelError) {
+        self.errors.lock().unwrap().push(error.clone());
+    }
+}
+
+#[tokio::test]
+async fn a_model_error_reaches_the_runtime_sink_structured() {
+    let server = MockServer::start(vec![Reply::status(429, "the plan window is used up")]).await;
+    let dir = TempDir::new("provider-sink");
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    let agent = Arc::new(Agent::new(model(&server), NoTools).with_config(
+        radian_core::AgentConfig {
+            retries: 0,
+            ..Default::default()
+        },
+    ));
+    let mut driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .expect("open the driver");
+    let sink = Arc::new(ErrorSink::default());
+    driver.set_runtime_events(Arc::clone(&sink) as Arc<dyn RuntimeEvents>);
+    let handle = tokio::spawn(async move { driver.run().await });
+
+    inbox.followup("hi", InputSource::User).await.unwrap();
+    recorder.wait_finished().await;
+    inbox.close();
+    handle.await.unwrap().unwrap();
+
+    let errors = sink.errors.lock().unwrap();
+    assert_eq!(errors.len(), 1, "one model error reached the sink");
+    assert!(
+        matches!(
+            &errors[0],
+            ModelError::Unavailable {
+                status: Some(429),
+                ..
+            }
+        ),
+        "the structured variant, not a string: {errors:?}"
     );
 }

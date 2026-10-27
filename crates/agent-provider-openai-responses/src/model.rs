@@ -112,9 +112,9 @@ impl OpenAiResponses {
             }
             // A used-up ChatGPT plan window is not throttling: the same request cannot succeed
             // until the window resets, so it is **not** retried (ADR 0017 retries
-            // only a transient error, and `Protocol` is not one).
-            if let Some(usage) = usage_limit(status.as_u16(), &snippet) {
-                return Err(ModelError::Protocol(usage));
+            // only a transient error, and `UsageLimit` is not one).
+            if let Some(error) = usage_limit(status.as_u16(), &snippet) {
+                return Err(error);
             }
             // Throttling and server trouble are temporary (ADR 0017).
             return Err(
@@ -245,6 +245,11 @@ impl OpenAiResponses {
                 status,
             },
             ModelError::ContextOverflow(text) => ModelError::ContextOverflow(scrub(text)),
+            // The plan-window body may echo the key too; the reset wait is not text.
+            ModelError::UsageLimit { message, resets_in } => ModelError::UsageLimit {
+                message: scrub(message),
+                resets_in,
+            },
             // The core's own fixed string; it carries no provider text to scrub.
             ModelError::EmptyResponse => ModelError::EmptyResponse,
         }

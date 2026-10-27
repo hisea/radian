@@ -468,3 +468,25 @@ Measured with that reproduction: the old wait failed 20/20 runs of each test, `w
 passed 20/20 of each. With the real `stty -a` and ten `yes` CPU hogs on this macOS box neither
 form failed (old 0/100, new 0/200 per test): the natural race needs the Linux line writer plus
 the full workspace load.
+
+## `Result.model_error` (TK0184, 2026-10-26)
+
+Branch `work/TK0184-exec-result-model-error`. Each mutation was applied in place, only
+`cargo nextest run -p radian-exec --locked --profile sandbox --lib` was run, and the source was
+restored from a `cp` under `.radian/mut-backup`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0184-M2 | the `Result` writer drops `model_error` (the insertion block removed from `result_line`) | ✅ 1 failed | `jsonl::tests::the_result_line_carries_model_error_only_on_a_failed_model_error` (the failed line has no `model_error`) |
+| TK0184-M3 | `retry_after_secs` read from `Unavailable.retry_after` only (the `UsageLimit.resets_in` arm removed) | ✅ 2 failed | `jsonl::tests::the_model_error_field_carries_kind_status_and_wait` (`usage_limit` reports `null` instead of `6240`) and `jsonl::tests::the_result_line_carries_model_error_only_on_a_failed_model_error` |
+
+## Rework 2: the runtime callback carries `UsageLimit` to the `Result` (TK0184, 2026-10-27)
+
+Branch `work/TK0184-exec-result-model-error`. The mutation was applied in place, only the new
+test was run (`cargo nextest run -p radian-exec --locked --profile sandbox --lib -E
+'test(a_usage_limit_error_reaches_the_result_through_the_driver)'`), and the source was restored
+from `.radian/mut-backup/chat.rs` (`cmp` identical). The restored lib then passed 32/32.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0184-M4 | `ExecRuntimeEvents::on_model_error` stores nothing (the callback body is a no-op) | ✅ 1 failed | `jsonl::tests::a_usage_limit_error_reaches_the_result_through_the_driver` (the stored slot stays `None`, so the `Result` has no `model_error`) |

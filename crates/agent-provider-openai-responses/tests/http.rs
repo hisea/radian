@@ -293,13 +293,18 @@ async fn a_used_up_plan_window_is_not_retried_and_names_the_reset() {
     // The core retries exactly the transient errors (`is_transient`, turn.rs:288), so a
     // non-transient error is what makes this one request: the adapter never retries itself.
     assert!(!error.is_transient(), "{error}");
-    let ModelError::Protocol(message) = &error else {
-        panic!("expected a protocol error: {error}");
+    let ModelError::UsageLimit { message, resets_in } = &error else {
+        panic!("expected a usage-limit error: {error}");
     };
     assert!(message.contains("plus"), "{message}");
     assert!(message.contains("300 min usage window"), "{message}");
     assert!(message.contains("58 min"), "{message}");
     assert!(message.contains("/model"), "{message}");
+    assert_eq!(
+        *resets_in,
+        Some(Duration::from_secs(3516)),
+        "the body's own resets_in_seconds"
+    );
     assert_eq!(server.requests().len(), 1, "the request is sent once");
 }
 
