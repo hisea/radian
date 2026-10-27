@@ -3,6 +3,7 @@
 - 状态：decided（owner 2026-10-27 定了下面五条）
 - 涉及 ADR：0048（§7 worker 的两种起法、§3 `start.json` 的 `worker` 记录、§9 取消、§12 成本）、0044（`Result` 回传契约）、0043（子进程边界）、0008（配置 schema）
 - 来源：owner 2026-10-27（tkrs 仓库的 image flow 用一个 40 行脚本包 `codex exec`，"有 ACP 就简单了"）；`acp-server.md` 的协议事实；agentclientprotocol.com 协议页与 `agentclientprotocol/codex-acp` README（2026-10-27 核对）
+- 后续：`acp-server.md` 第一阶段做 `radian acp`，`arc-radian-worker-over-acp.md` 再把 arc 的 radian worker 切到本条的起法；本条的第 4 条（v0 只 `fresh`）只对第三方 agent 成立。
 - 与 `acp-server.md` 的关系：那条是 radian **当 ACP 服务端**给编辑器用；这条是 arc **当 ACP 客户端**起别人的 agent 当 worker。两条独立，这条小得多，先做这条不影响那条。
 
 ## 背景
