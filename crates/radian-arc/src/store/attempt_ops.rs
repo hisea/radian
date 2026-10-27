@@ -203,7 +203,10 @@ pub struct Claim {
     /// `fresh` (ADR 0048 decision 4).
     pub session_id: String,
     pub allow_noop: bool,
-    /// The task body: the brief and every rework section.
+    /// Whether the wrapper commits what a `completed` worker leaves uncommitted or untracked
+    /// before the delivery check: the flow's `flows.<name>.commit_dirty`, read at this claim
+    /// (ADR 0048 decision 8).
+    pub commit_dirty: bool,
     pub brief: String,
     /// The worker this attempt runs, from the same configuration snapshot as its `start.json`
     /// record. The wrapper starts from this value, never from a later configuration read.
@@ -225,6 +228,7 @@ pub struct ReverifyClaim {
 /// What one applied result did.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
+    pub task: String,
     pub attempt_id: String,
     pub outcome: String,
     pub class: Option<Class>,
@@ -232,6 +236,9 @@ pub struct Applied {
     pub phase: String,
     pub retry_at: Option<String>,
     pub reason: Option<String>,
+    /// The attempt ended on an unavailable model or a usage limit and the task waits on it
+    /// without a retry (ADR 0048 decision 9).
+    pub model_wait: bool,
     /// The cost this attempt added, in US dollars.
     pub cost_usd: f64,
     /// Set when nothing changed: the result did not belong to the current attempt.
@@ -243,6 +250,14 @@ impl Applied {
     pub fn line(&self) -> String {
         if let Some(reason) = &self.ignored {
             return format!("{} ignored: {reason}", self.attempt_id);
+        }
+        if self.model_wait
+            && let Some(retry_at) = &self.retry_at
+        {
+            return format!(
+                "{} worker model unavailable -> retry at {retry_at}",
+                self.task
+            );
         }
         let mut line = format!(
             "{} {} -> {}.{}",
@@ -573,6 +588,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
         resume,
         session_id,
         allow_noop: task.effective_allow_noop(&config),
+        commit_dirty: flow.commit_dirty,
         brief: task.body.clone(),
         worker,
         no_cost_warning,
@@ -855,6 +871,10 @@ pub fn apply(
     wrapper_exit: Option<i32>,
 ) -> Result<Applied, Error> {
     let cost = attempt_cost(store, task_id, attempt);
+    // A model wait belongs to a `radian exec` worker only (ADR 0048 decision 9): a command
+    // worker's stdout may carry a `Result`, but its failures keep the ordinary retry rules.
+    let command_worker = worker_is_command(store, task_id, attempt);
+    let model_error = result_model_error(store, task_id, attempt);
     let budget = BudgetCheck::new(store, task_id)?;
     let (applied, pause_plan, reached_verification) = {
         let _lock = store.lock_state()?;
@@ -930,6 +950,13 @@ pub fn apply(
             task.cost_unknown = true;
         }
         let reached_verification = matches!(next, Next::Verifying);
+        // An unavailable model, or a used-up usage window, is not the request's fault: the
+        // attempt waits on the model's window and uses no retry (ADR 0048 decision 9). A
+        // budget pause still wins, and then the attempt is not a model wait.
+        let mut model_wait = signal.is_none()
+            && class == Some(Class::Model)
+            && model_error.is_some()
+            && !command_worker;
         let mut retry_at = None;
         let mut pause_plan = false;
         match next {
@@ -964,7 +991,23 @@ pub fn apply(
                     task.state = TaskState::Todo;
                     task.phase = "paused_budget".to_owned();
                     task.retry_at = None;
+                    model_wait = false;
                     pause_plan = plan_reached;
+                } else if model_wait {
+                    let error = model_error
+                        .as_ref()
+                        .expect("a model wait read its model error");
+                    task.state = TaskState::Todo;
+                    task.phase = "retry_wait".to_owned();
+                    // The count of waits is not the retry count: a run of model waits does
+                    // not use up `max_attempts`, and the next attempt that is not one ends
+                    // the run (ADR 0048 decision 9).
+                    let at = model_wait_retry_at(
+                        consecutive_model_waits(store, task_id, attempt),
+                        error,
+                    );
+                    task.retry_at = Some(at.clone());
+                    retry_at = Some(at);
                 } else if task.retry_count < max_attempts {
                     task.state = TaskState::Todo;
                     task.phase = "retry_wait".to_owned();
@@ -982,6 +1025,7 @@ pub fn apply(
         let version = store.next_version(Kind::Task, task_id);
         store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
         let applied = Applied {
+            task: task_id.to_owned(),
             attempt_id: finish
                 .map(|finish| finish.attempt_id.clone())
                 .unwrap_or_else(|| format!("{task_id}-{attempt}")),
@@ -991,6 +1035,7 @@ pub fn apply(
             phase: task.phase.clone(),
             retry_at,
             reason,
+            model_wait,
             cost_usd: cost.cost_usd,
             ignored: None,
         };
@@ -1017,6 +1062,14 @@ pub fn apply(
         "state": applied.state,
         "phase": applied.phase,
         "retry_at": applied.retry_at,
+        // A model wait records the session's own `model_error` object, as a review verdict
+        // does; every other applied result leaves it null (ADR 0048 decision 9).
+        "model_wait": applied.model_wait,
+        "model_error": if applied.model_wait {
+            model_error.as_ref()
+        } else {
+            None
+        },
         "applied_at": super::plan_ops::utc_now(),
     });
     let path = run_dir(store, task_id, attempt).join(ATTEMPT_RESULT_FILE);
@@ -1049,6 +1102,7 @@ enum Next {
 
 fn ignored(task: &model::TaskFile, finish: Option<&Finish>, reason: String) -> Applied {
     Applied {
+        task: task.id.clone(),
         attempt_id: finish
             .map(|finish| finish.attempt_id.clone())
             .or_else(|| task.attempt_id.clone())
@@ -1061,6 +1115,7 @@ fn ignored(task: &model::TaskFile, finish: Option<&Finish>, reason: String) -> A
         phase: task.phase.clone(),
         retry_at: task.retry_at.clone(),
         reason: None,
+        model_wait: false,
         cost_usd: 0.0,
         ignored: Some(reason),
     }
@@ -1177,6 +1232,102 @@ pub fn attempt_failure(store: &Store, task: &str, attempt: u32) -> Option<String
         }
     }
     None
+}
+
+/// The `model_error` object of an attempt whose last `Result` says the model was unavailable or
+/// its usage window was used up (ADR 0048 decision 9). `None` for any other kind, a `Result`
+/// without one, no `Result` at all, and a command worker's record.
+fn result_model_error(store: &Store, task: &str, attempt: u32) -> Option<Value> {
+    let text = fs::read_to_string(run_dir(store, task, attempt).join("result.jsonl")).ok()?;
+    for line in text.lines().rev() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("Result") {
+            continue;
+        }
+        // The last `Result` decides, as it does for the outcome and the cost: a `Result`
+        // without a model error ends the search.
+        let error = value.get("model_error")?;
+        let kind = error.get("kind").and_then(Value::as_str)?;
+        return crate::review::MODEL_WAIT_KINDS
+            .contains(&kind)
+            .then(|| error.clone());
+    }
+    None
+}
+
+/// Whether the attempt's recorded worker is a command worker (ADR 0048 decision 7): its
+/// `execution.json`, then `identity.json`, then the claim's `start.json`, the same precedence
+/// the session id uses. An attempt that names no worker keeps the `radian exec` rules.
+fn worker_is_command(store: &Store, task: &str, attempt: u32) -> bool {
+    [
+        run_dir(store, task, attempt).join("execution.json"),
+        attempt_dir(store, task, attempt).join("identity.json"),
+        attempt_dir(store, task, attempt).join(START_FILE),
+    ]
+    .into_iter()
+    .find_map(|path| worker_kind_in(&path))
+    .is_some_and(|kind| kind == "command")
+}
+
+fn worker_kind_in(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("worker")?
+        .get("kind")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// How many attempts before `attempt` ended in a model wait, newest first, in a row (ADR 0048
+/// decision 9). The current attempt's own record is written after this read; the next attempt
+/// that is not a model wait breaks the run.
+fn consecutive_model_waits(store: &Store, task: &str, attempt: u32) -> u32 {
+    let mut run = 0u32;
+    let mut number = attempt;
+    while number > 1 {
+        number -= 1;
+        let path = run_dir(store, task, number).join(ATTEMPT_RESULT_FILE);
+        let Ok(text) = fs::read_to_string(path) else {
+            break;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            break;
+        };
+        if value.get("model_wait").and_then(Value::as_bool) != Some(true) {
+            break;
+        }
+        run += 1;
+    }
+    run
+}
+
+/// The `retry_at` of a model wait (ADR 0048 decision 9): the review wait's step for `run` waits
+/// in a row, the session's own `retry_after_secs` when it is longer, and never more than 60
+/// minutes.
+fn model_wait_retry_at(prior_waits: u32, model_error: &Value) -> String {
+    let step = crate::review::wait_step_secs(prior_waits + 1);
+    let seconds = model_error
+        .get("retry_after_secs")
+        .and_then(Value::as_u64)
+        .map_or(step, |secs| secs.max(step))
+        .min(crate::review::REVIEW_WAIT_CAP_SECS);
+    let at = chrono::Utc::now() + chrono::Duration::seconds(seconds as i64);
+    at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// The current attempt's recorded model error, for `show` (ADR 0048 decision 9): the
+/// `model_error` object of its `attempt_result.json`, or `None` when the attempt did not wait
+/// on its model.
+pub fn attempt_model_error(store: &Store, task: &str, attempt: u32) -> Option<Value> {
+    let text = fs::read_to_string(run_dir(store, task, attempt).join(ATTEMPT_RESULT_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("model_error")
+        .filter(|error| !error.is_null())
+        .cloned()
 }
 
 /// The `notes` array one record carries, when the file exists, parses, and holds one.

@@ -60,12 +60,14 @@ On a cancel the wrapper is itself killed only after the grace and one more secon
 `Result.outcome` `completed` means that the run ended, not that the task is done (see the [result table](gate.md#failures-retries-and-the-budget)); the wrapper checks delivery itself before it pushes `work/<task>`, and it checks the repository's git control files before it runs any git command of its own after the worker. It requires that:
 
 - `work/<task>` exists, `head_sha` descends from `base_sha` and from the tip the attempt started on, and the worktree HEAD is on the branch;
-- the worktree has no uncommitted and no untracked files;
+- the worktree has no uncommitted and no untracked files, unless the task's flow sets [`commit_dirty`](files.md#configtoml) `true` and the outcome is `completed`: the wrapper then commits them first (below);
 - the task's own change is not empty, unless [`allow_noop`](files.md#task-fields) is on: the task's own value when its file carries one, else its flow's `flows.<name>.allow_noop` (see [An empty change](gate.md#an-empty-change));
 - the task's own change touches no path under `.radian/arc/`;
 - the repository's git control files are as the wrapper recorded them before the first `before_attempt` entry ran: `<common dir>/config`, `<git dir>/config.worktree` (the worktree's own git dir), `<common dir>/config.worktree`, every file under `<common dir>/hooks/` and every file under `<common dir>/info/` except `<common dir>/info/refs` (an automatic `git gc` rewrites it through `git update-server-info`, and only the dumb HTTP transport reads it), and every `config` file and every file under `hooks/` in `<common dir>/modules/**` (submodules). A file the worker creates, removes or changes counts as a change: the wrapper compares content, not time. The record stays in the wrapper's memory, never in the worktree, and the check does not depend on the worker's sandbox. A control file larger than 1 MiB is not read whole: an attempt does not start while one of those paths is that large, and one the worker creates fails the attempt and is removed.
 
 The wrapper compares the control files once after the `before_attempt` entries and before the worker starts, and again when the worker exits. A `before_attempt` command that changes one therefore fails the attempt before the worker starts, with the same restore and reason as a worker that changes one.
+
+A task whose flow sets [`flows.<name>.commit_dirty`](files.md#configtoml) `true` lets the wrapper commit a dirty worktree for a `completed` worker, after the control-file check and before the delivery checks. It does not run for a failed or cancelled worker, and a changed control file still fails the attempt with nothing committed. It applies to every worker kind: `radian exec`, a `command`, and any worker this build gains later. The commit's identity is the one arc's `merge-main` merge commit uses, `arc <arc@localhost>`; its subject is the first line of the worker's `Result.text` (or `<task id>: worker changes`), and the attempt's notes carry `committed dirty worktree: <short sha>`, which `radian arc show` prints. The key is read at the claim, so a change takes effect at the next claim.
 
 A failed check fails the attempt with its reason in `runs/<task>/attempts/<attempt id>/attempt_finished.json`, which [`show`](index.md#radian-arc-show-id-json) prints; nothing is pushed. The git control check also restores every recorded file to its recorded content and removes every file that was not there before, then fails the attempt with the reason `the worker changed git control files: <paths, comma-separated>`. A control file the wrapper cannot read back counts as a change and is restored the same way. When the restore itself fails, the reason carries both failures, and the wrapper runs no further git command for that attempt. The wrapper stops everything the worker left in its process group before it compares the files, so a background process the worker started cannot change one after the worker exits.
 
@@ -93,7 +95,7 @@ Unset, a flow's worker is `radian exec` and this section does not apply to it.
 The program runs in the task's worktree, gets the same brief on stdin as a `radian exec` worker (the conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)), and its stdout goes to `runs/<task>/attempts/<attempt id>/result.jsonl` and its stderr to `stderr.log`.
 The arc TUI's conversation tab shows those rows while the attempt runs, under the program's name (see [the task page's conversation tab](tui.md#the-task-page)).
 The wrapper gives it its own process group and enforces the attempt's limits itself, exactly as it does for `radian exec`: no new stdout line for [`stall_timeout_secs`](files.md#task-fields), `max_wall_time_secs` in total, the cancel grace period after SIGTERM.
-After it exits the wrapper runs the same git control-file check, [delivery check](#what-the-wrapper-checks-after-the-worker-exits), push and records; nothing about those changes.
+After it exits the wrapper runs the same git control-file check, [delivery check](#what-the-wrapper-checks-after-the-worker-exits), push and records; nothing about those changes. A flow with [`commit_dirty`](files.md#configtoml) `true` lets the wrapper commit the command's dirty worktree when its outcome is `completed`.
 
 ### The environment
 
@@ -125,8 +127,8 @@ The command writes no `Result` line on a crash, and the attempt then fails as `t
 
 ### What the command must do itself
 
-arc checks the result, not the work: the program must commit its change on the branch, leave the worktree clean, and print the `Result` line.
-A dirty or untracked file, no commit past the base, a commit that touches `.radian/arc/`, or a change to the repository's git control files fails the attempt exactly as it fails a `radian exec` worker.
+arc checks the result, not the work: the program must commit its change on the branch, leave the worktree clean, and print the `Result` line. A flow with [`commit_dirty`](files.md#configtoml) `true` takes the commit off its hands for a `completed` outcome: the wrapper commits the worktree after the program exits.
+A dirty or untracked file (without `commit_dirty`), no commit past the base, a commit that touches `.radian/arc/`, or a change to the repository's git control files fails the attempt exactly as it fails a `radian exec` worker.
 
 ### The differences from the `radian exec` worker
 

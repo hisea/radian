@@ -113,7 +113,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--include-reasoning` | — | off | — | Include assistant reasoning in the export. Needs `--export`. |
 | `--include-provider-payload` | — | off | — | Include raw provider payloads in the export. Needs `--export`. |
 | `--session-dir` | `DIR` | `RADIAN_SESSION_DIR`, else default | — | Where session files live. |
-| `--include-usage` | optional `true` \| `false` | on for `api.openai.com` and `opencode-go`, off elsewhere | — | Ask the server to include usage in the stream. |
+| `--include-usage` | optional `true` \| `false` | per route; see [providers](providers.md) | — | Ask the server to include usage in the stream. |
 | `--max-model-calls` | `N` | `1000` | — | Per-turn model call fuse. |
 | `--turn-timeout-secs` | `N` | — | — | Per-turn time limit in seconds. |
 | `--context-window` | `TOKENS` | catalog lookup | — | Explicit context window. Wins over the catalog. |

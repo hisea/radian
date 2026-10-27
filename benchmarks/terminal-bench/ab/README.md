@@ -239,7 +239,7 @@ The scripts export these themselves; they are not inputs:
 ```text
 $HOME/tb2/jobs/<label>/
   done            # one line per finished arm: "<arm> rc=<code>" (smoke: "rc=<code>"); a failed arm still writes its line
-  loadavg.log     # UTC timestamp plus 1/5/15-minute load, every 30 s (ab.sh, ab-system.sh)
+  loadavg.log     # UTC timestamp plus 1/5/15-minute load, every 30 s (ab.sh, ab-system.sh, ab-body.sh)
   tasks.txt       # the resolved task list the run used, one name per line
   capture/        # AB_CAPTURE only: <arm>.jsonl (one line per model request), <arm>/confdir/ (that arm's proxy state and CA), <arm>/mitmdump.log
   <arm>/          # Harbor output for that arm (one directory per binary name, pi, opencode)
@@ -253,7 +253,7 @@ each trial's agent log dir under `<arm>/`, next to `radian-binary.json` for a
 radian arm.
 
 `<arm>` is the binary name given to `ab.sh`/`ab-system.sh`, or `pi`, `opencode`,
-`radian`, `base` or `concise`. `done` is append-only, so a relaunch such as
+`radian`, `base`, `body` or `concise`. `done` is append-only, so a relaunch such as
 `ab-pi.sh` adds a second `pi` line and the first one stays as history.
 
 ## Test

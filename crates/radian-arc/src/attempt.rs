@@ -230,6 +230,9 @@ fn spawn_claim_with(
     if claim.allow_noop {
         command.arg("--allow-noop");
     }
+    if claim.commit_dirty {
+        command.arg("--commit-dirty");
+    }
     let limits = Limits::of(task, config);
     command
         .arg("--stall-timeout-secs")
@@ -845,7 +848,13 @@ pub fn lines(started: &Started) -> Vec<String> {
     let mut lines: Vec<String> = started
         .reconciled
         .iter()
-        .map(|applied| format!("reconciled: {}", applied.line()))
+        .map(|applied| {
+            if applied.model_wait {
+                applied.line()
+            } else {
+                format!("reconciled: {}", applied.line())
+            }
+        })
         .collect();
     if let Some(warning) = &started.no_cost_warning {
         lines.push(warning.clone());

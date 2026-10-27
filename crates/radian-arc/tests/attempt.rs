@@ -95,6 +95,32 @@ fn write_stream(store: &Store, task: &str, attempt: u32, micros: Option<u64>) {
     .unwrap();
 }
 
+/// One attempt's jsonl stream with a failed `Result` and, when given, its `model_error`.
+fn write_result_stream(store: &Store, task: &str, attempt: u32, model_error: Option<&Value>) {
+    let dir = attempt_ops::run_dir(store, task, attempt);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut result = json!({
+        "type": "Result",
+        "outcome": "failed",
+        "cost": {"micros": 1000, "incomplete": false, "estimated": false},
+    });
+    if let Some(error) = model_error {
+        result["model_error"] = error.clone();
+    }
+    std::fs::write(dir.join("result.jsonl"), format!("{result}\n")).unwrap();
+}
+
+/// The worker kind an attempt's `execution.json` records (ADR 0048 decision 7).
+fn write_worker_kind(store: &Store, task: &str, attempt: u32, kind: &str) {
+    let dir = attempt_ops::run_dir(store, task, attempt);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("execution.json"),
+        json!({"worker": {"kind": kind}}).to_string(),
+    )
+    .unwrap();
+}
+
 /// The attempt's `execution.json`, which the wrapper writes: the cost rule reads the session
 /// id from it to tell an attempt that shares the previous session from one with its own.
 fn write_execution(store: &Store, task: &str, attempt: u32, session: &str) {
@@ -541,6 +567,250 @@ fn a_failed_outcome_retries_with_the_backoff_then_is_exhausted() {
     let applied = attempt_ops::apply(&store, task, 4, Some(&finish), None, Some(1)).expect("apply");
     assert_eq!(state(&store, task), ("failed".into(), "exhausted".into()));
     assert_eq!(applied.retry_at, None);
+}
+
+// ---- a worker's model wait (ADR 0048 decision 9) --------------------------------------
+
+/// The delay of an applied wait, in whole seconds from now.
+fn wait_secs(applied: &attempt_ops::Applied) -> i64 {
+    let retry_at = applied.retry_at.as_deref().expect("a wait time");
+    utc_seconds(retry_at) - chrono::Utc::now().timestamp()
+}
+
+/// A worker attempt whose `Result` says the usage window is used up waits on the model: the
+/// task goes to `todo.retry_wait`, no retry is counted, the attempt records the `model_error`,
+/// and the loop line names the wait (ADR 0048 decision 9).
+#[test]
+fn a_usage_limit_worker_waits_without_a_retry() {
+    let (_repo, store) = setup("worker-wait-usage");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    let error = json!({"kind": "usage_limit", "status": null, "retry_after_secs": null});
+    write_result_stream(&store, task, 1, Some(&error));
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    let stored = store.load_task(task).unwrap().item;
+    assert_eq!(stored.retry_count, 0, "a model wait is not a retry");
+    let retry_at = stored.retry_at.clone().expect("the task waits");
+    assert!(
+        (wait_secs(&applied) - 300).abs() <= 2,
+        "the first wait is five minutes: {retry_at}"
+    );
+    assert_eq!(
+        applied.line(),
+        format!("{task} worker model unavailable -> retry at {retry_at}")
+    );
+    let result = attempt_result(&store, task, 1);
+    assert_eq!(result["model_wait"], json!(true), "{result}");
+    assert_eq!(result["model_error"], error, "{result}");
+}
+
+/// The same for `kind` `unavailable`, whose `Result` carries no reset time: the wait is the
+/// same first step, and no retry is counted.
+#[test]
+fn an_unavailable_worker_waits_without_a_retry() {
+    let (_repo, store) = setup("worker-wait-unavailable");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    let error = json!({"kind": "unavailable", "status": null, "retry_after_secs": null});
+    write_result_stream(&store, task, 1, Some(&error));
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 0);
+    assert!(
+        (wait_secs(&applied) - 300).abs() <= 2,
+        "the first wait is five minutes: {applied:?}"
+    );
+    let result = attempt_result(&store, task, 1);
+    assert_eq!(result["model_error"], error, "{result}");
+}
+
+/// A session reset time longer than the step is used, and the 60-minute cap still applies
+/// (ADR 0048 decision 9).
+#[test]
+fn a_reset_time_longer_than_the_step_is_used_and_capped() {
+    let (_repo, store) = setup("worker-wait-reset");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    for (attempt, reset, expected) in [(1u32, 1000u64, 1000i64), (2, 7200, 3600)] {
+        attempt_ops::claim(&store, task).expect("the next attempt starts");
+        let error = json!({
+            "kind": "usage_limit",
+            "status": null,
+            "retry_after_secs": reset,
+        });
+        write_result_stream(&store, task, attempt, Some(&error));
+        let record = finish(&store, task, attempt, "failed", false, None);
+        let applied =
+            attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(1)).expect("apply");
+        assert!(applied.model_wait, "attempt {attempt}: {applied:?}");
+        assert!(
+            (wait_secs(&applied) - expected).abs() <= 2,
+            "attempt {attempt}: the wait is {} s, expected {expected}: {applied:?}",
+            wait_secs(&applied)
+        );
+    }
+}
+
+/// A model error never bypasses a used-up budget: the task pauses for the budget, and the
+/// attempt records no model wait (ADR 0048 decisions 9 and 12).
+#[test]
+fn a_model_error_does_not_bypass_the_budget_pause() {
+    let (_repo, store) = setup("worker-model-error-budget");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.max_cost_usd = Some(0.0);
+            Ok(())
+        })
+        .expect("the task's budget");
+    attempt_ops::claim(&store, task).expect("claim");
+    write_result_stream(
+        &store,
+        task,
+        1,
+        Some(&json!({"kind": "usage_limit", "status": null, "retry_after_secs": null})),
+    );
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(!applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "paused_budget".into()));
+    assert_eq!(applied.retry_at, None);
+    assert!(attempt_result(&store, task, 1)["model_error"].is_null());
+}
+
+/// A run of model waits doubles and caps at 60 minutes and never reaches
+/// `failed.exhausted`, even with `max_attempts = 2`: none of them is a retry (ADR 0048
+/// decision 9). Mutation: raise `retry_count` for a model wait and the third attempt exhausts
+/// the task.
+#[test]
+fn consecutive_model_waits_double_cap_and_never_exhaust() {
+    let (_repo, store) = setup("worker-wait-backoff");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    store
+        .change_task(task, |task| {
+            task.max_attempts = Some(2);
+            Ok(())
+        })
+        .expect("the task's limit");
+    let error = json!({"kind": "usage_limit", "status": null, "retry_after_secs": null});
+
+    for (index, expected) in [300i64, 600, 1200, 2400, 3600, 3600, 3600]
+        .into_iter()
+        .enumerate()
+    {
+        let attempt = index as u32 + 1;
+        attempt_ops::claim(&store, task).expect("the next attempt starts");
+        write_result_stream(&store, task, attempt, Some(&error));
+        let record = finish(&store, task, attempt, "failed", false, None);
+        let applied =
+            attempt_ops::apply(&store, task, attempt, Some(&record), None, Some(1)).expect("apply");
+        assert!(applied.model_wait, "attempt {attempt}: {applied:?}");
+        assert_eq!(
+            state(&store, task),
+            ("todo".into(), "retry_wait".into()),
+            "attempt {attempt} waits"
+        );
+        assert_eq!(
+            store.load_task(task).unwrap().item.retry_count,
+            0,
+            "attempt {attempt} is not a retry"
+        );
+        assert!(
+            (wait_secs(&applied) - expected).abs() <= 2,
+            "attempt {attempt}: the wait is {} s, expected {expected}: {applied:?}",
+            wait_secs(&applied)
+        );
+    }
+}
+
+/// A failed attempt with no model error keeps the ordinary retry: the count rises and the
+/// backoff is ten seconds (ADR 0048 decision 9).
+#[test]
+fn a_failed_worker_without_a_model_error_still_counts_a_retry() {
+    let (_repo, store) = setup("worker-no-model-error");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    write_result_stream(&store, task, 1, None);
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(!applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 1);
+    assert!((wait_secs(&applied) - 10).abs() <= 2, "{applied:?}");
+    let result = attempt_result(&store, task, 1);
+    assert_eq!(result["model_wait"], json!(false), "{result}");
+    assert!(result["model_error"].is_null(), "{result}");
+}
+
+/// A model error of another kind is the request's fault: `protocol` keeps today's class,
+/// backoff and count, and the attempt records no model error (ADR 0048 decision 9).
+#[test]
+fn a_protocol_model_error_still_counts_a_retry() {
+    let (_repo, store) = setup("worker-protocol");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    write_result_stream(
+        &store,
+        task,
+        1,
+        Some(&json!({"kind": "protocol", "status": null, "retry_after_secs": null})),
+    );
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(!applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 1);
+    assert!((wait_secs(&applied) - 10).abs() <= 2, "{applied:?}");
+    let result = attempt_result(&store, task, 1);
+    assert_eq!(result["model_wait"], json!(false), "{result}");
+    assert!(result["model_error"].is_null(), "{result}");
+}
+
+/// A command worker's `Result` keeps the ordinary retry rules: the model wait belongs to the
+/// `radian exec` worker only (ADR 0048 decision 9).
+#[test]
+fn a_command_workers_model_error_keeps_the_retry() {
+    let (_repo, store) = setup("worker-command-model-error");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+    attempt_ops::claim(&store, task).expect("claim");
+    write_worker_kind(&store, task, 1, "command");
+    write_result_stream(
+        &store,
+        task,
+        1,
+        Some(&json!({"kind": "usage_limit", "status": null, "retry_after_secs": null})),
+    );
+    let record = finish(&store, task, 1, "failed", false, None);
+
+    let applied = attempt_ops::apply(&store, task, 1, Some(&record), None, Some(1)).expect("apply");
+
+    assert!(!applied.model_wait, "{applied:?}");
+    assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
+    assert_eq!(store.load_task(task).unwrap().item.retry_count, 1);
+    assert!((wait_secs(&applied) - 10).abs() <= 2, "{applied:?}");
 }
 
 /// A task reworked ten times keeps starting: every rework sets the retry count back to 0, so
