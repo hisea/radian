@@ -203,7 +203,7 @@ fn an_outcome_other_than_completed_fails_the_attempt() {
     );
 }
 
-/// A command that writes no `Result` line fails as `terminated`, as the `radian exec` worker
+/// A command that writes no `Result` line fails as `terminated`, as the radian worker
 /// does.
 #[test]
 fn a_command_without_a_result_line_is_terminated() {

@@ -79,15 +79,16 @@ fn line(exec_args: &[String]) -> Vec<String> {
 /// `flows.<name>.command` or `flows.<name>.exec_args`. Nothing is claimed or written.
 pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
     // `[worker] rework_session = "resume"` and a flow that runs an ACP agent are refused
-    // together: v0 runs every ACP attempt fresh and never uses `session/load` (ADR 0048
-    // decision 7). The message names both keys.
+    // together: a flow's `acp` agent runs every attempt fresh and never uses `session/load`
+    // (ADR 0048 decision 7). `radian acp`, the default worker, does resume — the refusal is
+    // about a flow's own agent. The message names both keys.
     if config.worker.rework_session == crate::store::config::ReworkSession::Resume
         && let Some((name, _)) = config.flows.iter().find(|(_, flow)| flow.acp.is_some())
     {
         return Err(Error::Refused(format!(
-            "`worker.rework_session` is `resume` and `flows.{name}.acp` is set; an ACP worker \
-             runs every attempt fresh, so set `worker.rework_session = \"fresh\"` or remove \
-             `flows.{name}.acp`"
+            "`worker.rework_session` is `resume` and `flows.{name}.acp` is set; a flow's ACP \
+             agent runs every attempt fresh, so set `worker.rework_session = \"fresh\"` or \
+             remove `flows.{name}.acp`"
         )));
     }
     match &config.worker.command {
@@ -106,7 +107,7 @@ pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
 /// A flow sets at most one worker line: two or more of `acp`, `command` and a non-empty
 /// `exec_args` are refused here, naming every key the flow set (ADR 0048 decisions 1 and 7).
 /// `acp` beside `[worker] rework_session = "resume"` is refused by [`check_config`], because
-/// v0 runs every ACP attempt fresh.
+/// a flow's ACP agent runs every attempt fresh.
 pub fn check_flow(name: &str, flow: &crate::store::config::Flow, repo: &Path) -> Result<(), Error> {
     let mut set = Vec::new();
     if flow.acp.is_some() {
@@ -408,26 +409,31 @@ mod tests {
         let repo = std::path::Path::new("/a/repo");
         let cases = [
             (
-                vec![vec!["sh".to_owned()], vec!["/bin/sh".to_owned()]],
+                Some(vec!["sh".to_owned()]),
+                Some(vec!["/bin/sh".to_owned()]),
+                Vec::new(),
                 vec!["flows.art.acp", "flows.art.command"],
             ),
             (
-                vec![vec!["sh".to_owned()]],
+                Some(vec!["sh".to_owned()]),
+                None,
+                args(&["--model", "m"]),
                 vec!["flows.art.acp", "flows.art.exec_args"],
             ),
+            (
+                Some(vec!["sh".to_owned()]),
+                Some(vec!["/bin/sh".to_owned()]),
+                args(&["--model", "m"]),
+                vec!["flows.art.acp", "flows.art.command", "flows.art.exec_args"],
+            ),
         ];
-        for (set, keys) in cases {
-            let mut flow = crate::store::config::Flow::default();
-            match set.len() {
-                1 => {
-                    flow.acp = Some(set[0].clone());
-                    flow.exec_args = vec!["--model".to_owned(), "m".to_owned()];
-                }
-                _ => {
-                    flow.acp = Some(set[0].clone());
-                    flow.command = Some(set[1].clone());
-                }
-            }
+        for (acp, command, exec_args, keys) in cases {
+            let flow = crate::store::config::Flow {
+                acp,
+                command,
+                exec_args,
+                ..Default::default()
+            };
             let error = check_flow("art", &flow, repo).expect_err("two worker lines");
             assert_eq!(error.exit(), Exit::State, "exit 3");
             for key in keys {
@@ -440,8 +446,8 @@ mod tests {
         }
     }
 
-    /// `acp` beside `[worker] rework_session = "resume"` is refused by name: v0 runs every ACP
-    /// attempt fresh (ADR 0048 decisions 4 and 7).
+    /// `acp` beside `[worker] rework_session = "resume"` is refused by name: a flow's ACP
+    /// agent runs every attempt fresh (ADR 0048 decisions 4 and 7).
     #[test]
     fn acp_beside_resume_is_refused_naming_both_keys() {
         let dir = std::env::temp_dir();

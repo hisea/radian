@@ -292,7 +292,7 @@ fn spawn_claim_with(
 }
 
 /// Adds the worker arguments to the wrapper's command: one JSON array on the hidden `--acp` or
-/// `--command` flag, or the `radian exec` extra arguments after `--`. All come from the claim's
+/// `--command` flag, or the `radian acp` extra arguments after `--`. All come from the claim's
 /// [`WorkerLine`], never from a configuration read after the claim.
 fn add_worker_args(command: &mut Command, worker: &WorkerLine) -> Result<(), Error> {
     let flag = match worker {

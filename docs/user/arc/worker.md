@@ -100,7 +100,7 @@ A failed check fails the attempt with its reason in `runs/<task>/attempts/<attem
 
 `[worker] command` replaces the radian worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
 A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, `acp` for an ACP agent, or `exec_args` for the radian worker, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
-A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never two.
+A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never more than one.
 A repository can then run, say, image tasks through a Codex script and code tasks through the radian worker in the same plan:
 
 ```toml

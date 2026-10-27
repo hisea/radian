@@ -41,6 +41,11 @@ const REPOSITORY_ENV: [&str; 6] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
 
+/// The identity of the commits arc itself writes: `arc <arc@localhost>`. The `merge-main`
+/// merge commit and a `flows.<name>.commit_dirty` commit both carry it (ADR 0048 decision 8),
+/// so the two names live here instead of in each caller.
+pub(crate) const IDENTITY: [&str; 4] = ["-c", "user.name=arc", "-c", "user.email=arc@localhost"];
+
 /// The environment channels that inject configuration from the caller.
 const INJECTED_CONFIG_ENV: [&str; 2] = ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"];
 

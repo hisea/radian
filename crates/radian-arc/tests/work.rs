@@ -1,5 +1,5 @@
 //! `radian arc work` end to end (ADR 0048 decisions 7 and 8): a real `radian` binary runs
-//! a real `radian exec` child under the mock model, against a temp bare origin and a temp
+//! a real `radian acp` child under the mock model, against a temp bare origin and a temp
 //! main clone.
 
 mod common;

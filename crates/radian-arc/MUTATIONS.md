@@ -1580,3 +1580,18 @@ identical.
 | TK0205-M2 | `resume` sends `session/new` instead of `session/load` (`acp_conversation` forces `resume_session` false) | `work::resume_on_the_second_attempt_continues_the_same_session` (`session/load` replayed no `user_message_chunk`) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0207: review follow-ups for the ACP worker (2026-10-27, branch `work/TK0207-arc-acp-worker-followups`)
+
+A flow that sets `acp`, `command` and a non-empty `exec_args` together is refused by the
+worker check (exit `3`, naming every key) instead of the parser's exit `1`, so every
+`acp`-involved combination behaves as the manual promises. The mutation was applied to
+`crates/radian-arc/src/store/config.rs`, and the source was restored from
+`.radian/mut/config.rs` with `cp`, which `cmp` found identical. The test ran with
+`cargo nextest run -p radian-arc --lib --locked --profile sandbox -E 'test(...)'`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0207-M1 | the parse-time `command` + `exec_args` refusal no longer skips a flow that also sets `acp` (`check_flows` drops the `&& flow.acp.is_none()` guard) | `store::config::tests::a_flow_with_acp_and_another_worker_line_still_parses` (the all-three document is refused by `parse`, so the worker check never sees it) | ✅ 1 failed |
+
+1/1 caught.

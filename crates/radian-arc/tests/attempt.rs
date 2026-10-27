@@ -319,7 +319,7 @@ fn a_resume_claim_makes_the_task_session_known_before_the_worker_ends() {
 }
 
 /// ADR 0048 decision 4: the claim writes the worker it decided on to `start.json`, so a reader
-/// can tell a command worker from `radian exec` before the wrapper has written any record, and a
+/// can tell a command worker from `radian acp` before the wrapper has written any record, and a
 /// later `[worker] command` change cannot re-classify the attempt.
 ///
 /// Mutation: the claim omits `worker` from `start.json`.
@@ -347,7 +347,7 @@ fn a_claim_records_the_worker_it_decided_on() {
     assert_eq!(
         start(&tasks[0])["worker"],
         json!({"kind": "radian", "flow": "default"}),
-        "the default worker is `radian exec`"
+        "the default worker is `radian acp`"
     );
 
     // The key takes effect at the next claim: this attempt is the command worker, and the
@@ -789,7 +789,7 @@ fn a_protocol_model_error_still_counts_a_retry() {
 }
 
 /// A command worker's `Result` keeps the ordinary retry rules: the model wait belongs to the
-/// `radian exec` worker only (ADR 0048 decision 9).
+/// radian worker only (ADR 0048 decision 9).
 #[test]
 fn a_command_workers_model_error_keeps_the_retry() {
     let (_repo, store) = setup("worker-command-model-error");

@@ -2,7 +2,7 @@
 //!
 //! [`TestRepo`] is the small repository with a bare `origin` the gate tests use; [`Repo`] is
 //! the bare remote, main clone and isolated home the `radian arc work` tests use. Every work
-//! test runs a real `radian` binary and a real `radian exec` child, driven by the mock model
+//! test runs a real `radian` binary and a real `radian acp` child, driven by the mock model
 //! in `agent-provider-openai-compatible`'s `testing` feature.
 #![allow(dead_code)]
 
@@ -1205,7 +1205,7 @@ pub fn model_args(base_url: &str) -> Vec<String> {
 }
 
 /// `work`'s argument list for one attempt: the required flags, then any boolean flags
-/// (`--resume`, `--allow-noop`), then `--` and the extra `radian exec` arguments.
+/// (`--resume`, `--allow-noop`), then `--` and the extra `radian acp` arguments.
 pub fn work_args(
     task: &str,
     attempt: u32,
