@@ -21,7 +21,7 @@ authentication method in this version.
 
 ## The flags
 
-`radian acp` accepts the conversation flags of [`radian exec`](cli.md#radian-exec) with the
+`radian acp` accepts the conversation flags of [`radian exec`](cli.md#radian-exec-the-headless-command) with the
 same names, values and defaults. Use that page for every one of them; this page does not
 repeat their meaning.
 
@@ -99,7 +99,7 @@ Every permission question and every `ask_user` question becomes `session/request
 ## MCP servers
 
 The `mcpServers` of `session/new` are merged as this session's MCP configuration at the same
-level as [`--mcp-config`](cli.md#radian-exec); a duplicate id keeps the client's entry and
+level as [`--mcp-config`](cli.md#radian-exec-the-headless-command); a duplicate id keeps the client's entry and
 prints one warning on stderr. Only stdio servers run. An HTTP, SSE or ACP server is refused
 in the `session/new` error.
 
