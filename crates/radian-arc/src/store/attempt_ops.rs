@@ -156,7 +156,7 @@ fn outcome_class(outcome: &str, wrapper_exit: Option<i32>) -> Class {
 /// so a later change to `config.toml` cannot make the record and the launched worker disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerLine {
-    /// `radian exec`, with the flow's `exec_args` from the claim's configuration snapshot.
+    /// `radian acp`, with the flow's `exec_args` from the claim's configuration snapshot.
     Radian {
         exec_args: Vec<String>,
         flow: String,
@@ -538,8 +538,8 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     let resume = number > 1 && config.worker.rework_session == ReworkSession::Resume;
     // The worker this attempt runs, decided here because a flow's worker takes effect at the
     // next claim. The wrapper is started with the same value, so a reader can tell a command
-    // worker from `radian exec` from the claim on, and a later `config.toml` change cannot make
-    // the record and the launched worker disagree (decision 4).
+    // worker from the radian worker from the claim on, and a later `config.toml` change cannot
+    // make the record and the launched worker disagree (decision 4).
     let worker = if let Some(words) = &flow.acp {
         WorkerLine::Acp {
             acp: crate::worker_args::resolved(words, store.repo()),
@@ -898,8 +898,9 @@ pub fn apply(
     wrapper_exit: Option<i32>,
 ) -> Result<Applied, Error> {
     let cost = attempt_cost(store, task_id, attempt);
-    // A model wait belongs to a `radian exec` worker only (ADR 0048 decision 9): a command
-    // worker's stdout may carry a `Result`, but its failures keep the ordinary retry rules.
+    // A model wait belongs to a `Result` that carries `model_error` (ADR 0048 decision 9): a
+    // command worker's stdout may carry one, but its failures keep the ordinary retry rules,
+    // and the radian worker's ACP response carries its error as text without a `kind`.
     let command_worker = worker_is_command(store, task_id, attempt);
     let model_error = result_model_error(store, task_id, attempt);
     let budget = BudgetCheck::new(store, task_id)?;

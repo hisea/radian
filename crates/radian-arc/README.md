@@ -54,7 +54,7 @@ the file's names.
 
 ```toml
 [worker]
-exec_args = []               # extra `radian exec` arguments, after the wrapper's own
+exec_args = []               # extra `radian acp` arguments, after the wrapper's own
 
 [ids]
 plan_prefix = "PL"           # 1 to 4 uppercase letters; the first letters of a new plan id
@@ -109,7 +109,7 @@ setup, naming `radian arc init`; with setup it opens the TUI that lives in `radi
 
 `radian arc start <task>` runs one task and waits; `radian arc run` is the scheduling loop and
 uses the same attempt path. Before `start`, each `run` pass and `confirm` act, `worker_args::check_config`
-checks the worker line. Without `[worker] command` it parses the `radian exec` command line —
+checks the worker line. Without `[worker] command` it parses the `radian acp` command line —
 the wrapper's fixed arguments with placeholder values plus `[worker] exec_args` — with
 `radian-exec`'s own parser, and refuses (exit 3) a line that does not parse or that repeats an
 argument the wrapper sets (`worker_args::OWNED_EXEC_ARGS`, the closed list the manual's drift
@@ -130,10 +130,11 @@ It then runs the current executable as `arc work --task … --attempt … --toke
 [--acp <JSON>] -- <[worker] exec_args>`,
 with the task body on stdin, and moves the task to `doing.running`. `--command` carries
 `[worker] command` as one JSON array (the program first); the wrapper then runs that program
-instead of `radian exec`, with the same brief, limits and delivery checks and the `ARC_*`
+instead of the radian worker, with the same brief, limits and delivery checks and the `ARC_*`
 environment of ADR 0048 decision 7. `--acp` carries a flow's `acp` the same way: the wrapper
-is an ACP v1 client (`acp`) and starts that program as the agent, sends it the brief through
-`session/prompt`, and writes the turn's `stopReason` as the attempt's `Result`. The claim picks the session from
+is an ACP v1 client (`acp`) and starts that program as the agent instead of `radian acp`,
+sends it the brief through `session/prompt`, and writes the turn's `stopReason` as the
+attempt's `Result`. The claim picks the session from
 `[worker] rework_session`: `<task>-<attempt>` with `fresh` (the default), the task id with
 `resume`, and only the latter sets `--resume`. The wrapper, not the caller, enforces the
 attempt's limits: no growth
@@ -363,7 +364,7 @@ still reads the current main.
 
 `radian arc work --task <id> --attempt <n> --token <token> [--session <id>] [--resume]
 [--allow-noop] [--commit-dirty] [--remote <name>] [--main-branch <name>] [--stall-timeout-secs <n>]
-[--max-wall-time-secs <n>] [--cancel-grace-secs <n>] [-- <extra radian exec args>]` runs one
+[--max-wall-time-secs <n>] [--cancel-grace-secs <n>] [-- <extra radian acp args>]` runs one
 attempt of one task, the brief on stdin. It is an **internal** subcommand: arc runs it, a
 person does not. It is hidden from `--help` and has no manual page. `--remote`,
 `--main-branch` and the three limit flags are internal too: `radian-tui` takes the names from
@@ -400,20 +401,24 @@ One run:
    the worker's pid and process start time, the session id, the worktree, the branch, the
    start time). The heartbeat writer already runs (it starts with the attempt directory, so
    the worktree setup counts too) and picks up the worker's identity here.
-4. Runs the current executable as `radian exec -p - --session-id <session> --workspace
-   <worktree> --profile workspace --yes --output jsonl` (a `resume` attempt whose session file
-   exists passes `--resume <session>` instead of `--session-id`), with the caller's extra
-   arguments and one hidden `--deny-read <path>` per entry of `.radian/arc/` except
-   `worktrees/`. The worker runs in its own process group, so a SIGTERM reaches it and every
-   child that stays in the group. Its stdout is `runs/<task>/attempts/<task>-<n>/result.jsonl`,
-   its stderr `stderr.log`; the attempt fields, the session id included, go to
+4. Runs the current executable as `radian acp --session-id <session> --workspace
+   <worktree> --profile workspace` (a `resume` attempt whose session file exists passes
+   `--resume <session>` instead of `--session-id`), with the caller's extra arguments and one
+   hidden `--deny-read <path>` per entry of `.radian/arc/` except `worktrees/`, and speaks ACP
+   to it (`crate::acp`): `initialize`, one `session/new` (a `resume` attempt with a session
+   file sends `session/load`) with the worktree as `cwd`, and one `session/prompt` with the
+   brief. The worker runs in its own process group, so a SIGTERM reaches it and every child
+   that stays in the group. Its stdout is the protocol; every `session/update` is written to
+   `runs/<task>/attempts/<task>-<n>/result.jsonl` as a `{"type":"acp",…}` envelope,
+   followed by the wrapper's one `Result` line from `_meta.radian` (`text`, `cost`); its
+   stderr is `stderr.log`; the attempt fields, the session id included, go to
    `execution.json`. A fresh attempt after the first gets a hand-off section in front of the
    brief (`## Where the previous attempt left off`): the newest earlier attempt's
    `Result.text` cut at 8,000 characters with a note (a worker-less `reverify` attempt writes
    none, so the section walks back and names the attempt it came from), `git log --oneline`
    and `git diff --stat` of the task's own change from the merge base with the remote main. A
    `merge-main` conflict section stays first. A hidden `--worker-command <shell command>`
-   replaces the `radian exec` child for the forwarding tests; it exists only for tests and is
+   replaces the worker for the forwarding tests; it exists only for tests and is
    not a user input.
    While the child runs, the wrapper enforces the limits itself: a stall, the wall time, or a
    `cancel` records `signal.json` with its class, sends SIGTERM to the child's group and then

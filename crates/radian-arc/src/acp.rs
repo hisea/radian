@@ -37,12 +37,15 @@ pub fn append(log: &Log, value: &Value) {
     }
 }
 
-/// One turn's end: the agent's `stopReason` and the last contiguous run of message text.
+/// One turn's end: the agent's `stopReason`, the last contiguous run of message text, and the
+/// response's `_meta` object (ADR 0049: `_meta.radian` carries what ACP has no field for).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptEnd {
     pub stop_reason: String,
     /// The text of the last contiguous run of `agent_message_chunk` updates, as sent.
     pub text: String,
+    /// The `_meta` object of the `session/prompt` response, or `Value::Null` when it has none.
+    pub meta: Value,
 }
 
 /// The client of one agent process.
@@ -178,12 +181,18 @@ impl Client {
         }
     }
 
-    /// Closes the agent's stdin and waits for the reader to reach the end of its output. The
-    /// caller has stopped and reaped the process by then.
-    pub fn finish(&mut self) {
+    /// Closes the agent's stdin: the protocol stream's end. A well-behaved agent treats it as
+    /// the end of the session and exits; the caller waits a moment before it signals the group.
+    pub fn close_input(&self) {
         if let Ok(mut stdin) = self.stdin.lock() {
             *stdin = None;
         }
+    }
+
+    /// Closes the agent's stdin and waits for the reader to reach the end of its output. The
+    /// caller has stopped and reaped the process by then.
+    pub fn finish(&mut self) {
+        self.close_input();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }

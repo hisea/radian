@@ -35,6 +35,87 @@ fn last_result(path: &Path) -> Value {
         .unwrap_or_else(|| panic!("no Result line in {}", path.display()))
 }
 
+/// The user turns a session journal holds: its `MessageAppended` records of a user message.
+/// The ACP worker's `Result` carries no `turns` field (`_meta.radian` has `text`, `cost` and
+/// `error`), so a test that asks whether a session continued counts the journal instead.
+fn journal_turns(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record.get("event").and_then(Value::as_str) == Some("MessageAppended"))
+        .filter(|record| record.pointer("/data/message/user").is_some())
+        .count()
+}
+
+/// The `session/update` kinds an attempt's `result.jsonl` holds (ADR 0048 decision 7).
+fn update_kinds(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line.get("type").and_then(Value::as_str) == Some("acp"))
+        .filter_map(|line| {
+            line.pointer("/message/params/update/sessionUpdate")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The fee the session journal recorded: the sum of every `ModelUsageRecorded`'s `fee.micros`,
+/// which is what `radian exec` and `radian acp` put in `Result.cost` / `_meta.radian.cost`.
+fn journal_fee_micros(path: &Path) -> u64 {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| {
+            matches!(
+                record.get("event").and_then(Value::as_str),
+                Some("ModelUsageRecorded" | "CompactionUsageRecorded")
+            )
+        })
+        .filter_map(|record| record.pointer("/data/fee/micros").and_then(Value::as_u64))
+        .sum()
+}
+
+/// A model reply that streams `text` and reports one call's usage, so the host prices it from
+/// the catalog cache and the journal carries a fee.
+fn priced_reply(text: &str, prompt: u64, completion: u64) -> Reply {
+    Reply::sse(&[
+        agent_provider_openai_compatible::testing::chunk(
+            json!({"role": "assistant", "content": text}),
+            None,
+        ),
+        agent_provider_openai_compatible::testing::chunk(json!({}), Some("stop")),
+        json!({"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion}}),
+    ])
+}
+
+/// Writes the catalog cache the worker's process prices its calls from: model `m` under the
+/// provider `--base-url` resolves to (`openai-compatible`), at $3/M input and $15/M output.
+fn write_priced_catalog(repo: &Repo) {
+    let path = repo.home.join("cache/catalog/models.json");
+    std::fs::create_dir_all(path.parent().expect("the cache directory"))
+        .expect("the cache directory");
+    std::fs::write(
+        &path,
+        json!({
+            "openai-compatible": {
+                "models": {
+                    "m": {
+                        "limit": {"context": 200_000, "output": 8_192},
+                        "cost": {"input": 3.0, "output": 15.0},
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("the catalog cache");
+}
+
 fn wait_for_pid(identity: &Path) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -212,9 +293,14 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
     assert_eq!(execution["head_sha"], json!(head.as_str()));
     assert_eq!(execution["attempt_id"], json!("TK0001-happy-1"));
 
+    // The `radian acp` worker writes the attempt's `Result` from `_meta.radian`: its `text`
+    // is the last assistant message, and the session is named by the wrapper's own records,
+    // not by the `Result` (a `radian exec` stream named it there; ACP does not).
     let result = last_result(&repo.run_dir("TK0001-happy", 1).join("result.jsonl"));
     assert_eq!(result["outcome"], json!("completed"));
-    assert_eq!(result["session_id"], json!("TK0001-happy"));
+    assert_eq!(result["text"], json!("done"));
+    let session = repo.sessions.join("TK0001-happy.jsonl");
+    assert_eq!(journal_turns(&session), 1, "the attempt's one turn");
     let written = std::fs::read_to_string(
         repo.run_dir("TK0001-happy", 1)
             .join("attempt_finished.json"),
@@ -225,6 +311,84 @@ fn the_happy_path_commits_pushes_and_records_the_attempt() {
         run.stdout.trim(),
         "attempt_finished.json is the stdout line"
     );
+}
+
+/// The `radian` worker is `radian acp`, so the attempt's cost comes from the prompt response's
+/// `_meta.radian.cost` (ADR 0048 decisions 7 and 12). The fake run reports 1000 input and 500
+/// output tokens; the catalog cache prices them at $3/M and $15/M, so the wrapper's `Result`,
+/// the applied attempt and the task all carry 10,500 micros. Mutation: drop the `cost` mapping
+/// and the `Result` has none, the attempt is unknown and the task's total stays at zero.
+#[test]
+fn a_radian_workers_attempt_cost_is_the_meta_cost_of_its_run() {
+    use radian_arc::store::plan_ops;
+
+    let repo = Repo::new("cost-meta");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    write_priced_catalog(&repo);
+    let plan = store
+        .add_plan("cost", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task(
+            &plan,
+            "worker",
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm the plan");
+    let mock = Mock::start(vec![priced_reply("done", 1_000, 500)]);
+    let mut extra = model_args(mock.base_url());
+    extra.push("--include-usage".to_owned());
+    tune(
+        &repo,
+        "exec_args = []",
+        &format!(
+            "exec_args = [{}]",
+            extra
+                .iter()
+                .map(|arg| format!("\"{arg}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+
+    let run = repo.radian(&["arc", "start", &task]);
+    assert_eq!(run.code, 0, "start: {}", run.stderr);
+
+    // 1000 input at $3/M plus 500 output at $15/M is 3000 + 7500 micros.
+    let journal = repo.sessions.join(format!("{task}-1.jsonl"));
+    assert_eq!(
+        journal_fee_micros(&journal),
+        10_500,
+        "the fake run reported a priced call"
+    );
+    let result = last_result(&repo.run_dir(&task, 1).join("result.jsonl"));
+    assert_eq!(result["outcome"], json!("completed"), "{result}");
+    assert_eq!(
+        result["cost"]["micros"],
+        json!(10_500),
+        "the Result carries `_meta.radian.cost`: {result}"
+    );
+
+    let applied: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(&task, 1).join("attempt_result.json"))
+            .expect("attempt_result.json"),
+    )
+    .expect("attempt_result.json parses");
+    assert_eq!(applied["cost_known"], json!(true), "{applied}");
+    assert!(
+        (applied["cost_usd"].as_f64().expect("a cost") - 0.0105).abs() < 1e-9,
+        "the attempt's cost is the micros the run reported: {applied}"
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(stored.cost_usd, Some(0.0105));
+    assert_eq!(stored.total_cost_usd, Some(0.0105));
+    assert!(!stored.cost_unknown, "a reported cost is not unknown");
 }
 
 /// While task B's worktree exists, task A's sandboxed worker moves B's ref back to the
@@ -477,10 +641,13 @@ fn an_outcome_other_than_completed_never_pushes() {
         &extra,
         "spend the budget",
     );
-    assert_eq!(run.code, 3, "{}", run.stderr);
+    // `radian acp` reports the used-up model-call budget as `max_turn_requests` and exits `0`
+    // when the wrapper closes its protocol stream; the wrapper turns a failed outcome with a
+    // zero exit into its own exit code `1`.
+    assert_eq!(run.code, 1, "{}", run.stderr);
     let finished = run.finished();
-    assert_eq!(finished["outcome"], json!("budget_exceeded"));
-    assert_eq!(finished["exit_code"], json!(3));
+    assert_eq!(finished["outcome"], json!("max_turn_requests"));
+    assert_eq!(finished["exit_code"], json!(0));
     assert_ne!(
         finished["head_sha"], finished["base_sha"],
         "the worker committed before the budget ran out: {finished}"
@@ -490,7 +657,7 @@ fn an_outcome_other_than_completed_never_pushes() {
         finished["failure"]
             .as_str()
             .unwrap()
-            .contains("outcome budget_exceeded")
+            .contains("outcome max_turn_requests")
     );
     assert_eq!(repo.remote_branch("TK0004-budget"), None);
 }
@@ -654,8 +821,10 @@ fn the_wrappers_git_commands_run_no_repository_hooks() {
     );
 }
 
-/// `--resume` on attempt 2 continues the same session id: the second `Result` reports two
-/// session turns and one turn for its own process.
+/// `--resume` on attempt 2 continues the same session: `radian acp` is started with
+/// `--resume`, the wrapper opens the journal with `session/load` (whose replay is the only
+/// source of a `user_message_chunk`), and the journal grows to two turns under the same id.
+/// Mutation: send `session/new` instead of `session/load` and no replay reaches the attempt.
 #[test]
 fn resume_on_the_second_attempt_continues_the_same_session() {
     let repo = Repo::new("resume");
@@ -677,9 +846,14 @@ fn resume_on_the_second_attempt_continues_the_same_session() {
         "one",
     );
     assert_eq!(first.code, 0, "{}", first.stderr);
-    let result1 = last_result(&repo.run_dir(task, 1).join("result.jsonl"));
-    assert_eq!(result1["session_id"], json!(task));
-    assert_eq!(result1["turns"], json!(1));
+    let journal = repo.sessions.join(format!("{task}.jsonl"));
+    assert_eq!(journal_turns(&journal), 1);
+    assert!(
+        !update_kinds(&repo.run_dir(task, 1).join("result.jsonl"))
+            .iter()
+            .any(|kind| kind == "user_message_chunk"),
+        "a new session does not replay a transcript"
+    );
 
     let mock2 = Mock::start(vec![
         shell_reply(
@@ -700,17 +874,30 @@ fn resume_on_the_second_attempt_continues_the_same_session() {
     assert_eq!(second.code, 0, "{}", second.stderr);
     let finished = second.finished();
     assert_eq!(finished["pushed"], json!(true));
-    let result2 = last_result(&repo.run_dir(task, 2).join("result.jsonl"));
-    assert_eq!(result2["session_id"], json!(task), "the same session id");
-    assert_eq!(result2["turns"], json!(2), "both attempts' turns");
-    assert_eq!(result2["run_turns"], json!(1), "only this process's turn");
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(task, 2).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    assert_eq!(execution["session_id"], json!(task), "the same session id");
+    assert_eq!(
+        journal_turns(&journal),
+        2,
+        "`session/load` continued the journal"
+    );
+    assert!(
+        update_kinds(&repo.run_dir(task, 2).join("result.jsonl"))
+            .iter()
+            .any(|kind| kind == "user_message_chunk"),
+        "`session/load` replayed the journal's first turn"
+    );
     assert_eq!(
         repo.remote_branch(task).as_deref(),
         finished["head_sha"].as_str()
     );
 }
 
-/// A first attempt that fails before the model starts (here `radian exec` refuses an unknown
+/// A first attempt that fails before the model starts (here `radian acp` refuses an unknown
 /// worker argument) leaves no session file. The second attempt carries `--resume` but must
 /// start the session with `--session-id`: resuming would fail with `no session` on every
 /// remaining attempt.
@@ -752,20 +939,35 @@ fn a_later_attempt_starts_the_session_when_no_earlier_attempt_created_it() {
     );
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(second.finished()["pushed"], json!(true));
-    let result = last_result(&repo.run_dir(task, 2).join("result.jsonl"));
-    assert_eq!(result["session_id"], json!(task), "the task's session id");
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(task, 2).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
     assert_eq!(
-        result["turns"],
-        json!(1),
+        execution["session_id"],
+        json!(task),
+        "the task's session id"
+    );
+    let journal = repo.sessions.join(format!("{task}.jsonl"));
+    assert_eq!(
+        journal_turns(&journal),
+        1,
         "a new session, not a resumed one"
+    );
+    assert!(
+        !update_kinds(&repo.run_dir(task, 2).join("result.jsonl"))
+            .iter()
+            .any(|kind| kind == "user_message_chunk"),
+        "a new session replays no transcript"
     );
 }
 
 /// ADR 0048 decision 7: a fresh rework starts a session of its own (`<task>-2`, no
 /// `--resume`), its stdin opens with the hand-off section (the previous report, the commit
 /// list and the diff stat), and the first attempt's journal is untouched. Mutation: pass
-/// `--resume` and the second result reports a resumed session; drop the section and the
-/// brief is the body alone.
+/// `--resume` and the second attempt's record names the first session; drop the section and
+/// the brief is the body alone.
 #[test]
 fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
     let repo = Repo::new("fresh-rework");
@@ -791,11 +993,9 @@ fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
         "one",
     );
     assert_eq!(first.code, 0, "{}", first.stderr);
-    let result1 = last_result(&repo.run_dir(task, 1).join("result.jsonl"));
-    assert_eq!(result1["session_id"], json!(first_session));
-    assert_eq!(result1["turns"], json!(1));
     let journal = repo.sessions.join(format!("{first_session}.jsonl"));
     assert!(journal.is_file(), "{} exists", journal.display());
+    assert_eq!(journal_turns(&journal), 1);
     let before = std::fs::read(&journal).expect("the first attempt's journal");
 
     let mock2 = Mock::start(vec![
@@ -817,15 +1017,10 @@ fn a_fresh_rework_starts_a_new_session_with_the_hand_off() {
     );
     assert_eq!(second.code, 0, "{}", second.stderr);
     assert_eq!(second.finished()["pushed"], json!(true));
-    let result2 = last_result(&repo.run_dir(task, 2).join("result.jsonl"));
+    let second_journal = repo.sessions.join(format!("{second_session}.jsonl"));
     assert_eq!(
-        result2["session_id"],
-        json!(second_session),
-        "the attempt's own session"
-    );
-    assert_eq!(
-        result2["turns"],
-        json!(1),
+        journal_turns(&second_journal),
+        1,
         "a new session, not a resumed one"
     );
     assert_eq!(
@@ -938,8 +1133,12 @@ fn the_hand_off_walks_back_past_a_reverify_attempt() {
         "third",
     );
     assert_eq!(third.code, 0, "{}", third.stderr);
-    let result3 = last_result(&repo.run_dir(task, 3).join("result.jsonl"));
-    assert_eq!(result3["session_id"], json!(third_session));
+    let execution: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.run_dir(task, 3).join("execution.json"))
+            .expect("execution.json"),
+    )
+    .expect("execution.json parses");
+    assert_eq!(execution["session_id"], json!(third_session));
 
     let brief = brief_of(&mock3.requests()[0]);
     let report = brief

@@ -241,7 +241,7 @@ fn spawn_claim_with(
         .arg(limits.wall.as_secs().to_string())
         .arg("--cancel-grace-secs")
         .arg(limits.grace.as_secs().to_string());
-    // The configured command worker or the `radian exec` arguments, from the claim's one
+    // The configured command worker or the radian worker's `exec_args`, from the claim's one
     // immutable worker line: a config change after the claim cannot start a different worker
     // than `start.json` records (ADR 0048 decisions 4 and 7).
     command.arg("--flow").arg(claim.worker.flow());

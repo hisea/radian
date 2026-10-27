@@ -1561,3 +1561,22 @@ restored from `.radian/` with `cp`.
 | TK0202-M3 | `end_turn` maps to a failed outcome (`work/mod.rs`, `acp_outcome` maps `end_turn` to `failed`) | `an_acp_turn_that_ends_with_end_turn_passes_and_commits` (the attempt ends `outcome failed`, nothing pushed) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0205: the radian worker runs `radian acp` (2026-10-27, branch `work/TK0205-arc-radian-worker-over-acp`)
+
+The default worker starts `radian acp` and the wrapper speaks ACP to it: the session request is
+`session/new`, or `session/load` for a `resume`-mode attempt whose session file exists, and the
+attempt's `Result` is written from `_meta.radian` (`text`, `cost`) instead of a `radian exec`
+jsonl stream (ADR 0048 decision 7). Each mutation was applied by hand to
+`crates/radian-arc/src/work/mod.rs`, the binary rebuilt with `cargo build -p radian-tui --bin
+radian` (the integration tests refuse one older than its sources), the named tests ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --no-fail-fast -E 'test(...)'`,
+and the file was restored from `.radian/mut/mod.rs.tk0205` with `cp`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0205-M1 | the cost is not read from `_meta.radian.cost` (`apply_radian_meta` drops the `cost` assignment) | `work::a_radian_workers_attempt_cost_is_the_meta_cost_of_its_run` (the `Result` has no `cost`, so the applied attempt is unknown), `work::tests::the_radian_meta_is_the_results_text_and_cost` (no `cost` on the line) | ✅ 2 failed |
+| TK0205-M2 | `resume` sends `session/new` instead of `session/load` (`acp_conversation` forces `resume_session` false) | `work::resume_on_the_second_attempt_continues_the_same_session` (`session/load` replayed no `user_message_chunk`) | ✅ 1 failed |
+
+2/2 caught.

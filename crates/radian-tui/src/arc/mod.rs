@@ -1200,12 +1200,13 @@ impl ArcApp {
 
     /// Opens, or polls, the selected attempt's conversation.
     ///
-    /// A `radian exec` attempt is its worker journal: the file is named by the attempt's session
-    /// id (ADR 0048 decision 4) — the wrapper's `execution.json` or `identity.json`, else the
-    /// claim's `start.json`. Only an attempt that names none (an older attempt, or a worker-less
-    /// `reverify`) falls back to the task id. A command worker has no session: its conversation
-    /// is the attempt's `result.jsonl` (ADR 0048 §13). A view opened for another attempt is
-    /// dropped, so `[`/`]` never keeps showing the previous conversation.
+    /// The radian worker's attempt is its worker journal: the file is named by the attempt's
+    /// session id (ADR 0048 decision 4) — the wrapper's `execution.json` or `identity.json`,
+    /// else the claim's `start.json`. Only an attempt that names none (an older attempt, or a
+    /// worker-less `reverify`) falls back to the task id. A `command` worker or a flow's `acp`
+    /// agent has no session: its conversation is the attempt's `result.jsonl` (ADR 0048 §13).
+    /// A view opened for another attempt is dropped, so `[`/`]` never keeps showing the
+    /// previous conversation.
     pub fn refresh_journal(&mut self) {
         let Some(page) = self.task.as_ref() else {
             return;
@@ -2842,9 +2843,9 @@ impl ArcApp {
     }
 }
 
-/// The program of the worker whose conversation is its stdout (`command` or `acp`) that ran,
-/// or is running, one attempt; `None` when the attempt's worker is `radian exec` (ADR 0048
-/// decisions 4, 7 and 13).
+/// The program of the worker whose conversation is its stdout (`command` or a flow's `acp`)
+/// that ran, or is running, one attempt; `None` when the attempt's worker is `radian`
+/// (ADR 0048 decisions 4, 7 and 13).
 ///
 /// The attempt's own records decide, never the current configuration: the claim writes the
 /// worker it decided on to `start.json` (the key takes effect at the next claim), the wrapper

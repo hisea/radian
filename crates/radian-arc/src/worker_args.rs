@@ -1,13 +1,13 @@
 //! The worker's command line, checked before an attempt is claimed (ADR 0048 decision 7).
 //!
 //! `[worker] exec_args` used to reach a worker only after the attempt started: a wrong entry
-//! (`-m` for `--model`) made `radian exec` exit `2` at argument parsing, the attempt ended
+//! (`-m` for `--model`) made `radian acp` exit `2` at argument parsing, the attempt ended
 //! `terminated`, and every remaining attempt failed the same way. `radian arc start`,
 //! `radian arc run` and `radian arc confirm` now check the worker line before they claim or
 //! change anything. Without `[worker] command`, they parse the line the worker would get — the
 //! wrapper's fixed arguments with placeholder values for the task and the worktree, then
-//! `exec_args`, then the prompt — with the parser the worker itself runs
-//! ([`radian_exec::Cli`]). Parsing starts no session, calls no model and writes no file.
+//! `exec_args` — with the parser the worker itself runs ([`radian_exec::AcpCli`]). Parsing
+//! starts no session, calls no model and writes no file.
 //!
 //! A rejected line is refused (exit `3`) with the parser's own message and names
 //! `worker.exec_args`. So is a line that repeats an argument the wrapper owns
@@ -27,27 +27,24 @@ use clap::Parser;
 use crate::store::Error;
 use crate::store::config::Config;
 
-/// The `radian exec` arguments the wrapper fixes for every worker, with placeholder values
-/// for the session and the worktree. [`check`] parses these, then `[worker] exec_args`, then
-/// `-p -`, in the order [`crate::work`]'s `spawn_child` builds them.
-pub const FIXED_EXEC_ARGS: &[&str] = &[
+/// The arguments the wrapper fixes for every worker, with placeholder values for the session
+/// and the worktree. [`check`] parses these, then `[worker] exec_args`, in the order
+/// [`crate::work`]'s `radian_acp_command` builds them. A `resume`-mode attempt passes
+/// `--resume <session>` instead of `--session-id`; the two are exclusive in both parsers, so
+/// the check parses the `--session-id` form.
+pub const FIXED_WORKER_ARGS: &[&str] = &[
     "--session-id",
     "<session>",
     "--workspace",
     "<worktree>",
     "--profile",
     "workspace",
-    "--yes",
-    "--output",
-    "jsonl",
 ];
 
-/// The prompt the worker's brief arrives on, after the caller's extra arguments.
-const PROMPT_ARGS: &[&str] = &["-p", "-"];
-
-/// The `radian exec` arguments the wrapper owns: `exec_args` may not repeat one, because the
-/// wrapper's value would be overridden (or the flag given twice). One closed list: the code
-/// refuses from it and the manual's drift test reads it.
+/// The arguments the wrapper owns: `exec_args` may not repeat one, because the wrapper's value
+/// would be overridden (or the flag given twice). One closed list: the code refuses from it and
+/// the manual's drift test reads it. `--output`, `--yes` and `-p` are here because the worker
+/// no longer takes them: its approvals go through `session/request_permission`.
 pub const OWNED_EXEC_ARGS: &[&str] = &[
     "--profile",
     "--workspace",
@@ -58,13 +55,12 @@ pub const OWNED_EXEC_ARGS: &[&str] = &[
     "-p",
 ];
 
-/// The full line [`check`] parses: the program name, the wrapper's fixed arguments, the
-/// caller's extra arguments and the prompt.
+/// The full line [`check`] parses: the program name, the wrapper's fixed arguments and the
+/// caller's extra arguments.
 fn line(exec_args: &[String]) -> Vec<String> {
-    std::iter::once("radian exec".to_owned())
-        .chain(FIXED_EXEC_ARGS.iter().map(|arg| (*arg).to_owned()))
+    std::iter::once("radian acp".to_owned())
+        .chain(FIXED_WORKER_ARGS.iter().map(|arg| (*arg).to_owned()))
         .chain(exec_args.iter().cloned())
-        .chain(PROMPT_ARGS.iter().map(|arg| (*arg).to_owned()))
         .collect()
 }
 
@@ -73,12 +69,12 @@ fn line(exec_args: &[String]) -> Vec<String> {
 ///
 /// The `[worker]` keys are checked as they always were, and then every `[flows.<name>]`
 /// worker is checked the same way: a flow's `command` program must resolve, and its
-/// `exec_args` must be a `radian exec` argument list without an argument the wrapper owns.
+/// `exec_args` must be a `radian acp` argument list without an argument the wrapper owns.
 ///
 /// # Errors
 ///
 /// [`Error::Refused`] (exit `3`) when a `[worker]` or flow `command` program does not
-/// resolve, or when an `exec_args` repeats an argument the wrapper owns or the `radian exec`
+/// resolve, or when an `exec_args` repeats an argument the wrapper owns or the `radian acp`
 /// parser rejects the line. The message names `worker.command`, `worker.exec_args`,
 /// `flows.<name>.command` or `flows.<name>.exec_args`. Nothing is claimed or written.
 pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
@@ -105,7 +101,7 @@ pub fn check_config(config: &Config, repo: &Path) -> Result<(), Error> {
 }
 
 /// Checks one flow's worker: its `command` or `acp` program resolves, or its `exec_args` is a
-/// valid `radian exec` argument list (ADR 0048 decision 15). The error names the flow's keys.
+/// valid `radian acp` argument list (ADR 0048 decision 15). The error names the flow's keys.
 ///
 /// A flow sets at most one worker line: two or more of `acp`, `command` and a non-empty
 /// `exec_args` are refused here, naming every key the flow set (ADR 0048 decisions 1 and 7).
@@ -226,7 +222,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 /// # Errors
 ///
 /// [`Error::Refused`] (exit `3`) when `exec_args` repeats an argument the wrapper owns, or
-/// when the `radian exec` parser rejects the line. The message names `worker.exec_args` and,
+/// when the `radian acp` parser rejects the line. The message names `worker.exec_args` and,
 /// for a parse failure, carries the parser's own text. Nothing is claimed or written.
 pub fn check(exec_args: &[String]) -> Result<(), Error> {
     check_named("worker.exec_args", exec_args)
@@ -238,12 +234,12 @@ fn check_named(key: &str, exec_args: &[String]) -> Result<(), Error> {
     if let Some(owned) = exec_args.iter().find_map(|arg| owned_name(arg)) {
         return Err(Error::Refused(format!(
             "{key} must not repeat `{owned}`: the wrapper sets it on the worker's \
-             `radian exec` line, so a value here would override the wrapper's"
+             `radian acp` line, so a value here would override the wrapper's"
         )));
     }
-    radian_exec::Cli::try_parse_from(line(exec_args)).map_err(|error| {
+    radian_exec::AcpCli::try_parse_from(line(exec_args)).map_err(|error| {
         Error::Refused(format!(
-            "{key} is not a `radian exec` argument list: {}",
+            "{key} is not a `radian acp` argument list: {}",
             error.to_string().trim_end()
         ))
     })?;

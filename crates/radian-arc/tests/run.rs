@@ -1661,7 +1661,7 @@ fn a_serve_pass_that_errors_prints_a_line_and_goes_on() {
 
 /// The config line that makes every pass refuse the same way: an argument the wrapper owns.
 const BAD_EXEC_ARGS_A: &str = "exec_args = [\"--profile\", \"full\"]";
-/// A different permanent error: the `radian exec` parser rejects the line.
+/// A different permanent error: the `radian acp` parser rejects the line.
 const BAD_EXEC_ARGS_B: &str = "exec_args = [\"-m\", \"x\"]";
 
 /// Rewrites `[worker] exec_args`, asserting the current spelling is there.
@@ -1944,7 +1944,7 @@ fn different_errors_do_not_stop_serve() {
     set_exec_args(&repo, BAD_EXEC_ARGS_A, BAD_EXEC_ARGS_B);
     wait_for_loop_log(
         &repo,
-        "worker.exec_args is not a `radian exec` argument list",
+        "worker.exec_args is not a `radian acp` argument list",
         1,
     );
     assert!(
@@ -1975,7 +1975,7 @@ fn different_errors_do_not_stop_serve() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("worker.exec_args is not a `radian exec` argument list"),
+        stdout.contains("worker.exec_args is not a `radian acp` argument list"),
         "{stdout}"
     );
     assert!(!stdout.contains("passes in a row"), "{stdout}");

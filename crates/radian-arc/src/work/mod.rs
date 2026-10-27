@@ -13,10 +13,13 @@
 //!    never run together); a first attempt fetches the configured remote's main branch and
 //!    starts from the fetched tip;
 //! 2. write the host-local attempt record under `<repository>/.radian/arc/attempts/`;
-//! 3. run `radian exec -p - --session-id <session> --workspace <worktree> --profile workspace
-//!    --yes --output jsonl` (with `--resume <session>` when this is a `resume`-mode later
-//!    attempt and the session exists, and the caller's extra arguments), the brief on its
-//!    stdin, stdout into `runs/…/result.jsonl`;
+//! 3. run the attempt's worker. A `radian` worker is `radian acp` spoken to over the ACP
+//!    client ([`crate::acp`]) with the flags the `radian exec` worker used to get
+//!    (`--session-id <session>` or `--resume <session>`, `--workspace <worktree>`, `--profile
+//!    workspace`, the deny list and the caller's extra arguments) and the brief as its one
+//!    `session/prompt`; the flow's `acp` program is started the same way, and a flow's
+//!    `command` (or the test-only shell) writes JSON lines to stdout into
+//!    `runs/…/result.jsonl`;
 //! 4. while the child runs, enforce the attempt's limits here: a stall, the wall time, or a
 //!    `cancel` records `signal.json`, sends SIGTERM to the child's process group and then
 //!    SIGKILL after the grace period. These limits belong to this process, so they hold after
@@ -102,12 +105,13 @@ pub struct Options {
     /// The main branch a first attempt starts from. Internal: `arc` sets it (default
     /// `main`); a person does not.
     pub main_branch: String,
-    /// Extra `radian exec` arguments after `--` (the model route in tests: `--model`,
-    /// `--base-url`).
+    /// Extra worker arguments after `--`: the flow's `exec_args` (the model route in tests:
+    /// `--model`, `--base-url`). They reach `radian acp` for a `radian` worker and the
+    /// configured program for a `command` or `acp` worker.
     pub extra_args: Vec<String>,
     /// Internal: the configured `[worker] command`, the program first and its arguments after
     /// it (ADR 0048 decision 7). arc reads it at the claim and passes it here; unset runs
-    /// `radian exec`. Never set by a person; it is not in the manual.
+    /// `radian acp`. Never set by a person; it is not in the manual.
     pub command: Option<Vec<String>>,
     /// Internal: a flow's `acp`, the program first and its arguments after it: the wrapper is
     /// the ACP client and starts this array as the agent (ADR 0048 decision 7). arc reads it at
@@ -125,9 +129,9 @@ pub struct Options {
     /// Internal: how long a signalled worker gets before SIGKILL (`[limits]
     /// cancel_grace_secs`).
     pub cancel_grace_secs: u64,
-    /// Test-only: run this shell command as the worker instead of `radian exec`. It exists so
-    /// the forwarding tests can start a plain process that spawns a child of its own, which
-    /// a real `radian exec` does not (its tools run in their own sessions). Never set by
+    /// Test-only: run this shell command as the worker instead of the attempt's own worker. It
+    /// exists so the forwarding tests can start a plain process that spawns a child of its own,
+    /// which neither `radian acp` nor a command worker does in the same way. Never set by
     /// arc; an input that exists only for tests is not documented (AGENTS.md).
     pub worker_command: Option<String>,
 }
@@ -154,10 +158,11 @@ pub const WORKER_ENV: &[&str] = &[
 ];
 
 /// The worker a run starts: the test-only shell, the configured ACP agent, the configured
-/// command, or `radian exec` (ADR 0048 decision 7). The test-only shell takes precedence, so
+/// command, or `radian acp` (ADR 0048 decision 7). The test-only shell takes precedence, so
 /// every existing forwarding test keeps its shape.
 #[derive(Debug, Clone, Copy)]
 enum Worker<'a> {
+    /// `radian acp`: the same agent `radian exec` served headless, spoken to as ACP.
     Radian,
     Command(&'a [String]),
     Acp(&'a [String]),
@@ -558,6 +563,10 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         }),
         Worker::Shell(_) => json!({"kind": "command", "flow": o.flow, "program": "sh"}),
     };
+    // What this attempt does with its session, decided once (ADR 0048 decision 4): the
+    // `--session-id`/`--resume` flag and the `session/new`/`session/load` request read the
+    // same value, so a session file that appears between the two cannot split them.
+    let start = session_start(o.resume, session_exists(&o.session, &o.extra_args));
     let spawn = Spawn {
         worktree: &s.worktree,
         deny: &deny,
@@ -566,8 +575,13 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         result_path: &result_path,
         stderr_path: &stderr_path,
         brief: &brief,
+        start,
     };
     let (mut child, acp_log) = match worker_of(o) {
+        Worker::Radian => {
+            let (child, log) = spawn_radian_acp(o, &spawn)?;
+            (child, Some(log))
+        }
         Worker::Acp(words) => {
             let (child, log) = spawn_acp(o, &spawn, words)?;
             (child, Some(log))
@@ -616,7 +630,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
         Some(log) => {
             let mut client = acp::Client::start(&mut child, s.worktree.clone(), log.clone())
                 .map_err(Failure::error)?;
-            let turn = run_acp_turn(o, s, &mut child, &mut client, &brief, &log)?;
+            let turn = run_acp_turn(o, s, &mut child, &mut client, &brief, &log, start)?;
             (turn.exit_code, turn.failure)
         }
         None => {
@@ -2524,7 +2538,8 @@ fn worker_env(
     ]
 }
 
-/// What one spawn needs: the paths of the attempt and the record of its git control files.
+/// What one spawn needs: the paths of the attempt, the record of its git control files, and
+/// the session decision the attempt made once.
 struct Spawn<'a> {
     worktree: &'a Path,
     deny: &'a [PathBuf],
@@ -2533,6 +2548,9 @@ struct Spawn<'a> {
     result_path: &'a Path,
     stderr_path: &'a Path,
     brief: &'a str,
+    /// What the worker does with its session (ADR 0048 decision 4). Computed once, so the
+    /// flags and the protocol request can never disagree.
+    start: SessionStart,
 }
 
 fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
@@ -2544,8 +2562,8 @@ fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
         result_path,
         stderr_path,
         brief,
+        start,
     } = *spawn;
-    let start = session_start(o.resume, session_exists(&o.session, &o.extra_args));
     let mut command = match worker_of(o) {
         Worker::Shell(shell) => {
             // Test-only (see [`Options::worker_command`]). `sh` starts in the wrapper's own
@@ -2571,43 +2589,12 @@ fn spawn_child(o: &Options, spawn: &Spawn<'_>) -> Result<Child, Failure> {
             }
             command
         }
-        // An ACP agent is spawned by [`spawn_acp`], which pipes its stdout to the client.
-        Worker::Acp(_) => {
+        // An ACP agent (a flow's `acp` or `radian acp`) is spawned by [`spawn_acp`], which
+        // pipes its stdout to the client.
+        Worker::Acp(_) | Worker::Radian => {
             return Err(Failure::usage(
-                "the ACP agent is started by the wrapper's ACP client, not here",
+                "the ACP worker is started by the wrapper's ACP client, not here",
             ));
-        }
-        Worker::Radian => {
-            let executable = std::env::current_exe().map_err(|error| {
-                Failure::error(format!("cannot find the current executable: {error}"))
-            })?;
-            let mut command = Command::new(executable);
-            command.arg("exec");
-            // `--session-id` and `--resume` are exclusive in `radian exec` (ADR 0022/0023). The
-            // session is the one the claim chose: the task id with `resume`, `<task>-<attempt>`
-            // with `fresh`. A `fresh` attempt is never resumed.
-            match start {
-                SessionStart::Continue => {
-                    command.arg("--resume").arg(&o.session);
-                }
-                SessionStart::New => {
-                    command.arg("--session-id").arg(&o.session);
-                }
-            }
-            command
-                .arg("--workspace")
-                .arg(worktree)
-                .arg("--profile")
-                .arg("workspace")
-                .arg("--yes")
-                .arg("--output")
-                .arg("jsonl");
-            for path in deny {
-                command.arg("--deny-read").arg(path);
-            }
-            command.args(&o.extra_args);
-            command.arg("-p").arg("-");
-            command
         }
     };
     // The worker gets its own process group, so the SIGTERM the wrapper forwards reaches it
@@ -2653,9 +2640,8 @@ fn spawn_acp(
         deny,
         state_dir,
         control,
-        result_path,
-        stderr_path,
-        brief: _,
+        start,
+        ..
     } = *spawn;
     let Some((program, args)) = words.split_first() else {
         return Err(Failure::usage(
@@ -2664,12 +2650,64 @@ fn spawn_acp(
     };
     let mut command = Command::new(program);
     command.args(args).current_dir(worktree);
-    let start = session_start(o.resume, session_exists(&o.session, &o.extra_args));
     for (name, value) in worker_env(o, worktree, deny, state_dir, control, start) {
         command.env(name, value);
     }
-    // Its own process group, so the wrapper's SIGTERM reaches the agent and every child that
-    // stays in the group, and never this wrapper or the process above it (decision 9).
+    spawn_agent(command, spawn)
+}
+
+/// Spawns the `radian acp` the default worker runs (ADR 0048 decision 7): the same flag string
+/// the `radian exec` worker got, without `-p -`, `--output jsonl` and `--yes`. The worktree
+/// goes in the session request's `cwd` and in `--workspace`, so the two agree.
+fn spawn_radian_acp(o: &Options, spawn: &Spawn<'_>) -> Result<(Child, acp::Log), Failure> {
+    let command = radian_acp_command(o, spawn.worktree, spawn.deny, spawn.start)?;
+    spawn_agent(command, spawn)
+}
+
+/// The `radian acp` command line of one attempt. `--session-id` and `--resume` are exclusive
+/// (ADR 0022/0023): the session is the one the claim chose, and a `fresh` attempt is never
+/// resumed. Which one is passed also decides `session/new` versus `session/load`, so both
+/// read the one [`SessionStart`] the attempt made.
+fn radian_acp_command(
+    o: &Options,
+    worktree: &Path,
+    deny: &[PathBuf],
+    start: SessionStart,
+) -> Result<Command, Failure> {
+    let executable = std::env::current_exe()
+        .map_err(|error| Failure::error(format!("cannot find the current executable: {error}")))?;
+    let mut command = Command::new(executable);
+    command.arg("acp");
+    match start {
+        SessionStart::Continue => {
+            command.arg("--resume").arg(&o.session);
+        }
+        SessionStart::New => {
+            command.arg("--session-id").arg(&o.session);
+        }
+    }
+    command
+        .arg("--workspace")
+        .arg(worktree)
+        .arg("--profile")
+        .arg("workspace");
+    for path in deny {
+        command.arg("--deny-read").arg(path);
+    }
+    command.args(&o.extra_args);
+    Ok(command)
+}
+
+/// The last steps every ACP agent gets: its own process group, so the wrapper's SIGTERM
+/// reaches the agent and every child that stays in the group and never this wrapper or the
+/// process above it (ADR 0048 decision 9); stdout piped to the client; stderr into
+/// `stderr.log`; and `result.jsonl` created for the client's lines.
+fn spawn_agent(mut command: Command, spawn: &Spawn<'_>) -> Result<(Child, acp::Log), Failure> {
+    let Spawn {
+        result_path,
+        stderr_path,
+        ..
+    } = *spawn;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -2705,9 +2743,15 @@ struct AcpTurn {
     end: Option<acp::PromptEnd>,
 }
 
+/// How long the agent gets to exit on its own after the wrapper closes its stdin at the end of
+/// a turn, before the wrapper signals its process group (`radian acp` exits `0` on the end of
+/// its protocol stream). This wait is not part of the attempt's limits; a signal ends it.
+const AGENT_EXIT_WAIT: Duration = Duration::from_secs(5);
+
 /// Runs the one conversation of an ACP attempt, then stops the agent and writes the attempt's
-/// `Result` line (ADR 0048 decision 7): `initialize`, one `session/new` in the worktree, and
-/// one `session/prompt` with the brief. The response's `stopReason` decides the outcome; on a
+/// `Result` line (ADR 0048 decision 7): `initialize`, one `session/new` (or, for a `resume`
+/// `radian` attempt whose session exists, `session/load`) in the worktree, and one
+/// `session/prompt` with the brief. The response's `stopReason` decides the outcome; on a
 /// stall, the wall clock or a cancel the client sends `session/cancel` first.
 fn run_acp_turn(
     o: &Options,
@@ -2716,40 +2760,94 @@ fn run_acp_turn(
     client: &mut acp::Client,
     brief: &str,
     log: &acp::Log,
+    start: SessionStart,
 ) -> Result<AcpTurn, Failure> {
     let limits = Limits::of(o);
-    let turn = acp_conversation(s, child, client, brief, &s.runs.join(SIGNAL_FILE), &limits);
-    if turn.is_err() {
-        // A request that could not be written means the agent's pipe is gone; stop whatever
-        // is left of its group so nothing of the worker outlives the attempt.
-        stop_agent(child, limits.grace);
-    }
+    let turn = match acp_conversation(
+        o,
+        s,
+        child,
+        client,
+        brief,
+        &s.runs.join(SIGNAL_FILE),
+        &limits,
+        start,
+    ) {
+        Ok(turn) => Ok(turn),
+        // A request that could not be written means the agent's pipe is gone. When the agent
+        // itself has exited, its exit code is the attempt's, exactly as the old jsonl monitor
+        // recorded a killed worker; otherwise stop whatever is left of its group so nothing of
+        // the worker outlives the attempt.
+        Err(failure) => match exited(child) {
+            Ok(Some(status)) => {
+                stop_group(child.id(), limits.grace);
+                let _ = child.wait();
+                Ok(AcpTurn {
+                    exit_code: exit_code_of(&status),
+                    failure: None,
+                    end: None,
+                })
+            }
+            _ => {
+                stop_agent(child, limits.grace);
+                Err(failure)
+            }
+        },
+    };
     client.finish();
     // The wrapper, not the agent, writes the attempt's `Result` line, after the agent has ended
     // and the reader has stopped, so nothing follows it in `result.jsonl` (ADR 0048 decision 7).
     if let Ok(turn) = &turn
         && let Some(end) = &turn.end
     {
-        acp::append(
-            log,
-            &json!({
-                "type": "Result",
-                "outcome": acp_outcome(&end.stop_reason),
-                "text": end.text,
-            }),
-        );
+        acp::append(log, &result_line(o, end));
     }
     turn
 }
 
+/// The attempt's `Result` line (ADR 0048 decisions 7 and 12). For a flow's `acp` agent it is
+/// the `stopReason` mapping and the last message run; for the `radian` worker it is what
+/// `radian acp` puts in `_meta.radian`: `text` is the last assistant message, and `cost` is the
+/// same `{micros, incomplete, estimated}` object `radian exec` wrote (or null when no call had
+/// a price), so the task's cost, `cost_unknown` and the budget checks read it exactly as they
+/// read `radian exec`'s `Result.cost`.
+fn result_line(o: &Options, end: &acp::PromptEnd) -> Value {
+    let mut result = json!({
+        "type": "Result",
+        "outcome": acp_outcome(&end.stop_reason),
+        "text": end.text,
+    });
+    if matches!(worker_of(o), Worker::Radian) {
+        apply_radian_meta(&mut result, &end.meta);
+    }
+    result
+}
+
+/// `_meta.radian` on the attempt's `Result`: `text` is the last assistant message in full, and
+/// `cost` is the same object `radian exec` wrote, null included (ADR 0048 decision 12). A
+/// `_meta` without `radian` leaves the line as the protocol's own stop reason gave it.
+fn apply_radian_meta(result: &mut Value, meta: &Value) {
+    let Some(radian) = meta.get("radian") else {
+        return;
+    };
+    if let Some(text) = radian.get("text").and_then(Value::as_str) {
+        result["text"] = json!(text);
+    }
+    if let Some(cost) = radian.get("cost") {
+        result["cost"] = cost.clone();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn acp_conversation(
+    o: &Options,
     s: &Setup,
     child: &mut Child,
     client: &acp::Client,
     brief: &str,
     signal: &Path,
     limits: &Limits,
+    start: SessionStart,
 ) -> Result<AcpTurn, Failure> {
     // No client capability is advertised: the agent writes its own files and runs no shell
     // through this client, and it never asks `fs/*` or `terminal/*` (ADR 0048 decision 7).
@@ -2782,18 +2880,26 @@ fn acp_conversation(
         });
     }
 
-    let created = client
-        .request(
-            "session/new",
-            json!({
-                "cwd": fs::canonicalize(&s.worktree)
-                    .unwrap_or_else(|_| s.worktree.clone())
-                    .display()
-                    .to_string(),
-                "mcpServers": [],
-            }),
+    // One session per process. A `resume`-mode later attempt of the `radian` worker opens the
+    // task's session with `session/load`, which continues it (ADR 0048 decisions 4 and 7); the
+    // agent was started with `--resume`, so the id agrees. Every other attempt, and every
+    // flow's own ACP agent, starts a session with `session/new`.
+    let resume_session = matches!(worker_of(o), Worker::Radian) && start == SessionStart::Continue;
+    let cwd = fs::canonicalize(&s.worktree)
+        .unwrap_or_else(|_| s.worktree.clone())
+        .display()
+        .to_string();
+    let (method, params) = if resume_session {
+        (
+            "session/load",
+            json!({ "sessionId": o.session, "cwd": cwd, "mcpServers": [] }),
         )
-        .map_err(|error| Failure::error(format!("session/new: {error}")))?;
+    } else {
+        ("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
+    };
+    let created = client
+        .request(method, params)
+        .map_err(|error| Failure::error(format!("{method}: {error}")))?;
     match wait_acp(child, client, signal, limits, s.clock.deadline(), || {
         client.has_response(created)
     })? {
@@ -2807,6 +2913,8 @@ fn acp_conversation(
         }
     }
     let session = match client.take_response(created) {
+        // `session/load` answers with an empty object and keeps the requested id.
+        Some(Ok(_)) if resume_session => Some(o.session.clone()),
         Some(Ok(value)) => value
             .get("sessionId")
             .and_then(Value::as_str)
@@ -2815,7 +2923,7 @@ fn acp_conversation(
             return Ok(AcpTurn {
                 exit_code: stop_agent(child, limits.grace)
                     .map_or(-1, |status| exit_code_of(&status)),
-                failure: Some(format!("session/new failed: {error}")),
+                failure: Some(format!("{method} failed: {error}")),
                 end: None,
             });
         }
@@ -2824,7 +2932,7 @@ fn acp_conversation(
     let Some(session) = session else {
         return Ok(AcpTurn {
             exit_code: stop_agent(child, limits.grace).map_or(-1, |status| exit_code_of(&status)),
-            failure: Some("session/new answered without a sessionId".to_owned()),
+            failure: Some(format!("{method} answered without a sessionId")),
             end: None,
         });
     };
@@ -2844,11 +2952,13 @@ fn acp_conversation(
     })?;
     let response = client.take_response(prompted);
     let (exit_code, end) = match stopped {
-        Wait::Done => {
-            let exit_code =
-                stop_agent(child, limits.grace).map_or(-1, |status| exit_code_of(&status));
-            (exit_code, prompt_end(response, client))
-        }
+        // The turn is over: the wrapper closes the agent's stdin, which is the protocol
+        // stream's end, and gives it a moment to exit before it signals the group. That is
+        // what lets `radian acp` shut down and exit `0` (ADR 0048 decision 7).
+        Wait::Done => (
+            end_agent(child, client, limits.grace),
+            prompt_end(response, client),
+        ),
         // `session/cancel` asked the agent to end the turn. If it answered `cancelled` in the
         // moment before SIGTERM, that answer is the attempt's result; otherwise the wrapper
         // wrote no result and the signal records the cancel (ADR 0048 decision 9).
@@ -2902,6 +3012,7 @@ fn prompt_end(
             Some(stop_reason) => Ok(acp::PromptEnd {
                 stop_reason: stop_reason.to_owned(),
                 text: client.message_text(),
+                meta: value.get("_meta").cloned().unwrap_or(Value::Null),
             }),
             None => Err("the agent's session/prompt answer carries no stopReason".to_owned()),
         },
@@ -3033,6 +3144,32 @@ fn exited(child: &mut Child) -> Result<Option<ExitStatus>, Failure> {
 fn stop_agent(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
     stop_group(child.id(), grace);
     child.wait().ok()
+}
+
+/// Ends an agent whose turn is over (ADR 0048 decision 7): the wrapper closes its stdin, waits
+/// [`AGENT_EXIT_WAIT`] for it to exit on its own, and stops the process group if it is still
+/// there. Closing the stream first is what `radian acp` shuts down on, so a completed attempt
+/// records its own exit code (`0`) instead of the SIGTERM one.
+fn end_agent(child: &mut Child, client: &acp::Client, grace: Duration) -> i32 {
+    client.close_input();
+    let deadline = Instant::now() + AGENT_EXIT_WAIT;
+    loop {
+        match exited(child) {
+            Ok(Some(status)) => {
+                // Nothing the agent started outlives the attempt, as after any other exit.
+                stop_group(child.id(), grace);
+                let _ = child.wait();
+                return exit_code_of(&status);
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
+    stop_agent(child, grace).map_or(-1, |status| exit_code_of(&status))
 }
 
 /// The repository's git control files, recorded before a worker starts and compared after it
@@ -4067,6 +4204,49 @@ mod tests {
         ] {
             assert_eq!(acp_outcome(reason), outcome, "{reason}");
         }
+    }
+
+    /// The `radian` worker's `Result` reads `_meta.radian`: `text` is the last assistant
+    /// message in full, `cost` is the object `radian exec` wrote (null included), and a missing
+    /// `radian` keeps the protocol's own text. Mutation: drop the `cost` line and the attempt's
+    /// cost becomes unknown.
+    #[test]
+    fn the_radian_meta_is_the_results_text_and_cost() {
+        let mut result = json!({
+            "type": "Result",
+            "outcome": "completed",
+            "text": "the streamed run",
+        });
+        apply_radian_meta(
+            &mut result,
+            &json!({"radian": {
+                "cost": {"micros": 12_345, "incomplete": false, "estimated": false},
+                "text": "the last message in full",
+            }}),
+        );
+        assert_eq!(result["text"], json!("the last message in full"));
+        assert_eq!(
+            result["cost"],
+            json!({"micros": 12_345, "incomplete": false, "estimated": false})
+        );
+
+        // `radian acp` writes `cost: null` when no call had a price: a reported zero, not an
+        // unknown cost (ADR 0048 decision 12).
+        let mut unpriced = json!({"type": "Result", "outcome": "completed", "text": "x"});
+        apply_radian_meta(
+            &mut unpriced,
+            &json!({"radian": {"cost": null, "text": "x"}}),
+        );
+        assert_eq!(unpriced["cost"], Value::Null);
+        assert!(unpriced.get("cost").is_some());
+
+        let mut plain = json!({"type": "Result", "outcome": "completed", "text": "x"});
+        apply_radian_meta(&mut plain, &Value::Null);
+        assert_eq!(plain["text"], json!("x"));
+        assert!(
+            plain.get("cost").is_none(),
+            "a flow's ACP agent reports no cost"
+        );
     }
 
     /// The brief's sections keep their order, the footer last, and a missing one takes no
