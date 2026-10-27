@@ -4797,6 +4797,93 @@ fn a_review_wait_reverified_by_itself_merges_at_auto_merge() {
     assert_eq!(fake.count(), 2, "one session per review attempt");
 }
 
+/// A worker attempt that ends on a used-up model prints the loop's one wait line, leaves
+/// `retry_count` alone, and records the `model_error` the attempt carried; `show` prints it
+/// together with the task's `retry_at` (ADR 0048 decision 9). Mutation: count the wait as a
+/// retry and the task's `retry_count` is 1.
+#[test]
+fn a_worker_model_wait_prints_its_line_and_show_names_the_error() {
+    let repo = Repo::new("run-worker-model-wait");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "worker-model-wait");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let claim = attempt_ops::claim(&store, &task).expect("claim");
+    let dir = attempt_ops::run_dir(&store, &task, 1);
+    fs::create_dir_all(&dir).expect("the run directory");
+    let error =
+        serde_json::json!({"kind": "usage_limit", "status": null, "retry_after_secs": null});
+    let result = serde_json::json!({
+        "type": "Result",
+        "outcome": "failed",
+        "cost": {"micros": 1000},
+        "model_error": error,
+    });
+    fs::write(dir.join("result.jsonl"), format!("{result}\n")).expect("result.jsonl");
+    let finish = serde_json::json!({
+        "type": "AttemptFinished",
+        "attempt_id": claim.attempt_id,
+        "token": claim.token,
+        "exit_code": 1,
+        "outcome": "failed",
+        "base_sha": "a".repeat(40),
+        "head_sha": null,
+        "dirty": [],
+        "pushed": false,
+        "remote_sha": null,
+        "failure": "outcome failed",
+        "notes": [],
+    });
+    fs::write(dir.join("attempt_finished.json"), format!("{finish}\n"))
+        .expect("attempt_finished.json");
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}", run.stderr);
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(
+        (stored.state.as_str(), stored.phase.as_str()),
+        ("todo", "retry_wait")
+    );
+    assert_eq!(stored.retry_count, 0, "a model wait is not a retry");
+    let retry_at = stored.retry_at.clone().expect("the task waits");
+    assert!(
+        (wait_seconds(&retry_at) - 300).abs() <= 5,
+        "the first wait is five minutes: {retry_at}"
+    );
+    assert!(
+        run.stdout.contains(&format!(
+            "{task} worker model unavailable -> retry at {retry_at}"
+        )),
+        "the loop line is missing:\n{}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains(&format!("reconciled: {task} worker")),
+        "the model wait is not a reconciliation line:\n{}",
+        run.stdout
+    );
+
+    let shown = repo.radian(&["arc", "show", &task]);
+    assert_eq!(shown.code, 0, "show: {}", shown.stderr);
+    assert!(
+        shown.stdout.contains(&format!("retry_at: {retry_at}")),
+        "show misses retry_at:\n{}",
+        shown.stdout
+    );
+    assert!(
+        shown.stdout.contains("attempt_model_error: ")
+            && shown.stdout.contains("\"kind\":\"usage_limit\"")
+            && shown.stdout.contains("\"retry_after_secs\":null"),
+        "show misses the model error:\n{}",
+        shown.stdout
+    );
+    let json_run = repo.radian(&["arc", "show", &task, "--json"]);
+    assert_eq!(json_run.code, 0, "show --json: {}", json_run.stderr);
+    let json: Value = serde_json::from_str(&json_run.stdout).expect("show --json parses");
+    assert_eq!(json["attempt_model_error"], error);
+    assert_eq!(json["retry_at"], serde_json::json!(retry_at));
+}
+
 /// How far in the future `retry_at` sits, in whole seconds.
 fn wait_seconds(retry_at: &str) -> i64 {
     let at = chrono::DateTime::parse_from_rfc3339(retry_at)

@@ -642,9 +642,15 @@ fn one_pass(
     crate::worker_args::check_config(&store.config()?, store.repo())?;
     let mut changed = false;
 
-    // 1. Doing: apply a finished attempt, leave a live one alone.
+    // 1. Doing: apply a finished attempt, leave a live one alone. A model wait prints the one
+    // line the review wait prints, without the `reconciled:` prefix: the task did not fail a
+    // retry, it is waiting on its model (ADR 0048 decision 9).
     for applied in crate::attempt::reconcile(store)? {
-        transitions.push(format!("reconciled: {}", applied.line()));
+        transitions.push(if applied.model_wait {
+            applied.line()
+        } else {
+            format!("reconciled: {}", applied.line())
+        });
         changed = true;
     }
 

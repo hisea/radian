@@ -845,7 +845,13 @@ pub fn lines(started: &Started) -> Vec<String> {
     let mut lines: Vec<String> = started
         .reconciled
         .iter()
-        .map(|applied| format!("reconciled: {}", applied.line()))
+        .map(|applied| {
+            if applied.model_wait {
+                applied.line()
+            } else {
+                format!("reconciled: {}", applied.line())
+            }
+        })
         .collect();
     if let Some(warning) = &started.no_cost_warning {
         lines.push(warning.clone());
