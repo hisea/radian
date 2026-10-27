@@ -1595,3 +1595,22 @@ worker check (exit `3`, naming every key) instead of the parser's exit `1`, so e
 | TK0207-M1 | the parse-time `command` + `exec_args` refusal no longer skips a flow that also sets `acp` (`check_flows` drops the `&& flow.acp.is_none()` guard) | `store::config::tests::a_flow_with_acp_and_another_worker_line_still_parses` (the all-three document is refused by `parse`, so the worker check never sees it) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0210: a pass that names the gate keeps the gate's `running` record (2026-10-27, branch `work/TK0210-gate-died-test-under-load`)
+
+The pass names the process it started in the `started` record with a whole-record
+read-modify-write, and the gate writes `running` as its first act. A pass that read `started`
+before that write and wrote it back after it left a `started` record with a digest, so every
+later pass reported `no_record` and the death was never counted (a real gate that dies early
+would hang the same way). A record lock, `runs/<task>/gate.json.lock`, makes the pass's read
+and write one step against the gate's write. The mutation was applied by hand to
+`crates/radian-arc/src/gate/background.rs`, the binary rebuilt with `cargo build -p radian-tui
+--bin radian`, and the file restored from `.radian/mut/background.rs.tk0210` with `cp`, which
+`cmp` found identical. The test ran with `cargo nextest run -p radian-arc --locked --profile
+sandbox --test run -E 'test(...)'`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0210-M1 | `remember_pid` reads the record without the record lock and writes it with `write` (the lock at write time cannot order the read before the gate's `running` write) | `run::a_pass_that_names_the_gate_does_not_put_its_started_record_back_over_running` (the pass reports `its gate exited without a record` after one start) | ✅ 1 failed |
+
+1/1 caught.

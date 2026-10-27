@@ -2377,6 +2377,59 @@ fn a_gate_that_dies_after_running_is_restarted_twice_then_left_died() {
     );
 }
 
+/// The pass names the process it started in the `started` record right after the spawn, and the
+/// gate replaces that record with `running` as its first write. A pass under load can read
+/// `started` before that write and put it back after it: the record then says `started` with a
+/// digest, so the next pass reports `no_record`, the death is never counted and the gate is never
+/// started again (ADR 0048 decision 10). `SLOW_PID_ENV` makes that window deterministic; the
+/// gate dies after `running`, so the starts are counted to `died` instead. Mutation: name the
+/// process without re-reading the record under its lock, and this pass reports a gate that
+/// wrote `running` as one that exited without a record.
+#[test]
+fn a_pass_that_names_the_gate_does_not_put_its_started_record_back_over_running() {
+    let repo = Repo::new("run-gate-stale-started");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "stale-started");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [
+        (background::DIE_AFTER_RUNNING_ENV, "1".to_owned()),
+        (background::SLOW_PID_ENV, "1000".to_owned()),
+    ];
+
+    // The record must go through its three deaths to `died`; the wait for each gate process is
+    // event-driven, so a pass cannot outrun a gate that is still starting.
+    let output = run_until_gate_record(&repo, &task, &env, |record| {
+        matches!(record["status"].as_str(), Some("died" | "no_record"))
+    });
+    assert!(
+        !output.contains("exited without a record"),
+        "a gate that wrote `running` was reported as one without a record: {output}"
+    );
+    let record = gate_record(&repo, &task).expect("the record");
+    assert_eq!(record["status"], "died", "{record}");
+    assert_eq!(record["deaths"], 3, "one start and two restarts: {record}");
+    assert_eq!(
+        gate_starts(&repo, &task),
+        3,
+        "gate.log:\n{}",
+        gate_log(&repo, &task)
+    );
+
+    // The inputs are unchanged: a later pass starts nothing and reports the death.
+    let again = repo.radian_with_env(&["arc", "run"], &env);
+    assert_eq!(again.code, 0, "run: {}\n{}", again.stderr, again.stdout);
+    assert!(!again.stdout.contains("verify started"), "{}", again.stdout);
+    assert!(
+        again.stdout.contains("died after it started"),
+        "{}",
+        again.stdout
+    );
+    assert_eq!(gate_starts(&repo, &task), 3);
+}
+
 /// A start a pass made without a digest is counted exactly like one whose gate wrote
 /// `running`: a `started` record with no inputs and a free gate lock is one death, so the gate
 /// is not started again for free. This is the state a pass leaves when its plan failed (a

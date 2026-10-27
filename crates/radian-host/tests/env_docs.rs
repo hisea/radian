@@ -217,6 +217,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "read in radian-arc/src/gate/background.rs: milliseconds the background gate waits before its `running` record, so a test can stop it while only the pass's `started` record exists",
     ),
     (
+        "RADIAN_ARC_GATE_TEST_SLOW_PID_MS",
+        "read in radian-arc/src/gate/background.rs: milliseconds a pass waits between reading the gate's `started` record and naming the process in it, so a test can hold the gate's own `running` write inside that window",
+    ),
+    (
         "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM",
         "read in radian-arc/src/gate/background.rs: runs this program instead of `radian exec` for the review stage, so a test drives the background gate's `commands`/`review` pair without a model",
     ),

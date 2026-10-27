@@ -476,7 +476,10 @@ it, to `runs/<task>/gate.json` (`started`), then spawns `radian arc gate --task 
 --lock-fd <fd>`: the child inherits the lock, so no second gate can start for that task until
 it exits. The pass keeps no child handle it waits on; a thread reaps the child so a `serve`
 loop collects no zombies, and the child's pid goes into the `started` record so a stop that
-finds only that record has a process to signal.
+finds only that record has a process to signal. Both sides write the record under
+`runs/<task>/gate.json.lock`, and the pass re-reads the record under that lock before it names
+the process, so its write cannot put the `started` record back over the `running` one the child
+wrote in between; the next pass would read that as a gate that exited without a record.
 
 The child (`radian arc gate`) owns the lock for its life, reads the task and picks the gate by
 its phase: `review.verifying` plans the verification and runs its stages, and
