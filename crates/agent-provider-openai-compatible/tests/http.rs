@@ -56,6 +56,22 @@ async fn chat<M: Model, P: ToolProvider>(model: M, tools: P) -> AgentSession<M, 
     .unwrap()
 }
 
+/// Like [`chat`], but with ADR 0017's retry enabled, for a test that proves an error is not
+/// retried (one retry is enough: a transient error would send the request twice).
+async fn chat_retrying<M: Model, P: ToolProvider>(
+    model: M,
+    tools: P,
+    retries: u32,
+) -> AgentSession<M, P, ()> {
+    Arc::new(Agent::new(model, tools).with_config(AgentConfig {
+        retries,
+        ..Default::default()
+    }))
+    .open_session()
+    .await
+    .unwrap()
+}
+
 /// Calls the adapter directly so the raw `ModelError` is visible.
 async fn complete_error(server: &MockServer) -> ModelError {
     let request = ModelRequest {
@@ -898,23 +914,21 @@ async fn the_request_body_carries_stream_options_only_when_enabled() {
 
 #[tokio::test]
 async fn a_400_for_stream_options_tells_you_to_turn_it_off() {
-    let server = MockServer::start(vec![Reply::status(
-        400,
+    for body in [
         "{\"error\":{\"message\":\"unknown parameter: stream_options\"}}",
-    )])
-    .await;
+        "{\"error\":{\"message\":\"unknown parameter: include_usage\"}}",
+    ] {
+        let server = MockServer::start(vec![Reply::status(400, body)]).await;
 
-    let message = run_error(model_with(&server, |c| c.include_usage = Some(true))).await;
+        let message = run_error(model_with(&server, |c| c.include_usage = Some(true))).await;
 
-    assert!(
-        message.contains("unknown parameter: stream_options"),
-        "{message}"
-    );
-    assert!(
-        message.contains("include_usage to Some(false)"),
-        "the way out is named: {message}"
-    );
-    assert!(!message.contains("sk-secret-key"), "{message}");
+        assert!(message.contains(body), "the body is quoted: {message}");
+        assert!(
+            message.contains("include_usage to Some(false)"),
+            "the way out is named: {message}"
+        );
+        assert!(!message.contains("sk-secret-key"), "{message}");
+    }
 }
 
 #[tokio::test]
@@ -924,6 +938,90 @@ async fn a_400_without_stream_options_gets_no_hint() {
     let message = run_error(model(&server)).await;
     assert!(message.contains("bad request"), "{message}");
     assert!(!message.contains("include_usage"), "{message}");
+}
+
+/// A 400 that has nothing to do with the usage option keeps its own message even when
+/// `include_usage` is on: the J10 hint names a cause only when the body names the option.
+#[tokio::test]
+async fn a_400_that_does_not_name_stream_options_keeps_its_message() {
+    let body = r#"{"error":{"message":"Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it."}}"#;
+    let server = MockServer::start(vec![Reply::status(400, body)]).await;
+
+    let message = run_error(model_with(&server, |c| c.include_usage = Some(true))).await;
+
+    assert!(message.contains("Global regions"), "{message}");
+    assert!(!message.contains("stream_options"), "{message}");
+    assert!(!message.contains("include_usage"), "{message}");
+}
+
+// ---------- the Go usage limit ----------
+
+/// The body opencode-go returned on 2026-10-27, verbatim.
+const GO_USAGE_LIMIT_BODY: &str = r#"{"type":"error","error":{"type":"GoUsageLimitError","message":"Go usage limit exceeded"},"metadata":{"workspace":"wrk_secret123","limitName":"monthly"}}"#;
+
+/// A spent Go plan window is `UsageLimit`, never retried, and the workspace id stays out.
+#[tokio::test]
+async fn a_go_usage_limit_fails_at_once_and_never_names_the_workspace() {
+    let server = MockServer::start(vec![Reply::status(429, GO_USAGE_LIMIT_BODY)]).await;
+    // One retry is enough to prove the error is not transient: a retried 429 sends twice.
+    let mut session = chat_retrying(model(&server), NoTools, 1).await;
+
+    let error = session
+        .run_turn("hi", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap_err();
+
+    let RunError::Model(error) = error else {
+        panic!("expected a model error")
+    };
+    assert!(matches!(&error, ModelError::UsageLimit { .. }), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("Go usage limit exceeded"), "{message}");
+    assert!(message.contains("monthly"), "{message}");
+    assert!(
+        !message.contains("wrk_"),
+        "the workspace id is not quoted: {message}"
+    );
+    assert_eq!(server.requests().len(), 1, "a usage limit is never retried");
+}
+
+/// The provider's own `Retry-After` becomes the structured reset wait.
+#[tokio::test]
+async fn a_go_usage_limit_uses_retry_after_as_its_reset() {
+    let server = MockServer::start(vec![Reply::Status {
+        code: 429,
+        headers: vec![("retry-after".into(), "3600".into())],
+        body: GO_USAGE_LIMIT_BODY.into(),
+    }])
+    .await;
+
+    let error = complete_error(&server).await;
+
+    let ModelError::UsageLimit { resets_in, .. } = error else {
+        panic!("expected a usage-limit error")
+    };
+    assert_eq!(resets_in, Some(Duration::from_secs(3600)));
+}
+
+/// The same message and metadata under another type stay an ordinary, retryable 429.
+#[tokio::test]
+async fn another_429_body_stays_unavailable() {
+    let body = r#"{"error":{"type":"rate_limit_exceeded","message":"Go usage limit exceeded"},"metadata":{"limitName":"monthly"}}"#;
+    let server = MockServer::start(vec![Reply::status(429, body)]).await;
+
+    let error = complete_error(&server).await;
+
+    assert!(
+        matches!(
+            &error,
+            ModelError::Unavailable {
+                status: Some(429),
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(error.is_transient(), "{error}");
 }
 
 // ---------- configuration ----------
