@@ -1408,3 +1408,21 @@ The `review` stage reads `Result.model_error` and stops on `unavailable` or `usa
 
 4/4 caught.
 
+## TK0185 rework 1: a review wait counts attempts by number (2026-10-26, branch `work/TK0185-arc-review-waits-on-unavailable-model`)
+
+The review found that `task_verdict_files_except` sorted the attempt directories as strings, so
+`<task>-10` came before `<task>-2`; `review_unavailable_run`'s newest-first scan then met the
+passing review at attempt 2 before the current verdict at attempt 11 and counted too few waits.
+The attempt directories now sort by their number, with an integration re-run's `.iK` directory
+after its own attempt. The mutation was applied by hand to
+`crates/radian-arc/src/review/mod.rs` (`dirs.sort()` in place of the numeric sort), the named
+test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E
+'test(a_review_wait_counts_attempts_by_number_not_by_name)'`, and the file was restored from
+`.radian/mut/review_mod.rs.fixed` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0185-M5 | attempt directories sort by name again (`dirs.sort()` in `task_verdict_files_except`) | `review::a_review_wait_counts_attempts_by_number_not_by_name` (`six waits in a row reach the 60-minute cap: 2399 seconds`) | ✅ failed |
+
+1/1 caught.
+

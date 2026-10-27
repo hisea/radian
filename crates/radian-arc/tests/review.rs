@@ -6984,3 +6984,127 @@ fn a_commands_failure_decides_when_the_review_model_is_unavailable() {
     );
     assert!(!stored.body.contains("## Rework"), "{}", stored.body);
 }
+
+/// Writes a verdict into an earlier attempt's directory, the way a finished round left it.
+/// `reason` `None` is a pass; a `review` verdict with `review_unavailable` is one of the run
+/// the wait counts.
+fn seed_verdict(fixture: &Fixture, attempt: u32, stage: &str, sha: &str, reason: Option<&str>) {
+    let dir = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(format!("{}-{attempt}", fixture.task))
+        .join("verdicts");
+    fs::create_dir_all(&dir).expect("the attempt's verdict directory");
+    let value = json!({
+        "schema_version": VERDICT_SCHEMA_VERSION,
+        "stage": stage,
+        "sha": sha,
+        "result": if reason.is_none() { "pass" } else { "fail" },
+        "reason": reason,
+        "commands": [],
+        "started_at": "2026-10-26T00:00:00Z",
+        "ended_at": "2026-10-26T00:00:00Z",
+    });
+    fs::write(
+        dir.join(format!("{stage}.json")),
+        serde_json::to_string_pretty(&value).expect("the seeded verdict serializes") + "\n",
+    )
+    .expect("the seeded verdict");
+}
+
+/// Runs a review at `attempt` whose model is unavailable without a reset time and returns the
+/// task's wait.
+fn unavailable_wait_at(fixture: &Fixture, head: &str, attempt: u32, label: &str) -> i64 {
+    let fake = FakeReview::new(label, &[review_message("ignored", &[], &[])], 0);
+    fake.set_model_error(
+        1,
+        &json!({"kind": "unavailable", "status": null, "retry_after_secs": null}),
+    );
+    fixture.set_verifying_at(head, attempt);
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the verification runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    assert_eq!(fake.count(), 1, "one session per unavailable review");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let retry_at = stored.retry_at.clone().expect("the task waits");
+    wait_seconds(&retry_at)
+}
+
+/// The run of `review_unavailable` waits counts attempts by their number, not by their
+/// directory name: `...-10` sorts before `...-2` as a string, so a newest-first scan would
+/// stop at attempt 2 and never reach the doubling and the 60-minute cap (ADR 0048 decision
+/// 9). Eleven attempt directories: attempt 2 passes, attempts 3 through 6 and 10 are
+/// unavailable, attempts 7 through 9 hold only a `commands` verdict, and the review at
+/// attempt 11 is the newest one. The numeric run is 6 waits, which is the cap; the string
+/// order would stop at attempt 2 after 4 and wait 40 minutes. Mutation: sort the attempt
+/// directories by name again → this test sees 2400 seconds.
+#[test]
+fn a_review_wait_counts_attempts_by_number_not_by_name() {
+    let fixture = Fixture::new("review-wait-attempt-order");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&fixture, 1, "review", &head, None);
+    seed_verdict(&fixture, 2, "review", &head, None);
+    for attempt in 3..=6 {
+        seed_verdict(
+            &fixture,
+            attempt,
+            "review",
+            &head,
+            Some("review_unavailable"),
+        );
+    }
+    for attempt in 7..=9 {
+        seed_verdict(&fixture, attempt, "commands", &head, None);
+    }
+    seed_verdict(&fixture, 10, "review", &head, Some("review_unavailable"));
+
+    let waited = unavailable_wait_at(&fixture, &head, 11, "review-wait-attempt-order-fake");
+    assert!(
+        (waited - 3600).abs() <= 5,
+        "six waits in a row reach the 60-minute cap: {waited} seconds"
+    );
+}
+
+/// A long run of `review_unavailable` verdicts on one `verified_sha` reaches the 60-minute
+/// cap, and two in a row wait 10 minutes (ADR 0048 decision 9).
+#[test]
+fn a_review_wait_caps_at_an_hour_and_doubles_from_ten_minutes() {
+    let capped = Fixture::new("review-wait-cap");
+    capped.add_review_stage();
+    capped.commands(&["true"]);
+    let head = capped.publish(&capped.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&capped, 1, "review", &head, None);
+    seed_verdict(&capped, 2, "review", &head, None);
+    for attempt in 3..=10 {
+        seed_verdict(
+            &capped,
+            attempt,
+            "review",
+            &head,
+            Some("review_unavailable"),
+        );
+    }
+    let waited = unavailable_wait_at(&capped, &head, 11, "review-wait-cap-fake");
+    assert!(
+        (waited - 3600).abs() <= 5,
+        "nine waits in a row reach the 60-minute cap: {waited} seconds"
+    );
+
+    let doubled = Fixture::new("review-wait-ten-minutes");
+    doubled.add_review_stage();
+    doubled.commands(&["true"]);
+    let head = doubled.publish(&doubled.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&doubled, 1, "review", &head, None);
+    seed_verdict(&doubled, 2, "review", &head, None);
+    seed_verdict(&doubled, 3, "review", &head, Some("review_unavailable"));
+    let waited = unavailable_wait_at(&doubled, &head, 4, "review-wait-ten-minutes-fake");
+    assert!(
+        (waited - 600).abs() <= 5,
+        "the second wait in a row is 10 minutes: {waited} seconds"
+    );
+}

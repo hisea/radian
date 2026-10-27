@@ -1980,9 +1980,9 @@ struct FollowupRound {
     items: Vec<ReviewItem>,
 }
 
-/// The task's `review` verdicts across every attempt, oldest first, with their paths. Attempt
-/// numbers order the rounds, because `task_verdict_files` sorts their directory names as
-/// strings and `attempt-10` sorts before `attempt-2`.
+/// The task's `review` verdicts across every attempt, oldest first, with their paths. The
+/// attempt number orders the rounds (ADR 0048 decision 10); `task_verdict_files` already
+/// sorts the attempt directories by it, and this keeps the order explicit for the rounds.
 fn review_verdicts(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
     let mut reviews: Vec<(PathBuf, Verdict)> = task_verdict_files(store, task)?
         .into_iter()
@@ -3352,6 +3352,27 @@ fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict
     task_verdict_files_except(store, task, None)
 }
 
+/// The order attempt directories sort in: the attempt number a directory names, then an
+/// integration re-run's index (`<task>-<n>.iK`, which follows its own attempt). Attempt
+/// numbers are compared as numbers: sorting their names as strings put `<task>-10` before
+/// `<task>-2`, and a scan that walks the verdicts newest first then met attempt 2 before
+/// attempt 10 and stopped counting too early.
+fn attempt_order(path: &Path) -> (u32, u32) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let (base, rerun) = match name.rsplit_once(".i") {
+        Some((base, index)) => (base, index.parse().unwrap_or(0)),
+        None => (name, 0),
+    };
+    let attempt = base
+        .rsplit_once('-')
+        .and_then(|(_, number)| number.parse().ok())
+        .unwrap_or(u32::MAX);
+    (attempt, rerun)
+}
+
 /// Every verdict file of every attempt of `task` except the attempt `except`, in attempt order,
 /// with its path. A stage that runs beside another one skips its own attempt's directory: the
 /// other stage may be writing a verdict there, and a read between `Verdict::write_new`'s
@@ -3371,7 +3392,11 @@ fn task_verdict_files_except(
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
-    dirs.sort();
+    dirs.sort_by(|one, other| {
+        attempt_order(one)
+            .cmp(&attempt_order(other))
+            .then_with(|| one.cmp(other))
+    });
     for dir in dirs {
         if except.is_some_and(|label| dir.file_name().and_then(|name| name.to_str()) == Some(label))
         {
