@@ -576,7 +576,11 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
     let events = state
         .events()
         .ok_or((protocol::INTERNAL_ERROR, "no event sink".to_owned()))?;
+    let runtime_events = state
+        .runtime_events()
+        .ok_or((protocol::INTERNAL_ERROR, "no runtime event sink".to_owned()))?;
     let before = events.finished_generation();
+    let before_journaled = runtime_events.finished_generation();
     session
         .inbox()
         .followup(radian_core::Message::user(text), InputSource::User)
@@ -587,9 +591,18 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
                 format!("cannot enqueue the prompt: {error}"),
             )
         })?;
+    // ADR 0049: the answer waits for the driver's journaled turn end, not only the core's
+    // live `RunFinished`. The live event comes first and carries the turn's status (used for
+    // `stopReason`); `TurnFinished` follows once the journal holds the turn end, so `_meta`
+    // and a client reading the session file after the answer see the completed turn (ADR
+    // 0010). Both generations are read before enqueueing, so a stale permit can never be
+    // taken for this turn's end.
     loop {
-        let finished = events.finished.notified();
-        if events.finished_generation() > before {
+        let live = events.finished.notified();
+        let journaled = runtime_events.finished.notified();
+        let live_done = events.finished_generation() > before;
+        let journaled_done = runtime_events.finished_generation() > before_journaled;
+        if live_done && journaled_done {
             break;
         }
         if let Some(end) = state.driver_end() {
@@ -597,7 +610,8 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
         }
         tokio::select! {
             biased;
-            _ = finished => {}
+            _ = live, if !live_done => {}
+            _ = journaled, if !journaled_done => {}
             _ = state.driver_ended.notified() => {
                 let end = state.driver_end().unwrap_or(radian_host::DriverEnd::Ok);
                 return Err((protocol::INTERNAL_ERROR, driver_message(&end)));

@@ -546,3 +546,20 @@ profile: `cargo nextest run -p radian-exec --locked --profile sandbox --test acp
 |---|---|---|---|
 | TK0207-M2 | `session/new` takes the child headers before `setup` succeeds (`child_headers.take()` instead of `as_ref()` plus a clone) | ✅ 1 failed | `acp::a_failed_session_new_can_be_retried` (the retry answers `internal`: "the internal child headers were already consumed") |
 
+## `radian acp`: the prompt answer waits for the journaled turn end (TK0209, 2026-10-27)
+
+Branch `work/TK0209-acp-prompt-waits-for-durable-turn-end`. `prompt_turn` now waits for the
+driver's `RuntimeEvent::TurnFinished` (the journaled turn end) after the live `RunFinished`,
+instead of answering on the live event. The catching test sets the existing
+`RADIAN_TURN_COMMIT_DELAY_MS` hook to 2000 ms, so the gap is wide and deterministic. The
+mutation was applied in place to `crates/radian-exec/src/acp/mod.rs`, the `radian` binary was
+rebuilt (`cargo build -p radian-tui --bin radian`), and the source was restored from
+`.radian/mut/acp-mod.rs` (`cmp` identical). Test:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(the_prompt_answer_waits_for_the_journaled_turn_end)'`. Unmutated, the whole `acp` binary
+passed 14/14.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0209-M1 | the prompt answer waits only for the live `RunFinished` again (`if live_done && journaled_done` → `if live_done`) | ✅ 1 failed | `acp::the_prompt_answer_waits_for_the_journaled_turn_end` ("the answer arrived before the turn was durable": the journal held `MessageAppended` but no `TurnFinished`) |
+
