@@ -1,0 +1,35 @@
+{
+  "model": "deepseek-v4.1-flash",
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "reasoning_effort": "high",
+  "temperature": 0.2,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "run_shell",
+        "strict": true,
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+      }
+    }
+  ],
+  "messages": [
+    {"role": "system", "content": "You are a careful coding agent."},
+    {"role": "user", "content": "Fix the failing test."},
+    {
+      "role": "assistant",
+      "content": "Let me read the test first.",
+      "reasoning_content": "The failing test names the function I must change."
+    },
+    {"role": "tool", "content": "1 passed, 1 failed"},
+    {"role": "assistant", "content": "The patch is applied."}
+  ]
+}

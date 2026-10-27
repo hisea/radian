@@ -1,0 +1,10 @@
+{
+  "model": "some-responses-model",
+  "instructions": "You are a terse assistant; answer with the patch only.",
+  "max_output_tokens": 512,
+  "reasoning": {"effort": "high", "summary": "auto"},
+  "input": [
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Fix the parser."}]},
+    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Working on it."}]}
+  ]
+}
