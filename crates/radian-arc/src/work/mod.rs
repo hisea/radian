@@ -2938,9 +2938,11 @@ enum Wait {
 
 /// Waits for one ACP step while enforcing the attempt's limits (ADR 0048 decisions 7.8 and 9).
 /// `done` is the step's response. No new protocol line for the stall window, the wall clock,
-/// or a `cancel` records the signal, sends `session/cancel`, gives the agent a moment to end
-/// its turn, and then sends SIGTERM, waits the grace period and sends SIGKILL. An agent that
-/// exits on its own is reaped here too.
+/// or a `radian arc cancel` (or a SIGTERM to the wrapper) sends `session/cancel`, gives the
+/// agent a moment to end its turn, and then sends SIGTERM, waits the grace period and sends
+/// SIGKILL. The wall clock and a stall also record `signal.json`; a cancel's record was
+/// written by the caller that signalled the wrapper. An agent that exits on its own is reaped
+/// here too.
 fn wait_acp(
     child: &mut Child,
     client: &acp::Client,
@@ -2969,21 +2971,25 @@ fn wait_acp(
             last_growth = now;
         }
         // The order of the command worker's monitor: a cancel from another process first,
-        // then the wall clock, then the stall timer.
-        let reason = if signal_path.is_file() {
-            Some("cancel")
+        // then the wall clock, then the stall timer. A SIGTERM sent to the wrapper alone, with
+        // no `signal.json`, is a stop too: the ACP handler does not forward it, so the protocol
+        // cancel below is the only way the agent learns of it.
+        let (reason, record) = if signal_path.is_file() || STOP_REQUESTED.load(Ordering::SeqCst) {
+            (Some("cancel"), false)
         } else if wall_deadline.is_some_and(|deadline| now >= deadline) {
-            Some("wall_time")
+            (Some("wall_time"), true)
         } else if !limits.stall.is_zero() && now.duration_since(last_growth) >= limits.stall {
-            Some("stall")
+            (Some("stall"), true)
         } else {
-            None
+            (None, false)
         };
         let Some(reason) = reason else {
             std::thread::sleep(POLL);
             continue;
         };
-        write_signal(signal_path, reason)?;
+        if record {
+            write_signal(signal_path, reason)?;
+        }
         // The protocol's own stop first: the agent ends the turn, and the reader answers a
         // pending permission request `cancelled` from here on.
         client.cancel();
@@ -4044,6 +4050,23 @@ mod tests {
             "x".repeat(72),
             "a line with no space is cut at the limit"
         );
+    }
+
+    /// The ACP `stopReason` mapping (ADR 0048 decisions 7 and 9): only `end_turn` passes, every
+    /// protocol reason keeps its own name as a failed outcome, and an unknown reason is
+    /// `failed`. Mutation: map `end_turn` to `failed` → this fails.
+    #[test]
+    fn the_acp_stop_reasons_map_to_outcomes() {
+        for (reason, outcome) in [
+            ("end_turn", "completed"),
+            ("max_tokens", "max_tokens"),
+            ("max_turn_requests", "max_turn_requests"),
+            ("refusal", "refusal"),
+            ("cancelled", "cancelled"),
+            ("something_new", "failed"),
+        ] {
+            assert_eq!(acp_outcome(reason), outcome, "{reason}");
+        }
     }
 
     /// The brief's sections keep their order, the footer last, and a missing one takes no
