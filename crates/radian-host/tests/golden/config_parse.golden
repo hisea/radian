@@ -331,7 +331,7 @@ Err(/golden/config.toml: providers.has space: `has space` is not a valid provide
 ### providers.shadows_builtin
 Err(/golden/config.toml: providers.anthropic: `anthropic` is a built-in provider; a named provider must not shadow it)
 ### providers.unknown_kind
-Err(/golden/config.toml: `providers.corp.kind` value "grpc" is not one of openai-compatible|anthropic|openai-responses (aliases: openai-completions, anthropic-messages))
+Err(/golden/config.toml: `providers.corp.kind` value "grpc" is not one of openai-compatible|anthropic|openai-responses (aliases: openai-completions = openai-compatible, anthropic-messages = anthropic))
 ### providers.empty_base_url
 Err(/golden/config.toml: providers.corp: base_url must not be empty)
 ### providers.base_url_wrong_type

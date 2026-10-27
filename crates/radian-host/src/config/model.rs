@@ -73,7 +73,7 @@ pub(super) fn parse_providers(
                     return Err(wrong_type(
                         path,
                         &format!("providers.{name}.kind"),
-                        KIND_DESCRIPTION,
+                        "a string",
                     ));
                 }
                 ("base_url", Value::String(base_url)) if !base_url.is_empty() => {
@@ -119,7 +119,7 @@ pub(super) fn parse_providers(
                             return Err(ConfigError::InvalidProviderField {
                                 path: path.to_path_buf(),
                                 key: format!("providers.{name}.prefer[{index}]"),
-                                reason: format!("must be one of {KIND_DESCRIPTION}"),
+                                reason: format!("must be one of {}", crate::provider::kind_list()),
                             });
                         };
                         let canonical =
@@ -221,7 +221,7 @@ pub(super) fn parse_providers(
                                     return Err(wrong_type(
                                         path,
                                         &format!("providers.{name}.models[{index}].kind"),
-                                        KIND_DESCRIPTION,
+                                        "a string",
                                     ));
                                 }
                                 (other, _) => config
@@ -261,9 +261,6 @@ pub(super) fn parse_providers(
     Ok(())
 }
 
-/// The one-line description of the kind set a refusal prints.
-const KIND_DESCRIPTION: &str = "one of openai-compatible|anthropic|openai-responses (aliases: openai-completions, anthropic-messages)";
-
 /// Resolves a kind spelling to its canonical name, or refuses naming the key (ADR 0026 D10).
 fn canonical_kind(path: &Path, name: &str, field: &str, kind: &str) -> Result<String, ConfigError> {
     crate::provider::Protocol::from_kind(kind)
@@ -271,7 +268,10 @@ fn canonical_kind(path: &Path, name: &str, field: &str, kind: &str) -> Result<St
         .ok_or_else(|| ConfigError::InvalidProviderField {
             path: path.to_path_buf(),
             key: format!("providers.{name}.{field}"),
-            reason: format!("value {kind:?} is not {KIND_DESCRIPTION}"),
+            reason: format!(
+                "value {kind:?} is not one of {}",
+                crate::provider::kind_list()
+            ),
         })
 }
 
