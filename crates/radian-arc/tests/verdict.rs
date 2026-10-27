@@ -21,6 +21,7 @@ fn verdict(stage: Stage, sha: &str, result: VerdictResult, ended_at: &str) -> Ve
         review: None,
         review_session_ids: Vec::new(),
         review_cost_micros: None,
+        review_model_error: None,
         review_pre_existing: None,
         review_settings: None,
         profile: None,

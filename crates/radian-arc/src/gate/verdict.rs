@@ -300,6 +300,10 @@ pub struct Verdict {
     /// A `review` verdict only: the summed cost of the runs, in micros of a US dollar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cost_micros: Option<u64>,
+    /// A `review` verdict only: the failing session's `Result.model_error` object as read
+    /// (ADR 0044 §2b), present only when the stage failed with reason `review_unavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_model_error: Option<Value>,
     /// A `review` verdict of a rework round only: how many blocking items arc moved to
     /// `suggestions` as `pre_existing` (ADR 0048 decision 10). Absent on a first review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,6 +347,7 @@ impl Verdict {
             review: None,
             review_session_ids: Vec::new(),
             review_cost_micros: None,
+            review_model_error: None,
             review_pre_existing: None,
             review_settings: None,
             profile: None,

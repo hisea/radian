@@ -35,9 +35,9 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, PreviousReview, ReviewItem, ReviewRun, ReviewSettings, Stage,
-    StageSpec, Verdict, attempt_dir, effective_stages, merge_ready, required_passed, verdict_path,
-    verdict_set_digest,
+    CommandRun, IntegrationRun, PreviousReview, REVIEW_BLOCKING, REVIEW_UNAVAILABLE, ReviewItem,
+    ReviewRun, ReviewSettings, Stage, StageSpec, Verdict, attempt_dir, effective_stages,
+    merge_ready, required_passed, verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
 use crate::store::{Error, Loaded, Store, model};
@@ -62,6 +62,15 @@ pub const AUTO_REVERIFY_FILE: &str = "auto_reverify.json";
 /// The failure reasons a moved main can fix: a `commands` or integration command that failed,
 /// or ran past its timeout (ADR 0048 decision 9).
 pub const AUTO_REVERIFY_REASONS: &[&str] = &["command_failed", "timeout"];
+/// The first wait after a `review_unavailable` on a `verified_sha`: 5 minutes (ADR 0048
+/// decision 9). Each further one in a row on the same sha doubles it.
+pub const REVIEW_WAIT_BASE_SECS: u64 = 5 * 60;
+/// The longest backoff a run of `review_unavailable` waits reaches: 60 minutes.
+pub const REVIEW_WAIT_CAP_SECS: u64 = 60 * 60;
+/// A `model_error.retry_after_secs` wait is at least this long (ADR 0048 decision 9).
+pub const REVIEW_RETRY_AFTER_MIN_SECS: u64 = 60;
+/// A `model_error.retry_after_secs` wait is at most this long: 6 hours.
+pub const REVIEW_RETRY_AFTER_MAX_SECS: u64 = 6 * 60 * 60;
 /// Test-only (an input that exists only for tests is not in the manual, AGENTS.md): the program
 /// a background gate runs instead of `radian exec` for the `review` stage, the same seam
 /// [`ReviewRun::program`] gives the synchronous path. A test sets it on the `radian arc run`
@@ -80,6 +89,9 @@ pub struct Reason {
     pub verdict: Option<PathBuf>,
     /// What wrote it: `verify` or `merge`.
     pub action: &'static str,
+    /// The exact text `show` prints, when the stage's own text is not the one to show (the
+    /// `review_unavailable` wait carries its retry time and no stage prefix).
+    pub display: Option<String>,
 }
 
 impl Reason {
@@ -89,6 +101,7 @@ impl Reason {
             reason,
             verdict: None,
             action,
+            display: None,
         }
     }
 
@@ -98,11 +111,33 @@ impl Reason {
             reason,
             verdict: Some(verdict),
             action,
+            display: None,
+        }
+    }
+
+    /// A reason whose `text` is exactly `display`, because the wait it names is the useful
+    /// text (ADR 0048 decision 9), while `stage` and the verdict stay for `reverify`.
+    fn with_display(
+        action: &'static str,
+        stage: Stage,
+        reason: String,
+        display: String,
+        verdict: PathBuf,
+    ) -> Self {
+        Self {
+            stage: Some(stage),
+            reason,
+            verdict: Some(verdict),
+            action,
+            display: Some(display),
         }
     }
 
     /// The one text `show` prints and the refusal carries.
     pub fn text(&self) -> String {
+        if let Some(display) = &self.display {
+            return display.clone();
+        }
         let stage = self
             .stage
             .map(|stage| format!("{stage}: "))
@@ -202,11 +237,21 @@ pub struct Verified {
     /// Set when the automatic rework count paused the plan; the task stays in
     /// `review.rework_pending` and `run` prints the pause.
     pub paused: Option<Paused>,
+    /// The `retry_at` of a `review_unavailable` wait (ADR 0048 decision 9): the task stays in
+    /// `review.rework_pending`, the pass does not count an automatic rework for it, and `run`
+    /// prints the wait.
+    pub review_wait: Option<String>,
 }
 
 impl Verified {
     /// The one line `radian arc start` prints for the verification.
     pub fn line(&self) -> String {
+        if let Some(retry_at) = &self.review_wait {
+            return format!(
+                "{} review model unavailable -> retry at {retry_at}",
+                self.task
+            );
+        }
         if let Some(conflict) = &self.conflict {
             return conflict_line(&self.task, conflict);
         }
@@ -899,6 +944,7 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
             conflict: None,
             review: None,
             paused: None,
+            review_wait: None,
         });
     }
 
@@ -954,6 +1000,7 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         conflict: None,
         review: None,
         paused: None,
+        review_wait: None,
     })
 }
 
@@ -1207,6 +1254,94 @@ pub fn auto_reverify(store: &Store, task_id: &str) -> Result<AutoReverify, Error
     }
 }
 
+/// What an automatic reverify of a `review_unavailable` wait did (ADR 0048 decision 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewReverify {
+    /// Nothing ran: the task is not waiting on a review model, its plan is at `auto` `off`, or
+    /// its `retry_at` has not passed.
+    Not,
+    /// A new worker-less attempt was claimed; the pass starts its gate.
+    Started { attempt_id: String },
+}
+
+/// The scheduling loop's reverify of a task waiting on an unavailable review model (ADR 0048
+/// decision 9): a `review.rework_pending` task whose reason is `review_unavailable`, of a plan
+/// whose `auto` is not `off`, once its `retry_at` has passed. The claim starts no worker, is not
+/// a retry, and is not an automatic rework; it does not use `[limits] max_auto_reverify` and
+/// has no count limit, because a usage window always resets.
+///
+/// A refused claim is the ordinary "nothing ran" result: the task moved since it was read.
+///
+/// # Errors
+///
+/// A stored file could not be read, or the claim failed for a reason other than the task
+/// having moved.
+pub fn auto_reverify_review(store: &Store, task_id: &str) -> Result<ReviewReverify, Error> {
+    let Some((_, retry_at)) = review_wait_cause(store, task_id)? else {
+        return Ok(ReviewReverify::Not);
+    };
+    if retry_at > crate::store::plan_ops::utc_now() {
+        return Ok(ReviewReverify::Not);
+    }
+    match crate::store::attempt_ops::claim_reverify_by(
+        store,
+        task_id,
+        crate::store::attempt_ops::ReverifyBy::Automatic,
+    ) {
+        Ok(claim) => Ok(ReviewReverify::Started {
+            attempt_id: claim.attempt_id,
+        }),
+        Err(Error::Refused(_)) => Ok(ReviewReverify::Not),
+        Err(error) => Err(error),
+    }
+}
+
+/// The task and its `retry_at` when it waits on an unavailable review model (ADR 0048
+/// decision 9): a `review.rework_pending` task of a plan whose `auto` is not `off`, whose
+/// recorded review reason is `review_unavailable`, with `retry_at` set and no reject note.
+fn review_wait_cause(
+    store: &Store,
+    task_id: &str,
+) -> Result<Option<(model::TaskFile, String)>, Error> {
+    let loaded = store.load_task(task_id)?;
+    if loaded.changed_outside_arc {
+        return Ok(None);
+    }
+    let task = loaded.item;
+    if task.state != model::TaskState::Review || task.phase != "rework_pending" {
+        return Ok(None);
+    }
+    let plan = store.load_plan(&task.plan)?;
+    if plan.changed_outside_arc || plan.item.auto == "off" {
+        return Ok(None);
+    }
+    let Some(retry_at) = task.retry_at.clone() else {
+        return Ok(None);
+    };
+    let Ok(label) = attempt_label(&task) else {
+        return Ok(None);
+    };
+    let dir = attempt_dir(store.repo(), &task.id, &label).map_err(gate_error)?;
+    // The owner's reject note is a decision about the work, not a model wait.
+    if dir.join(REJECT_FILE).is_file() {
+        return Ok(None);
+    }
+    let Ok(text) = fs::read_to_string(dir.join(REVIEW_FILE)) else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Ok(None);
+    };
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !reason.starts_with(REVIEW_UNAVAILABLE) {
+        return Ok(None);
+    }
+    Ok(Some((task, retry_at)))
+}
+
 /// The task and the main its failing verdict recorded, when the stored side of an automatic
 /// reverify applies to `task_id` (ADR 0048 decision 9): the plan's `auto` is not `off`, the task
 /// is in `review.rework_pending`, and the attempt failed a `commands` or integration stage with
@@ -1265,6 +1400,11 @@ fn auto_reverify_cause(
 /// make a pass act again, and the frame cannot see that.
 #[must_use]
 pub fn auto_reverify_pending(store: &Store, task_id: &str) -> bool {
+    // A `review_unavailable` wait is reverified by a pass once `retry_at` passes, with no
+    // count and no moved main (ADR 0048 decision 9).
+    if review_wait_cause(store, task_id).ok().flatten().is_some() {
+        return true;
+    }
     let Ok(Some((task, recorded_main))) = auto_reverify_stored_cause(store, task_id) else {
         return false;
     };
@@ -1424,6 +1564,39 @@ fn failed_stage(
             conflict: None,
             review: None,
             paused: None,
+            review_wait: None,
+        });
+    }
+    // A review whose model was unavailable waits on the model's window: no second session,
+    // no rework, no automatic rework count, and no paused plan (ADR 0048 decision 9).
+    if verdict.stage == Stage::Review && verdict.reason.as_deref() == Some(REVIEW_UNAVAILABLE) {
+        let run = review_unavailable_run(store, &task.id, &verdict.sha)?;
+        let retry_at = review_retry_at(verdict.review_model_error.as_ref(), run);
+        let text = review_unavailable_text(verdict.review_model_error.as_ref(), &retry_at);
+        let reason =
+            Reason::with_display("verify", Stage::Review, text.clone(), text, path.clone());
+        reason.record(store, &task.id, label);
+        reset_conflict_rework(store, &task.id)?;
+        store.change_task(&task.id, |task| {
+            task.state = model::TaskState::Review;
+            task.phase = "rework_pending".to_owned();
+            task.verified_sha = Some(head.to_owned());
+            task.verdict_set_digest = None;
+            task.retry_at = Some(retry_at.clone());
+            Ok(())
+        })?;
+        return Ok(Verified {
+            task: task.id.clone(),
+            attempt_id: label.to_owned(),
+            state: "review",
+            phase: "rework_pending".to_owned(),
+            reason: Some(reason),
+            digest: None,
+            reused: Vec::new(),
+            conflict: None,
+            review: None,
+            paused: None,
+            review_wait: Some(retry_at),
         });
     }
     // A conflict with main starts the next attempt mid-merge, so arc writes its brief itself
@@ -1451,6 +1624,7 @@ fn failed_stage(
             conflict: Some(conflict),
             review: None,
             paused: None,
+            review_wait: None,
         });
     }
     // This verification did not end in a conflict, so the task's run of conflicts is over.
@@ -1483,6 +1657,7 @@ fn failed_stage(
             conflict: None,
             review: Some(review),
             paused,
+            review_wait: None,
         });
     }
     store.change_task(&task.id, |task| {
@@ -1504,7 +1679,60 @@ fn failed_stage(
         conflict: None,
         review: None,
         paused: None,
+        review_wait: None,
     })
+}
+
+/// How many `review_unavailable` verdicts this task has in a row for `sha`, newest first,
+/// among its `review` verdicts: 1 for the first, 2 for the next on the same sha. Any other
+/// review outcome, or a change of sha, ends the run (ADR 0048 decision 9).
+fn review_unavailable_run(store: &Store, task: &str, sha: &str) -> Result<u32, Error> {
+    let mut run = 0u32;
+    for (_, verdict) in task_verdict_files(store, task)?.into_iter().rev() {
+        if verdict.stage != Stage::Review {
+            continue;
+        }
+        if verdict.reason.as_deref() != Some(REVIEW_UNAVAILABLE) || verdict.sha != sha {
+            break;
+        }
+        run = run.saturating_add(1);
+    }
+    Ok(run.max(1))
+}
+
+/// The `retry_at` of a `review_unavailable` wait (ADR 0048 decision 9): the session's
+/// `retry_after_secs` clamped to [`REVIEW_RETRY_AFTER_MIN_SECS`] and
+/// [`REVIEW_RETRY_AFTER_MAX_SECS`], else 5 minutes for `run` 1, doubled for each further one
+/// in a row, capped at [`REVIEW_WAIT_CAP_SECS`].
+fn review_retry_at(model_error: Option<&Value>, run: u32) -> String {
+    let seconds = model_error
+        .and_then(|error| error.get("retry_after_secs"))
+        .and_then(Value::as_u64)
+        .map(|secs| secs.clamp(REVIEW_RETRY_AFTER_MIN_SECS, REVIEW_RETRY_AFTER_MAX_SECS))
+        .unwrap_or_else(|| {
+            let exponent = run.saturating_sub(1).min(4);
+            (REVIEW_WAIT_BASE_SECS << exponent).min(REVIEW_WAIT_CAP_SECS)
+        });
+    let at = chrono::Utc::now() + chrono::Duration::seconds(seconds as i64);
+    at.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// The `rework_reason` of a `review_unavailable` wait (ADR 0048 decision 9): the model's kind,
+/// its HTTP status when it has one, and the retry time.
+fn review_unavailable_text(model_error: Option<&Value>, retry_at: &str) -> String {
+    let kind = model_error
+        .and_then(|error| error.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let mut text = format!("{REVIEW_UNAVAILABLE}: model {kind}");
+    if let Some(status) = model_error
+        .and_then(|error| error.get("status"))
+        .and_then(Value::as_u64)
+    {
+        text.push_str(&format!(" (HTTP {status})"));
+    }
+    text.push_str(&format!(", retry at {retry_at}"));
+    text
 }
 
 /// The conflict rework arc writes itself (ADR 0048 decision 9): when the profile runs
@@ -1681,7 +1909,7 @@ fn review_auto_rework(
     verdict: &Verdict,
     path: &Path,
 ) -> Result<Option<(ReviewRework, Option<Paused>)>, Error> {
-    if verdict.stage != Stage::Review || verdict.reason.as_deref() != Some("review_blocking") {
+    if verdict.stage != Stage::Review || verdict.reason.as_deref() != Some(REVIEW_BLOCKING) {
         return Ok(None);
     }
     let Some(review) = verdict.review.as_ref() else {
@@ -1752,9 +1980,9 @@ struct FollowupRound {
     items: Vec<ReviewItem>,
 }
 
-/// The task's `review` verdicts across every attempt, oldest first, with their paths. Attempt
-/// numbers order the rounds, because `task_verdict_files` sorts their directory names as
-/// strings and `attempt-10` sorts before `attempt-2`.
+/// The task's `review` verdicts across every attempt, oldest first, with their paths. The
+/// attempt number orders the rounds (ADR 0048 decision 10); `task_verdict_files` already
+/// sorts the attempt directories by it, and this keeps the order explicit for the rounds.
 fn review_verdicts(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict)>, Error> {
     let mut reviews: Vec<(PathBuf, Verdict)> = task_verdict_files(store, task)?
         .into_iter()
@@ -2884,12 +3112,12 @@ fn failure_text(verdict: &Verdict) -> String {
     if reason == "conflict" && !verdict.conflict_paths.is_empty() {
         return format!("conflict: {}", verdict.conflict_paths.join(", "));
     }
-    if reason == "review_blocking"
+    if reason == REVIEW_BLOCKING
         && let Some(review) = &verdict.review
         && !review.blocking.is_empty()
     {
         return format!(
-            "review_blocking: {}",
+            "{REVIEW_BLOCKING}: {}",
             review
                 .blocking
                 .iter()
@@ -3124,6 +3352,27 @@ fn task_verdict_files(store: &Store, task: &str) -> Result<Vec<(PathBuf, Verdict
     task_verdict_files_except(store, task, None)
 }
 
+/// The order attempt directories sort in: the attempt number a directory names, then an
+/// integration re-run's index (`<task>-<n>.iK`, which follows its own attempt). Attempt
+/// numbers are compared as numbers: sorting their names as strings put `<task>-10` before
+/// `<task>-2`, and a scan that walks the verdicts newest first then met attempt 2 before
+/// attempt 10 and stopped counting too early.
+fn attempt_order(path: &Path) -> (u32, u32) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let (base, rerun) = match name.rsplit_once(".i") {
+        Some((base, index)) => (base, index.parse().unwrap_or(0)),
+        None => (name, 0),
+    };
+    let attempt = base
+        .rsplit_once('-')
+        .and_then(|(_, number)| number.parse().ok())
+        .unwrap_or(u32::MAX);
+    (attempt, rerun)
+}
+
 /// Every verdict file of every attempt of `task` except the attempt `except`, in attempt order,
 /// with its path. A stage that runs beside another one skips its own attempt's directory: the
 /// other stage may be writing a verdict there, and a read between `Verdict::write_new`'s
@@ -3143,7 +3392,11 @@ fn task_verdict_files_except(
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
-    dirs.sort();
+    dirs.sort_by(|one, other| {
+        attempt_order(one)
+            .cmp(&attempt_order(other))
+            .then_with(|| one.cmp(other))
+    });
     for dir in dirs {
         if except.is_some_and(|label| dir.file_name().and_then(|name| name.to_str()) == Some(label))
         {
