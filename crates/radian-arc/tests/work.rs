@@ -2718,6 +2718,122 @@ fn a_worker_that_adds_a_hook_fails_and_the_hook_is_removed() {
     assert!(!hook.exists(), "the hook the worker added is removed");
 }
 
+/// A worker that rewrites `<common dir>/info/refs` through `git update-server-info` does not
+/// fail the control check: `info/refs` is not a control file, because any automatic `git gc`
+/// in the shared repository rewrites it and only the dumb HTTP transport reads it (ADR 0048
+/// decision 7). Its commit is pushed.
+#[test]
+fn a_worker_that_rewrites_info_refs_still_passes() {
+    let repo = Repo::new("control-info-refs");
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "git update-server-info && echo change > change.txt \
+             && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        "TK0012-info-refs",
+        1,
+        "tok-info-refs",
+        &[],
+        &model_args(mock.base_url()),
+        "make a change\n",
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let finished = run.finished();
+    assert_eq!(finished["outcome"], json!("completed"));
+    assert_eq!(finished["failure"], json!(null));
+    assert_eq!(finished["pushed"], json!(true));
+    assert_eq!(
+        repo.remote_branch("TK0012-info-refs").as_deref(),
+        finished["head_sha"].as_str(),
+        "the wrapper pushed the attempt"
+    );
+    let refs = common_git_dir(&repo).join("info/refs");
+    assert!(
+        !std::fs::read_to_string(&refs)
+            .unwrap_or_default()
+            .is_empty(),
+        "the worker rewrote {}",
+        refs.display()
+    );
+}
+
+/// A worker that changes `<common dir>/info/exclude` still fails the attempt and the recorded
+/// content comes back: only `info/refs` is left out of the record (ADR 0048 decision 7).
+#[test]
+fn a_worker_that_changes_info_exclude_fails_and_is_restored() {
+    let repo = Repo::new("control-info-exclude");
+    let exclude = common_git_dir(&repo).join("info/exclude");
+    let before = std::fs::read(&exclude).expect("the info/exclude file");
+    let worker = format!("printf '*.tmp\\n' >> '{}'", exclude.display());
+    let run = run(
+        &repo,
+        "TK0013-info-exclude",
+        1,
+        "tok-info-exclude",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("info/exclude"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert_eq!(
+        std::fs::read(&exclude).expect("the exclude file is back"),
+        before,
+        "the recorded content is restored"
+    );
+    assert_eq!(
+        repo.remote_branch("TK0013-info-exclude"),
+        None,
+        "nothing was pushed"
+    );
+}
+
+/// A worker that creates a new file under `<common dir>/info/` fails the attempt and the file
+/// is removed: only the existing `info/refs` is left out, not the directory (ADR 0048
+/// decision 7).
+#[test]
+fn a_worker_that_creates_a_file_under_info_fails_and_it_is_removed() {
+    let repo = Repo::new("control-info-attributes");
+    let attributes = common_git_dir(&repo).join("info/attributes");
+    let worker = format!("printf '*.txt text\\n' > '{}'", attributes.display());
+    let run = run(
+        &repo,
+        "TK0014-info-attributes",
+        1,
+        "tok-info-attributes",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("info/attributes"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(
+        !attributes.exists(),
+        "the file the worker created is removed"
+    );
+}
+
 /// A control file too large to read whole fails the attempt and is removed instead of being
 /// loaded into the wrapper's memory (ADR 0048 decisions 7 and 8).
 #[test]

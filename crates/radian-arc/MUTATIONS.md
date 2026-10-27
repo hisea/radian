@@ -1395,3 +1395,21 @@ restored from `.radian/mut/` with `cp` and compared with `cmp`.
 
 2/2 caught.
 
+## TK0189: `info/refs` is not a control file (2026-10-26, branch `work/TK0189-control-check-skips-info-refs`)
+
+ADR 0048 decision 7: the wrapper records every file under `<common dir>/info/` except
+`<common dir>/info/refs`, because an automatic `git gc` runs `git repack`, which rewrites it
+through `git update-server-info`, and only the dumb HTTP transport reads it. The mutation was
+applied by hand to `crates/radian-arc/src/work/mod.rs`, leaving the whole `info/` directory
+out of the scan. The binary was rebuilt with `cargo build -p radian-tui --bin radian -p
+agent-extensions --bin mcp-fixture` (the work tests refuse an older one), and the three `info`
+tests ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test work -E
+'test(rewrites_info_refs) or test(changes_info_exclude) or test(creates_a_file_under_info)'`.
+The source was restored from `.radian/mut/work_mod_fixed.rs` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0189-M1 | leave the whole `info/` directory out of the control scan (the `tree_except` call for `info` dropped) | `work::a_worker_that_changes_info_exclude_fails_and_is_restored` (the failure is `outcome terminated`, not the control-file reason), and `work::a_worker_that_creates_a_file_under_info_fails_and_it_is_removed` | ✅ 2 failed |
+
+2/2 caught.
+

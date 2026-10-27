@@ -2782,6 +2782,12 @@ fn git_directory(worktree: &Path, flag: &str, clock: &Clock) -> Result<PathBuf, 
 /// larger file is never loaded into memory, so a worker cannot exhaust the wrapper with one.
 const CONTROL_FILE_LIMIT: u64 = 1024 * 1024;
 
+/// The one path under `<common dir>/` that the control record leaves out: `info/refs`. Any
+/// automatic `git gc` in the shared repository runs `git repack`, which rewrites this file
+/// through `git update-server-info`, and only the dumb HTTP transport reads it; a change to it
+/// says nothing about what the wrapper's own git commands run (ADR 0048 decision 7).
+const INFO_REFS: &str = "info/refs";
+
 /// Every git control file of decision 7 read in one pass, plus the paths the pass could not
 /// read. A scan that cannot read one path keeps the rest: the check treats the unreadable path
 /// as a change and restores what it recorded (ADR 0048 decisions 7 and 8).
@@ -2805,9 +2811,9 @@ impl ControlScan {
         ] {
             scan.entry(&path);
         }
-        for dir in [common.join("hooks"), common.join("info")] {
-            scan.tree(&dir);
-        }
+        scan.tree(&common.join("hooks"));
+        let info = common.join("info");
+        scan.tree_except(&info, Some(&common.join(INFO_REFS)));
         scan.modules(&common.join("modules"), false);
         scan
     }
@@ -2835,6 +2841,12 @@ impl ControlScan {
     /// a file where the directory itself should be is recorded as that entry, so swapping the
     /// directory for a link is a change.
     fn tree(&mut self, dir: &Path) {
+        self.tree_except(dir, None);
+    }
+
+    /// `tree`, leaving out one exact path. `info/refs` is the only entry read this way
+    /// ([`INFO_REFS`]).
+    fn tree_except(&mut self, dir: &Path, skip: Option<&Path>) {
         let metadata = match fs::symlink_metadata(dir) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -2863,8 +2875,11 @@ impl ControlScan {
                 }
             };
             let path = entry.path();
+            if skip == Some(path.as_path()) {
+                continue;
+            }
             match entry.file_type() {
-                Ok(kind) if kind.is_dir() => self.tree(&path),
+                Ok(kind) if kind.is_dir() => self.tree_except(&path, skip),
                 Ok(_) => self.entry(&path),
                 Err(error) => self.unreadable(&path, error),
             }
