@@ -2,9 +2,9 @@
 //!
 //! The protocol schema is the authority: field names are camelCase, the update and tool enums
 //! are snake_case, and `_meta` is spelled with the leading underscore. The host implements a
-//! closed subset — initialize, session/new, session/prompt, session/cancel, session/update and
-//! session/request_permission — and answers any other method with a JSON-RPC method-not-found
-//! error.
+//! closed subset — initialize, session/new, session/load, session/prompt, session/cancel,
+//! session/update and session/request_permission — and answers any other method with a
+//! JSON-RPC method-not-found error.
 
 use std::path::{Path, PathBuf};
 
@@ -189,6 +189,21 @@ pub(crate) fn tool_call(call_id: &str, name: &str, arguments: &Value, workspace:
     })
 }
 
+/// The `rawOutput` of a `tool_call_update`: the result's text, plus its structured output and
+/// its machine-readable error code when the result has them. The live sink and the
+/// `session/load` replay both use it, so a replayed call reports what a live client saw.
+pub(crate) fn tool_output(result: &radian_core::ToolResult) -> Value {
+    let mut raw = serde_json::Map::new();
+    raw.insert("text".to_owned(), Value::String(result.text()));
+    if let Some(structured) = &result.structured {
+        raw.insert("structured".to_owned(), structured.clone());
+    }
+    if let Some(code) = &result.error_code {
+        raw.insert("code".to_owned(), Value::String(code.clone()));
+    }
+    Value::Object(raw)
+}
+
 /// A `tool_call_update` for a finished call. `raw_output` is present when the tool result is
 /// known; a status-only update omits it.
 pub(crate) fn tool_call_update(
@@ -227,13 +242,13 @@ pub(crate) fn permission_tool_call(
     })
 }
 
-/// The result of `initialize`: version 1, no `session/load`, no client filesystem or terminal
-/// dependence.
+/// The result of `initialize`: version 1, `session/load` supported, no client filesystem or
+/// terminal dependence.
 pub(crate) fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "agentCapabilities": {
-            "loadSession": false,
+            "loadSession": true,
             "promptCapabilities": {
                 "image": false,
                 "audio": false,

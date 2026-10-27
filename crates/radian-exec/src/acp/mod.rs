@@ -2,13 +2,15 @@
 //!
 //! One process, one session, JSON-RPC over stdio. The session itself is opened by
 //! [`super::host::open_host_session`], the same function `radian exec` uses; this module is the
-//! protocol surface: the read loop, `initialize`/`session/new`/`session/prompt`/`session/cancel`,
-//! the live-update sink, and the pending-queue bridge that turns approvals and questions into
-//! `session/request_permission`.
+//! protocol surface: the read loop,
+//! `initialize`/`session/new`/`session/load`/`session/prompt`/`session/cancel`, the live-update
+//! sink, the `session/load` replay, and the pending-queue bridge that turns approvals and
+//! questions into `session/request_permission`.
 
 mod bridge;
 mod events;
 mod protocol;
+mod replay;
 mod wire;
 
 use std::collections::HashMap;
@@ -217,13 +219,24 @@ async fn handle_line(
             // There is no ACP authentication method: the key comes from `auth.json`.
             "authenticate" => state.out().respond(&id, json!({})),
             "session/new" => {
-                new_session(state, common, child_headers, &id, params).await;
+                open_session_request(state, common, child_headers, &id, params, None).await;
             }
-            "session/load" => state.out().respond_error(
-                &id,
-                protocol::METHOD_NOT_FOUND,
-                "session/load is not supported in this build; loadSession is false",
-            ),
+            "session/load" => {
+                let Some(session_id) = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    state.out().respond_error(
+                        &id,
+                        protocol::INVALID_PARAMS,
+                        "session/load needs the id of an existing session",
+                    );
+                    return true;
+                };
+                open_session_request(state, common, child_headers, &id, params, Some(session_id))
+                    .await;
+            }
             "session/prompt" => prompt_request(state, &id, params),
             other => state.out().respond_error(
                 &id,
@@ -267,14 +280,23 @@ async fn handle_line(
     true
 }
 
-/// `session/new`: creates the one session, or refuses because this process already holds one.
-async fn new_session(
+/// `session/new` and `session/load`: opens this process's one session, or refuses because it
+/// already holds one. `load` is the id a `session/load` named; it opens the session through
+/// `--resume`, the same lookup `radian exec` uses (ADR 0006, ADR 0022: the journal continues, it
+/// is never forked).
+async fn open_session_request(
     state: &Arc<State>,
     common: &mut CommonArgs,
     child_headers: &mut Option<Result<Vec<String>, String>>,
     id: &Value,
     params: Value,
+    load: Option<String>,
 ) {
+    let method = if load.is_some() {
+        "session/load"
+    } else {
+        "session/new"
+    };
     if let Some(session_id) = state.session_id() {
         state.out().respond_error(
             id,
@@ -285,21 +307,35 @@ async fn new_session(
         );
         return;
     }
+    // `--resume` already names the session this process was started for; a `session/load` of a
+    // different id would be a second session.
+    if let Some(session_id) = &load
+        && let Some(explicit) = &common.resume
+        && explicit != session_id
+    {
+        state.out().respond_error(
+            id,
+            protocol::INVALID_PARAMS,
+            &format!(
+                "one process holds one session; session/load names {session_id}, but this process \
+                 was started to resume {explicit}"
+            ),
+        );
+        return;
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct NewSession {
+    struct SessionRequest {
         cwd: PathBuf,
         #[serde(default)]
         mcp_servers: Option<Vec<Value>>,
     }
-    let request: NewSession = match serde_json::from_value(params) {
+    let request: SessionRequest = match serde_json::from_value(params) {
         Ok(request) => request,
         Err(error) => {
-            state.out().respond_error(
-                id,
-                protocol::INVALID_PARAMS,
-                &format!("session/new: {error}"),
-            );
+            state
+                .out()
+                .respond_error(id, protocol::INVALID_PARAMS, &format!("{method}: {error}"));
             return;
         }
     };
@@ -307,7 +343,7 @@ async fn new_session(
         state.out().respond_error(
             id,
             protocol::INVALID_PARAMS,
-            &format!("session/new cwd {} must be absolute", request.cwd.display()),
+            &format!("{method} cwd {} must be absolute", request.cwd.display()),
         );
         return;
     }
@@ -317,7 +353,7 @@ async fn new_session(
             state.out().respond_error(
                 id,
                 protocol::INVALID_PARAMS,
-                &format!("session/new cwd: {error}"),
+                &format!("{method} cwd: {error}"),
             );
             return;
         }
@@ -340,7 +376,7 @@ async fn new_session(
                     id,
                     protocol::INVALID_PARAMS,
                     &format!(
-                        "one process holds one session; session/new cwd {} is not --workspace {}",
+                        "one process holds one session; {method} cwd {} is not --workspace {}",
                         requested.display(),
                         flag.display()
                     ),
@@ -352,6 +388,11 @@ async fn new_session(
         None => requested,
     };
     common.workspace = Some(workspace.to_string_lossy().into_owned());
+    // ADR 0049: `session/load` opens the named session exactly as `radian exec --resume` does.
+    // An unknown id is an error from the opener that names it.
+    if let Some(session_id) = &load {
+        common.resume = Some(session_id.clone());
+    }
     let mcp = match protocol::parse_mcp_servers(&request.mcp_servers.unwrap_or_default()) {
         Ok(mcp) => mcp,
         Err(error) => {
@@ -437,7 +478,21 @@ async fn new_session(
         workspace,
     );
     *state.bridge_task.lock().unwrap() = Some(task);
-    state.out().respond(id, json!({ "sessionId": session_id }));
+    // ADR 0049: a loaded session's transcript is replayed before the response, so the client
+    // sees the same messages and tool calls a live session streamed. The transcript is the
+    // journal's (`LocalSession::history`), so the replay and the model's next request agree.
+    if load.is_some() {
+        for update in replay::updates(&session.history, session.workspace()) {
+            state.out().notify(
+                "session/update",
+                json!({ "sessionId": session_id, "update": update }),
+            );
+        }
+        // `LoadSessionResponse` has no required field.
+        state.out().respond(id, json!({}));
+    } else {
+        state.out().respond(id, json!({ "sessionId": session_id }));
+    }
 }
 
 /// Accepts `session/prompt` when the session is idle; a second prompt during a turn is
@@ -448,7 +503,7 @@ fn prompt_request(state: &Arc<State>, id: &Value, params: Value) {
         state.out().respond_error(
             id,
             protocol::INVALID_PARAMS,
-            "session/prompt before session/new",
+            "session/prompt before session/new or session/load",
         );
         return;
     };

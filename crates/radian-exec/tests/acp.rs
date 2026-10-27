@@ -182,6 +182,30 @@ impl Acp {
             .await
     }
 
+    /// Sends `session/load` and collects the `session/update`s the agent replays before it
+    /// answers (ADR 0049).
+    async fn load_session(&mut self, session_id: &str, cwd: &Path) -> (Value, Vec<Value>) {
+        let id = self
+            .send_request(
+                "session/load",
+                json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": [] }),
+            )
+            .await;
+        let mut updates = Vec::new();
+        loop {
+            let message = self.read().await;
+            if message.get("id") == Some(&json!(id)) && message.get("method").is_none() {
+                return (message, updates);
+            }
+            if message.get("method").and_then(Value::as_str) == Some("session/update") {
+                assert_eq!(message["params"]["sessionId"], session_id);
+                updates.push(message["params"]["update"].clone());
+                continue;
+            }
+            self.queued.push(message);
+        }
+    }
+
     async fn prompt(&mut self, session_id: &str, text: &str, decision: Decision) -> PromptRun {
         let id = self
             .send_request(
@@ -313,8 +337,8 @@ async fn a_prompt_streams_updates_and_answers_with_cost_and_text() {
     let init = acp.initialize().await;
     assert_eq!(
         init["result"]["agentCapabilities"]["loadSession"],
-        json!(false),
-        "loadSession is false until session/load exists"
+        json!(true),
+        "session/load is advertised"
     );
     let new = acp.new_session(&env.workspace).await;
     let session = new["result"]["sessionId"]
@@ -582,30 +606,10 @@ async fn a_model_error_is_a_refusal_with_the_error() {
 }
 
 #[tokio::test]
-async fn session_load_is_refused_and_http_mcp_servers_are_refused() {
-    let env = Env::fresh("load-mcp");
+async fn http_mcp_servers_are_refused() {
+    let env = Env::fresh("mcp");
     let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
-    let init = acp.initialize().await;
-    assert_eq!(
-        init["result"]["agentCapabilities"]["loadSession"],
-        json!(false)
-    );
-    let load = acp
-        .request(
-            "session/load",
-            json!({
-                "sessionId": "x",
-                "cwd": env.workspace,
-                "mcpServers": [],
-            }),
-        )
-        .await;
-    assert!(
-        load["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("not supported")),
-        "{load}"
-    );
+    acp.initialize().await;
     let new = acp
         .request(
             "session/new",
@@ -624,6 +628,254 @@ async fn session_load_is_refused_and_http_mcp_servers_are_refused() {
     assert!(
         message.contains("http") && message.contains("not supported"),
         "an HTTP MCP server is refused by transport: {new}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// The acceptance test: one process writes a session, a second one loads it, the client gets
+/// the earlier messages and tool calls as `session/update`s, and a prompt continues the **same**
+/// journal (ADR 0006, ADR 0022: no fork). The journal then replays cleanly.
+#[tokio::test]
+async fn session_load_replays_the_journal_and_continues_it() {
+    let server = MockServer::start(vec![
+        tool_reply("call-1", "read", json!({ "path": "hello.txt" })),
+        text_reply("first answer"),
+        text_reply("second answer"),
+    ])
+    .await;
+    let env = Env::fresh("load");
+    std::fs::write(env.workspace.join("hello.txt"), "hello").unwrap();
+    let args = [
+        "--model",
+        "m",
+        "--base-url",
+        &server.base_url,
+        "--workspace",
+        env.workspace.to_str().unwrap(),
+    ];
+    let session = {
+        let mut acp = Acp::spawn(&args, &env);
+        acp.initialize().await;
+        let new = acp.new_session(&env.workspace).await;
+        let session = new["result"]["sessionId"]
+            .as_str()
+            .expect("a session id")
+            .to_owned();
+        let run = acp.prompt(&session, "read hello", Decision::None).await;
+        assert_eq!(run.result()["stopReason"], "end_turn");
+        let (code, stderr) = acp.finish().await;
+        assert_eq!(code, 0, "{stderr}");
+        session
+    };
+
+    let mut acp = Acp::spawn(&args, &env);
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session(&session, &env.workspace).await;
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(!replayed.is_empty(), "the transcript is replayed");
+    assert_eq!(
+        replayed[0]["sessionUpdate"], "user_message_chunk",
+        "the replay starts with the earlier user message: {replayed:?}"
+    );
+    assert_eq!(replayed[0]["content"]["text"], "read hello");
+    assert!(
+        replayed.iter().any(|update| {
+            update["sessionUpdate"] == "agent_message_chunk"
+                && update["content"]["text"] == "first answer"
+        }),
+        "the earlier answer is replayed: {replayed:?}"
+    );
+    let call = replayed
+        .iter()
+        .find(|update| update["sessionUpdate"] == "tool_call")
+        .expect("the earlier tool call is replayed");
+    assert_eq!(call["toolCallId"], "call-1");
+    assert_eq!(call["kind"], "read");
+    assert_eq!(call["rawInput"]["path"], "hello.txt");
+    let finished = replayed
+        .iter()
+        .find(|update| {
+            update["sessionUpdate"] == "tool_call_update" && update["toolCallId"] == "call-1"
+        })
+        .expect("the earlier tool result is replayed");
+    assert_eq!(finished["status"], "completed", "{finished}");
+    assert!(
+        finished["rawOutput"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello")),
+        "the replayed result carries the output: {finished}"
+    );
+    // The replay is in transcript order: the message before the call it asked for, the call
+    // before its result.
+    let position = |predicate: &dyn Fn(&Value) -> bool| {
+        replayed
+            .iter()
+            .position(predicate)
+            .expect("the update is present")
+    };
+    assert!(
+        position(&|update| update["sessionUpdate"] == "user_message_chunk")
+            < position(&|update| update["sessionUpdate"] == "tool_call")
+            && position(&|update| update["sessionUpdate"] == "tool_call")
+                < position(&|update| update["sessionUpdate"] == "tool_call_update")
+    );
+
+    // A prompt on the loaded session continues the same journal.
+    let run = acp.prompt(&session, "what next", Decision::None).await;
+    assert_eq!(run.result()["stopReason"], "end_turn");
+    assert_eq!(run.result()["_meta"]["radian"]["text"], "second answer");
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // The model's second request carries the earlier turn, so the journal continued rather
+    // than starting a new one.
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3, "one call per turn");
+    for text in ["read hello", "first answer", "what next"] {
+        assert!(
+            requests[2].body.contains(text),
+            "the continued request lacks {text:?}: {}",
+            requests[2].body
+        );
+    }
+
+    let path = env.sessions.join(format!("{session}.jsonl"));
+    let events = journal(&path);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "SessionCreated")
+            .count(),
+        1,
+        "session/load must not start a second journal"
+    );
+    // The `journal-selfcheck` replay of the loaded session: the journal still folds to one
+    // transcript, the earlier turn first and the new turn after it.
+    let loaded = radian_session::Session::open(&path).expect("the loaded journal parses");
+    let history = loaded
+        .history()
+        .expect("the loaded journal's selfcheck replay");
+    let texts: Vec<String> = history.iter().map(radian_core::Message::text).collect();
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("read hello"),
+        "{texts:?}"
+    );
+    assert!(texts.contains(&"first answer".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"what next".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"second answer".to_owned()), "{texts:?}");
+}
+
+#[tokio::test]
+async fn session_load_of_an_unknown_id_is_an_error_that_names_it() {
+    let env = Env::fresh("load-unknown");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session("missing-id", &env.workspace).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("missing-id"),
+        "the error names the id: {response}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[tokio::test]
+async fn session_load_after_session_new_is_refused() {
+    let env = Env::fresh("load-after-new");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let (response, replayed) = acp.load_session(&session, &env.workspace).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("one process holds one session"),
+        "a second session is refused: {response}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049: `allow_always` is a grant for the process that answered it. A `session/load` in a
+/// new process restores none.
+#[tokio::test]
+async fn a_session_grant_is_not_restored_by_session_load() {
+    let call = || {
+        tool_reply(
+            "call-shell",
+            "shell",
+            json!({
+                "command": "echo hi",
+                "outside_sandbox": true,
+                "outside_sandbox_reason": "the ACP grant test",
+            }),
+        )
+    };
+    let server = MockServer::start(vec![
+        call(),
+        text_reply("ran"),
+        call(),
+        text_reply("ran again"),
+    ])
+    .await;
+    let env = Env::fresh("load-grant");
+    let args = [
+        "--model",
+        "m",
+        "--base-url",
+        &server.base_url,
+        "--workspace",
+        env.workspace.to_str().unwrap(),
+        "--profile",
+        "workspace",
+    ];
+    let session = {
+        let mut acp = Acp::spawn(&args, &env);
+        acp.initialize().await;
+        let new = acp.new_session(&env.workspace).await;
+        let session = new["result"]["sessionId"]
+            .as_str()
+            .expect("a session id")
+            .to_owned();
+        let run = acp
+            .prompt(&session, "run it", Decision::Select("allow_always"))
+            .await;
+        assert_eq!(run.result()["stopReason"], "end_turn");
+        assert_eq!(run.permissions.len(), 1, "{:?}", run.permissions);
+        let (code, stderr) = acp.finish().await;
+        assert_eq!(code, 0, "{stderr}");
+        session
+    };
+
+    let mut acp = Acp::spawn(&args, &env);
+    acp.initialize().await;
+    let (response, _) = acp.load_session(&session, &env.workspace).await;
+    assert!(response.get("error").is_none(), "{response}");
+    let run = acp.prompt(&session, "run it again", Decision::Reject).await;
+    assert_eq!(run.result()["stopReason"], "end_turn");
+    assert_eq!(
+        run.permissions.len(),
+        1,
+        "the earlier allow_always is gone, so the call is asked again: {:?}",
+        run.permissions
     );
     let (code, stderr) = acp.finish().await;
     assert_eq!(code, 0, "{stderr}");

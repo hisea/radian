@@ -46,11 +46,13 @@ workspace. The response carries the process's session id (`--resume`, else `--se
 else a generated id), and every later session-scoped request must name it.
 
 A second `session/new`, and a `session/new` whose `cwd` differs from the workspace, are
-refused with an error that says one process holds one session. `session/load` is refused as
-not supported, and `initialize` advertises `loadSession: false`.
+refused with an error that says one process holds one session. The same refusal covers a
+`session/load` after either call, a second `session/load`, and a `session/load` naming a
+different id than `--resume`. `initialize` advertises `loadSession: true`.
 
 With `--resume` the first `session/new` opens that existing session, exactly as
-`radian exec --resume` does. A missing journal is a `session/new` error.
+`radian exec --resume` does. A missing journal is a `session/new` error. `session/load`
+(decision 11) is the other way to open an existing session.
 
 ### 4. A prompt is one turn
 
@@ -151,6 +153,37 @@ and writes files with its own tools and starts its own shell, under the same san
 permission rules as every other host (ADR 0016, ADR 0020, ADR 0039). The protocol response
 advertises no client capability dependence.
 
+### 11. `session/load` replays the journal and continues it
+
+`session/load` opens an existing session by id through `--resume`'s lookup: the same journal,
+the same recovery, the same model route and access the journal records. Its `cwd` obeys the
+`session/new` rule (an absolute directory equal to `--workspace`, or the workspace when the
+flag is absent), and its `mcpServers` are merged exactly as `session/new`'s are (decision 9).
+An unknown id is an error from the opener that names the id.
+
+The response is an empty `LoadSessionResponse`. Before it, the journal's transcript — the
+recovered history `radian exec --resume` would send to the model (ADR 0002 repairs an unpaired
+call) — is replayed as `session/update` notifications in transcript order:
+
+| Transcript | `session/update` |
+|---|---|
+| a user message's text | `user_message_chunk` |
+| an assistant message's reasoning | `agent_thought_chunk` |
+| an assistant message's text | `agent_message_chunk` |
+| each tool call of an assistant message | `tool_call`, as decision 5 describes it |
+| the committed tool result | `tool_call_update` with `completed` or `failed` and `rawOutput` |
+
+The replay is a read: it writes nothing to the journal. A prompt after it is the ordinary
+`session/prompt` of decision 4 and continues the **same** journal — a load is a resume, never a
+fork (ADR 0006, ADR 0022). The session id stays the loaded one. A resource link is replayed as
+the `[name](uri)` line a prompt would have produced; an image, an audio block or an embedded
+resource has no text form on this surface and is not replayed. The protocol has one text
+channel for a user-role message, so a host-injected one (a memory block or a job notice,
+ADR 0011) is replayed the same way.
+
+The `allow_always` grant of decision 7 lives in the process that answered it, so a loaded
+session has none: the first call that needs an approval asks again.
+
 ## Constraints and Costs
 
 - One prompt runs at a time per process; parallel work belongs to arc's processes or to the
@@ -166,6 +199,9 @@ advertises no client capability dependence.
 `crates/radian-exec/tests/acp.rs` drives `radian acp` as a child over stdio: initialize,
 `session/new`, `session/prompt`, the update stream, the prompt `_meta`, a permission
 rejection, a cancellation with the interrupted journal prefix, a model error, the
-one-session refusal, and the shared flag set. `journal-selfcheck` replays the sessions the
-suite writes. The touched crates' mutation records name the tests that catch a cancelled turn
-answering `end_turn` and a second `session/new` being accepted.
+one-session refusal, the shared flag set, and `session/load` — a session written by one process
+and loaded by a second, whose replay and continued journal the test checks by folding the
+journal. `journal-selfcheck` replays the sessions the suite writes. The touched crates'
+mutation records name the tests that catch a cancelled turn answering `end_turn`, a second
+`session/new` being accepted, and a `session/load` that starts a new journal instead of
+continuing the loaded one.

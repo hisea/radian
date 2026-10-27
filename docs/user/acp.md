@@ -43,19 +43,38 @@ flag string a wrapper builds for `radian exec` is accepted unchanged once `-p -`
   with an error that says one process holds one session.
 - `--resume <id>` makes the first `session/new` continue that journal. A missing journal is a
   `session/new` error.
-- `session/load` is not supported in this version: `initialize` advertises
-  `loadSession: false`, and a `session/load` request is refused.
+
+## Loading an existing session
+
+`session/load` opens an existing session by id, the same lookup `--resume` uses, and replays
+its transcript to the client. `initialize` advertises `loadSession: true`.
+
+- The request's `cwd` must satisfy the same rule as `session/new`: an absolute directory that
+  equals `--workspace`, or, when `--workspace` is absent, the workspace itself.
+- The reply is an empty object. Before it, radian sends the journal's transcript as
+  `session/update` notifications, in transcript order: `user_message_chunk` for each user
+  message, `agent_thought_chunk` for reasoning, `agent_message_chunk` for answer text, and a
+  `tool_call` followed by the `tool_call_update` of its final status (`completed` or `failed`,
+  with the tool's output) for each tool call.
+- A prompt after the load continues the **same** journal: the loaded session is continued, never
+  forked, exactly like `radian exec --resume`. The session id stays the one that was loaded.
+- An unknown id is an error that names the id.
+- A `session/load` after `session/new`, a second `session/load`, and a `session/load` naming a
+  different id than `--resume` are refused with the one-process-one-session error.
+- An `allow_always` grant from an earlier process is **not** restored: the first call that needs
+  an approval after a load asks again.
 
 ## Methods
 
 | Method | What happens |
 |---|---|
-| `initialize` | Negotiates protocol version 1 and advertises `loadSession: false`. |
+| `initialize` | Negotiates protocol version 1 and advertises `loadSession: true`. |
 | `session/new` | Creates (or, with `--resume`, continues) the one session; see above. |
+| `session/load` | Opens an existing session by id, replays its transcript as updates, and continues it; see above. |
 | `session/prompt` | Sends the prompt's text as a user message (a resource link becomes a text line) and answers when the turn ends. |
 | `session/cancel` | Interrupts the running turn, like ESC in the full-screen interface; the journal keeps the interrupted prefix. |
 | `session/request_permission` | Sent by radian for every approval and every `ask_user` question. |
-| `session/update` | Sent by radian for the live turn; see below. |
+| `session/update` | Sent by radian for the live turn and for a `session/load` replay; see below. |
 
 `session/prompt` answers with `stopReason`: `end_turn`, `cancelled`, `max_tokens`,
 `max_turn_requests` (the model-call budget ran out) or `refusal` (a model or hook error, or
@@ -72,11 +91,13 @@ A client that does not read `_meta` ignores it.
 
 ## Updates
 
-`session/update` carries only live events; the durable transcript goes to the session journal
-and a full-screen session can resume it.
+`session/update` carries the live events of a turn, and the replayed transcript of a
+`session/load`; the durable transcript goes to the session journal and a full-screen session can
+resume it.
 
 - `agent_message_chunk`: streamed answer text.
 - `agent_thought_chunk`: streamed reasoning.
+- `user_message_chunk`: a user message, in a replayed transcript.
 - `tool_call`: a tool call started, with its id, title, kind, status, locations and raw input.
 - `tool_call_update`: a tool finished, with its status and raw output.
 - `usage_update`: the provider's reported usage and the context window, when the window is
