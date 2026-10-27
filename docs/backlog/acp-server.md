@@ -3,7 +3,7 @@
 - 状态：decided（第一阶段：arc 需要的范围；owner 2026-10-27）；idea（第二阶段：编辑器）
 - 涉及 ADR：新 ADR；0032（一个二进制、保留的子命令）、0009（全屏 TUI 之外的宿主面）、0024（审批与提问映射到 `request_permission`）、0011（`session/prompt` 走 inbox）、0010（`session/update` 只发 live 事件）、0043（单会话、控制口）、0031（信任门）、0007（usage 与 cost）、0022（不 fork 会话）
 - 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥；owner 2026-10-27："arc 可以用 ACP 调用 radian"
-- 关系：`arc-acp-worker.md`（arc 当 ACP 客户端）是本条的第一个用户，先做；`arc-radian-worker-over-acp.md` 在两条之后，把 arc 的 radian worker 切到本条。
+- 关系：arc 当 ACP 客户端的部分已落地（ADR 0048 第 7 节；手册 `docs/user/arc/files.md` 的 `flows.<name>.acp` 行与 `docs/user/arc/worker.md` 的「An ACP agent as the worker」），它是本条的第一个用户；`arc-radian-worker-over-acp.md` 在本条之后，把 arc 的 radian worker 切到本条。
 
 ## 背景
 

@@ -51,7 +51,7 @@ The wrapper enforces the attempt's limits itself, so they hold even after the pr
 - after `[limits] cancel_grace_secs` the worker gets SIGKILL; a `before_attempt` command's group gets the same when a stop reaches it while it runs (see [The steps before an attempt](#the-steps-before-an-attempt)).
 
 A limit of `0` means no limit for that timer.
-The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), forwards SIGTERM, waits for the worker, and still writes its `AttemptFinished` record.
+The wrapper records the class in `runs/<task>/attempts/<attempt id>/signal.json` (`stall` or `wall_time`), stops the worker (an ACP agent gets `session/cancel` first; see [An ACP agent as the worker](#an-acp-agent-as-the-worker)), and still writes its `AttemptFinished` record.
 On a cancel the wrapper is itself killed only after the grace and one more second, the window in which it reaps what it stopped and writes that record; the grace is never shortened to make room for the record.
 `start` waits for the wrapper and applies the result; `radian arc run` does not wait (see `run`).
 
@@ -74,7 +74,8 @@ A failed check fails the attempt with its reason in `runs/<task>/attempts/<attem
 ## Another agent as the worker
 
 `[worker] command` replaces the `radian exec` worker with one program of your choice for every attempt of every task ([`worker.command`](files.md#configtoml)).
-A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, or `exec_args` for `radian exec`, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
+A task can pick a different worker with its `flow`: a `[flows.<name>]` section can set `command`, `acp` for an ACP agent, or `exec_args` for `radian exec`, and each task names the flow it runs ([the flow rows](files.md#configtoml)).
+A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never two.
 A repository can then run, say, image tasks through a Codex script and code tasks through `radian exec` in the same plan:
 
 ```toml
@@ -88,7 +89,7 @@ exec_args = ["--model", "some-model", "--system-file", ".radian/arc/code.md"]
 A task with `flow = "codex"` starts the script; a task with no `flow` uses `default`, here `radian exec` with those arguments.
 Without a `[flows.default]` section, `default` comes from the `[worker]` keys ([the flow rows](files.md#configtoml)).
 `[worker] rework_session` is a `[worker]` key, not a flow key, and it applies to every flow.
-The rest of this section describes the command worker; it applies to a flow's `command` exactly as it did to `[worker] command`.
+The rest of this section describes the command worker; it applies to a flow's `command` exactly as it did to `[worker] command`. [An ACP agent as the worker](#an-acp-agent-as-the-worker) below describes `acp`.
 The array's first element is the program and the rest are its arguments; there is no shell in between, so a pipeline or a variable belongs in a script you pass as the program.
 Unset, a flow's worker is `radian exec` and this section does not apply to it.
 
@@ -99,7 +100,7 @@ After it exits the wrapper runs the same git control-file check, [delivery check
 
 ### The environment
 
-The wrapper adds these variables to the program's environment; they describe the attempt and are never read by radian itself.
+The wrapper adds these variables to the command's or the ACP agent's environment; they describe the attempt and are never read by radian itself.
 
 | Variable | Value |
 |---|---|
@@ -181,4 +182,92 @@ rework_session = "fresh"
 
 `codex exec resume` has no `-C` or `-s` in `0.159.1`, so the example always starts a new Codex session: keep `rework_session = "fresh"`, which is the default.
 The wrapper's hand-off section still carries the previous attempt's report, and `ARC_STATE_DIR` is where the script can keep a session map of its own.
+
+## An ACP agent as the worker
+
+A flow that sets [`flows.<name>.acp`](files.md#configtoml) makes the wrapper an [Agent Client Protocol](https://agentclientprotocol.com) client instead: it starts the program as the agent and talks ACP v1 to it over stdin and stdout.
+The first element of the array is the program and the rest are its arguments, with no shell in between, resolved exactly as a `command` program is.
+The agent works in the task's worktree, gets its own process group, and gets the [environment below](#the-environment), the `command` worker's on top of the wrapper's own.
+radian does not sandbox it: the agent's own sandbox decides what it may read, and `ARC_DENY_READ` names the paths the wrapper would deny to `radian exec`.
+
+One attempt is one agent process. The wrapper sends `initialize` with no `fs/*` or `terminal/*` client capability, one `session/new` with the attempt's worktree as `cwd` and `mcpServers` `[]`, and one `session/prompt` whose single content block is the brief a `radian exec` worker would receive on stdin (the `merge-main` conflict section, the hand-off, the task body, then [`worker-brief.md`](files.md#worker-briefmd)).
+It sends no second prompt: the turn's end is the attempt's end, and the agent is stopped then.
+
+Every `session/update` the agent sends is written to `runs/<task>/attempts/<attempt id>/result.jsonl` as one line, in this envelope that keeps the protocol's own JSON whole:
+
+```json
+{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{...}}}
+```
+
+The arc TUI's conversation tab draws a `tool_call` and a `tool_call_update` in the same row shape as a `radian exec` tool row, and an `agent_message_chunk` as its text (see [the task page's conversation tab](tui.md#the-task-page)).
+
+`session/request_permission` is answered by one fixed policy, with no configuration key:
+
+- a request whose path or paths all lie inside the attempt's worktree is answered `allow_once`;
+- any path outside the worktree rejects it, `reject_once`;
+- a request that names no path counts as inside.
+
+The request and the answer are each one line of `result.jsonl`; the answer is `{"type":"acp","answer":{"requestId":<id>,"kind":"allow_once|reject_once|cancelled","optionId":<id or null>}}`.
+The paths are the request's `toolCall.locations` (and a `path` in its `rawInput`).
+`ARC_DENY_READ` names paths outside the worktree, so they fall on the rejecting side.
+
+The `session/prompt` response's `stopReason` decides the attempt:
+
+| `stopReason` | `Result.outcome` | What happens |
+|---|---|---|
+| `end_turn` | `completed` | The delivery check runs; the attempt passes when it delivers. |
+| `max_tokens` | `max_tokens` | A failed attempt named after the reason; the retry rules apply. |
+| `max_turn_requests` | `max_turn_requests` | The same. |
+| `refusal` | `refusal` | The same. |
+| `cancelled` | `cancelled` | The same, unless arc itself cancelled the attempt: then it is a cancel and the task ends `failed.cancelled`. |
+| any other value | `failed` | A failed attempt under the retry rules. |
+
+The last contiguous run of `agent_message_chunk` text becomes `Result.text`, so the next fresh attempt's hand-off reads it and `commit_dirty` can use its first line as the commit subject; see [`flows.<name>.commit_dirty`](files.md#configtoml), which applies to every worker kind.
+The wrapper writes that `Result` line itself, after the agent has ended, in the same shape a `command` worker's last line has.
+Nothing after it changes: the git control-file check, the delivery check, the push and `AttemptFinished` are the same.
+
+The protocol has no fee, only `usage_update` token counts, which stay in `result.jsonl`.
+An ACP attempt's cost is therefore unknown, exactly as a command worker's that reports none: it adds nothing to a task's or plan's totals, a budget never stops on it, and the task records [`cost_unknown`](files.md#task-fields).
+When a claim starts an ACP worker for a task or plan with a cost limit, `start`, `run` and `serve` print one line: `<task>: worker.acp reports no cost; the cost limit does not apply`.
+
+`radian arc cancel`, a stall and the wall clock stop an ACP worker the same way: the wrapper first sends `session/cancel` and answers a pending permission request `cancelled`, gives the agent a moment to end its turn, and then sends SIGTERM to its process group, waits `[limits] cancel_grace_secs` and sends SIGKILL.
+An agent that ends its turn with `stopReason: cancelled` after an arc cancel is recorded as cancelled, not terminated.
+
+`[worker] rework_session = "resume"` cannot be combined with a flow that sets `acp`: the file is refused before `start`, naming both keys.
+Every ACP attempt is fresh, so an attempt after the first gets the hand-off section and a new agent session.
+
+### Installing an ACP agent
+
+The Codex adapter is one package; install it globally so the worker does not need the network:
+
+```sh
+npm i -g @agentclientprotocol/codex-acp
+```
+
+Then one line starts it:
+
+```toml
+[flows.codex]
+acp = ["codex-acp"]
+```
+
+`npx -y @agentclientprotocol/codex-acp` also works, but it downloads the package on first use: a worker without network access fails before its first turn.
+Claude Code and Gemini CLI have their own adapters, and opencode speaks ACP natively; the same `acp` array starts any of them.
+
+An adapter's environment variables belong in a wrapper script, not in a second configuration key: the `acp` array's program is the one process the wrapper starts, so a script that exports what the adapter needs and execs it is the whole configuration.
+
+```sh
+#!/bin/sh
+# codex-acp with an agent mode the adapter reads from its environment.
+export INITIAL_AGENT_MODE=workspace-write
+exec codex-acp "$@"
+```
+
+```toml
+[flows.codex]
+acp = ["/absolute/path/to/codex-acp.sh"]
+commit_dirty = true
+```
+
+The script keeps `acp` to one program; the wrapper passes the ACP traffic through it unchanged.
 
