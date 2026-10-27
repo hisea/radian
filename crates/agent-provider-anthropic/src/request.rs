@@ -19,6 +19,13 @@ const RESERVED: [&str; 7] = [
     "tool_choice",
 ];
 
+/// The body keys this adapter owns, for a host that merges `extra_body` into every request
+/// (ADR 0026 D13). A caller refuses them before a request is sent; `build_body` refuses them
+/// again.
+pub fn reserved_body_keys() -> &'static [&'static str] {
+    &RESERVED
+}
+
 /// The documented maximum number of explicit `cache_control` breakpoints in one request
 /// (wire notes §2.4). The adapter places at most three (last tool, end of system, last
 /// cacheable block of the last message), so it never approaches this; `build_body` asserts it.

@@ -48,6 +48,7 @@ fn isolated_home(base_url: &str) -> PathBuf {
 
 fn context() -> RouteContext {
     RouteContext {
+        extra_body: Default::default(),
         providers: BTreeMap::new(),
         session_id: "key-pool-failover".to_owned(),
         user_headers: Vec::new(),

@@ -514,6 +514,20 @@ pub(super) fn resolve_window_and_route(
     if let Some(notice) = compaction_notice {
         startup_log.line(format!("radian: [compaction] {notice}"));
     }
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
+    // read once here, before any session file exists; an invalid value is a startup refusal.
+    let extra_body = radian_host::read_extra_body()?;
+    if let Some(extra) = &extra_body {
+        if let Some(line) = extra.applied_line() {
+            startup_log.line(line);
+        }
+        if let Some(line) = extra.settings_warning(&settings.compaction_settings) {
+            startup_log.line(line);
+        }
+    }
+    let extra_fields = extra_body
+        .map(radian_host::ExtraBody::into_fields)
+        .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay =
@@ -528,6 +542,7 @@ pub(super) fn resolve_window_and_route(
             .as_ref()
             .map(|credential| credential.key.clone()),
         headers: route.headers.clone(),
+        extra_body: extra_fields.clone(),
         // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default. The
         // TUI has no `--include-usage` flag.
         include_usage: radian_host::default_include_usage(&resolved.provider_name),
@@ -545,6 +560,7 @@ pub(super) fn resolve_window_and_route(
         providers: config.providers.clone(),
         session_id: session_id.clone(),
         user_headers: user_headers.clone(),
+        extra_body: extra_fields,
         include_usage: None,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking: resolved.thinking.clone(),

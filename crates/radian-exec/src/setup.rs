@@ -413,6 +413,20 @@ pub(crate) async fn setup(
     if let Some(notice) = compaction_notice {
         eprintln!("[compaction] {notice}");
     }
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
+    // read once here, before any session file exists; an invalid value is a startup refusal.
+    let extra_body = radian_host::read_extra_body().map_err(SetupError)?;
+    if let Some(extra) = &extra_body {
+        if let Some(line) = extra.applied_line() {
+            eprintln!("{line}");
+        }
+        if let Some(line) = extra.settings_warning(&settings.compaction_settings) {
+            eprintln!("{line}");
+        }
+    }
+    let extra_fields = extra_body
+        .map(radian_host::ExtraBody::into_fields)
+        .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
@@ -473,6 +487,7 @@ pub(crate) async fn setup(
         model: model_name.clone(),
         api_key: credential.as_ref().map(|key| key.key.clone()),
         headers: route.headers.clone(),
+        extra_body: extra_fields.clone(),
         // ADR 0026 D0: the `opencode-go` descriptor asks for streamed usage by default;
         // `--include-usage` overrides it in either direction.
         include_usage: cli
@@ -493,6 +508,7 @@ pub(crate) async fn setup(
         providers: config.providers.clone(),
         session_id: session_id.clone(),
         user_headers: headers.clone(),
+        extra_body: extra_fields,
         include_usage: cli.include_usage,
         max_tokens: cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         thinking,

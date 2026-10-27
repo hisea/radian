@@ -35,3 +35,4 @@ pub mod testing;
 
 pub use config::{ConfigError, DEFAULT_CONNECT_TIMEOUT, OpenAiResponsesConfig, redact_url};
 pub use model::{OpenAiResponses, build_client};
+pub use request::reserved_body_keys;

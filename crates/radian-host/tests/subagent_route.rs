@@ -94,6 +94,7 @@ fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
 /// is the only thing that can change the route the mock sees.
 fn model(base_url: &str, slot: Arc<radian_runtime::ConfigSlot>) -> radian_host::SwitchableModel {
     let initial = build_model(radian_host::ModelArgs {
+        extra_body: Default::default(),
         provider: radian_host::Provider::OpenAiCompatible,
         base_url: base_url.to_owned(),
         model: "old".into(),
@@ -115,6 +116,7 @@ fn model(base_url: &str, slot: Arc<radian_runtime::ConfigSlot>) -> radian_host::
         ModelRoute::new("openai-compatible", "old"),
         slot,
         radian_host::RouteContext {
+            extra_body: Default::default(),
             providers: BTreeMap::new(),
             session_id: "route-test".to_owned(),
             user_headers: Vec::new(),

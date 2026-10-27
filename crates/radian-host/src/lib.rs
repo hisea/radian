@@ -25,6 +25,7 @@ mod describe;
 mod diagnostics;
 mod errors;
 mod escape;
+pub mod extra_body;
 pub mod goal;
 mod headers;
 pub mod headers_usage;
@@ -137,6 +138,7 @@ pub use diagnostics::{
     diagnostics_dir, is_diagnostic_file, job_notice_log_name, now_millis, panic_log_name,
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
+pub use extra_body::{EXTRA_BODY_ENV, ExtraBody, parse_extra_body, read_extra_body, reserved_keys};
 pub use headers::{
     CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
     take_child_headers_from_env,

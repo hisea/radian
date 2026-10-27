@@ -9,6 +9,13 @@ use crate::config::OpenAiCompatibleConfig;
 /// since ADR 0018 it is a request-level setting that wins over `config.reasoning_effort`.
 const RESERVED: [&str; 5] = ["model", "messages", "tools", "stream", "stream_options"];
 
+/// The body keys this adapter owns, for a host that merges `extra_body` into every request
+/// (ADR 0026 D13). A caller refuses them before a request is sent; `build_body` refuses them
+/// again.
+pub fn reserved_body_keys() -> &'static [&'static str] {
+    &RESERVED
+}
+
 pub(crate) fn build_body(
     request: &ModelRequest,
     config: &OpenAiCompatibleConfig,

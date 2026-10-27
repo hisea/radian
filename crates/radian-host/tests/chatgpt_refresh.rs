@@ -66,6 +66,7 @@ fn now_millis() -> u64 {
 
 fn model(base_url: &str, endpoints: Endpoints) -> ChatGptModel {
     ChatGptModel {
+        extra_body: Default::default(),
         base_url: base_url.to_owned(),
         model: "gpt-5.4".to_owned(),
         static_headers: vec![("originator".to_owned(), "radian".to_owned())],
