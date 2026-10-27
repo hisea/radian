@@ -60,7 +60,7 @@ When the run ended because a turn failed on a `ModelError` (ADR 0017), the `Resu
 {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}
 ```
 
-- `kind` is one closed set, one value per `ModelError` variant, snake_case: `transport`, `protocol`, `unavailable`, `usage_limit`, `context_overflow`, `empty_response`. The list lives in code (`radian_core::MODEL_ERROR_KINDS`) and the serializer and the docs drift test both read it.
+- `kind` is one closed set, one value per `ModelError` variant, snake_case: `transport`, `protocol`, `unavailable`, `usage_limit`, `context_overflow`, `empty_response`. The list is declared once in code, by `model_error_kinds!` in `radian-core/src/model.rs`, which generates both `radian_core::ModelErrorKind` and `radian_core::MODEL_ERROR_KINDS`. The serializer writes `ModelErrorKind::as_str()`, and the docs drift test and `check-fixtures.sh` read that same declaration; there is no second literal set.
 - `status` is the HTTP status the variant carries (`Unavailable.status`), else `null`.
 - `retry_after_secs` is `Unavailable.retry_after` or `UsageLimit.resets_in` in whole seconds, rounded up, else `null`.
 - The field is absent on every other run end: completed, cancelled, budget, a hook error, a tool failure. It is never `null`.
@@ -92,7 +92,7 @@ Core `RunStatus` (`#[non_exhaustive]`, unnamed new states take the wildcard arm,
 
 ## Verification
 
-- Golden tests: one mock-session jsonl stdout passes row-by-row checks. Durable rows match journal files byte for byte, live rows carry deltas only, `Result` rows match their own fixture (`docs/schema/fixtures/exec-result.jsonl`, `check-fixtures.sh` Result sections check). The fixture's `model_error` line is checked against `radian_core::MODEL_ERROR_KINDS`, and `docs/user/cli.md` names every kind value (the drift test reads the same list).
+- Golden tests: one mock-session jsonl stdout passes row-by-row checks. Durable rows match journal files byte for byte, live rows carry deltas only, `Result` rows match their own fixture (`docs/schema/fixtures/exec-result.jsonl`, `check-fixtures.sh` Result sections check). The fixture's `model_error` line is checked against the list `model_error_kinds!` declares (the script parses that declaration), and `docs/user/cli.md` names every kind value (the drift test reads the same list).
 - Five outcomes each own one exit-code test (0/1/3/4, plus two existing 130 tests with 2 usage tests staying pinned): any outcome falling back to 1 fails.
 - `-p -` reads stdin and starts after EOF. `-p` stdout matches pre-change bytes (jsonl rows leaking to default output fail).
 - Terminal-Bench adapters run `--output jsonl`, and read `exit_code`/`stop_reason` from `Result` rows.
