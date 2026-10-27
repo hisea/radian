@@ -2430,6 +2430,90 @@ fn a_pass_that_names_the_gate_does_not_put_its_started_record_back_over_running(
     assert_eq!(gate_starts(&repo, &task), 3);
 }
 
+/// A reset (`gate::background::clear`) removes the record under the record lock. A pass that
+/// has already read the `started` record to name its process must not put that record back
+/// after the removal: the record would come back from the dead, and the next pass would report
+/// a gate that left no record as `no_record` for a reset the owner made. `SLOW_PID_ENV` holds
+/// the pass in that window; a stop signal ends the loop after that pass, and the gate exits
+/// before writing any record, so nothing writes the record again. Mutation: remove the record
+/// without taking its lock, and this test finds the pass's `started` record back after the reset.
+#[test]
+fn a_reset_does_not_put_back_the_started_record_a_pass_already_read() {
+    let repo = Repo::new("run-gate-clear-race");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "clear-race");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    commands(&repo, "true");
+    publish_verifying(&repo, &store, &plan, &task);
+    let env = [
+        (background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned()),
+        (background::SLOW_PID_ENV, "1000".to_owned()),
+    ];
+    // A `serve` loop, so a stop signal ends the run after the pass that names its gate: a
+    // one-shot `run` would take another pass and start a gate for the removed record, which
+    // hides whether the record itself came back.
+    let pass = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "5"], &env);
+
+    wait_for_a_pass_naming_the_gate(&repo, &task);
+    // The stop arrives while the pass still names its gate; the loop ends after this pass.
+    assert!(
+        signal_group(pass.id(), libc::SIGTERM),
+        "the loop is still there"
+    );
+    background::clear(&store, &task);
+
+    let output = pass.wait_with_output().expect("wait for the loop");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "serve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        gate_record(&repo, &task).is_none(),
+        "the reset record came back: {:?}",
+        gate_record(&repo, &task)
+    );
+}
+
+/// Waits for the window in which a pass has spawned its gate and holds the record lock to name
+/// it: `gate.log` has the gate's first line, so the spawn happened, and the lock stays held
+/// longer than the short initial `started` write, so its holder is the pass's `remember_pid`.
+fn wait_for_a_pass_naming_the_gate(repo: &Repo, task: &str) {
+    use fs2::FileExt as _;
+
+    let dir = repo.arc().join("runs").join(task);
+    let lock_path = dir.join("gate.json.lock");
+    let held = || {
+        let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        else {
+            return false;
+        };
+        let locked = file.try_lock_exclusive().is_err();
+        let _ = file.unlock();
+        locked
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the pass never read the record to name its gate"
+        );
+        let spawned = fs::metadata(dir.join("gate.log")).is_ok_and(|meta| meta.len() > 0);
+        if spawned && held() {
+            std::thread::sleep(Duration::from_millis(100));
+            if held() {
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// A start a pass made without a digest is counted exactly like one whose gate wrote
 /// `running`: a `started` record with no inputs and a free gate lock is one death, so the gate
 /// is not started again for free. This is the state a pass leaves when its plan failed (a

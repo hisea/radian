@@ -1614,3 +1614,22 @@ sandbox --test run -E 'test(...)'`.
 | TK0210-M1 | `remember_pid` reads the record without the record lock and writes it with `write` (the lock at write time cannot order the read before the gate's `running` write) | `run::a_pass_that_names_the_gate_does_not_put_its_started_record_back_over_running` (the pass reports `its gate exited without a record` after one start) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0212: a reset removes the gate record under its lock (2026-10-27, branch `work/TK0212-gate-died-test-under-load-followups`)
+
+The gate record's lock ordered the writes, but `clear` removed `runs/<task>/gate.json` without
+taking it. A pass that had already read the `started` record to name its process could write it
+back after the removal, so a record a reset removed came back and the next pass reported that
+gate as `no_record` and started nothing. `clear` now takes `gate.json.lock` for the removal, and
+the two other whole-record read-modify-writes (the gate's first `running` write and the
+`interrupted` write a stop makes) hold the lock across their read too. The mutation was applied
+by hand to `crates/radian-arc/src/gate/background.rs`, the binary rebuilt with `cargo build -p
+radian-tui --bin radian`, and the file restored from `.radian/background.rs.tk0212` with `cp`,
+which `cmp` found identical. The test ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test run -E 'test(...)'`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0212-M1 | `clear` removes the record without taking the record lock (`lock_record` dropped from its body) | `run::a_reset_does_not_put_back_the_started_record_a_pass_already_read` (the record the reset removed is back as `started`, with the pass's pid) | ✅ 1 failed |
+
+1/1 caught.
