@@ -1240,6 +1240,54 @@ pub fn resolve_route_for(
     session_id: &str,
     catalog: Option<&crate::Catalog>,
 ) -> Result<Route, String> {
+    check_route_dials(provider, base_url_override, header_args)?;
+    let protocol = provider.resolve_protocol(catalog, model)?;
+    build_route(
+        provider,
+        model,
+        protocol,
+        base_url_override,
+        auth_base_url,
+        header_args,
+        session_id,
+        catalog,
+    )
+}
+
+/// [`resolve_route_for`] with the route's protocol already resolved (ADR 0026): for a caller
+/// that resolved it through its own shared lookup, so the catalog-or-table choice is made
+/// once. The dials are checked here too, exactly as `resolve_route_for` checks them.
+#[allow(clippy::too_many_arguments)] // mirrors `resolve_route_for`, plus the protocol
+pub(crate) fn resolve_route_with_protocol(
+    provider: &ProviderRef,
+    model: &str,
+    protocol: Protocol,
+    base_url_override: Option<&str>,
+    auth_base_url: Option<&str>,
+    header_args: &[(String, String)],
+    session_id: &str,
+    catalog: Option<&crate::Catalog>,
+) -> Result<Route, String> {
+    check_route_dials(provider, base_url_override, header_args)?;
+    build_route(
+        provider,
+        model,
+        protocol,
+        base_url_override,
+        auth_base_url,
+        header_args,
+        session_id,
+        catalog,
+    )
+}
+
+/// The generic provider's dials (`--base-url`, `--header`, and their config forms) are the
+/// only ones a named or built-in provider refuses (ADR 0026 D10).
+fn check_route_dials(
+    provider: &ProviderRef,
+    base_url_override: Option<&str>,
+    header_args: &[(String, String)],
+) -> Result<(), String> {
     let generic = provider.takes_base_url_override();
     if !generic && base_url_override.is_some() {
         return Err(format!(
@@ -1255,7 +1303,23 @@ pub fn resolve_route_for(
             provider.id()
         ));
     }
-    let protocol = provider.resolve_protocol(catalog, model)?;
+    Ok(())
+}
+
+/// Builds the route from an already-resolved protocol: the catalog notice, the endpoint and
+/// the headers.
+#[allow(clippy::too_many_arguments)] // the public route signatures' inputs, plus the protocol
+fn build_route(
+    provider: &ProviderRef,
+    model: &str,
+    protocol: Protocol,
+    base_url_override: Option<&str>,
+    auth_base_url: Option<&str>,
+    header_args: &[(String, String)],
+    session_id: &str,
+    catalog: Option<&crate::Catalog>,
+) -> Result<Route, String> {
+    let generic = provider.takes_base_url_override();
     // ADR 0026: when the catalog's `npm` overrules the built-in table,
     // the startup line says so once. A model the catalog does not carry keeps the table's
     // protocol, so there is nothing to report.

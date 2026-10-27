@@ -47,16 +47,12 @@ first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
 
 | Command | Syntax | What it does |
 |---|---|---|
-| `/model` | `/model <provider>/<model>` or `/model <provider> <model>` | Switch the model. Takes effect at the next turn boundary. Either switches directly or asks first when the switch needs confirmation. Example: `/model openai/gpt-5`. Related: `/thinking`, `/usage`. |
+| `/model` | `/model <provider>/<model>` or `/model <provider> <model>` | Switch the model. Takes effect at the next turn boundary. Either switches directly or asks first when the switch needs confirmation. A switch is refused when the target route's adapter reserves a key `RADIAN_EXTRA_BODY` sets; the session keeps its current model and route (see [`environment`](environment.md) for the per-route keys and the exact line). Example: `/model openai/gpt-5`. Related: `/thinking`, `/usage`. |
 | `/thinking` | `/thinking <level>` (exactly one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) | Set the thinking level. `tab` completes only the levels the current model supports. An unknown level behaves like an unsupported one: the level clamps to what the current model supports. Takes effect at the next turn boundary. Example: `/thinking high`. |
 | `/usage` | `/usage` (no arguments) | Show the current provider's usage snapshot, every window of it, one line each. A pure read: no network, works any time. The footer shows the short form of the same snapshot. |
 | `/auto` | `/auto on\|off` | Approve tool questions without asking, for this session (`on`), or ask again (`off`). Deny rules and the sandbox still apply. Applies at once. |
 | `/yolo` | `/yolo on\|off` | Alias of `/auto` with the same two words. |
 | `/access` | `/access [workspace\|full]` | With no argument, show the current tier and where it came from. With a name, switch tiers. The switch takes effect at the next tool call, and `full` asks for confirmation first because it removes the sandbox. Applies at once. Example: `/access workspace`. |
-
-A `/model` switch is refused when the target route's adapter reserves a key
-`RADIAN_EXTRA_BODY` sets; the session keeps its current model and route (see
-[`environment`](environment.md) for the per-route keys and the exact line).
 
 ## Trust
 

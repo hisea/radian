@@ -413,8 +413,10 @@ pub(crate) async fn setup(
     if let Some(notice) = compaction_notice {
         eprintln!("[compaction] {notice}");
     }
-    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body on every route. It is
-    // read once here, before any session file exists; an invalid value is a startup refusal.
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body — on the startup route
+    // and on every later `/model` route. It is read once here, before any session file exists;
+    // an invalid value is a startup refusal. Reserved keys are checked per route, so only the
+    // startup route's adapter is consulted here.
     let extra_body = radian_host::read_extra_body().map_err(SetupError)?;
     if let Some(extra) = &extra_body
         && let Some(refusal) = extra.refusal_for(route.adapter())
