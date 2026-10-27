@@ -260,14 +260,17 @@ pub enum ModelError {
         retry_after: Option<Duration>,
         status: Option<u16>,
     },
-    /// The provider's plan usage window is used up (a ChatGPT Plus/Pro `429` whose body says
-    /// `error.type == "usage_limit_reached"`). The same request cannot succeed until the
-    /// window resets, so this is **never** transient: the turn fails at once rather than
-    /// spending the ordinary retries (ADR 0017).
+    /// An adapter's recognized plan usage limit is used up: a ChatGPT Plus/Pro `429` whose body
+    /// says `error.type == "usage_limit_reached"`, or opencode-go's `429` whose body says
+    /// `error.type == "GoUsageLimitError"`. The same request cannot succeed until the window
+    /// resets, so this is **never** transient: the turn fails at once rather than spending the
+    /// ordinary retries (ADR 0017).
     ///
-    /// `message` names the plan, the window, the reset and `/model`, read from the body.
-    /// `resets_in` is the body's own `resets_in_seconds`, when it carries one. It is not a
-    /// retry wait (this error is never retried); a host reports it as
+    /// `message` is the provider's own text, masked: the ChatGPT adapter names the plan, the
+    /// window, the reset and `/model`; the OpenAI-compatible adapter carries the body's message
+    /// and, when present, `metadata.limitName` (never the workspace id). `resets_in` is the
+    /// reset wait the provider reported (a body countdown or `Retry-After`), when it reported
+    /// one. It is not a retry wait (this error is never retried); a host reports it as
     /// `Result.model_error.retry_after_secs` so a caller can wait out the window (ADR 0044).
     #[error("model usage limit reached: {message}")]
     UsageLimit {

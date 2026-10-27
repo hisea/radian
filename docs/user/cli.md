@@ -145,6 +145,8 @@ When the run ended because a turn failed on a model error, `Result` carries a `m
 | `status` | number or null | The HTTP status when the error carries one (an `unavailable` error), else `null`. |
 | `retry_after_secs` | number or null | The provider's `Retry-After` (`unavailable`) or the plan window's reset wait (`usage_limit`) in whole seconds, rounded up, else `null`. |
 
+`usage_limit` covers a spent ChatGPT plan window and opencode-go's Go plan limit (an HTTP 429 whose body has `error.type` `GoUsageLimitError`). For opencode-go the message on stderr is the body's `error.message` plus the limit's window name when the body carries one, for example `Go usage limit exceeded (monthly)`; it never includes the workspace id. `status` stays `null` for both, and `retry_after_secs` is the reset wait only when the provider sent one (a `Retry-After` header, or the body's own countdown).
+
 The field is absent on every other run end: completed, cancelled, budget, a hook error, or a tool failure.
 It is never `null`.
 

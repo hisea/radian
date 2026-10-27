@@ -17,6 +17,7 @@ use crate::overflow::classify_overflow;
 use crate::request::build_body;
 use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
+use crate::usage_limit::usage_limit;
 
 /// How much of an error body is quoted in the error message.
 const ERROR_BODY_BYTES: usize = 2048;
@@ -162,8 +163,16 @@ impl OpenAiCompatible {
             if classify_overflow(status.as_u16(), &snippet) {
                 return Err(ModelError::ContextOverflow(message));
             }
-            // J10: a 400 from a server that rejects the usage option deserves a way out.
-            if status.as_u16() == 400 && self.include_usage {
+            // A spent Go plan window (opencode-go) is not throttling: the same request cannot
+            // succeed until the window resets, so it is **not** retried (ADR 0017 retries only
+            // a transient error, and `UsageLimit` is not one).
+            if let Some(error) = usage_limit(status.as_u16(), &snippet, retry_after) {
+                return Err(error);
+            }
+            // J10: a 400 from a server that rejects the usage option deserves a way out. The
+            // hint is added only when the body names the option; an unrelated 400 keeps its
+            // own message (a Global-regions rejection, for example).
+            if status.as_u16() == 400 && self.include_usage && names_stream_options(&snippet) {
                 message.push_str(
                     "; the server rejected stream_options; set include_usage to Some(false) to \
                      turn the option off",
@@ -267,6 +276,12 @@ impl OpenAiCompatible {
             ModelError::EmptyResponse => ModelError::EmptyResponse,
         }
     }
+}
+
+/// Whether an error body names the usage option the J10 hint is about.
+fn names_stream_options(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("stream_options") || body.contains("include_usage")
 }
 
 fn tool_call_ids(messages: &[Message]) -> HashSet<String> {
