@@ -1460,3 +1460,28 @@ source was restored from `.radian/mut/work_mod_fixed.rs` with `cp` and compared 
 
 1/1 caught.
 
+
+## TK0195: a gate start is counted exactly once (2026-10-27, branch `work/TK0195-gate-start-counted-once`)
+
+`run::a_gate_that_dies_after_running_is_restarted_twice_then_left_died` failed under the full
+workspace run on a loaded Linux host with `1 + max_gate_deaths starts: left: 4, right: 3`, its
+`deaths == 3` assertion green. The cause was a pass that could not plan the gate: it started the
+gate without an inputs digest (`started`, no `inputs`), the gate exited before its `running`
+write, and the next pass could not write `no_record` (there were no inputs to record) and started
+a fresh gate without counting a death. The reproduction is a `git` shim on `PATH` that fails the
+second `fetch` and every fetch after it until the arm is consumed (so the pass cannot get a
+digest) and then the next `rev-parse --show-toplevel` (the gate's `Store::open`, so that gate
+exits before `running`): before the fix the test failed 10 of 10, after it 0 of 100 runs. Each
+mutation was applied by hand to the named file, the binary rebuilt with `cargo build -p
+radian-tui --bin radian`, the named tests ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test run -E 'test(a_start_without_a_digest) or
+test(a_death_the_pass_cannot_plan_now) or test(a_gate_that_is_still_starting) or
+test(a_gate_that_dies_after_running)'`, and the source was restored from `.radian/mut/` with
+`cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0195-M1 | a `started` record with no digest and a free gate lock falls through to a new start without a death (`run.rs`, the `STARTED` branch) | `run::a_start_without_a_digest_that_left_no_record_is_counted_not_restarted_for_free` (`the pass started a gate for a start it never counted`) | ✅ 1 failed |
+| TK0195-M2 | a death the pass cannot plan now starts the count again at zero (`gate/background.rs`, `count_death` returns `Count(0)` when `inputs` is `None`) | `run::a_death_the_pass_cannot_plan_now_carries_the_count_forward` (`the pass started a gate at zero deaths again`) | ✅ 1 failed |
+
+2/2 caught.

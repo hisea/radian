@@ -2935,28 +2935,46 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                                 )));
                             }
                             crate::gate::background::Death::Count(count) => deaths = count,
-                            crate::gate::background::Death::Restart => {}
                         }
                     }
                 }
-                // The pass wrote the inputs it started the integration with and the gate
-                // wrote nothing: a new start with the same inputs would only repeat it.
+                // The pass wrote the record it started the integration with and the gate wrote
+                // nothing: with a digest, a new start with the same inputs would only repeat
+                // it; without one there is nothing to compare, so the start is counted like
+                // any death (ADR 0048 decision 10).
                 crate::gate::background::STARTED => {
-                    if !crate::gate::background::running(store, task_id)
-                        && record.attempt == label
-                        && let Some(inputs) = record.inputs.clone()
+                    if !crate::gate::background::running(store, task_id) && record.attempt == label
                     {
-                        crate::gate::background::write_no_record(
+                        if let Some(inputs) = record.inputs.clone() {
+                            crate::gate::background::write_no_record(
+                                store,
+                                task_id,
+                                "integration",
+                                &record.attempt,
+                                &inputs,
+                            )?;
+                            return Ok(MergeStep::note(format!(
+                                "{task_id} integration cannot run: {}",
+                                crate::gate::background::NO_RECORD_TEXT
+                            )));
+                        }
+                        let inputs = integration_inputs(store, task_id);
+                        match crate::gate::background::count_death(
                             store,
                             task_id,
                             "integration",
-                            &record.attempt,
-                            &inputs,
-                        )?;
-                        return Ok(MergeStep::note(format!(
-                            "{task_id} integration cannot run: {}",
-                            crate::gate::background::NO_RECORD_TEXT
-                        )));
+                            &label,
+                            record,
+                            inputs.as_deref(),
+                        )? {
+                            crate::gate::background::Death::Stop => {
+                                return Ok(MergeStep::note(format!(
+                                    "{task_id} integration cannot run: {}",
+                                    crate::gate::background::DIED_TEXT
+                                )));
+                            }
+                            crate::gate::background::Death::Count(count) => deaths = count,
+                        }
                     }
                 }
                 // A refused gate is reported once, and no new gate starts for this attempt
