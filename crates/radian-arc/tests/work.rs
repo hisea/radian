@@ -2834,6 +2834,44 @@ fn a_worker_that_creates_a_file_under_info_fails_and_it_is_removed() {
     );
 }
 
+/// A worker that replaces `<common dir>/info/refs` with a directory and puts a file under it
+/// fails the attempt and the file is removed: the record leaves out that one path, not the
+/// files a worker adds below it (ADR 0048 decision 7).
+#[test]
+fn a_worker_that_replaces_info_refs_with_a_directory_fails_and_its_files_are_removed() {
+    let repo = Repo::new("control-info-refs-dir");
+    let refs = common_git_dir(&repo).join("info/refs");
+    let extra = refs.join("extra");
+    let worker = format!(
+        "rm -rf '{refs}' && mkdir '{refs}' && printf 'x\\n' > '{extra}'",
+        refs = refs.display(),
+        extra = extra.display()
+    );
+    let run = run(
+        &repo,
+        "TK0015-info-refs-dir",
+        1,
+        "tok-info-refs-dir",
+        &["--worker-command", worker.as_str()],
+        &[],
+        "the body\n",
+    );
+    let finished = run.finished();
+    let failure = finished["failure"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the attempt failed: {finished}"));
+    assert!(
+        failure.starts_with("the worker changed git control files: "),
+        "{failure}"
+    );
+    assert!(failure.contains("info/refs/extra"), "{failure}");
+    assert_eq!(finished["pushed"], json!(false));
+    assert!(
+        !extra.exists(),
+        "the file the worker created under info/refs is removed"
+    );
+}
+
 /// A control file too large to read whole fails the attempt and is removed instead of being
 /// loaded into the wrapper's memory (ADR 0048 decisions 7 and 8).
 #[test]

@@ -2845,7 +2845,8 @@ impl ControlScan {
     }
 
     /// `tree`, leaving out one exact path. `info/refs` is the only entry read this way
-    /// ([`INFO_REFS`]).
+    /// ([`INFO_REFS`]). A directory at that path is still walked: the exclusion names that
+    /// one path, not what is below it.
     fn tree_except(&mut self, dir: &Path, skip: Option<&Path>) {
         let metadata = match fs::symlink_metadata(dir) {
             Ok(metadata) => metadata,
@@ -2875,12 +2876,17 @@ impl ControlScan {
                 }
             };
             let path = entry.path();
-            if skip == Some(path.as_path()) {
-                continue;
-            }
+            let skipped = skip == Some(path.as_path());
             match entry.file_type() {
+                // A directory at the excluded path is still walked: a worker can put one where
+                // `info/refs` was, and the files it adds under it are control files like any
+                // other under `info/` ([`INFO_REFS`]).
                 Ok(kind) if kind.is_dir() => self.tree_except(&path, skip),
+                Ok(_) if skipped => {}
                 Ok(_) => self.entry(&path),
+                // The excluded path stays out even when its kind cannot be read; it was never
+                // an entry of the record.
+                Err(_) if skipped => {}
                 Err(error) => self.unreadable(&path, error),
             }
         }
