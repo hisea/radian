@@ -1380,3 +1380,18 @@ instead of `--test before_attempt`. M1–M3 are unchanged.
 
 6/6 caught.
 
+## TK0186: macOS test paths and the reused scratch name (2026-10-26, branch `work/TK0186-radian-arc-macos-test-paths-and-git-setup`)
+
+The arc integration tests now build a recorded path from the canonical clone (macOS resolves
+`$TMPDIR`'s `/var` to `/private/var`), and a scratch directory that an earlier process's pid
+already named starts empty. Each mutation was applied by hand to the named file, the named
+test ran with `cargo nextest run -p radian-arc --locked --profile sandbox`, and the source was
+restored from `.radian/mut/` with `cp` and compared with `cmp`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0186-M1 | `worker_args::resolved` leaves a relative program as it is (`repo.join` dropped) | `attempt::a_claim_records_the_worker_it_decided_on` (`left: Command { command: ["tools/codex"] }`, `right: …/clone/tools/codex`) | ✅ failed |
+| TK0186-M2 | `TempDir::at` creates the directory without clearing a stale one (`remove_dir_all` dropped) | `common::scratch_tests::a_reused_scratch_name_starts_empty` (the earlier run's `leftover` is still there) | ✅ failed |
+
+2/2 caught.
+

@@ -26,8 +26,20 @@ impl TempDir {
         Self::at(dir)
     }
 
-    /// Wraps an already-chosen path and creates it.
+    /// Wraps an already-chosen path and creates it, empty. A scratch name is unique only
+    /// within one process (`<pid>-<n>`), so a directory left behind by an earlier run whose
+    /// pid the OS handed out again is cleared first. A stale clone there made `git commit -m
+    /// initial` exit 1 with "nothing to commit" on stdout and an empty stderr, which read as
+    /// a mystery failure in an unrelated test.
     pub fn at(dir: PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "cannot clear the stale scratch directory {}: {error}",
+                dir.display()
+            ),
+        }
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -245,6 +257,27 @@ mod scratch_tests {
         assert!(
             !config.control.enabled,
             "a scratch home must not bind the control socket: {text}"
+        );
+    }
+
+    /// A scratch name is unique only within one process (`<pid>-<n>`), so the OS can hand a
+    /// pid to a later run that an earlier, interrupted run already used. That run's directory
+    /// must not become the new fixture: a clone left with its `initial` commit made
+    /// `git commit -m initial` exit 1 with "nothing to commit" and an empty stderr.
+    #[test]
+    fn a_reused_scratch_name_starts_empty() {
+        let path =
+            std::env::temp_dir().join(format!("radian-arc-work-reused-{}-0", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("the earlier run's directory");
+        std::fs::write(path.join("leftover"), "from an earlier run").expect("the leftover");
+
+        let dir = TempDir::at(path);
+
+        assert!(
+            !dir.join("leftover").exists(),
+            "a reused scratch directory must start empty: {}",
+            dir.path().display()
         );
     }
 }
@@ -477,6 +510,13 @@ impl Repo {
         self.clone.join(".radian").join("arc")
     }
 
+    /// The clone as arc records it. arc canonicalizes the repository root
+    /// (`store::git::repository_root`), which on macOS turns a `$TMPDIR` under `/var` into
+    /// `/private/var`; a test that compares a recorded path must start from this.
+    pub fn canonical_clone(&self) -> PathBuf {
+        fs::canonicalize(&self.clone).expect("the clone canonicalizes")
+    }
+
     pub fn worktree(&self, task: &str) -> PathBuf {
         self.arc().join("worktrees").join(task)
     }
@@ -512,7 +552,11 @@ impl Repo {
             .expect("run git");
         assert!(
             output.status.success(),
-            "git {args:?} failed: {}",
+            "git {args:?} in {} failed: {} (exit code {:?})\nstdout:\n{}\nstderr:\n{}",
+            dir.display(),
+            output.status,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).into_owned()
