@@ -76,7 +76,9 @@ the turn's status for `stopReason`:
 | `RunStatus::Failed`, `RunStatus::Refused`, `RunStatus::Poisoned`, another incomplete reason | `refusal` |
 
 A model or hook error that ends the turn (ADR 0017) is `refusal` with the error text in
-`_meta.radian.error`. A second `session/prompt` while a turn or a wake turn is running is
+`_meta.radian.error`. `max_tokens` means the turn ended on a truncated response with no tool calls
+after two truncated responses in a row had already continued it (ADR 0017 §2). A truncated response
+with tool calls continues the turn and never produces `max_tokens` by itself. A second `session/prompt` while a turn or a wake turn is running is
 refused with an error. `session/cancel` calls the inbox's requested cancellation, the same
 interruption an ESC produces in the TUI, and the journal keeps the interrupted prefix
 (ADR 0003). A `cancelled` answer to a permission request also cancels the turn.

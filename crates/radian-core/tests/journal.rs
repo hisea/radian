@@ -517,3 +517,29 @@ async fn steering_that_fails_to_journal_is_handed_back_not_lost() {
         assert_eq!(chat.transcript().len(), 1 + journaled);
     }
 }
+
+/// ADR 0017 §2: the truncation notice is an ordinary `User` message, journaled as one
+/// `Message` record, so a replay rebuilds the transcript with it.
+#[tokio::test]
+async fn a_truncation_notice_is_journaled_and_replays() {
+    const NOTICE: &str = "Your last response hit the output token limit. Do not apologize, recap, or repeat yourself. Continue from where you stopped, and break the remaining work into smaller pieces.";
+    let model = ScriptedModel::new([stop(StopReason::MaxTokens, "half"), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, MemTools::new(vec![]), journal.clone()).await;
+
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(chat.transcript().len(), 4);
+    assert_eq!(chat.transcript()[2].text(), NOTICE);
+    assert_eq!(
+        chat.transcript()[2].meta().source,
+        Some(InputSource::System)
+    );
+    let replay = radian_core::replay(&journal.records()).unwrap();
+    assert_eq!(replay, chat.transcript().to_vec());
+    assert_eq!(replay[2].text(), NOTICE);
+    assert!(replay[2].is_user());
+    assert_eq!(replay[2].meta().source, Some(InputSource::System));
+}

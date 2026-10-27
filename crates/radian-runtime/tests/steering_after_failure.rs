@@ -3,10 +3,16 @@
 //!
 //! `drain_steering` hands a `next_step` input to Core as soon as it can; Core only applies it
 //! at the next safe point. On an `end_turn` finish Core keeps the turn going when steering is
-//! pending, but a model error — and any non-`end_turn` finish such as `max_tokens` — ends the
-//! turn with the steer still unapplied. The entry was claimed but never admitted; the driver
-//! puts it back at the front of its lane, and (ADR 0011) that requeued waking
-//! entry opens the next turn by itself, so the steer is used exactly once without a followup.
+//! pending, but a model error ends the turn with the steer still unapplied. The entry was
+//! claimed but never admitted; the driver puts it back at the front of its lane, and (ADR 0011)
+//! that requeued waking entry opens the next turn by itself, so the steer is used exactly once
+//! without a followup.
+//!
+//! A `max_tokens` finish no longer ends the turn (ADR 0017 §2): with no tool calls the core
+//! appends the output-limit continuation notice and makes another model call, and the next
+//! step's safe point admits the steer into that continuation request. The order in the
+//! transcript is the truncated answer, the notice (committed with the response), then the steer.
+//! One turn, three model calls, and the steer is still used exactly once.
 
 mod common;
 
@@ -47,8 +53,8 @@ fn text_reply(text: &str) -> Reply {
 }
 
 /// A final answer whose stop reason is `max_tokens`, sent slowly so a steer can land during
-/// the call. Core does **not** keep the turn going for `max_tokens`, so the steer is left
-/// unapplied.
+/// the call. Core continues the turn with the notice (ADR 0017 §2), so the steer is admitted
+/// by the continuation request.
 fn slow_max_tokens_reply(text: &str) -> Reply {
     Reply::Sse {
         pieces: [
@@ -67,6 +73,17 @@ fn slow_max_tokens_reply(text: &str) -> Reply {
     }
 }
 
+/// The continuation notice, verbatim (ADR 0017 §2).
+const MAX_TOKENS_NOTICE: &str = "Your last response hit the output token limit. Do not apologize, recap, or repeat yourself. Continue from where you stopped, and break the remaining work into smaller pieces.";
+
+/// Waits for one turn to finish. A scenario that scripts too few replies for the turn it
+/// expects fails here instead of hanging until nextest's timeout.
+async fn wait_turn(recorder: &Recorder) {
+    tokio::time::timeout(Duration::from_secs(30), recorder.wait_finished())
+        .await
+        .expect("a turn must finish");
+}
+
 fn last_status(recorder: &Recorder) -> Option<RunStatus> {
     recorder
         .events()
@@ -78,14 +95,17 @@ fn last_status(recorder: &Recorder) -> Option<RunStatus> {
         })
 }
 
-/// Opens a driver over a real session and runs the scenario: turn 1 calls the `gate` tool,
-/// the steer is injected while the second model call is in flight, the turn ends without
-/// applying it, and the requeued steer opens turn 2 by itself (ADR 0011). Returns
-/// the request bodies and the session path.
+/// Opens a driver over a real session and runs the scenario: turn 1 calls the `gate` tool and
+/// the steer is injected while the second model call is in flight. What ends the turn depends
+/// on `second_reply`: a model error requeues the steer and the next turn carries it, while a
+/// `max_tokens` finish continues the same turn with the notice and the steer rides the
+/// continuation. `turns` is how many turns finish; the third scripted reply ends either shape.
+/// Returns the request bodies, the session history and turn 1's status.
 async fn run_scenario(
     label: &str,
     second_reply: Reply,
     idle_timeout: Option<Duration>,
+    turns: usize,
 ) -> (Vec<String>, Vec<String>, RunStatus) {
     let server = MockServer::start(vec![
         tool_reply("toolu_1", "gate"),
@@ -128,7 +148,8 @@ async fn run_scenario(
     let handle = tokio::spawn(async move { driver.run().await });
 
     // Turn 1: run the gate tool, release it, then inject the steer while the second call is
-    // in flight (after the last `inject_steering` of the turn).
+    // in flight, after the `inject_steering` that preceded that call. The next safe point
+    // (a `max_tokens` continuation step, or the next turn after a model error) admits it.
     inbox.followup("go", InputSource::User).await.unwrap();
     started.notified().await;
     gate.notify_one();
@@ -136,23 +157,27 @@ async fn run_scenario(
         tokio::task::yield_now().await;
     }
     inbox.steer("STEER-ME", InputSource::User).await.unwrap();
-    recorder.wait_finished().await;
+    wait_turn(&recorder).await;
     let first_status = last_status(&recorder).expect("a turn finished");
 
-    // ADR 0011: the requeued steer opens the next turn itself, as its first
-    // input — no followup is needed to pick it up.
-    recorder.wait_finished().await;
-    assert_eq!(last_status(&recorder), Some(RunStatus::Completed));
+    if turns > 1 {
+        // ADR 0011: the requeued steer opens the next turn itself, as its first
+        // input — no followup is needed to pick it up.
+        wait_turn(&recorder).await;
+        assert_eq!(last_status(&recorder), Some(RunStatus::Completed));
+    }
     inbox.close();
     handle.await.unwrap().expect("the driver survives");
 
     let requests: Vec<String> = server.requests().into_iter().map(|r| r.body).collect();
     assert_eq!(requests.len(), 3, "three model calls expected");
     assert_eq!(
-        requests[2].matches("STEER-ME").count(),
+        requests
+            .iter()
+            .map(|request| request.matches("STEER-ME").count())
+            .sum::<usize>(),
         1,
-        "the steer must appear exactly once in the next request: {}",
-        requests[2]
+        "the steer must appear in exactly one request: {requests:?}"
     );
     let history: Vec<String> = Session::open(&path)
         .unwrap()
@@ -177,6 +202,7 @@ async fn a_steer_accepted_during_a_failing_turn_is_requeued_and_used_once() {
         "steer-failure",
         Reply::SseThenHang { pieces: Vec::new() },
         Some(Duration::from_secs(2)),
+        2,
     )
     .await;
     assert_eq!(first_status, RunStatus::Failed);
@@ -186,15 +212,38 @@ async fn a_steer_accepted_during_a_failing_turn_is_requeued_and_used_once() {
     assert!(history.contains(&"SECOND-OK".to_string()), "{history:?}");
 }
 
-/// The same gap existed on a non-`end_turn` finish: a `max_tokens` answer ends the turn even
-/// with steering pending, so the steer was dropped in-process. The requeue covers it too.
+/// A `max_tokens` finish used to end the turn with the steer unapplied. Now the turn continues
+/// (ADR 0017 §2), and the next safe point admits the steer into the continuation request —
+/// exactly once, never dropped. The notice is committed with the truncated response, so it
+/// precedes the steer in the transcript and in the request (ADR 0011 L1).
 #[tokio::test]
-async fn a_steer_accepted_during_a_max_tokens_finish_is_requeued_and_used_once() {
-    let (_requests, history, first_status) =
-        run_scenario("steer-max-tokens", slow_max_tokens_reply("FINAL"), None).await;
-    assert!(
-        matches!(first_status, RunStatus::Incomplete(_)),
-        "turn 1 must end incomplete: {first_status:?}"
+async fn a_steer_accepted_during_a_max_tokens_finish_reaches_the_continuation_once() {
+    let (requests, history, first_status) =
+        run_scenario("steer-max-tokens", slow_max_tokens_reply("FINAL"), None, 1).await;
+    assert_eq!(
+        first_status,
+        RunStatus::Completed,
+        "the continuation notice keeps the turn going"
     );
     assert!(history.contains(&"SECOND-OK".to_string()), "{history:?}");
+    assert_eq!(
+        history.iter().filter(|text| *text == "STEER-ME").count(),
+        1,
+        "the steer is admitted exactly once: {history:?}"
+    );
+
+    // The continuation request carries the truncated answer, then the notice, then the steer.
+    let continuation = &requests[2];
+    assert!(continuation.contains("FINAL"), "{continuation}");
+    let notice = continuation
+        .find(MAX_TOKENS_NOTICE)
+        .expect("the continuation request carries the notice");
+    let steer = continuation
+        .find("STEER-ME")
+        .expect("the continuation request carries the steer");
+    assert!(
+        notice < steer,
+        "the notice precedes the steer in the continuation request: {continuation}"
+    );
+    assert_eq!(continuation.matches(MAX_TOKENS_NOTICE).count(), 1);
 }

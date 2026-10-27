@@ -156,6 +156,8 @@ Identities and recovery:
 | `Cancelled(Requested)` | `cancelled` | `requested` |
 | `Cancelled(DeadlineExceeded)` | `cancelled` | `deadline_exceeded` |
 
+`incomplete` with reason `max_tokens` means the turn ended on a truncated response with no tool calls after two truncated responses in a row had already continued it (ADR 0017 §2). Every earlier truncated response continued the turn; each one without tool calls left a continuation notice in the transcript.
+
 History compatibility: the reader accepts `outcome = "context_budget"` (`TurnOutcome::ContextBudget`). It is a serializable typed compatible shape. The current driver and host never send it.
 
 ### 5.5 `ConfigChanged`

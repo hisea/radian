@@ -618,11 +618,15 @@ async fn an_exhausted_budget_exits_three() {
 /// Exit 4 is an unfinished answer. Mutation: map either arm back to 1 → this fails.
 #[tokio::test]
 async fn an_unfinished_answer_exits_four() {
-    // MaxTokens: the model stopped for length with no tool calls to run.
-    let server = MockServer::start(vec![Reply::sse(&[
-        chunk(json!({"role": "assistant", "content": "partial"}), None),
-        chunk(json!({}), Some("length")),
-    ])]);
+    // MaxTokens: three consecutive truncated answers with no tool calls end the turn. The
+    // first two continue with the fixed notice (ADR 0017 §2).
+    let truncated = |text: &str| {
+        Reply::sse(&[
+            chunk(json!({"role": "assistant", "content": text}), None),
+            chunk(json!({}), Some("length")),
+        ])
+    };
+    let server = MockServer::start(vec![truncated("one"), truncated("two"), truncated("three")]);
     let server = server.await;
     let env = Env::fresh("exit-four-maxtokens");
     let (code, _, _, result, err) =
@@ -632,6 +636,22 @@ async fn an_unfinished_answer_exits_four() {
     assert_eq!(result.get("exit_code"), Some(&json!(4)));
     assert_eq!(result.get("outcome"), Some(&json!("incomplete")));
     assert_eq!(result.get("stop_reason"), Some(&json!("max_tokens")));
+    assert_eq!(server.requests().len(), 3, "one call per truncation");
+    let second = server.requests()[1].json();
+    let messages = second["messages"].as_array().expect("messages");
+    assert_eq!(
+        messages[messages.len() - 2]["role"],
+        json!("assistant"),
+        "the notice follows the truncated assistant message"
+    );
+    assert_eq!(
+        messages.last().expect("a message"),
+        &json!({
+            "role": "user",
+            "content": "Your last response hit the output token limit. Do not apologize, recap, or repeat yourself. Continue from where you stopped, and break the remaining work into smaller pieces.",
+        }),
+        "the continuation request carries the notice"
+    );
 }
 
 /// Exit 4 is a refused answer. Mutation: map `Refused` back to 1 → this fails.

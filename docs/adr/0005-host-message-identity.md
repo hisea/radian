@@ -28,7 +28,7 @@ All three fields are optional. Only the host generates and interprets `MessageId
 
 ### G3: Metadata lives at the message layer, not in the tool result payload layer
 
-The `User`, `Assistant`, and `Tool` `Message` variants each carry `meta`. An empty `MessageMeta` does not serialize. Old JSON without `meta` reads as empty. Each non-empty field is omitted independently. `ToolResult` is the provider-visible result payload and cannot carry host identity. `Message::user`, `Message::assistant`, and every Core-generated message set an explicit empty meta.
+The `User`, `Assistant`, and `Tool` `Message` variants each carry `meta`. An empty `MessageMeta` does not serialize. Old JSON without `meta` reads as empty. Each non-empty field is omitted independently. `ToolResult` is the provider-visible result payload and cannot carry host identity. `Message::user` and `Message::assistant` set an explicit empty meta. A Core-generated message whose words are not the user's — the output-limit continuation notice (ADR 0017 §2) — sets `source = System`, so a resumed host never treats it as human input (G2).
 
 ### G4: The provider cannot see it
 

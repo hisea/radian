@@ -35,3 +35,14 @@ one declaration; the source was restored from `.radian/mut-backup/model.rs` (`cm
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0184-M5 | rename one declared kind (`UsageLimit => "usageLimit"`) | ✅ 2 failed | `model::tests::every_model_error_kind_is_in_the_closed_list` (the variant's pinned name differs, and `usageLimit` is not snake_case) and `bash docs/schema/check-fixtures.sh` (`exec-result.jsonl` line 3: `model_error.kind 'usage_limit'` is not in the closed set parsed from the same declaration) |
+
+## Max tokens continuation (TK0208, 2026-10-27)
+
+Branch `work/TK0208-max-tokens-continuation`. Each mutation was applied in place, only the
+catching test binaries were run (`--no-fail-fast`), and the source was restored from
+`.radian/turn.rs.clean` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0208-M1 | the streak never resets on an untruncated response (`else { self.run.max_tokens_streak }` instead of `else { 0 }`) | ✅ 1 failed (rc=100) | `tests/turn.rs::an_untruncated_response_resets_the_streak` (the turn ended `Incomplete(MaxTokens)` instead of `Completed` after the untruncated tool-call response no longer reset the streak) |
+| TK0208-M2 | the continuation adds no notice (the `commit` is dropped and `Step::Continue` still returns) | ✅ 5 failed (rc=100) | `tests/turn.rs::a_truncated_response_without_calls_continues_with_a_notice` (the second request carries no notice), `tests/turn.rs::three_truncated_responses_without_calls_end_incomplete_with_two_notices` (0 notices instead of 2), `tests/journal.rs::a_truncation_notice_is_journaled_and_replays` (the replay has no notice), `tests/turn.rs::a_truncated_tool_call_response_counts_toward_the_streak`, and `tests/turn.rs::an_untruncated_response_resets_the_streak` |
