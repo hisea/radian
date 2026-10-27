@@ -309,6 +309,29 @@ class OtherScriptsCaptureTest(unittest.TestCase):
                 capture_pairs(calls["concise"]),
             )
 
+    def test_ab_body_starts_one_proxy_per_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, env = stub_host(root)
+            env["AB_CAPTURE"] = "1"
+            body = root / "body.json"
+            body.write_text('{"thinking": {"type": "enabled"}}\n', encoding="utf-8")
+            rc, stderr = base.run_script(
+                AB / "ab-body.sh",
+                ["capsbody", "radian-test", str(body)],
+                env,
+                tmp,
+            )
+            self.assertEqual(rc, 0, stderr)
+            self.assertEqual([call["port"] for call in proxy_calls(root)], [18080, 18081])
+            out = home / "tb2" / "jobs" / "capsbody"
+            calls = {call["arm"]: call for call in base.stub_invocations(root)}
+            for arm in ("base", "body"):
+                self.assertIn(
+                    f"capture_ca={out / 'capture' / arm / 'confdir' / 'mitmproxy-ca-cert.pem'}",
+                    capture_pairs(calls[arm]),
+                )
+
     def test_smoke_starts_one_proxy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
