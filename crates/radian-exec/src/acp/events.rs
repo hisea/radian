@@ -27,10 +27,11 @@ pub(crate) struct AcpEvents {
     busy: AtomicBool,
     /// Wakes when a turn starts.
     pub(crate) started: Notify,
-    /// Wakes when a turn ends.
+    /// Wakes when the core's live turn ends (`RunFinished`), before the driver journals the
+    /// turn end. A prompt answer must also wait for `AcpRuntimeEvents::finished`.
     pub(crate) finished: Notify,
-    /// How many turns have ended. The prompt driver waits for it to move past the value it
-    /// read before enqueueing, so a stale `finished` permit can never be mistaken for this
+    /// How many live turns have ended. The prompt driver waits for it to move past the value
+    /// it read before enqueueing, so a stale `finished` permit can never be mistaken for this
     /// turn's end.
     finished_generation: AtomicU64,
     last_status: Mutex<Option<RunStatus>>,
@@ -179,9 +180,19 @@ impl EventSink for AcpEvents {
 /// The runtime-event sink: keeps the last turn's failure text for `_meta.radian.error`,
 /// masked with the same secrets the session redacts everywhere else. `TurnStarted` clears it,
 /// so only the turn that just ended can contribute.
+///
+/// It also tracks the **journaled** turn end (`TurnFinished`): the prompt answer waits for it,
+/// because the core's live `RunFinished` fires before the driver commits the turn (ADR 0010,
+/// ADR 0049).
 pub(crate) struct AcpRuntimeEvents {
     error: Mutex<Option<String>>,
     secrets: Vec<String>,
+    /// Wakes when the driver has journaled a turn end.
+    pub(crate) finished: Notify,
+    /// How many journaled turn ends this sink has seen. The prompt driver waits for it to move
+    /// past the value it read before enqueueing, so a stale permit can never be mistaken for
+    /// this turn's end.
+    finished_generation: AtomicU64,
 }
 
 impl AcpRuntimeEvents {
@@ -189,11 +200,17 @@ impl AcpRuntimeEvents {
         Self {
             error: Mutex::new(None),
             secrets,
+            finished: Notify::new(),
+            finished_generation: AtomicU64::new(0),
         }
     }
 
     pub(crate) fn last_error(&self) -> Option<String> {
         self.error.lock().unwrap().clone()
+    }
+
+    pub(crate) fn finished_generation(&self) -> u64 {
+        self.finished_generation.load(Ordering::Acquire)
     }
 }
 
@@ -205,6 +222,13 @@ impl radian_runtime::RuntimeEvents for AcpRuntimeEvents {
             }
             radian_session::RuntimeEvent::TurnStarted { .. } => {
                 *self.error.lock().unwrap() = None;
+            }
+            // `TurnFinished` is the journaled turn end (the driver appends it before it calls
+            // this). `TurnFailed` is not: the driver journals it, then `TurnFinished` with the
+            // failed outcome, and the answer must wait for that record.
+            radian_session::RuntimeEvent::TurnFinished { .. } => {
+                self.finished_generation.fetch_add(1, Ordering::AcqRel);
+                self.finished.notify_waiters();
             }
             _ => {}
         }

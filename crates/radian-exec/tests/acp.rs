@@ -87,9 +87,16 @@ struct Acp {
 
 impl Acp {
     fn spawn(args: &[&str], env: &Env) -> Self {
+        Self::spawn_with(args, env, &[])
+    }
+
+    /// [`Acp::spawn`] with extra environment for the child (the driver's commit-delay test
+    /// hook needs one).
+    fn spawn_with(args: &[&str], env: &Env, extra_env: &[(&str, &str)]) -> Self {
         let stderr_path = env.home.join("stderr.log");
         let stderr = std::fs::File::create(&stderr_path).unwrap();
-        let mut child = Command::new(common::radian_bin())
+        let mut command = Command::new(common::radian_bin());
+        command
             .arg("acp")
             .args(args)
             .env_remove("OPENAI_API_KEY")
@@ -102,9 +109,11 @@ impl Acp {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr))
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn radian acp");
+            .kill_on_drop(true);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn radian acp");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout")).lines();
         Self {
@@ -312,6 +321,95 @@ fn journal(path: &Path) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+/// The `_meta.radian` text and cost `radian acp` folds from a journal, so a test can compare
+/// the answer against the final file rather than against a literal.
+fn journal_summary(events: &[Value]) -> (String, Value) {
+    let mut text = String::new();
+    let mut micros: Option<u64> = None;
+    let mut incomplete = false;
+    for event in events {
+        match event["event"].as_str() {
+            Some("MessageAppended") => {
+                let Some(content) = event["data"]["message"]["assistant"]["content"].as_array()
+                else {
+                    continue;
+                };
+                let message: String = content
+                    .iter()
+                    .filter_map(|part| part["text"]["text"].as_str())
+                    .collect();
+                if !message.is_empty() {
+                    text = message;
+                }
+            }
+            Some("ModelUsageRecorded" | "CompactionUsageRecorded") => {
+                let fee = &event["data"]["fee"];
+                if let Some(value) = fee["micros"].as_u64() {
+                    micros = Some(micros.unwrap_or(0).saturating_add(value));
+                    incomplete |= fee["incomplete"].as_bool() == Some(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    let cost = match micros {
+        Some(micros) => json!({
+            "micros": micros,
+            "incomplete": incomplete,
+            "estimated": false,
+        }),
+        None => Value::Null,
+    };
+    (text, cost)
+}
+
+/// ADR 0049: the answer follows the driver's journaled `TurnFinished`, not the core's live
+/// `RunFinished`. The driver's commit-delay hook widens that gap: an answer on the live event
+/// arrives while the journal still lacks the turn end, and its `_meta` is folded too early.
+#[tokio::test]
+async fn the_prompt_answer_waits_for_the_journaled_turn_end() {
+    let server = MockServer::start(vec![text_reply("durable answer")]).await;
+    let env = Env::fresh("durable-turn");
+    let mut acp = Acp::spawn_with(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+        // A gap wide enough that the response's own latency cannot close it.
+        &[("RADIAN_TURN_COMMIT_DELAY_MS", "2000")],
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let run = acp.prompt(&session, "say it", Decision::None).await;
+    let result = run.result();
+    assert_eq!(result["stopReason"], "end_turn", "{result}");
+    // Read immediately after the answer: with the delayed commit, a response that followed
+    // `RunFinished` would find no turn end here.
+    let events = journal(&env.sessions.join(format!("{session}.jsonl")));
+    assert!(
+        events.iter().any(|event| event["event"] == "TurnFinished"),
+        "the answer arrived before the turn was durable: {events:?}"
+    );
+    let (text, cost) = journal_summary(&events);
+    assert_eq!(result["_meta"]["radian"]["text"], text, "{result}");
+    assert_eq!(result["_meta"]["radian"]["cost"], cost, "{result}");
+    assert_eq!(
+        text, "durable answer",
+        "the turn's answer is in the journal"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
 }
 
 #[tokio::test]
