@@ -102,7 +102,8 @@ python3 benchmarks/terminal-bench/tests/test_radian_command.py   # stdlib only
 python3 benchmarks/terminal-bench/metrics.py --self-test          # stdlib only
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_command.py
 <home>/.local/share/uv/tools/harbor/bin/python benchmarks/terminal-bench/tests/test_radian_agent.py
-PYTHONPATH=benchmarks/terminal-bench <home>/.local/share/uv/tools/harbor/bin/python -c \
+PYTHONPATH=benchmarks/terminal-bench:benchmarks/terminal-bench/ab \
+  <home>/.local/share/uv/tools/harbor/bin/python -c \
   "from harbor.utils.import_path import import_class; print(import_class('radian_agent:RadianAgent'))"
 ```
 

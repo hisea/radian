@@ -1,0 +1,13 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 4096,
+  "stream": true,
+  "system": [
+    {"type": "text", "text": "You are a careful coding agent."},
+    {"type": "text", "text": "Answer in English."}
+  ],
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "Fix the failing test."}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "Let me read it first."}]}
+  ]
+}
