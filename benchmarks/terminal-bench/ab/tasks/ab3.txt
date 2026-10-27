@@ -1,0 +1,11 @@
+# The tasks ab1, ab3 and absys1 ran: the ten-task default set.
+llm-inference-batching-scheduler
+largest-eigenval
+write-compressor
+reshard-c4-data
+torch-tensor-parallelism
+password-recovery
+break-filter-js-from-html
+portfolio-optimization
+gpt2-codegolf
+merge-diff-arc-agi-task
