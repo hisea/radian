@@ -4058,6 +4058,7 @@ fn write_passing_review_at(
         review: Some(report),
         review_session_ids: vec!["hand-written".to_owned()],
         review_cost_micros: None,
+        review_model_error: None,
         review_pre_existing: None,
         review_settings: None,
         profile: Some("default".to_owned()),
@@ -6759,5 +6760,351 @@ fn a_review_cost_that_reaches_the_plan_budget_pauses_the_plan() {
         fixture.store.load_plan(&plan).unwrap().item.auto,
         "off",
         "a plan budget switches the plan off"
+    );
+}
+
+/// How far in the future `retry_at` sits, in whole seconds.
+fn wait_seconds(retry_at: &str) -> i64 {
+    let at = chrono::DateTime::parse_from_rfc3339(retry_at)
+        .expect("a UTC retry time")
+        .with_timezone(&chrono::Utc);
+    (at - chrono::Utc::now()).num_seconds()
+}
+
+/// A review session whose model used up its window (ADR 0044 §2b) is not run a second time:
+/// the stage fails with `review_unavailable`, records the session and its `model_error`, and
+/// leaves the task waiting on the reset time (ADR 0048 decision 9). Mutation: run the session
+/// again → `fake.count()` is 2.
+#[test]
+fn a_usage_limit_review_fails_once_and_waits_on_the_reset() {
+    let fixture = Fixture::new("review-usage-limit");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-usage-limit-fake",
+        &[review_message("ignored", &[], &[])],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &json!({"kind": "usage_limit", "status": 429, "retry_after_secs": 600}),
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    assert_eq!(fake.count(), 1, "the session ran exactly once");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_unavailable"));
+    assert_eq!(verdict.review_session_ids, vec!["fake-review-1".to_owned()]);
+    assert_eq!(
+        verdict.review_model_error,
+        Some(json!({"kind": "usage_limit", "status": 429, "retry_after_secs": 600})),
+        "the verdict records the session's model_error as read"
+    );
+    assert_eq!(
+        verdict.review_cost_micros,
+        Some(2000),
+        "a review's cost counts toward the budget"
+    );
+
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(!stored.body.contains("## Rework"), "{}", stored.body);
+    assert_eq!(stored.auto_rework, 0, "a usage-limit wait is not a rework");
+    assert_eq!(stored.retry_count, 0, "it is not a retry");
+    let retry_at = stored.retry_at.clone().expect("the task waits");
+    assert!(
+        (wait_seconds(&retry_at) - 600).abs() <= 5,
+        "the wait is the session's reset: {retry_at}"
+    );
+    let plan = fixture.store.load_plan(&stored.plan).unwrap().item;
+    assert_eq!(plan.auto, "run", "the plan is not paused");
+    assert_eq!(
+        review::rework_reason(&fixture.store, &stored),
+        Some(format!(
+            "review_unavailable: model usage_limit (HTTP 429), retry at {retry_at}"
+        ))
+    );
+    let shown = radian_arc::store::cli::show_text(&fixture.store, &fixture.task)
+        .expect("show prints the task");
+    assert!(
+        shown.contains(&format!("retry_at: {retry_at}")),
+        "show misses retry_at:\n{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "rework_reason: review_unavailable: model usage_limit (HTTP 429), retry at {retry_at}"
+        )),
+        "show misses the review wait:\n{shown}"
+    );
+    let json = radian_arc::store::cli::show_json(&fixture.store, &fixture.task)
+        .expect("show --json prints the task");
+    assert_eq!(json["retry_at"].as_str(), Some(retry_at.as_str()));
+    assert_eq!(
+        json["rework_reason"].as_str(),
+        Some(
+            format!("review_unavailable: model usage_limit (HTTP 429), retry at {retry_at}")
+                .as_str()
+        )
+    );
+    assert_eq!(
+        json["review_model_error"],
+        json!({"kind": "usage_limit", "status": 429, "retry_after_secs": 600})
+    );
+    let views = fixture.store.plans().expect("the plans read");
+    let listed = radian_arc::store::cli::list_text(&views, false);
+    assert!(
+        listed.contains(&format!("retry at {retry_at}")),
+        "list misses the wait:\n{listed}"
+    );
+}
+
+/// Without a reset wait the stage backs off itself: 5 minutes for the first
+/// `review_unavailable` on a `verified_sha`, 10 minutes for the second (ADR 0048 decision 9).
+#[test]
+fn an_unavailable_review_backs_off_and_doubles_on_the_same_sha() {
+    let fixture = Fixture::new("review-unavailable-backoff");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-unavailable-backoff-fake",
+        &[
+            review_message("ignored", &[], &[]),
+            review_message("ignored", &[], &[]),
+        ],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &json!({"kind": "unavailable", "status": null, "retry_after_secs": null}),
+    );
+    fake.set_model_error(
+        2,
+        &json!({"kind": "unavailable", "status": null, "retry_after_secs": null}),
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let first = fixture.store.load_task(&fixture.task).unwrap().item;
+    let first_retry = first.retry_at.clone().expect("the first wait");
+    assert!(
+        (wait_seconds(&first_retry) - 300).abs() <= 5,
+        "the first wait is 5 minutes: {first_retry}"
+    );
+
+    let reverified = review::reverify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the reverify runs");
+    let second = reverified.verification.expect("the verification ran");
+    assert_eq!(second.phase, "rework_pending", "{second:?}");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let second_retry = stored.retry_at.clone().expect("the second wait");
+    assert!(
+        (wait_seconds(&second_retry) - 600).abs() <= 5,
+        "the second wait doubles: {second_retry}"
+    );
+    assert_eq!(fake.count(), 2, "one session per unavailable review");
+}
+
+/// A `model_error` of another kind keeps today's rule: the stage runs the session once more
+/// and, when that is unusable too, fails with `review_output` (ADR 0048 decision 10).
+#[test]
+fn a_protocol_model_error_still_runs_the_session_twice() {
+    let fixture = Fixture::new("review-protocol-twice");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-protocol-twice-fake",
+        &[
+            review_message("ignored", &[], &[]),
+            review_message("ignored", &[], &[]),
+        ],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &json!({"kind": "protocol", "status": null, "retry_after_secs": null}),
+    );
+    fake.set_model_error(
+        2,
+        &json!({"kind": "protocol", "status": null, "retry_after_secs": null}),
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    assert_eq!(fake.count(), 2, "the session ran once more");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_output"));
+    assert_eq!(verdict.review_session_ids.len(), 2);
+    assert!(
+        verdict.review_model_error.is_none(),
+        "only an unavailable model is recorded"
+    );
+}
+
+/// A `commands` failure in the same round still decides with the commands reason (ADR 0048
+/// decision 10), even when the review's model is unavailable. Mutation: let the review decide
+/// → the task waits on a `review_unavailable` reason and a worker-less reverify.
+#[test]
+fn a_commands_failure_decides_when_the_review_model_is_unavailable() {
+    let fixture = Fixture::new("review-commands-unavailable");
+    fixture.add_review_stage();
+    fixture.commands(&["false"]);
+    fixture.set_auto("run");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let fake = FakeReview::new(
+        "review-commands-unavailable-fake",
+        &[review_message("ignored", &[], &[])],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &json!({"kind": "usage_limit", "status": 429, "retry_after_secs": 600}),
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let reason = verified.reason.clone().expect("a reason");
+    assert_eq!(reason.stage, Some(Stage::Commands));
+    assert_eq!(reason.reason, "command_failed");
+    let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(review.reason.as_deref(), Some("review_unavailable"));
+    assert_eq!(fake.count(), 1, "the review did not run a second session");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.retry_at.is_none(),
+        "a commands failure sets no review wait"
+    );
+    assert!(!stored.body.contains("## Rework"), "{}", stored.body);
+}
+
+/// Writes a verdict into an earlier attempt's directory, the way a finished round left it.
+/// `reason` `None` is a pass; a `review` verdict with `review_unavailable` is one of the run
+/// the wait counts.
+fn seed_verdict(fixture: &Fixture, attempt: u32, stage: &str, sha: &str, reason: Option<&str>) {
+    let dir = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(format!("{}-{attempt}", fixture.task))
+        .join("verdicts");
+    fs::create_dir_all(&dir).expect("the attempt's verdict directory");
+    let value = json!({
+        "schema_version": VERDICT_SCHEMA_VERSION,
+        "stage": stage,
+        "sha": sha,
+        "result": if reason.is_none() { "pass" } else { "fail" },
+        "reason": reason,
+        "commands": [],
+        "started_at": "2026-10-26T00:00:00Z",
+        "ended_at": "2026-10-26T00:00:00Z",
+    });
+    fs::write(
+        dir.join(format!("{stage}.json")),
+        serde_json::to_string_pretty(&value).expect("the seeded verdict serializes") + "\n",
+    )
+    .expect("the seeded verdict");
+}
+
+/// Runs a review at `attempt` whose model is unavailable without a reset time and returns the
+/// task's wait.
+fn unavailable_wait_at(fixture: &Fixture, head: &str, attempt: u32, label: &str) -> i64 {
+    let fake = FakeReview::new(label, &[review_message("ignored", &[], &[])], 0);
+    fake.set_model_error(
+        1,
+        &json!({"kind": "unavailable", "status": null, "retry_after_secs": null}),
+    );
+    fixture.set_verifying_at(head, attempt);
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the verification runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    assert_eq!(fake.count(), 1, "one session per unavailable review");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let retry_at = stored.retry_at.clone().expect("the task waits");
+    wait_seconds(&retry_at)
+}
+
+/// The run of `review_unavailable` waits counts attempts by their number, not by their
+/// directory name: `...-10` sorts before `...-2` as a string, so a newest-first scan would
+/// stop at attempt 2 and never reach the doubling and the 60-minute cap (ADR 0048 decision
+/// 9). Eleven attempt directories: attempt 2 passes, attempts 3 through 6 and 10 are
+/// unavailable, attempts 7 through 9 hold only a `commands` verdict, and the review at
+/// attempt 11 is the newest one. The numeric run is 6 waits, which is the cap; the string
+/// order would stop at attempt 2 after 4 and wait 40 minutes. Mutation: sort the attempt
+/// directories by name again → this test sees 2400 seconds.
+#[test]
+fn a_review_wait_counts_attempts_by_number_not_by_name() {
+    let fixture = Fixture::new("review-wait-attempt-order");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&fixture, 1, "review", &head, None);
+    seed_verdict(&fixture, 2, "review", &head, None);
+    for attempt in 3..=6 {
+        seed_verdict(
+            &fixture,
+            attempt,
+            "review",
+            &head,
+            Some("review_unavailable"),
+        );
+    }
+    for attempt in 7..=9 {
+        seed_verdict(&fixture, attempt, "commands", &head, None);
+    }
+    seed_verdict(&fixture, 10, "review", &head, Some("review_unavailable"));
+
+    let waited = unavailable_wait_at(&fixture, &head, 11, "review-wait-attempt-order-fake");
+    assert!(
+        (waited - 3600).abs() <= 5,
+        "six waits in a row reach the 60-minute cap: {waited} seconds"
+    );
+}
+
+/// A long run of `review_unavailable` verdicts on one `verified_sha` reaches the 60-minute
+/// cap, and two in a row wait 10 minutes (ADR 0048 decision 9).
+#[test]
+fn a_review_wait_caps_at_an_hour_and_doubles_from_ten_minutes() {
+    let capped = Fixture::new("review-wait-cap");
+    capped.add_review_stage();
+    capped.commands(&["true"]);
+    let head = capped.publish(&capped.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&capped, 1, "review", &head, None);
+    seed_verdict(&capped, 2, "review", &head, None);
+    for attempt in 3..=10 {
+        seed_verdict(
+            &capped,
+            attempt,
+            "review",
+            &head,
+            Some("review_unavailable"),
+        );
+    }
+    let waited = unavailable_wait_at(&capped, &head, 11, "review-wait-cap-fake");
+    assert!(
+        (waited - 3600).abs() <= 5,
+        "nine waits in a row reach the 60-minute cap: {waited} seconds"
+    );
+
+    let doubled = Fixture::new("review-wait-ten-minutes");
+    doubled.add_review_stage();
+    doubled.commands(&["true"]);
+    let head = doubled.publish(&doubled.base.clone(), "feature.txt", "feature\n");
+    seed_verdict(&doubled, 1, "review", &head, None);
+    seed_verdict(&doubled, 2, "review", &head, None);
+    seed_verdict(&doubled, 3, "review", &head, Some("review_unavailable"));
+    let waited = unavailable_wait_at(&doubled, &head, 4, "review-wait-ten-minutes-fake");
+    assert!(
+        (waited - 600).abs() <= 5,
+        "the second wait in a row is 10 minutes: {waited} seconds"
     );
 }

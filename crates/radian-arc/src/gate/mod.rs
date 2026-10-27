@@ -47,8 +47,9 @@ pub use error::GateError;
 pub use exclusive::ExclusiveLock;
 pub use integration::{IntegrationRun, merge_ready};
 pub use review::{
-    OWNED_EXEC_ARGS, PRE_EXISTING_WINDOW, PREVIOUS_ITEM_WINDOW, PreviousReview, REVIEW_RUNS,
-    REVIEW_TOOLS, ReviewRun, owned_name, parse_report,
+    OWNED_EXEC_ARGS, PRE_EXISTING_WINDOW, PREVIOUS_ITEM_WINDOW, PreviousReview, REVIEW_BLOCKING,
+    REVIEW_FAILURE_REASONS, REVIEW_OUTPUT, REVIEW_RUNS, REVIEW_TIMEOUT, REVIEW_TOOLS,
+    REVIEW_UNAVAILABLE, ReviewRun, owned_name, parse_report,
 };
 pub use verdict::{
     CommandRecord, REVIEW_LEVELS, ReviewItem, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION,

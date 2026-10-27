@@ -1412,4 +1412,34 @@ The source was restored from `.radian/mut/work_mod_fixed.rs` with `cp` and compa
 | TK0189-M1 | leave the whole `info/` directory out of the control scan (the `tree_except` call for `info` dropped) | `work::a_worker_that_changes_info_exclude_fails_and_is_restored` (the failure is `outcome terminated`, not the control-file reason), and `work::a_worker_that_creates_a_file_under_info_fails_and_it_is_removed` | ✅ 2 failed |
 
 2/2 caught.
+## TK0185: a review waits on an unavailable model (2026-10-26, branch `work/TK0185-arc-review-waits-on-unavailable-model`)
+
+The `review` stage reads `Result.model_error` and stops on `unavailable` or `usage_limit`; the task waits on `retry_at` and a pass reverifies it. Each mutation was applied by hand to the named file, the named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox`, and the source was restored from a copy under `.radian/` with `cp`. The `run` mutation rebuilds the `radian` binary first, because the test binary drives it.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0185-M1 | the unavailable session is run a second time (`gate/review.rs`: the `unavailable_model_error` branch never fires) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (`the session ran exactly once`: `fake.count()` was 2) | ✅ failed |
+| TK0185-M2 | the wait ignores `retry_after_secs` (`review/mod.rs`: `review_retry_at` reads `None` instead of the model error) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (`the wait is the session's reset`: the retry was 5 minutes away) | ✅ failed |
+| TK0185-M3 | the `retry_at` reverify counts toward `max_auto_reverify` (`review/mod.rs`: `auto_reverify_review` returns `Not` when the limit is `0`) | `run::a_review_wait_reverifies_by_itself_with_max_auto_reverify_zero` (the loop did not settle: the task stayed in `review.rework_pending`) | ✅ failed |
+| TK0185-M4 | `review_unavailable` writes a rework section (`review/mod.rs`: the branch calls `add_rework_with`) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (the body gained a `## Rework 2 (review)` section) | ✅ failed |
+
+4/4 caught.
+
+## TK0185 rework 1: a review wait counts attempts by number (2026-10-26, branch `work/TK0185-arc-review-waits-on-unavailable-model`)
+
+The review found that `task_verdict_files_except` sorted the attempt directories as strings, so
+`<task>-10` came before `<task>-2`; `review_unavailable_run`'s newest-first scan then met the
+passing review at attempt 2 before the current verdict at attempt 11 and counted too few waits.
+The attempt directories now sort by their number, with an integration re-run's `.iK` directory
+after its own attempt. The mutation was applied by hand to
+`crates/radian-arc/src/review/mod.rs` (`dirs.sort()` in place of the numeric sort), the named
+test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E
+'test(a_review_wait_counts_attempts_by_number_not_by_name)'`, and the file was restored from
+`.radian/mut/review_mod.rs.fixed` with `cp`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0185-M5 | attempt directories sort by name again (`dirs.sort()` in `task_verdict_files_except`) | `review::a_review_wait_counts_attempts_by_number_not_by_name` (`six waits in a row reach the 60-minute cap: 2399 seconds`) | ✅ failed |
+
+1/1 caught.
 

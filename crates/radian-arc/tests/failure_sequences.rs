@@ -314,6 +314,7 @@ fn write_verdict(
         }),
         review_session_ids: Vec::new(),
         review_cost_micros: None,
+        review_model_error: None,
         review_pre_existing: None,
         review_settings: None,
         profile: Some("default".to_owned()),

@@ -25,8 +25,10 @@
 //! block. An empty `blocking` list passes the stage; any item fails it with reason
 //! `review_blocking`. No parsable block, a missing field, a timeout, or a session error makes
 //! the stage run the session once more; when the second run is unusable too the stage fails
-//! with `review_output` (or `review_timeout` when the last run timed out). The verdict records
-//! every run's session id and their summed cost.
+//! with `review_output` (or `review_timeout` when the last run timed out). A session whose
+//! `Result` carries `model_error.kind` `unavailable` or `usage_limit` is model unavailable: the
+//! stage does not run it again and fails at once with `review_unavailable` (ADR 0048 decision
+//! 9). The verdict records every run's session id and their summed cost.
 //!
 //! A task whose own change is empty starts no session: the stage passes and its report says
 //! that there is nothing to review (ADR 0048 decision 10).
@@ -63,6 +65,26 @@ pub const REVIEW_TOOLS: &str = "read,grep,glob";
 /// How many times one stage may run the session: once, and once more when the first run's
 /// output is unusable (ADR 0048 decision 10).
 pub const REVIEW_RUNS: u32 = 2;
+
+/// A review stage failed with blocking items (ADR 0048 decision 10).
+pub const REVIEW_BLOCKING: &str = "review_blocking";
+/// A review stage's two runs left no usable report (ADR 0048 decision 10).
+pub const REVIEW_OUTPUT: &str = "review_output";
+/// A review stage's last run hit `[gate.review] timeout_secs` (ADR 0048 decision 10).
+pub const REVIEW_TIMEOUT: &str = "review_timeout";
+/// The review session's model was unavailable (`unavailable` or `usage_limit`), so the stage
+/// stops at once and the task waits on `retry_at` instead of running the session again
+/// (ADR 0048 decisions 9 and 10).
+pub const REVIEW_UNAVAILABLE: &str = "review_unavailable";
+
+/// Every reason a `review` stage can fail with. One closed list: the stage writes its entries,
+/// `show` reads them, and the manual's drift test names each one.
+pub const REVIEW_FAILURE_REASONS: &[&str] = &[
+    REVIEW_BLOCKING,
+    REVIEW_OUTPUT,
+    REVIEW_TIMEOUT,
+    REVIEW_UNAVAILABLE,
+];
 
 /// The item level whose item always blocks a rework round, wherever it is (ADR 0048 decision
 /// 10): the window rules never move it.
@@ -183,8 +205,8 @@ enum Unusable {
 impl Unusable {
     fn reason(self) -> &'static str {
         match self {
-            Unusable::Output => "review_output",
-            Unusable::Timeout => "review_timeout",
+            Unusable::Output => REVIEW_OUTPUT,
+            Unusable::Timeout => REVIEW_TIMEOUT,
         }
     }
 }
@@ -260,6 +282,8 @@ impl ReviewRun<'_> {
         let mut cost: Option<u64> = None;
         let mut report = None;
         let mut pre_existing = None;
+        // The failing session's `model_error` object, when the model is unavailable.
+        let mut model_error: Option<Value> = None;
         let mut reason = candidate.failure.clone();
         if candidate.failure.is_none() {
             let (base, own_diff) =
@@ -303,6 +327,13 @@ impl ReviewRun<'_> {
                         Unusable::Output
                     };
                     let Some(found) = usable_report(&ran) else {
+                        // A used-up model window needs no second run: the stage fails at once
+                        // and the task waits on the window (ADR 0048 decision 9).
+                        if let Some(error) = unavailable_model_error(&ran) {
+                            model_error = Some(error.clone());
+                            reason = Some(REVIEW_UNAVAILABLE.to_owned());
+                            break;
+                        }
                         continue;
                     };
                     report = Some(found);
@@ -318,9 +349,9 @@ impl ReviewRun<'_> {
                         pre_existing = Some(round.mark_pre_existing(found));
                     }
                     if !found.blocking.is_empty() {
-                        reason = Some("review_blocking".to_owned());
+                        reason = Some(REVIEW_BLOCKING.to_owned());
                     }
-                } else {
+                } else if model_error.is_none() {
                     reason = Some(unusable.reason().to_owned());
                 }
             }
@@ -348,6 +379,7 @@ impl ReviewRun<'_> {
             review: report,
             review_session_ids: sessions,
             review_cost_micros: cost,
+            review_model_error: model_error,
             review_pre_existing: pre_existing,
             review_settings: Some(self.settings.clone()),
             profile: Some(self.profile.to_owned()),
@@ -627,6 +659,18 @@ fn usable_report(ran: &Ran) -> Option<ReviewReport> {
         return None;
     }
     parse_report(result.get("text").and_then(Value::as_str)?)
+}
+
+/// The `model_error` object of a run whose model was unavailable: `kind` is `unavailable` or
+/// `usage_limit` (ADR 0044 §2b). Any other kind, a missing field and a timeout are not one, so
+/// the stage keeps today's rule and runs the session once more.
+fn unavailable_model_error(ran: &Ran) -> Option<&Value> {
+    if ran.timed_out {
+        return None;
+    }
+    let error = ran.result.as_ref()?.get("model_error")?;
+    let kind = error.get("kind").and_then(Value::as_str)?;
+    matches!(kind, "unavailable" | "usage_limit").then_some(error)
 }
 
 /// The cost a `Result` line reports, in micros of a US dollar.
