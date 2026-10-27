@@ -518,3 +518,17 @@ Unmutated, each test passed.
 |---|---|---|---|
 | TK0203-M1 | `stop_reason` maps `RunStatus::Cancelled` to `end_turn` instead of `cancelled` | ✅ 1 failed | `acp::a_cancelled_turn_answers_cancelled_and_keeps_the_interrupted_prefix` (the response says `stopReason: end_turn`) |
 | TK0203-M2 | the existing-session branch of `session/new` returns the current session id instead of the one-session error | ✅ 1 failed | `acp::one_process_holds_one_session` (the second `session/new` succeeds; its error message is empty) |
+
+## `radian acp`: `session/load` continues the journal (TK0204, 2026-10-27)
+
+Branch `work/TK0204-radian-acp-session-load`. The mutation was applied in place, the `radian`
+binary was rebuilt (`cargo build -p radian-tui --bin radian`), and the source was restored from
+`.radian/mut-backup/acp-mod.rs` (`cmp` identical). The catching test ran in the sandbox profile:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(session_load_replays_the_journal_and_continues_it)'`. Unmutated, the whole `acp` binary
+passed 12/12.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0204-M1 | `session/load` does not set `--resume`, so the opener generates a new id and starts a new journal instead of continuing the loaded one | ✅ 1 failed | `acp::session_load_replays_the_journal_and_continues_it` ("the transcript is replayed": the loaded session's recovered history is empty, so no `session/update` is sent) |
+

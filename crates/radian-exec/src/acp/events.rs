@@ -130,19 +130,11 @@ impl EventSink for AcpEvents {
                         .get(&result.call_id)
                         .map(|(name, _)| name.clone())
                         .unwrap_or_default();
-                    let mut raw = serde_json::Map::new();
-                    raw.insert("text".to_owned(), serde_json::Value::String(result.text()));
-                    if let Some(structured) = &result.structured {
-                        raw.insert("structured".to_owned(), structured.clone());
-                    }
-                    if let Some(code) = &result.error_code {
-                        raw.insert("code".to_owned(), serde_json::Value::String(code.clone()));
-                    }
                     self.notify(protocol::tool_call_update(
                         &result.call_id,
                         &name,
                         result.is_error,
-                        Some(serde_json::Value::Object(raw)),
+                        Some(protocol::tool_output(&result)),
                     ));
                 }
                 Message::User { .. } => {}
