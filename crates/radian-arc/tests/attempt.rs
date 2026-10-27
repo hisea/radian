@@ -1246,6 +1246,25 @@ fn wait_for_file_within(path: &Path, limit: Duration) {
     }
 }
 
+/// Waits until `path` holds `needle`, failing after `limit`. A streamed line reaches the file
+/// as the writer flushes it, so a test can cancel while the turn is mid-answer.
+fn wait_for_text(path: &Path, needle: &str, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.contains(needle)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never held `{needle}` within {limit:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Waits until `path` exists **and has content**. The writer creates the file and then writes
 /// it, so existence alone can race a reader that parses the file.
 fn wait_for_file(path: &Path) {
@@ -1770,8 +1789,10 @@ fn a_wall_time_signals_the_wrapper_and_records_the_class() {
     assert_eq!(state(&store, task), ("todo".into(), "retry_wait".into()));
 }
 
-/// `radian arc cancel` stops a running attempt: SIGTERM to the wrapper, its
-/// `AttemptFinished`, `failed.cancelled`.
+/// `radian arc cancel` stops a running radian worker through the protocol first: the wrapper
+/// sends `session/cancel`, the agent ends the turn with `stopReason: cancelled` (the attempt's
+/// `Result` says so) and the journal keeps the interrupted prefix; then the wrapper writes its
+/// `AttemptFinished` and the task ends `failed.cancelled` (ADR 0048 decision 9).
 #[test]
 fn cancel_stops_a_running_attempt() {
     let repo = Repo::new("cancel");
@@ -1779,7 +1800,20 @@ fn cancel_stops_a_running_attempt() {
     let store = Store::open(&repo.clone).expect("open");
     let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
     let task = tasks[0].clone();
-    let mock = Mock::start(vec![Reply::SseThenHang { pieces: Vec::new() }]);
+    // One streamed piece and then silence: the turn is mid-answer when the cancel arrives, so
+    // the journal has an interrupted assistant prefix to keep.
+    let mock = Mock::start(vec![Reply::SseThenHang {
+        pieces: vec![
+            format!(
+                "data: {}\n\n",
+                agent_provider_openai_compatible::testing::chunk(
+                    json!({"role": "assistant", "content": "the partial answer"}),
+                    None
+                )
+            )
+            .into_bytes(),
+        ],
+    }]);
     tune(
         &repo,
         &[
@@ -1795,6 +1829,10 @@ fn cancel_stops_a_running_attempt() {
 
     let mut start = repo.spawn(&["arc", "start", &task]);
     wait_for(&repo.attempt_dir(&task, 1).join("identity.json"));
+    // The wrapper writes every `session/update` to `result.jsonl` as it arrives, so its text is
+    // the moment the answer is streaming.
+    let stream = repo.run_dir(&task, 1).join("result.jsonl");
+    wait_for_text(&stream, "the partial answer", Duration::from_secs(60));
     let cancel = repo.radian(&["arc", "cancel", &task]);
     assert_eq!(cancel.code, 0, "cancel failed: {}", cancel.stderr);
     assert!(
@@ -1809,6 +1847,42 @@ fn cancel_stops_a_running_attempt() {
         Duration::from_secs(15),
     );
     assert_eq!(state(&store, &task), ("failed".into(), "cancelled".into()));
+
+    // The protocol cancel reached the agent: its turn answered `cancelled`, and the wrapper
+    // wrote that as the attempt's `Result`. A SIGTERM alone writes no Result.
+    let lines: Vec<Value> = std::fs::read_to_string(&stream)
+        .expect("the attempt's result.jsonl")
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let result = lines
+        .iter()
+        .rev()
+        .find(|line| line["type"] == json!("Result"))
+        .expect("the cancelled turn's Result");
+    assert_eq!(result["outcome"], json!("cancelled"), "{result}");
+
+    // The journal kept the interrupted assistant prefix (ADR 0003).
+    let journal = repo.sessions.join(format!("{task}-1.jsonl"));
+    let events: Vec<Value> = std::fs::read_to_string(&journal)
+        .unwrap_or_else(|error| panic!("{}: {error}", journal.display()))
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let interrupted = events
+        .iter()
+        .find(|event| {
+            event["event"] == json!("MessageAppended")
+                && event["data"]["message"]["assistant"]["interrupted"] == json!(true)
+        })
+        .expect("the interrupted assistant prefix is journaled");
+    assert!(
+        interrupted["data"]["message"]["assistant"]["content"][0]["text"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("the partial answer")),
+        "{interrupted}"
+    );
+
     let deadline = Instant::now() + Duration::from_secs(15);
     while start.try_wait().expect("try_wait").is_none() {
         assert!(
