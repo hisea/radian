@@ -884,9 +884,13 @@ impl FakeReview {
              s=$(cat \"$d/sleep-$n\" 2>/dev/null || printf '{sleep_secs}')\n\
              sleep \"$s\"\n\
              if [ ! -f \"$d/text-$n\" ]; then n={last}; fi\n\
-             printf '{{\"type\":\"Result\",\"session_id\":\"%s\",\"outcome\":\"completed\",\"cost\":{{\"micros\":2000}},\"text\":' \"$sid\"\n\
+             me=$(cat \"$d/model-error-$n.json\" 2>/dev/null || true)\n\
+             if [ -n \"$me\" ]; then outcome=failed; else outcome=completed; fi\n\
+             printf '{{\"type\":\"Result\",\"session_id\":\"%s\",\"outcome\":\"%s\",\"cost\":{{\"micros\":2000}},\"text\":' \"$sid\" \"$outcome\"\n\
              cat \"$d/text-$n\"\n\
-             printf '}}\\n'\n",
+             if [ -n \"$me\" ]; then printf ',\"model_error\":%s' \"$me\"; fi\n\
+             printf '}}\\n'\n\
+             if [ -n \"$me\" ]; then exit 1; fi\n",
             dir = dir.path().display(),
             session = session,
             wait = wait,
@@ -965,6 +969,17 @@ impl FakeReview {
         let replaced = text.replacen("\"cost\":{\"micros\":2000}", "\"cost\":null", 1);
         assert_ne!(replaced, text, "the fake's default cost is in its program");
         fs::write(&self.program, replaced).expect("the fake cost");
+    }
+
+    /// Makes `run` print a failed `Result` carrying `model_error` (ADR 0044 §2b): the outcome
+    /// is `failed`, the process exits `1`, and the object is copied as given. The run's text
+    /// is still its chosen message; the stage reads the error rather than the text.
+    pub fn set_model_error(&self, run: u32, error: &serde_json::Value) {
+        fs::write(
+            self.dir.path().join(format!("model-error-{run}.json")),
+            serde_json::to_string(error).expect("the model error serializes"),
+        )
+        .expect("the fake model error");
     }
 
     /// Changes how long a later run sleeps before it answers.

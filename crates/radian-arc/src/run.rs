@@ -813,8 +813,12 @@ fn advance_verification(
                         // failed reverify attempt, whether the loop or the owner started it.
                         let paused = match &verified.paused {
                             Some(paused) => Some(paused.clone()),
+                            // A `review_unavailable` wait is not an automatic rework: the task
+                            // waits for its `retry_at` and a pass reverifies it (ADR 0048
+                            // decision 9).
                             None if verified.phase == "rework_pending"
-                                && verified.conflict.is_none() =>
+                                && verified.conflict.is_none()
+                                && verified.review_wait.is_none() =>
                             {
                                 if attempt_ops::is_reverify_attempt(store, task_id)? {
                                     None
@@ -883,6 +887,16 @@ fn advance_verification(
 fn auto_reverify_tasks(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
     let mut changed = false;
     for id in rework_pending_tasks(store)? {
+        // A task waiting on an unavailable review model comes first: it needs no moved main
+        // and has no count (ADR 0048 decision 9).
+        match crate::review::auto_reverify_review(store, &id)? {
+            crate::review::ReviewReverify::Not => {}
+            crate::review::ReviewReverify::Started { .. } => {
+                transitions.push(format!("{id} review retry_at passed -> auto reverify"));
+                changed = true;
+                continue;
+            }
+        }
         match crate::review::auto_reverify(store, &id)? {
             crate::review::AutoReverify::Not => {}
             crate::review::AutoReverify::Started { main_sha, .. } => {
@@ -1395,6 +1409,14 @@ pub fn waiting_reason(
             None => "waiting to be verified".to_owned(),
         },
         (TaskState::Review, "rework_pending") => match crate::review::rework_reason(store, item) {
+            // A review waiting on an unavailable model is reverified by the loop, not by a
+            // lead's brief (ADR 0048 decision 9).
+            Some(reason) if plan.auto != "off" && reason.starts_with("review_unavailable") => {
+                format!(
+                    "waiting for its review retry at {}",
+                    item.retry_at.as_deref().unwrap_or("an unrecorded time")
+                )
+            }
             Some(reason) => format!("waiting for a rework brief from the lead ({reason})"),
             None => "waiting for a rework brief from the lead".to_owned(),
         },

@@ -1363,6 +1363,14 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                     ),
                 );
                 object.insert(
+                    "review_model_error".to_owned(),
+                    json!(
+                        verdict
+                            .as_ref()
+                            .and_then(|verdict| verdict.review_model_error.clone())
+                    ),
+                );
+                object.insert(
                     "review_settings".to_owned(),
                     json!(
                         verdict

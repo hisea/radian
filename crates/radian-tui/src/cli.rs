@@ -2515,6 +2515,19 @@ mod tests {
         );
     }
 
+    /// The review stage's failure reasons are one closed list in the code, and the gate page
+    /// names every one of them: a reason added to the list fails here until the page lists it.
+    #[test]
+    fn every_review_failure_reason_appears_in_arc_gate_md() {
+        let doc = arc_gate_md();
+        for reason in radian_arc::gate::REVIEW_FAILURE_REASONS {
+            assert!(
+                doc.contains(&format!("`{reason}`")),
+                "arc/gate.md does not name the review failure reason `{reason}`"
+            );
+        }
+    }
+
     /// One option of one arc command.
     struct ArcOptionRow {
         flag: String,

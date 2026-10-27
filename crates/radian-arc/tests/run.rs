@@ -4397,3 +4397,155 @@ fn a_merge_that_changed_arcs_code_says_to_rebuild_and_a_docs_merge_does_not() {
         "a docs-only merge printed the rebuild line:\n{output}"
     );
 }
+
+// ---- review waits on an unavailable model (ADR 0048 decision 9) -----------------------
+
+/// A `review_unavailable` task waits: a pass before `retry_at` reverifies nothing, and a pass
+/// after it claims a worker-less attempt and passes. Even `[limits] max_auto_reverify = 0`
+/// leaves this reverify alone: it uses no count, because a usage window always resets.
+/// Mutation: count it toward `max_auto_reverify` → the task stays in `review.rework_pending`.
+#[test]
+fn a_review_wait_reverifies_by_itself_with_max_auto_reverify_zero() {
+    let repo = Repo::new("run-review-wait-zero");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "review-wait");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(&repo, "max_auto_reverify = 2", "max_auto_reverify = 0");
+    review_stage(&repo);
+    publish_verifying(&repo, &store, &plan, &task);
+    let fake = FakeReview::new(
+        "run-review-wait-zero-fake",
+        &[
+            review_message("ignored", &[], &[]),
+            review_message("the change is fine", &[], &[]),
+        ],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &serde_json::json!({"kind": "usage_limit", "status": 429, "retry_after_secs": 600}),
+    );
+    let env = [(
+        REVIEW_PROGRAM_ENV,
+        fake.program().to_string_lossy().into_owned(),
+    )];
+
+    let first = run_until_env(&repo, Duration::from_secs(60), &env, || {
+        state(&store, &task) == ("review".to_owned(), "rework_pending".to_owned())
+    });
+    assert!(
+        first.contains(&format!("{task} review model unavailable -> retry at ")),
+        "{first}"
+    );
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(stored.attempt, 1);
+    assert_eq!(stored.auto_rework, 0, "a review wait is not a rework");
+    assert_eq!(stored.retry_count, 0, "a review wait is not a retry");
+    assert!(!stored.body.contains("## Rework"), "{}", stored.body);
+    assert!(stored.retry_at.is_some(), "the task waits");
+    let plan_item = store.load_plan(&stored.plan).expect("the plan reads").item;
+    assert_eq!(plan_item.auto, "run", "the plan is not paused");
+
+    // Before `retry_at`: a pass does nothing.
+    let early = repo.radian_with_env(&["arc", "run"], &env);
+    assert_eq!(early.code, 0, "run: {}", early.stderr);
+    assert!(
+        !early.stdout.contains("auto reverify"),
+        "a pass before retry_at reverified: {}",
+        early.stdout
+    );
+    assert_eq!(attempt(&store, &task), 1);
+
+    // Move the clock the way the retry-wait tests do: a due review wait reverifies at once.
+    store
+        .change_task(&task, |task| {
+            task.retry_at = Some("2000-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the wait is due");
+    let output = run_until_env(&repo, Duration::from_secs(90), &env, || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "awaiting_human"
+    });
+    assert!(
+        output.contains(&format!("{task} review retry_at passed -> auto reverify")),
+        "{output}"
+    );
+    assert_eq!(attempt(&store, &task), 2);
+    assert!(
+        attempt_ops::is_reverify_attempt(&store, &task).expect("the attempt reads"),
+        "the reverify started no worker"
+    );
+    assert_eq!(fake.count(), 2, "one session per review attempt");
+    let verdict = Verdict::read(&repo.run_dir(&task, 2).join("verdicts").join("review.json"))
+        .expect("the review verdict reads");
+    assert!(verdict.is_pass(), "{verdict:?}");
+}
+
+/// A passing review after a due `review_unavailable` wait reaches `done.merged` under
+/// `auto = merge`, with no worker: the attempt is a worker-less reverify.
+#[test]
+fn a_review_wait_reverified_by_itself_merges_at_auto_merge() {
+    let repo = Repo::new("run-review-wait-merge");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "review-wait-merge");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "merge").expect("auto merge");
+    review_stage(&repo);
+    publish_verifying(&repo, &store, &plan, &task);
+    let fake = FakeReview::new(
+        "run-review-wait-merge-fake",
+        &[
+            review_message("ignored", &[], &[]),
+            review_message("the change is fine", &[], &[]),
+        ],
+        0,
+    );
+    fake.set_model_error(
+        1,
+        &serde_json::json!({"kind": "unavailable", "status": null, "retry_after_secs": null}),
+    );
+    let env = [(
+        REVIEW_PROGRAM_ENV,
+        fake.program().to_string_lossy().into_owned(),
+    )];
+
+    run_until_env(&repo, Duration::from_secs(60), &env, || {
+        state(&store, &task) == ("review".to_owned(), "rework_pending".to_owned())
+    });
+    let stored = store.load_task(&task).expect("the task reads").item;
+    assert!(
+        (wait_seconds(&stored.retry_at.clone().expect("the wait")) - 300).abs() <= 5,
+        "the first wait is 5 minutes"
+    );
+    store
+        .change_task(&task, |task| {
+            task.retry_at = Some("2000-01-01T00:00:00Z".to_owned());
+            Ok(())
+        })
+        .expect("the wait is due");
+
+    let output = run_until_env(&repo, Duration::from_secs(90), &env, || {
+        state(&store, &task) == ("done".to_owned(), "merged".to_owned())
+    });
+    assert!(
+        output.contains(&format!("{task} review retry_at passed -> auto reverify")),
+        "{output}"
+    );
+    assert_eq!(attempt(&store, &task), 2);
+    assert!(
+        attempt_ops::is_reverify_attempt(&store, &task).expect("the attempt reads"),
+        "the reverify started no worker"
+    );
+    assert_eq!(fake.count(), 2, "one session per review attempt");
+}
+
+/// How far in the future `retry_at` sits, in whole seconds.
+fn wait_seconds(retry_at: &str) -> i64 {
+    let at = chrono::DateTime::parse_from_rfc3339(retry_at)
+        .expect("a UTC retry time")
+        .with_timezone(&chrono::Utc);
+    (at - chrono::Utc::now()).num_seconds()
+}

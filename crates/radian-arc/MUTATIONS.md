@@ -1395,3 +1395,16 @@ restored from `.radian/mut/` with `cp` and compared with `cmp`.
 
 2/2 caught.
 
+## TK0185: a review waits on an unavailable model (2026-10-26, branch `work/TK0185-arc-review-waits-on-unavailable-model`)
+
+The `review` stage reads `Result.model_error` and stops on `unavailable` or `usage_limit`; the task waits on `retry_at` and a pass reverifies it. Each mutation was applied by hand to the named file, the named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox`, and the source was restored from a copy under `.radian/` with `cp`. The `run` mutation rebuilds the `radian` binary first, because the test binary drives it.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0185-M1 | the unavailable session is run a second time (`gate/review.rs`: the `unavailable_model_error` branch never fires) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (`the session ran exactly once`: `fake.count()` was 2) | ✅ failed |
+| TK0185-M2 | the wait ignores `retry_after_secs` (`review/mod.rs`: `review_retry_at` reads `None` instead of the model error) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (`the wait is the session's reset`: the retry was 5 minutes away) | ✅ failed |
+| TK0185-M3 | the `retry_at` reverify counts toward `max_auto_reverify` (`review/mod.rs`: `auto_reverify_review` returns `Not` when the limit is `0`) | `run::a_review_wait_reverifies_by_itself_with_max_auto_reverify_zero` (the loop did not settle: the task stayed in `review.rework_pending`) | ✅ failed |
+| TK0185-M4 | `review_unavailable` writes a rework section (`review/mod.rs`: the branch calls `add_rework_with`) | `review::a_usage_limit_review_fails_once_and_waits_on_the_reset` (the body gained a `## Rework 2 (review)` section) | ✅ failed |
+
+4/4 caught.
+
