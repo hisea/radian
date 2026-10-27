@@ -3242,3 +3242,22 @@ those copies (never `git checkout`); the tests ran with `cargo nextest run -p ra
 | TK0167-M2 | render a hard-coded `(waiting for a free concurrency slot)` for every reason in `extra_text` | ✅ failed | `arc_flows::two_flows_show_the_column_the_field_the_reason_and_the_counts` (a full `code` and `image` flow show the shared reason instead of `waiting for a free code slot` / `waiting for a free image slot`) |
 
 2/2 caught.
+
+## TK0191: the TUI startup route resolves its catalog cap once (2026-10-27, branch `work/TK0196-chat-request-output-cap-and-usage-followups`)
+
+The change under test is TK0191's: the startup route derives `request_output` from the catalog
+(the chat route's `min(limit.output, ⌊C/4⌋)`), and both the window's `R`/`B` and the model's
+`max_output_tokens` come from that one value. The mutation was applied in place to
+`crates/radian-tui/src/cli/run_resolve.rs` (`request_output` becomes `RouteOutput::None`, the
+pre-TK0191 value), the `radian` binary rebuilt (`cargo build -p radian-tui --bin radian`, so the
+pty test does not run a stale binary), and the source restored from
+`.radian/mut/run_resolve.rs.orig` (`cmp` identical). The test ran with `cargo nextest run
+-p radian-tui --locked --profile sandbox --test pty -E
+'test(=pty_the_startup_notice_names_the_catalog_cap_and_sends_it)'`; unmutated, the same command
+passes 1/1.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0191-M1 | the startup route's `request_output` is `RouteOutput::None` (the catalog cap is never resolved), so `R`, `B` and the sent `max_tokens` all fall back to none / 16384 / 922000 | ✅ 1 failed (rc=100) | `pty_the_startup_notice_names_the_catalog_cap_and_sends_it` (the startup line printed `C 1000000, I 922000, output 384000, R 16384, B 922000` instead of `R 250000, B 750000`; the request would carry no `max_tokens`) |
+
+1/1 caught.
