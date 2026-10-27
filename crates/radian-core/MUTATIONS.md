@@ -55,3 +55,13 @@ test was run, and the source was restored from `.radian/core_model.rs.bak` (`cmp
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0214-M8 | `http_status_of` searches for `HTTP ` anywhere instead of requiring the prefix | ✅ 1 failed (rc=100) | `model::tests::http_status_is_read_from_the_response_prefix_only` (`the provider said HTTP 400` read as `Some(400)` instead of `None`) |
+
+## A truncation notice only for a model call that can happen (TK0211, 2026-10-27)
+
+Branch `work/TK0211-max-tokens-continuation-followups`. The mutation was applied in place, only
+`tests/turn.rs` was run, and the source was restored from `.radian/turn.rs.clean`
+(`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0211-M1 | the continuation consults the call cap only again (`self.run.cap_end().is_some()` instead of `self.run.pre_call_end()`) | ✅ 1 failed (rc=100) | `tests/turn.rs::a_passed_deadline_beats_a_truncation_continuation` (the deadline that passed after the response still journaled a notice, `left: 1, right: 0`) |

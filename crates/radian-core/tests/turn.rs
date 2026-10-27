@@ -1,6 +1,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::*;
 use radian_core::*;
@@ -299,6 +300,45 @@ async fn the_call_cap_beats_a_truncation_continuation() {
     assert_eq!(outcome.model_calls, 1);
     assert_eq!(model.requests().len(), 1);
     assert_eq!(notice_count(chat.transcript()), 0);
+}
+
+/// A deadline that has already passed by the time the truncated answer is in the transcript
+/// ends the turn on that deadline and writes no continuation notice: the notice's model call
+/// can never happen (ADR 0017 §2).
+#[tokio::test]
+async fn a_passed_deadline_beats_a_truncation_continuation() {
+    /// Blocks long enough that the turn deadline passes between the response and the notice.
+    struct SlowAfterResponse;
+
+    impl Hooks for SlowAfterResponse {
+        async fn after_model_response(
+            &self,
+            _cx: &HookContext,
+            _response: &ModelResponse,
+        ) -> Result<(), HookError> {
+            std::thread::sleep(Duration::from_millis(100));
+            Ok(())
+        }
+    }
+
+    let model = ScriptedModel::new([stop(StopReason::MaxTokens, "half"), text("never sent")]);
+    let agent = Arc::new(Agent::new(model.clone(), NoTools).with_hooks(SlowAfterResponse));
+    let mut chat = agent.open_session().await.unwrap();
+    let options = TurnOptions {
+        deadline: Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+        ..Default::default()
+    };
+
+    let outcome = chat.run_turn("go", options, &NoopSink).await.unwrap();
+
+    assert_eq!(
+        outcome.status,
+        RunStatus::Cancelled(CancelReason::DeadlineExceeded)
+    );
+    assert_eq!(outcome.model_calls, 1);
+    assert_eq!(model.requests().len(), 1, "the continuation never ran");
+    assert_eq!(notice_count(chat.transcript()), 0);
+    assert_eq!(chat.transcript().len(), 2, "input and the truncated answer");
 }
 
 #[tokio::test]

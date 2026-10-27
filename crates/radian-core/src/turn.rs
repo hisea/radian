@@ -1337,6 +1337,27 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
         }
     }
 
+    /// Why the turn ends before its next model call, if that is already decided: the interrupt
+    /// (an explicit cancel or the turn deadline) and the model-call cap. `step_once` checks the
+    /// interrupt before it injects steering and the cap after, so each gate has its own method
+    /// and this one combines them for the continuation: a notice is only written for a model
+    /// call that can happen (ADR 0017 §2). A new gate belongs here and in `step_once` together.
+    fn pre_call_end(&self) -> Option<RunStatus> {
+        self.interrupt_end().or_else(|| self.cap_end())
+    }
+
+    /// The interrupt gate: an explicit cancel, or the turn deadline (`TurnOptions::deadline`);
+    /// both end the turn as `Cancelled`.
+    fn interrupt_end(&self) -> Option<RunStatus> {
+        self.interrupt.check().map(RunStatus::Cancelled)
+    }
+
+    /// The call-count gate: ADR 0015's budget is on model calls, not on the context window, and
+    /// a continuation is an ordinary model call (ADR 0017 §2).
+    fn cap_end(&self) -> Option<RunStatus> {
+        (self.model_calls >= self.max_model_calls).then_some(RunStatus::BudgetExceeded)
+    }
+
     /// Commits each steering message through the journal (S3): if the j-th fails, the first
     /// j-1 are journaled and in memory, the rest are not, and memory still equals the journal.
     /// The failed message and those behind it go back to the queue, so the turn's outcome and
@@ -1575,12 +1596,12 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             self.run.started = true;
             events.emit(AgentEvent::TurnStarted);
         }
-        if let Some(reason) = interrupt.check() {
-            return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
+        if let Some(status) = self.run.interrupt_end() {
+            return Ok(self.run.finish(status, events));
         }
         self.run.inject_steering(events).await?;
-        if self.run.model_calls >= self.run.max_model_calls {
-            return Ok(self.run.finish(RunStatus::BudgetExceeded, events));
+        if let Some(status) = self.run.cap_end() {
+            return Ok(self.run.finish(status, events));
         }
 
         self.run.model_calls += 1;
@@ -1891,9 +1912,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             StopReason::EndTurn => {
                 // Steering that arrived during the final answer keeps the turn going,
                 // which covers what other runtimes call follow-up messages.
-                if self.run.steering.has_pending()
-                    && self.run.model_calls < self.run.max_model_calls
-                {
+                if self.run.steering.has_pending() && self.run.cap_end().is_none() {
                     return Ok(Step::Continue);
                 }
                 RunStatus::Completed
@@ -1903,12 +1922,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             StopReason::MaxTokens => {
                 // A truncated answer with no tool calls: the response is already committed
                 // above, so reasoning and partial text stay. Two continuations in a row are
-                // allowed; the third ends the turn. The call cap wins over the continuation:
-                // a notice whose model call cannot happen is not written.
+                // allowed; the third ends the turn. A cancel, the deadline or the call cap
+                // that already ends the next step wins over the continuation: a notice whose
+                // model call cannot happen is not written. The context budget is not decided
+                // here — it is decided by the next request, which the notice itself is part
+                // of, and it only ends a step as a compaction error (ADR 0018) — so the
+                // notice stays and the budget's outcome still wins.
                 if self.run.max_tokens_streak > MAX_TOKENS_CONTINUATIONS {
                     RunStatus::Incomplete(IncompleteReason::MaxTokens)
-                } else if self.run.model_calls >= self.run.max_model_calls {
-                    RunStatus::BudgetExceeded
+                } else if let Some(status) = self.run.pre_call_end() {
+                    status
                 } else {
                     let notice = Message::User {
                         content: vec![ContentPart::text(MAX_TOKENS_CONTINUATION_NOTICE)],
@@ -2034,7 +2057,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
             }
             _ => {}
         }
-        if run.model_calls >= run.max_model_calls {
+        if run.cap_end().is_some() {
             if let Err(e) = run
                 .resolve_unexecuted(
                     &calls,
