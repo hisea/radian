@@ -175,7 +175,14 @@ advertises no client capability dependence.
 the same recovery, the same model route and access the journal records. Its `cwd` obeys the
 `session/new` rule (an absolute directory equal to `--workspace`, or the workspace when the
 flag is absent), and its `mcpServers` are merged exactly as `session/new`'s are (decision 9).
-An unknown id is an error from the opener that names the id.
+The named session must belong to that workspace: its `SessionCreated.workspace` must equal the
+process workspace, the rule `--export` applies. Both values are canonical paths (the host
+resolves both with `resolve_workspace`), so a workspace reached through a symlink matches the
+directory it names. A session created in another workspace is refused with an
+invalid-parameters error that names it, before the session is opened, so the refusal writes
+nothing and the process can still load a session of its own workspace or start one with
+`session/new`. An unknown id is an error from the opener that names the id, and a file whose
+`SessionCreated` cannot be read is that opener's error too, never this refusal.
 
 The response is an empty `LoadSessionResponse`. Before it, the journal's transcript — the
 recovered history `radian exec --resume` would send to the model (ADR 0002 repairs an unpaired
@@ -217,7 +224,9 @@ session has none: the first call that needs an approval asks again.
 rejection, a cancellation with the interrupted journal prefix, a model error, a prompt whose
 journaled turn end is delayed (the answer must wait for it), a prompt whose own turn follows a
 job-completion wake turn (the wake turn's end must not answer it, and the answer reports that
-turn's own cost and text, not the session's), the one-session refusal, the
+turn's own cost and text, not the session's), the one-session refusal, a `session/load` of a
+session created in another workspace (refused by name, then a load of a session in the process
+workspace succeeds), the
 shared flag set, and `session/load` — a session written by one process and loaded by a second,
 whose replay and continued journal the test checks by folding the journal. `journal-selfcheck`
 replays the sessions the suite writes. The touched crates' mutation records name the tests that
