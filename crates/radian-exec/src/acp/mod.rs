@@ -616,22 +616,23 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
     // The status of **that** turn's live end: another turn's `RunFinished` must not decide this
     // answer's `stopReason`.
     let status = ledger.status(&turn);
-    let summary = super::jsonl::summarize_journal(session.journal_path());
+    // The fee and text are that turn's own (ADR 0049): folding the journal now is safe because
+    // the fold takes only the records between this turn's `TurnStarted` and `TurnFinished`, so
+    // a turn that starts after it cannot leak in. `estimated` is false: every call of a turn
+    // this process ran was priced as it arrived (ADR 0027).
+    let summary = super::jsonl::summarize_turn(session.journal_path(), &turn);
     let cost = summary.fee_micros.map(|micros| {
         json!({
             "micros": micros,
             "incomplete": summary.fee_incomplete,
-            "estimated": session.projection().read().cost_estimated(),
+            "estimated": false,
         })
     });
     let mut radian = json!({
         "cost": cost,
         "text": summary.last_text,
     });
-    if let Some(error) = state
-        .runtime_events()
-        .and_then(|events| events.last_error())
-    {
+    if let Some(error) = ledger.error(&turn) {
         radian["error"] = Value::String(error);
     }
     Ok(json!({

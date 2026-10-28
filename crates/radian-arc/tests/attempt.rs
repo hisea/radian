@@ -121,9 +121,17 @@ fn write_worker_kind(store: &Store, task: &str, attempt: u32, kind: &str) {
     .unwrap();
 }
 
-/// The attempt's `execution.json`, which the wrapper writes: the cost rule reads the session
-/// id from it to tell an attempt that shares the previous session from one with its own.
+/// The attempt's `execution.json` for a command worker, which the wrapper writes: the cost
+/// rule reads the session id from it to tell an attempt that shares the previous session from
+/// one with its own, and the worker kind to tell a command worker's session total from the
+/// radian worker's turn fee.
 fn write_execution(store: &Store, task: &str, attempt: u32, session: &str) {
+    write_execution_worker(store, task, attempt, session, "command");
+}
+
+/// The attempt's `execution.json` with the worker kind as well, so the cost rule can see a
+/// `radian` worker's turn fee where a command worker reports a session total.
+fn write_execution_worker(store: &Store, task: &str, attempt: u32, session: &str, kind: &str) {
     let dir = attempt_ops::run_dir(store, task, attempt);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -131,6 +139,7 @@ fn write_execution(store: &Store, task: &str, attempt: u32, session: &str) {
         json!({
             "attempt_id": format!("{task}-{attempt}"),
             "session_id": session,
+            "worker": {"kind": kind},
         })
         .to_string(),
     )
@@ -1012,6 +1021,39 @@ fn cost_is_the_attempt_delta_of_the_session_total() {
         (record["session_cost_usd"].as_f64().unwrap() - 1.5).abs() < 1e-9,
         "{record}"
     );
+}
+
+/// ADR 0048 decisions 7 and 12 with ADR 0049: a `radian` worker attempt is one prompt, and its
+/// `_meta.radian.cost` is that turn's fee, so a resumed attempt adds that whole value — the
+/// session-total delta would keep only the increase over the previous attempt. Mutation: take
+/// the delta for the `radian` worker too, and the second attempt reads 0.5 instead of 1.5.
+#[test]
+fn a_radian_workers_resumed_attempt_counts_its_own_prompt_turn() {
+    let (_repo, store) = setup("radian-cost");
+    let (_plan, tasks) = confirmed_plan_with_tasks(&store, "plan", &["work"]);
+    let task = &tasks[0];
+
+    attempt_ops::claim(&store, task).expect("claim 1");
+    write_stream(&store, task, 1, Some(1_000_000));
+    write_execution_worker(&store, task, 1, "shared", "radian");
+    let first_finish = finish(&store, task, 1, "failed", false, None);
+    let first =
+        attempt_ops::apply(&store, task, 1, Some(&first_finish), None, Some(1)).expect("apply");
+    assert!((first.cost_usd - 1.0).abs() < 1e-9, "{first:?}");
+
+    let retry_at = store.load_task(task).unwrap().item.retry_at.unwrap();
+    attempt_ops::release_retries(&store, &retry_at).expect("release");
+    attempt_ops::claim(&store, task).expect("claim 2");
+    write_stream(&store, task, 2, Some(1_500_000));
+    write_execution_worker(&store, task, 2, "shared", "radian");
+    let second_finish = finish(&store, task, 2, "failed", false, None);
+    let second =
+        attempt_ops::apply(&store, task, 2, Some(&second_finish), None, Some(1)).expect("apply");
+    assert!(
+        (second.cost_usd - 1.5).abs() < 1e-9,
+        "the prompt turn's whole fee is the attempt's cost: {second:?}"
+    );
+    assert_eq!(store.load_task(task).unwrap().item.cost_usd, Some(2.5));
 }
 
 /// With `fresh` every attempt has a session of its own, so its session total is the cost it

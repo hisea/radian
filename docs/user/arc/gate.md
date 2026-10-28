@@ -343,8 +343,9 @@ The attempt's session id is decided by the claim, which writes it to `attempts/<
 A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`, so the worker's journal is found by its session id from the claim on, while the attempt still runs (see [`arc/files`](files.md)).
 
 Cost is counted per attempt.
-`Result.cost` is the session total, so the attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
-The delta is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd`.
+A command worker's `Result.cost` is the session total, so its attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).
+The `radian` worker's `Result.cost` is its prompt turn's fee, so its attempt's cost is that value as it stands, on a resumed session too.
+The attempt's cost is added to the task's `cost_usd` and its `total_cost_usd`; the attempt result records `cost_usd` and `session_cost_usd` (the `cost` the worker's `Result` carried).
 A `reverify` attempt runs no worker and adds no worker cost, but a `review` stage it runs costs the same as any review.
 
 A `review` stage's cost counts too: when arc applies a gate's verdicts, the sum of the attempt's `review_cost_micros` (every session the stage ran; a run that reported none adds `0`) is added to the task's `cost_usd` and `total_cost_usd`, and both budgets are checked then.

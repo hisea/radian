@@ -44,6 +44,9 @@ struct LedgerInner {
     claimed: HashMap<MessageId, String>,
     /// Turn id -> the status of its live `RunFinished`.
     live: HashMap<String, RunStatus>,
+    /// Turn id -> the masked `TurnFailed` message that failed it, so a prompt reads its own
+    /// turn's error and not a later turn's.
+    errors: HashMap<String, String>,
     /// The turns whose end the driver has journaled (`TurnFinished`), newest last.
     journaled: HashSet<String>,
     /// The same turn ids in the order they finished, so the oldest can be forgotten.
@@ -71,6 +74,13 @@ impl TurnLedger {
         if let Some(turn) = inner.current.clone() {
             inner.live.insert(turn, status);
         }
+    }
+
+    /// A turn failed on a model or hook error (ADR 0017): keep the text against **that** turn,
+    /// so a prompt reports its own turn's error even when a later turn fails before the answer
+    /// task runs.
+    fn turn_failed(&self, turn: &str, message: String) {
+        self.lock().errors.insert(turn.to_owned(), message);
     }
 
     /// The runtime events a host receives, in the order the driver writes them (ADR 0049).
@@ -124,6 +134,11 @@ impl TurnLedger {
         self.lock().live.get(turn).cloned()
     }
 
+    /// The masked error that failed `turn`, if it ended on a model or hook error.
+    pub(crate) fn error(&self, turn: &str) -> Option<String> {
+        self.lock().errors.get(turn).cloned()
+    }
+
     /// Resolves when a turn end is journaled.
     pub(crate) fn changed(&self) -> &Notify {
         &self.changed
@@ -140,6 +155,7 @@ impl LedgerInner {
             };
             self.journaled.remove(&turn);
             self.live.remove(&turn);
+            self.errors.remove(&turn);
             self.claimed.retain(|_, claimed| claimed != &turn);
         }
     }
@@ -284,31 +300,23 @@ impl EventSink for AcpEvents {
     }
 }
 
-/// The runtime-event sink: keeps the last turn's failure text for `_meta.radian.error`,
-/// masked with the same secrets the session redacts everywhere else. `TurnStarted` clears it,
-/// so only the turn that just ended can contribute.
+/// The runtime-event sink: keeps each failed turn's error text for `_meta.radian.error`,
+/// masked with the same secrets the session redacts everywhere else, and the [`TurnLedger`].
 ///
-/// It also keeps the [`TurnLedger`]: the prompt answer waits for the journaled end of the turn
-/// that claimed **its** message, because the core's live `RunFinished` fires before the driver
-/// commits the turn (ADR 0010, ADR 0049), and because a turn that ran before the prompt's own
-/// (a job-completion wake turn, ADR 0037) must not answer it.
+/// The prompt answer waits for the journaled end of the turn that claimed **its** message,
+/// because the core's live `RunFinished` fires before the driver commits the turn (ADR 0010,
+/// ADR 0049), and because a turn that ran before the prompt's own (a job-completion wake turn,
+/// ADR 0037) must not answer it. The error and the turn's fee and text are read by turn id
+/// (ADR 0049): a later turn can start and finish before the answer task runs, and none of its
+/// facts may stand in for the prompt's turn.
 pub(crate) struct AcpRuntimeEvents {
-    error: Mutex<Option<String>>,
     secrets: Vec<String>,
     ledger: Arc<TurnLedger>,
 }
 
 impl AcpRuntimeEvents {
     pub(crate) fn new(secrets: Vec<String>, ledger: Arc<TurnLedger>) -> Self {
-        Self {
-            error: Mutex::new(None),
-            secrets,
-            ledger,
-        }
-    }
-
-    pub(crate) fn last_error(&self) -> Option<String> {
-        self.error.lock().unwrap().clone()
+        Self { secrets, ledger }
     }
 
     /// The turn ledger the prompt driver waits on.
@@ -319,16 +327,12 @@ impl AcpRuntimeEvents {
 
 impl radian_runtime::RuntimeEvents for AcpRuntimeEvents {
     fn on_runtime_event(&self, event: &radian_session::RuntimeEvent) {
-        match event {
-            radian_session::RuntimeEvent::TurnFailed { message, .. } => {
-                *self.error.lock().unwrap() = Some(crate::redact::redact(message, &self.secrets));
-            }
-            radian_session::RuntimeEvent::TurnStarted { .. } => {
-                *self.error.lock().unwrap() = None;
-            }
-            // `TurnFailed` is not the turn end: the driver journals it, then `TurnFinished` with
-            // the failed outcome, and the answer must wait for that record.
-            _ => {}
+        if let radian_session::RuntimeEvent::TurnFailed { turn_id, message } = event {
+            // `TurnFailed` is not the turn end: the driver journals it, then `TurnFinished`
+            // with the failed outcome, and the answer must wait for that record. Keeping it
+            // per turn keeps it out of a later turn's answer.
+            self.ledger
+                .turn_failed(turn_id, crate::redact::redact(message, &self.secrets));
         }
         self.ledger.on_runtime(event);
     }
@@ -354,4 +358,25 @@ pub(crate) fn events(
         )),
         Arc::new(AcpRuntimeEvents::new(secrets, ledger)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnLedger;
+
+    /// ADR 0049: `_meta.radian.error` belongs to the turn that failed. Once the prompt's
+    /// `TurnFinished` has woken the answer task, the driver can run and fail a later wake turn
+    /// before that task reads the ledger, so the error must be kept per turn.
+    #[test]
+    fn a_later_turn_failure_does_not_replace_an_earlier_turns_error() {
+        let ledger = TurnLedger::new();
+        ledger.turn_failed("t-1", "the prompt's turn failed".to_owned());
+        ledger.turn_failed("t-2", "the wake turn failed".to_owned());
+        assert_eq!(
+            ledger.error("t-1").as_deref(),
+            Some("the prompt's turn failed")
+        );
+        assert_eq!(ledger.error("t-2").as_deref(), Some("the wake turn failed"));
+        assert_eq!(ledger.error("t-3"), None);
+    }
 }
