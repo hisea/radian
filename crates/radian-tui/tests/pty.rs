@@ -2101,11 +2101,12 @@ async fn pty_panic_path_does_not_orphan_a_background_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_resume_renders_the_stored_history() {
     let dir = TempDir::new("resume");
+    let (home, workspace) = resume_home("resume-home");
     let path = dir.path().join("resume-me.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "resume-me",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     use radian_core::TranscriptJournal;
@@ -2126,7 +2127,7 @@ async fn pty_resume_renders_the_stored_history() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("new reply")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -2137,6 +2138,7 @@ async fn pty_resume_renders_the_stored_history() {
             "--resume",
             "resume-me",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -2174,11 +2176,12 @@ async fn pty_resume_renders_the_stored_history() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
     let dir = TempDir::new("resume-goal");
+    let (home, workspace) = resume_home("resume-goal-home");
     let path = dir.path().join("goal.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "goal",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     let budget = radian_session::GoalState::default_budget();
@@ -2194,7 +2197,7 @@ async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("new reply")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -2205,6 +2208,7 @@ async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
             "--resume",
             "goal",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -2226,13 +2230,14 @@ async fn pty_resume_with_paused_goal_shows_the_resume_hint() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_new_from_a_goal_session_starts_without_a_goal() {
     let dir = TempDir::new("new-goal");
+    let (home, workspace) = resume_home("new-goal-home");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let path = sessions.join("old.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "old",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     let budget = radian_session::GoalState::default_budget();
@@ -2248,7 +2253,7 @@ async fn pty_new_from_a_goal_session_starts_without_a_goal() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("SECOND-TWO")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -2259,6 +2264,7 @@ async fn pty_new_from_a_goal_session_starts_without_a_goal() {
             "--resume",
             "old",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -3406,9 +3412,10 @@ async fn pty_a_header_value_expands_the_session_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_a_resumed_session_header_uses_the_resumed_id() {
     let dir = TempDir::new("header-resume");
+    let (home, _workspace) = resume_home("header-resume-home");
     let server = MockServer::start(vec![text_reply("FIRST"), text_reply("SECOND")]).await;
 
-    let mut first = Pty::spawn(
+    let mut first = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -3419,6 +3426,7 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
             "--session-id",
             "abc",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -3436,7 +3444,7 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
     first.quit();
     assert_eq!(first.app_exit_code(), Some(0));
 
-    let mut second = Pty::spawn(
+    let mut second = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -3449,6 +3457,7 @@ async fn pty_a_resumed_session_header_uses_the_resumed_id() {
             "--header",
             "x-s={session_id}",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -5682,12 +5691,13 @@ async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
     let dir = TempDir::new("composer-draft");
+    let (home, _workspace) = resume_home("composer-draft-home");
     let sessions = dir.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let server = MockServer::start(vec![text_reply("never")]).await;
     let draft = sessions.join("draft.draft");
 
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -5698,6 +5708,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
             "--session-id",
             "draft",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         30,
         110,
     );
@@ -5735,7 +5746,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
     );
 
     // Resume the same session: the draft is restored into the input box and consumed.
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -5746,6 +5757,7 @@ async fn pty_a_draft_is_written_on_exit_and_restored_by_resume() {
             "--resume",
             "draft",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         30,
         110,
     );
@@ -5829,6 +5841,22 @@ async fn seed_session(dir: &Path, id: &str, workspace: &str, user: &str) {
         .await
         .unwrap();
     drop(journal);
+}
+
+/// The `$HOME` a resume test's spawns share, and the default workspace `$HOME/tmp` it implies.
+/// The pty harness gives every spawn its own `HOME`, but a resume opens only in the workspace
+/// the session records (ADR 0006 §4), so the creating and resuming processes need the same one.
+/// The directory is created here so a hand-written `SessionCreated` can record its canonical
+/// path before any app runs.
+fn resume_home(label: &str) -> (TempDir, String) {
+    let home = TempDir::new(label);
+    let workspace = home.path().join("tmp");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace = std::fs::canonicalize(&workspace)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    (home, workspace)
 }
 
 /// The picker lists this workspace's sessions, filters, resumes the chosen one, and the next
@@ -6270,13 +6298,14 @@ async fn pty_a_rebound_send_key_sends_and_enter_does_not() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
     let dir = TempDir::new("config-screen");
+    let (home, workspace) = resume_home("config-screen-home");
     let config = dir.path().join("config.toml");
     std::fs::write(&config, "schema_version = 1\n").unwrap();
     let path = dir.path().join("screen-me.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "screen-me",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     use radian_core::TranscriptJournal;
@@ -6290,7 +6319,7 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("never")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--config",
             config.to_str().unwrap(),
@@ -6303,6 +6332,7 @@ async fn pty_the_config_line_is_not_written_inside_the_alternate_screen() {
             "--resume",
             "screen-me",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         30,
         110,
     );
@@ -6441,6 +6471,10 @@ async fn pty_fork_creates_a_resumable_child_when_idle() {
             sessions.to_str().unwrap(),
             "--resume",
             &child_id,
+            // The child records the parent's workspace; the resume opens only there (ADR 0006
+            // §4), and each pty here gets its own `$HOME`.
+            "--workspace",
+            ws.to_str().unwrap(),
         ],
         30,
         110,
@@ -10869,11 +10903,12 @@ async fn pty_auto_key_approves_once_and_enables_auto() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_resume_restores_auto_on_workspace() {
     let dir = TempDir::new("auto-resume");
+    let (home, workspace) = resume_home("auto-resume-home");
     let path = dir.path().join("auto-resume.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "auto-resume",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     use radian_core::TranscriptJournal;
@@ -10895,7 +10930,7 @@ async fn pty_resume_restores_auto_on_workspace() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -10908,6 +10943,7 @@ async fn pty_resume_restores_auto_on_workspace() {
             "--profile",
             "workspace",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         30,
         110,
     );
@@ -10937,11 +10973,12 @@ async fn pty_resume_restores_auto_on_workspace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
     let dir = TempDir::new("auto-resume-full");
+    let (home, workspace) = resume_home("auto-resume-full-home");
     let path = dir.path().join("auto-full.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "auto-full",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     journal
@@ -10954,7 +10991,7 @@ async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
     drop(journal);
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -10967,6 +11004,7 @@ async fn pty_resume_does_not_restore_auto_on_full_and_hints() {
             "--profile",
             "full",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         30,
         110,
     );
@@ -11106,11 +11144,12 @@ fn sgr(code: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
     let dir = TempDir::new("select-copy");
+    let (home, workspace) = resume_home("select-copy-home");
     let path = dir.path().join("select-me.jsonl");
     let journal = radian_session::SessionJournal::create(
         &path,
         "select-me",
-        radian_session::SessionCreatedData::new("/tmp", json!({})),
+        radian_session::SessionCreatedData::new(&workspace, json!({})),
     )
     .expect("create the session file");
     use radian_core::TranscriptJournal;
@@ -11123,7 +11162,7 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
         .unwrap();
     drop(journal);
 
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -11135,6 +11174,7 @@ async fn pty_a_mouse_drag_copies_the_selection_via_osc52() {
             "--resume",
             "select-me",
         ],
+        &[("HOME", home.path().to_str().unwrap())],
         24,
         100,
     );
@@ -12547,6 +12587,7 @@ async fn pty_the_shipped_default_footer_is_two_rows_without_a_config() {
 async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
     let dir = TempDir::new("cost-resume");
     let home = TempDir::new("cost-resume-home");
+    let (workspace_home, workspace) = resume_home("cost-resume-workspace");
     // A catalog cache with a price for the model the session ran on. `resolve_offline` reads
     // it, so the resumed fee is resolved without any network (ADR 0026 D7).
     let cache = home.path().join("cache/catalog");
@@ -12576,7 +12617,7 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
             &path,
             "resumed",
             radian_session::SessionCreatedData::new(
-                "/tmp",
+                &workspace,
                 serde_json::json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
             ),
         )
@@ -12624,6 +12665,7 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
         ],
         &[
             ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("HOME", workspace_home.path().to_str().unwrap()),
             // The harness writes the `opencode-go` credential into `auth.json` from this env
             // name (ADR 0026 D2: a key comes only from `auth.json`).
             ("OPENCODE_GO_API_KEY", "test-key-not-a-secret"),

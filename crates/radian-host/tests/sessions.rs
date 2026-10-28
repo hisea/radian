@@ -134,9 +134,13 @@ fn a_session_file_names_the_workspace_without_opening_it_for_resume() {
         sessions::other_workspace(dir.path(), "in-ws", "/work/ws"),
         None
     );
-    assert_eq!(
-        sessions::other_workspace(dir.path(), "in-ws", "/work/other").as_deref(),
-        Some("/work/ws")
+    let message = sessions::other_workspace(dir.path(), "in-ws", "/work/other")
+        .expect("another workspace's session is refused");
+    assert!(
+        message.contains("in-ws")
+            && message.contains("/work/ws")
+            && message.contains("not in this workspace"),
+        "{message}"
     );
     assert_eq!(
         sessions::other_workspace(dir.path(), "missing", "/work/ws"),

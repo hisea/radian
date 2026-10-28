@@ -5788,6 +5788,56 @@ async fn export_refuses_another_workspaces_session() {
     assert!(stdout.is_empty(), "{stdout}");
 }
 
+/// ADR 0006 §4: `--resume` applies the same workspace rule as `--export` and ACP's
+/// `session/load`. A session created in another workspace is refused by name, and the journal
+/// is not written.
+#[tokio::test]
+async fn resume_refuses_another_workspaces_session() {
+    // `common::process_dir`, not `scratch`: the sandbox cannot create `/tmp` directories, and
+    // this test opens no Unix socket (the reason `scratch` uses `/tmp`).
+    let dir = common::process_dir("radian-exec-resume-other-ws");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws_a = dir.join("ws-a");
+    let ws_b = dir.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+    let session = write_session(&sessions, "from-a", &canonical(&ws_a), "reply", None, None);
+    let before = std::fs::read(&session).unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:1",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--workspace",
+                ws_b.to_str().unwrap(),
+                "--resume",
+                "from-a",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("from-a") && stderr.contains("not in this workspace"),
+        "the error names the session and the rule: {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(
+        std::fs::read(&session).unwrap(),
+        before,
+        "a refused resume writes nothing to the journal"
+    );
+}
+
 /// Acceptance 5: `--out` writes a file, refuses an existing one, and `--force` overwrites it.
 #[tokio::test]
 async fn export_out_refuses_to_overwrite_without_force() {

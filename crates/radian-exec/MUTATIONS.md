@@ -623,3 +623,35 @@ Unmutated, the six new tests pass 6/6.
 4/4 caught. M2 changes only the symlink case: the test harness's `$TMPDIR` path is already
 canonical on this machine, so the other tests see the same string either way.
 
+## Resume applies the same workspace rule (TK0223 rework, 2026-10-28)
+
+Branch `work/TK0223-acp-load-refuses-other-workspace`. `radian_host::open_session` now reads
+the resumed journal's `SessionCreated.workspace` after the locked parse and before
+`into_journal` can write the interrupted-turn `Aborted` line, and refuses a session of another
+workspace through `radian_host::sessions::workspace_mismatch` — the equality and the wording
+`--export` and `radian acp`'s `session/load` use. `radian --resume`, `radian exec --resume`
+and `session/new` with `--resume` therefore agree with `session/load`. The two
+`session/load` tests the review found passing on the old code now assert the refusal first.
+
+Each mutation was applied in place, the `radian` binary was rebuilt
+(`cargo build -p radian-tui --bin radian`), and the source was restored from `.radian/mut/`
+(`cmp` identical). The tests ran in the sandbox profile:
+
+- `cargo nextest run -p radian-exec --locked --profile sandbox --test cli -E 'test(<name>)'`
+- `cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E 'test(<name>)'`
+- `cargo nextest run -p radian-tui --locked --profile sandbox --test resume`
+- `cargo nextest run -p radian-tui --locked --profile sandbox --test pty -E 'test(<name>)'`
+
+Unmutated, every test named here passes.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0223-M5 | `open_session` skips the resume workspace check | ✅ 2 failed | `resume_refuses_another_workspaces_session` (`radian-exec::cli` and `radian-tui::resume`: the cross-workspace resume succeeds and reaches the model) |
+| TK0223-M6 | `workspace_mismatch` refuses every recorded workspace (`recorded != workspace` → `true`) | ✅ 1 failed | `pty_resume_renders_the_stored_history` (a session of the process's own workspace is refused) |
+| TK0223-M1 (re-run on the rewritten tests, together with M5: the pre-change load path) | the ACP pre-check is removed, so `session/load` falls through to the unguarded opener | ✅ 2 failed | `session_load_accepts_the_workspace_reached_through_a_symlink` (the other workspace's session was loaded and replayed) and `session_load_of_a_truncated_journal_is_the_openers_error` (the first, different-workspace load was accepted) |
+| TK0223-M2 (re-run on the rewritten test) | the ACP check compares the request's raw `cwd` instead of the canonical process workspace | ✅ 1 failed | `session_load_accepts_the_workspace_reached_through_a_symlink` (the linked path no longer matches the recorded canonical workspace) |
+| TK0223-M4 (re-run on the rewritten test) | a journal with no readable `SessionCreated` is treated as another workspace | ✅ 1 failed | `session_load_of_a_truncated_journal_is_the_openers_error` (the reply is `INVALID_PARAMS` instead of the opener's `INTERNAL_ERROR`) |
+
+5/5 caught. M5 and M1 together are the pre-change behavior for `session/load`: the rewritten
+symlink and truncated tests fail on them, which is what the review asked for.
+

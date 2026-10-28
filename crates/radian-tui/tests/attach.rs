@@ -880,10 +880,12 @@ impl Pty {
 }
 
 /// A valid v1 session file with `n` messages; the last one is a visible marker, so "the first
-/// frame is up" is the moment it appears.
-fn write_session(path: &Path, session_id: &str, n: usize) {
+/// frame is up" is the moment it appears. `workspace` is recorded canonical, because the resume
+/// opens only in the workspace a session records (ADR 0006 §4).
+fn write_session(path: &Path, session_id: &str, n: usize, workspace: &Path) {
     use radian_core::Message;
     use std::io::BufWriter;
+    let workspace = std::fs::canonicalize(workspace).expect("canonicalize the workspace");
     let mut out = BufWriter::new(std::fs::File::create(path).unwrap());
     let ts = "2026-10-12T00:00:00.000000Z";
     writeln!(
@@ -891,7 +893,7 @@ fn write_session(path: &Path, session_id: &str, n: usize) {
         "{}",
         serde_json::json!({"schema_version":1,"session_id":session_id,"seq":0,"ts":ts,
             "event":"SessionCreated","critical":true,
-            "data":{"workspace":"/work/example","config_snapshot":{}}})
+            "data":{"workspace":workspace,"config_snapshot":{}}})
     )
     .unwrap();
     for i in 0..n {
@@ -932,7 +934,14 @@ fn a_ten_thousand_entry_first_frame_is_within_twice_a_resume_first_frame() {
     let scratch = Scratch::new("perf");
     let sessions = scratch.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    write_session(&sessions.join("perf.jsonl"), "perf", 10_000);
+    // The pty inherits the test process's cwd (it sets HOME, not the cwd), and the resume
+    // resolves the workspace from that directory, so the session must record it.
+    write_session(
+        &sessions.join("perf.jsonl"),
+        "perf",
+        10_000,
+        &std::env::current_dir().unwrap(),
+    );
     let dir = sessions.to_str().unwrap();
 
     let mut attach = Vec::new();

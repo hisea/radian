@@ -1238,16 +1238,21 @@ async fn session_load_refuses_another_workspace_when_the_cwd_sets_it() {
 }
 
 /// ADR 0049 decision 11: both the recorded and the process workspace are canonical
-/// (`resolve_workspace`), so the same directory reached through a symlink is accepted.
+/// (`resolve_workspace`), so the same directory reached through a symlink is accepted. The
+/// other workspace in the same process is refused first, so the acceptance of the linked
+/// directory is the changed behavior, not the old "load any named session".
 #[cfg(unix)]
 #[tokio::test]
 async fn session_load_accepts_the_workspace_reached_through_a_symlink() {
     let env = Env::fresh("load-symlink");
     let ws_a = env.home.join("ws-a");
+    let ws_b = env.home.join("ws-b");
     let link = env.home.join("ws-link");
     std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
     std::os::unix::fs::symlink(&ws_a, &link).unwrap();
     write_session(&env.sessions, "in-a", &canonical(&ws_a), "hello from a");
+    write_session(&env.sessions, "in-b", &canonical(&ws_b), "hello from b");
     let mut acp = Acp::spawn(
         &[
             "--model",
@@ -1260,6 +1265,17 @@ async fn session_load_accepts_the_workspace_reached_through_a_symlink() {
         &env,
     );
     acp.initialize().await;
+    // The process workspace is the link's target (`ws-a`), so `in-b` is another workspace and
+    // is refused. This is what the pre-change code did not do: it loaded every named session.
+    let (refused, replayed) = acp.load_session("in-b", &link).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("in-b") && message.contains("not in this workspace"),
+        "the error names the session and the rule: {refused}"
+    );
+    // The link still matches the canonical workspace `in-a` recorded.
     let (response, replayed) = acp.load_session("in-a", &link).await;
     assert!(response.get("error").is_none(), "{response}");
     assert!(
@@ -1338,11 +1354,12 @@ async fn a_refused_load_leaves_the_process_able_to_start_a_new_session() {
 }
 
 /// ADR 0049 decision 11: a journal whose `SessionCreated` cannot be read is the opener's error
-/// path, not this refusal and not a panic.
+/// path, not this refusal and not a panic. The refusal of a valid other-workspace session comes
+/// first, so the test shows the two errors are different; the pre-change code accepted that
+/// first load (no refusal exists), so this fails on the old behavior.
 #[tokio::test]
 async fn session_load_of_a_truncated_journal_is_the_openers_error() {
-    let env = Env::fresh("load-truncated");
-    let ws = env.workspace.clone();
+    let (env, _ws_a, ws_b, _other) = two_workspaces("load-truncated");
     std::fs::write(
         env.sessions.join("broken.jsonl"),
         "{\"schema_version\":1,\"session_id\":\"broken\",\"seq\":0,\"event\":\"SessionCreated\",\n",
@@ -1355,12 +1372,15 @@ async fn session_load_of_a_truncated_journal_is_the_openers_error() {
             "--base-url",
             "http://127.0.0.1:1",
             "--workspace",
-            ws.to_str().unwrap(),
+            ws_b.to_str().unwrap(),
         ],
         &env,
     );
     acp.initialize().await;
-    let (response, replayed) = acp.load_session("broken", &ws).await;
+    let (refused, replayed) = acp.load_session("from-a", &ws_b).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    let (response, replayed) = acp.load_session("broken", &ws_b).await;
     assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
     assert_eq!(response["error"]["code"], json!(-32603), "{response}");
     let message = response["error"]["message"].as_str().unwrap_or_default();

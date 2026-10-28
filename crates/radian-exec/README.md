@@ -37,7 +37,8 @@ Every run is a durable session: one JSONL file per conversation.
 - **New session**: `--session-id <id>` names it (the same value expands `{session_id}` in
   `--header`); otherwise an id is generated and printed to stderr.
 - **`--resume <id>`**: reopen a session and continue; the previous history is sent to the
-  model on the next turn.
+  model on the next turn. The session must belong to the current workspace (the workspace its
+  `SessionCreated` records); another workspace's session is refused, as it is for `--export`.
 - **`--list`**: the sessions of the current workspace (`--workspace`, else the current
   directory), newest activity first: id, created, last activity, message count.
 - One writer per file: a second process opening the same session is refused.

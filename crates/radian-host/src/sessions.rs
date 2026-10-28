@@ -211,12 +211,26 @@ pub fn file_workspace(dir: &Path, session_id: &str) -> Option<String> {
     session_workspace(&session)
 }
 
-/// The workspace recorded by the session file `session_id` in `dir` when it is **not**
-/// `workspace`; `None` when the session belongs here or when [`file_workspace`] has no answer
-/// (the opener reports those). The caller supplies the message.
+/// The refusal for the session file `session_id` in `dir` when it belongs to **another**
+/// workspace, or `None` when it belongs to `workspace` or [`file_workspace`] has no answer (the
+/// opener reports those). The message is [`workspace_mismatch`]'s, so `--resume` and
+/// `session/load` say the same thing.
 pub fn other_workspace(dir: &Path, session_id: &str, workspace: &str) -> Option<String> {
     let recorded = file_workspace(dir, session_id)?;
-    (recorded != workspace).then_some(recorded)
+    workspace_mismatch(session_id, &recorded, workspace)
+}
+
+/// The refusal for a session whose `SessionCreated.workspace` is `recorded` while the process
+/// workspace is `workspace`; `None` when it belongs there. `--resume` and `radian acp`'s
+/// `session/load` both answer with this message; `--export` applies the same equality with its
+/// own wording.
+pub fn workspace_mismatch(session_id: &str, recorded: &str, workspace: &str) -> Option<String> {
+    (recorded != workspace).then(|| {
+        format!(
+            "session {session_id:?} is not in this workspace; it was created in {recorded:?} and \
+             is only opened there"
+        )
+    })
 }
 
 /// The `message_count` and one-line `summary` of one session, both derived from its index

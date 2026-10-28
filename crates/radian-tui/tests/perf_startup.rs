@@ -288,17 +288,20 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-/// Writes a valid v1 session file with `n` messages; the last one is a visible marker.
-fn write_session(path: &std::path::Path, session_id: &str, n: usize) {
+/// Writes a valid v1 session file with `n` messages; the last one is a visible marker. The
+/// workspace is recorded canonical, because a resume opens only in the workspace a session
+/// records (ADR 0006 §4).
+fn write_session(path: &std::path::Path, session_id: &str, n: usize, workspace: &std::path::Path) {
     use radian_core::Message;
     use std::io::BufWriter;
+    let workspace = std::fs::canonicalize(workspace).expect("canonicalize the workspace");
     let mut out = BufWriter::new(File::create(path).unwrap());
     let ts = "2026-10-12T00:00:00.000000Z";
     writeln!(
         out,
         "{}",
         json!({"schema_version":1,"session_id":session_id,"seq":0,"ts":ts,"event":"SessionCreated",
-               "critical":true,"data":{"workspace":"/work/example","config_snapshot":{}}})
+               "critical":true,"data":{"workspace":workspace,"config_snapshot":{}}})
     )
     .unwrap();
     for i in 0..n {
@@ -414,7 +417,12 @@ async fn perf_startup_and_resume() {
     // 2. `--resume` of a 1k / 10k message session.
     for n in [1_000usize, 10_000] {
         let dir = TempDir::new(&format!("resume-{n}"));
-        write_session(&dir.path().join("resume.jsonl"), "resume", n);
+        write_session(
+            &dir.path().join("resume.jsonl"),
+            "resume",
+            n,
+            &std::env::current_dir().unwrap(),
+        );
         let mut times = Vec::new();
         for _ in 0..5 {
             let mut pty = Pty::spawn(

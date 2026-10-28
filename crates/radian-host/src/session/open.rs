@@ -227,6 +227,19 @@ pub async fn open_session(
             radian_session::SessionJournal::lock_for_resume(&journal_path).map_err(cannot)?;
         let parsed = lock.parse().map_err(cannot)?;
         radian_session::trace::took("open/parse-once", t_parse);
+        // ADR 0006 §4: a session opens only in the workspace it records, the rule `--export`
+        // and `radian acp`'s `session/load` apply. The check runs before `into_journal` can
+        // write the interrupted-turn `Aborted` line, so a refusal changes no byte and leaves
+        // the process able to open another session.
+        if let Some(recorded) = crate::sessions::session_workspace(&parsed)
+            && let Some(message) = crate::sessions::workspace_mismatch(
+                session_id.as_str(),
+                &recorded,
+                &workspace.to_string_lossy(),
+            )
+        {
+            return Err(SessionError::Message(message));
+        }
         let (journal, wrote_abort) = lock
             .into_journal(session_id.as_str(), &parsed)
             .map_err(cannot)?;

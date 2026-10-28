@@ -14,6 +14,9 @@ The next default is `~/.radian/sessions`.
 Set `$RADIAN_HOME` to move the home directory.
 
 Pass `--resume <id>` to resume one session.
+The session must belong to this workspace: the workspace recorded when it was created.
+A session from another workspace is refused by name, the same rule `--list` and `--export` use.
+A workspace reached through a symlink matches the directory it names.
 Omit the value in the full screen interface to open the picker.
 Use arrow keys to move in the picker.
 Type to filter the list.

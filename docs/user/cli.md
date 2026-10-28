@@ -46,7 +46,7 @@ Run it only in a real terminal: it takes over the screen.
 |---|---|---|---|---|---|
 | `--session-dir` | `DIR` | `RADIAN_SESSION_DIR`, else `~/.radian/sessions` | `RADIAN_SESSION_DIR` | — | Where session files live. |
 | `--session-id` | `VALUE` | generated per process | — | `--resume` | The session file name for this run. |
-| `-r`, `--resume` | optional `SESSION_ID` | — | — | `--session-id`, `--list` | Resume a session by id. A bare `--resume` opens the picker. |
+| `-r`, `--resume` | optional `SESSION_ID` | — | — | `--session-id`, `--list` | Resume a session by id. The session must belong to this workspace: another workspace's session is refused, as it is for `--export`. A bare `--resume` opens the picker. |
 | `-l`, `--list` | — | — | — | `--resume` | Print this workspace sessions and exit. |
 | `--pick` | — | — | — | `--resume`, `--session-id` | Pick a session in a full-screen list before opening one. Creates no file. |
 
@@ -102,7 +102,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--output` | `jsonl` | model text | — | Print every journal line, live deltas, and a closing `Result` record as JSON lines. |
 | `--header` | `NAME=VALUE` | — | — | Extra request header. Repeatable. `Authorization` is refused. Only for `openai-compatible`; refused for other providers. `{session_id}` expands. A flag of the same name wins over the file. |
 | `--session-id` | `VALUE` | generated | `--resume`, `--list`, `--search` | The session file name for this process. |
-| `--resume` | `SESSION_ID` | — | `--list` | Resume a session by id. |
+| `--resume` | `SESSION_ID` | — | `--list` | Resume a session by id. The session must belong to this workspace: another workspace's session is refused, as it is for `--export`. |
 | `--list` | — | — | — | Print this workspace sessions and exit. |
 | `--export` | `SESSION_ID` | — | `--prompt`, `--resume`, `--list`, `--search` | Export one session of this workspace and exit. |
 | `--search` | `TEXT` | — | `--prompt`, `--resume`, `--list`, `--export` | Search this workspace sessions and exit. |
