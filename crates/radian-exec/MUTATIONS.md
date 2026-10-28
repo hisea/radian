@@ -601,3 +601,25 @@ rebuilt (`cargo build -p radian-tui --bin radian`), and the source was restored 
 2/2 caught. The cost test's wake turn **succeeds** and reports usage, so the session-wide fold
 differs from the prompt's own turn; the earlier wake test's wake turn fails and reports no
 usage, so it could not tell the two folds apart.
+
+## `radian acp`: `session/load` refuses another workspace (TK0223, 2026-10-28)
+
+Branch `work/TK0223-acp-load-refuses-other-workspace`. `open_session_request` reads the
+journal's `SessionCreated.workspace` through `radian_host::sessions::other_workspace` (the
+comparison `--export` uses) before `setup`, and refuses a session of another workspace with
+JSON-RPC `INVALID_PARAMS`. Each mutation was applied in place, the `radian` binary was rebuilt
+(`cargo build -p radian-tui --bin radian`), and the source was restored from `.radian/mut/`
+(`cmp` identical). The tests ran in the sandbox profile:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E 'test(<name>)'`.
+Unmutated, the six new tests pass 6/6.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0223-M1 | the workspace check never refuses (`other_workspace` always returns `None`) | ✅ 4 failed | `acp::session_load_refuses_a_session_of_another_workspace`, `acp::session_load_refuses_another_workspace_when_the_cwd_sets_it`, `acp::a_refused_load_leaves_the_process_able_to_load_a_valid_session`, `acp::a_refused_load_leaves_the_process_able_to_start_a_new_session` (the cross-workspace load succeeded) |
+| TK0223-M2 | the check compares the request's raw `cwd` instead of the canonical process workspace | ✅ 1 failed | `acp::session_load_accepts_the_workspace_reached_through_a_symlink` (the symlinked path no longer matches the recorded canonical workspace) |
+| TK0223-M3 | the refusal consumes the internal child headers before returning (`*child_headers = None`) | ✅ 2 failed | `acp::a_refused_load_leaves_the_process_able_to_load_a_valid_session` and `acp::a_refused_load_leaves_the_process_able_to_start_a_new_session` (the retry answers `internal`: "the internal child headers were already consumed") |
+| TK0223-M4 | a journal with no readable `SessionCreated` is treated as another workspace instead of being left to the opener | ✅ 1 failed | `acp::session_load_of_a_truncated_journal_is_the_openers_error` (the reply is `INVALID_PARAMS` with "not in this workspace" instead of the opener's `INTERNAL_ERROR`) |
+
+4/4 caught. M2 changes only the symlink case: the test harness's `$TMPDIR` path is already
+canonical on this machine, so the other tests see the same string either way.
+

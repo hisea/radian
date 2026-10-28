@@ -120,6 +120,31 @@ fn export_renders_this_workspaces_session() {
 }
 
 #[test]
+fn a_session_file_names_the_workspace_without_opening_it_for_resume() {
+    let dir = TempDir::new("file-workspace");
+    write_session(dir.path(), "in-ws", "/work/ws", "hello");
+    assert_eq!(
+        sessions::file_workspace(dir.path(), "in-ws").as_deref(),
+        Some("/work/ws")
+    );
+    // An unknown id and a path-like id are the opener's to report.
+    assert_eq!(sessions::file_workspace(dir.path(), "missing"), None);
+    assert_eq!(sessions::file_workspace(dir.path(), "../x"), None);
+    assert_eq!(
+        sessions::other_workspace(dir.path(), "in-ws", "/work/ws"),
+        None
+    );
+    assert_eq!(
+        sessions::other_workspace(dir.path(), "in-ws", "/work/other").as_deref(),
+        Some("/work/ws")
+    );
+    assert_eq!(
+        sessions::other_workspace(dir.path(), "missing", "/work/ws"),
+        None
+    );
+}
+
+#[test]
 fn export_refuses_another_workspace_and_a_path_like_id() {
     let dir = TempDir::new("export-bad");
     write_session(dir.path(), "in-ws", "/work/ws", "export me");

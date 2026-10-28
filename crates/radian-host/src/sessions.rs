@@ -156,7 +156,7 @@ pub fn export(
     }
     let session =
         Session::open(&path).map_err(|e| format!("cannot read session {session_id:?}: {e}"))?;
-    if session_workspace(&session).as_deref() != Some(workspace) {
+    if !in_workspace(&session, workspace) {
         return Err(format!(
             "session {session_id:?} is not in this workspace; only the current workspace can be \
              exported"
@@ -186,6 +186,37 @@ pub fn session_workspace(session: &Session) -> Option<String> {
             .map(str::to_owned),
         _ => None,
     })
+}
+
+/// Whether a session belongs to `workspace`: its `SessionCreated.workspace` is exactly that
+/// value. Both were written by `resolve_workspace`, so both are canonical paths and a
+/// workspace reached through a symlink matches the directory it names.
+///
+/// This is the rule [`export`] refuses on and `radian acp`'s `session/load` applies before it
+/// opens the journal.
+pub fn in_workspace(session: &Session, workspace: &str) -> bool {
+    session_workspace(session).is_some_and(|recorded| recorded == workspace)
+}
+
+/// The workspace recorded by the session file `session_id` in `dir`, read without opening the
+/// journal for appending. `None` when the id is not a plain file name, the file cannot be
+/// read, or it carries no `SessionCreated`: the session opener reports those with its own
+/// message (an unknown id must name the id).
+pub fn file_workspace(dir: &Path, session_id: &str) -> Option<String> {
+    if crate::validate_session_id(session_id).is_err() {
+        return None;
+    }
+    let path = dir.join(format!("{session_id}.jsonl"));
+    let session = Session::open(&path).ok()?;
+    session_workspace(&session)
+}
+
+/// The workspace recorded by the session file `session_id` in `dir` when it is **not**
+/// `workspace`; `None` when the session belongs here or when [`file_workspace`] has no answer
+/// (the opener reports those). The caller supplies the message.
+pub fn other_workspace(dir: &Path, session_id: &str, workspace: &str) -> Option<String> {
+    let recorded = file_workspace(dir, session_id)?;
+    (recorded != workspace).then_some(recorded)
 }
 
 /// The `message_count` and one-line `summary` of one session, both derived from its index

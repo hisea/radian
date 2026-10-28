@@ -1133,6 +1133,245 @@ async fn session_load_of_an_unknown_id_is_an_error_that_names_it() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// A minimal, valid v1 session file for `workspace`, so a load can name a session without a
+/// run: one `SessionCreated`, one user message and one assistant reply.
+fn write_session(dir: &Path, id: &str, workspace: &str, user_text: &str) -> PathBuf {
+    let ts = "2026-10-13T00:00:00.000000Z";
+    let lines = [
+        json!({"schema_version":1,"session_id":id,"seq":0,"ts":ts,"event":"SessionCreated",
+               "critical":true,"data":{"workspace":workspace,"config_snapshot":{}}}),
+        json!({"schema_version":1,"session_id":id,"seq":1,"ts":ts,"event":"MessageAppended",
+               "critical":true,"data":{"index":0,
+               "message":{"user":{"content":[{"text":{"text":user_text}}]}}}}),
+        json!({"schema_version":1,"session_id":id,"seq":2,"ts":ts,"event":"MessageAppended",
+               "critical":true,"data":{"index":1,
+               "message":{"assistant":{"content":[{"text":{"text":"reply"}}]}}}}),
+    ];
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.to_string());
+        text.push('\n');
+    }
+    let path = dir.join(format!("{id}.jsonl"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// The canonical form `resolve_workspace` records, so a hand-written `SessionCreated` matches
+/// what a real run would write (macOS `/var` -> `/private/var` included).
+fn canonical(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .expect("the directory exists")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Two workspaces and a session created in the first, for the workspace rule of
+/// `session/load` (ADR 0049 decision 11).
+fn two_workspaces(prefix: &str) -> (Env, PathBuf, PathBuf, PathBuf) {
+    let env = Env::fresh(prefix);
+    let ws_a = env.home.join("ws-a");
+    let ws_b = env.home.join("ws-b");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+    let session = write_session(&env.sessions, "from-a", &canonical(&ws_a), "hello from a");
+    (env, ws_a, ws_b, session)
+}
+
+/// ADR 0049 decision 11: a session created in workspace A is refused in a process whose
+/// workspace is B: the error names it and says it is not in this workspace, and the journal is
+/// not written.
+#[tokio::test]
+async fn session_load_refuses_a_session_of_another_workspace() {
+    let (env, _ws_a, ws_b, session) = two_workspaces("load-other-ws");
+    let before = std::fs::read(&session).unwrap();
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            ws_b.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session("from-a", &ws_b).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    assert_eq!(response["error"]["code"], json!(-32602), "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("from-a"),
+        "the error names the session: {response}"
+    );
+    assert!(
+        message.contains("not in this workspace"),
+        "the error states the workspace rule: {response}"
+    );
+    assert_eq!(
+        std::fs::read(&session).unwrap(),
+        before,
+        "a refused load writes nothing to the journal"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 11: without `--workspace` the request's `cwd` is the process workspace,
+/// and the same refusal applies to a session created elsewhere.
+#[tokio::test]
+async fn session_load_refuses_another_workspace_when_the_cwd_sets_it() {
+    let (env, _ws_a, ws_b, _session) = two_workspaces("load-other-ws-cwd");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session("from-a", &ws_b).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    assert_eq!(response["error"]["code"], json!(-32602), "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("from-a") && message.contains("not in this workspace"),
+        "the error names the session and the rule: {response}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 11: both the recorded and the process workspace are canonical
+/// (`resolve_workspace`), so the same directory reached through a symlink is accepted.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_load_accepts_the_workspace_reached_through_a_symlink() {
+    let env = Env::fresh("load-symlink");
+    let ws_a = env.home.join("ws-a");
+    let link = env.home.join("ws-link");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::os::unix::fs::symlink(&ws_a, &link).unwrap();
+    write_session(&env.sessions, "in-a", &canonical(&ws_a), "hello from a");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            link.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session("in-a", &link).await;
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(
+        replayed.iter().any(|update| {
+            update["sessionUpdate"] == "user_message_chunk"
+                && update["content"]["text"] == "hello from a"
+        }),
+        "the session's transcript is replayed: {replayed:?}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 11: a refused load consumes nothing, so the process can still load a
+/// session that belongs to its workspace.
+#[tokio::test]
+async fn a_refused_load_leaves_the_process_able_to_load_a_valid_session() {
+    let (env, _ws_a, ws_b, _other) = two_workspaces("load-then-valid");
+    write_session(&env.sessions, "in-b", &canonical(&ws_b), "hello from b");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            ws_b.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (refused, replayed) = acp.load_session("from-a", &ws_b).await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    let (loaded, replayed) = acp.load_session("in-b", &ws_b).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    assert!(
+        replayed.iter().any(|update| {
+            update["sessionUpdate"] == "user_message_chunk"
+                && update["content"]["text"] == "hello from b"
+        }),
+        "the valid session is replayed: {replayed:?}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 11: a refused load consumes nothing, so the process can still start its
+/// own session in the process workspace.
+#[tokio::test]
+async fn a_refused_load_leaves_the_process_able_to_start_a_new_session() {
+    let (env, _ws_a, ws_b, _other) = two_workspaces("load-then-new");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            ws_b.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (refused, replayed) = acp.load_session("from-a", &ws_b).await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    let new = acp.new_session(&ws_b).await;
+    assert!(new.get("error").is_none(), "{new}");
+    assert!(
+        new["result"]["sessionId"].as_str().is_some(),
+        "a session is opened after the refusal: {new}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 11: a journal whose `SessionCreated` cannot be read is the opener's error
+/// path, not this refusal and not a panic.
+#[tokio::test]
+async fn session_load_of_a_truncated_journal_is_the_openers_error() {
+    let env = Env::fresh("load-truncated");
+    let ws = env.workspace.clone();
+    std::fs::write(
+        env.sessions.join("broken.jsonl"),
+        "{\"schema_version\":1,\"session_id\":\"broken\",\"seq\":0,\"event\":\"SessionCreated\",\n",
+    )
+    .unwrap();
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            "http://127.0.0.1:1",
+            "--workspace",
+            ws.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let (response, replayed) = acp.load_session("broken", &ws).await;
+    assert!(replayed.is_empty(), "nothing is replayed: {replayed:?}");
+    assert_eq!(response["error"]["code"], json!(-32603), "{response}");
+    let message = response["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("cannot resume"),
+        "the opener's error path, not the workspace refusal: {response}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 #[tokio::test]
 async fn session_load_after_session_new_is_refused() {
     let env = Env::fresh("load-after-new");
