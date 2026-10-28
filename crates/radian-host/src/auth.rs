@@ -264,6 +264,15 @@ impl AuthStore {
         &self.path
     }
 
+    /// Whether `auth.json` has an entry under `provider_id`, of any type.
+    ///
+    /// The startup check for a rules-only `[providers.<name>]` table asks this, not whether the
+    /// entry holds a usable key: the entry is what declares the provider's `env`
+    /// (`RADIAN_BASE_URL`, `RADIAN_KIND`), and that is what the overlay adds to (ADR 0026 D10).
+    pub fn has_entry(&self, provider_id: &str) -> bool {
+        self.entries.contains_key(provider_id)
+    }
+
     /// Every key for `provider_id`, in file order, or `None` when there is no usable
     /// `api_key` entry (missing, `oauth`, unknown type, or no `key` at all). [`Self::note`]
     /// explains a `None` that is a refusal rather than an absence.

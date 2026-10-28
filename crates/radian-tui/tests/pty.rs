@@ -4890,6 +4890,40 @@ fn pty_anthropic_only_flags_are_refused_under_openai_compatible() {
     }
 }
 
+/// ADR 0026 D10 (TK0221): the TUI checks **every** `[providers.<name>]` table at startup. A
+/// rules-only table whose name has no `auth.json` entry is refused before the terminal is
+/// entered, even though no model selects it, with exit code 2 (ADR 0032 A3).
+#[test]
+fn pty_a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup() {
+    let mut pty = Pty::spawn_with_config(
+        &[],
+        &[],
+        concat!(
+            "schema_version = 1\n",
+            "[providers.orphan]\n",
+            "prefer = [\"anthropic\"]\n",
+        ),
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not refuse the rules-only table"
+    );
+    assert_eq!(
+        pty.app_exit_code(),
+        Some(2),
+        "a config refusal is a startup/usage error (ADR 0032 A3)"
+    );
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw.contains("providers.orphan"), "{raw}");
+    assert!(raw.contains("auth.json"), "{raw}");
+    assert!(
+        !raw.contains("\u{1b}[?1049h"),
+        "a refusal must not enter the alternate screen: {raw}"
+    );
+}
+
 /// ADR 0017: a model error ends the turn, not the session. The TUI shows the error as a
 /// transcript notice, returns to the input box, and the next line runs a new turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

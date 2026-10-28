@@ -116,7 +116,7 @@ kind = "anthropic"
 
 A rule with the same `match` already present is left alone. A read-only configuration (a newer `schema_version`) or an unwritable one keeps the route for this session and the notice says `not saved: <reason>`. A route that came from a rule never probes; if it fails, the error names the rule and the file. When a candidate fails any other way, the turn ends with that candidate's error, followed by `tried <protocol> (HTTP <status>), …` and the rule to set; when every protocol is refused, it ends with the first error and the same line. See `providers` for the three steps and `troubleshooting` for the failure line.
 
-A table with **no** `kind` and **no** `base_url` but with `models`, `prefer`, `base_urls` or `reasoning_replay` adds those to the provider of that name already declared in `auth.json`, with no "config wins" warning. The same table with no `auth.json` entry of that name is refused. A table with `kind` or `base_url` is a full declaration; with a same-name `auth.json` entry, configuration wins and warns once.
+A table with **no** `kind` and **no** `base_url` but with `models`, `prefer`, `base_urls` or `reasoning_replay` adds those to the provider of that name already declared in `auth.json`, with no "config wins" warning. Every such table is checked at startup, not only the provider the run selects: one with no `auth.json` entry of that name is refused then, with one line naming `providers.<name>`, even when another provider is in use. A table with `kind` or `base_url` is a full declaration; with a same-name `auth.json` entry, configuration wins and warns once.
 
 The name uses letters, digits, `-`, and `_` only, and must not shadow a built-in provider.
 Unknown keys under a name are skipped and named.

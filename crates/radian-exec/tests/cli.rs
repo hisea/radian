@@ -9434,6 +9434,244 @@ fn spawn_radian_raw(args: &[&str], envs: &[(String, String)]) -> Child {
         .expect("spawn radian")
 }
 
+// ---------- every provider table at startup (ADR 0026 D10) ----------
+
+/// The environment a named-provider run needs: its own `~/.radian` root and session directory,
+/// a fresh `HOME`, and the fast-failing catalog sink. `RADIAN_CONFIG` is not set, so the
+/// config can only come from `RADIAN_HOME/config/config.toml`.
+fn provider_home_envs(home: &Path) -> Vec<(String, String)> {
+    vec![
+        ("RADIAN_HOME".into(), home.to_string_lossy().into_owned()),
+        (
+            "HOME".into(),
+            fresh_session_dir().to_string_lossy().into_owned(),
+        ),
+        (
+            "RADIAN_SESSION_DIR".into(),
+            fresh_session_dir().to_string_lossy().into_owned(),
+        ),
+        ("RADIAN_CATALOG_URL".into(), common::fast_catalog_url()),
+    ]
+}
+
+/// Writes `<home>/config/config.toml` (the file `RADIAN_HOME` selects).
+fn write_home_config(home: &Path, text: &str) {
+    let dir = home.join("config");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), text).unwrap();
+}
+
+/// A `[providers.orphan]` rules-only table is checked at **startup**, whichever provider the run
+/// selects: with no `auth.json` entry named `orphan` it is refused with one line naming
+/// `providers.orphan`, exit code 2 like every other config refusal, and no request is sent.
+#[tokio::test]
+async fn a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup() {
+    let server = MockServer::start(vec![text_reply("SHOULD-NOT-RUN")]).await;
+    let dir = fresh_session_dir();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        concat!(
+            "schema_version = 1\n",
+            "[model]\n",
+            "provider = \"openai-compatible\"\n",
+            "model = \"m\"\n",
+            "[providers.orphan]\n",
+            "prefer = [\"anthropic\"]\n",
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--base-url", &server.base_url, "-p", "hi"],
+            &[
+                ("RADIAN_CONFIG", config.to_str().unwrap()),
+                ("OPENAI_API_KEY", "sk-test"),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(
+        stderr.contains("adds to an `auth.json` provider that does not exist"),
+        "{stderr}"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "a refused table must send no request: {stderr}"
+    );
+}
+
+/// `reasoning_replay` alone is rules-only by the documented definition, so an orphan table with
+/// only that key is refused at startup too.
+#[tokio::test]
+async fn a_reasoning_replay_only_provider_table_without_an_auth_entry_is_refused_at_startup() {
+    let dir = fresh_session_dir();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        concat!(
+            "schema_version = 1\n",
+            "[model]\n",
+            "provider = \"openai-compatible\"\n",
+            "model = \"m\"\n",
+            "[providers.orphan]\n",
+            "reasoning_replay = \"reasoning_content\"\n",
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["-p", "hi"],
+            &[
+                ("RADIAN_CONFIG", config.to_str().unwrap()),
+                ("OPENAI_API_KEY", "sk-test"),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
+}
+
+/// With the same-name `auth.json` entry, the same rules-only table starts **while the run
+/// selects another provider**, and adds no "config wins" warning (an overlay never warns). The
+/// same config without the entry is refused by the same startup check, so this asserts the
+/// startup-wide check: without it the second run starts and the turn runs.
+#[tokio::test]
+async fn a_rules_only_provider_table_with_an_auth_entry_starts_while_another_provider_is_selected()
+{
+    let server = MockServer::start(vec![text_reply("BUILT-IN"), text_reply("BUILT-IN")]).await;
+    let orphan = MockServer::start(vec![text_reply("ORPHAN")]).await;
+    let home = fresh_session_dir();
+    write_named_auth_json(
+        &home,
+        &[
+            ("openai-compatible", "sk-test", &server.base_url),
+            ("orphan", "sk-orphan-1", &orphan.base_url),
+        ],
+    );
+    write_home_config(
+        &home,
+        "schema_version = 1\n[providers.orphan]\nprefer = [\"anthropic\"]\n",
+    );
+    let args = ["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"];
+    let child = spawn_radian_raw(&args, &provider_home_envs(&home));
+    let (code, stdout, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(stdout, "BUILT-IN\n");
+    assert!(
+        !stderr.contains("declared in both config and auth.json"),
+        "an overlay must not warn: {stderr}"
+    );
+    assert!(
+        !stderr.contains("adds to an `auth.json` provider"),
+        "{stderr}"
+    );
+    assert!(
+        orphan.requests().is_empty(),
+        "the unselected overlay's provider must not be resolved: {stderr}"
+    );
+
+    // The same table, the same selected provider, without the entry: refused at startup.
+    write_named_auth_json(&home, &[("openai-compatible", "sk-test", &server.base_url)]);
+    let child = spawn_radian_raw(&args, &provider_home_envs(&home));
+    let (code, _, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(
+        stderr.contains("adds to an `auth.json` provider that does not exist"),
+        "{stderr}"
+    );
+}
+
+/// A full declaration (`kind` + `base_url`) needs no `auth.json` entry: the startup check skips
+/// it, so with a rules-only table beside it the refusal names only the rules-only one, and with
+/// the full table alone the run selects another provider and starts. Dropping the `is_full`
+/// guard makes the check refuse `corp` instead.
+#[tokio::test]
+async fn a_full_provider_table_without_an_auth_entry_is_not_refused_at_startup() {
+    let server = MockServer::start(vec![text_reply("BUILT-IN")]).await;
+    let corp = MockServer::start(vec![text_reply("CORP")]).await;
+    let home = fresh_session_dir();
+    write_named_auth_json(&home, &[("openai-compatible", "sk-test", &server.base_url)]);
+    let full = format!(
+        "schema_version = 1\n[providers.corp]\nkind = \"openai-compatible\"\n\
+         base_url = \"{}\"\n",
+        corp.base_url
+    );
+
+    // Both tables, neither name in `auth.json`: the refusal names the rules-only table only.
+    write_home_config(
+        &home,
+        &format!("{full}[providers.orphan]\nprefer = [\"anthropic\"]\n"),
+    );
+    let child = spawn_radian_raw(
+        &["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"],
+        &provider_home_envs(&home),
+    );
+    let (code, _, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(
+        !stderr.contains("providers.corp"),
+        "a full declaration is not rules-only: {stderr}"
+    );
+
+    // The full table alone: it starts while another provider is selected, and is never resolved.
+    write_home_config(&home, &full);
+    let child = spawn_radian_raw(
+        &["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"],
+        &provider_home_envs(&home),
+    );
+    let (code, stdout, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(stdout, "BUILT-IN\n");
+    assert!(
+        corp.requests().is_empty(),
+        "the unselected full declaration must not be resolved: {stderr}"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{stderr}");
+    assert_eq!(requests[0].json()["model"], "m-1");
+}
+
+/// A read-only configuration (a newer `schema_version`) gets the same refusal as every other
+/// provider-table refusal: the reader's own provider errors refuse in read-only mode too, and
+/// this check runs after the parse.
+#[tokio::test]
+async fn a_read_only_config_with_an_orphan_rules_only_table_is_refused_at_startup() {
+    let dir = fresh_session_dir();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        concat!(
+            "schema_version = 2\n",
+            "[providers.orphan]\n",
+            "prefer = [\"anthropic\"]\n",
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["-p", "hi"],
+            &[
+                ("RADIAN_CONFIG", config.to_str().unwrap()),
+                ("OPENAI_API_KEY", "sk-test"),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(stderr.contains("auth.json"), "{stderr}");
+}
+
 // ---------- radian login / radian logout (ADR 0026 D3) ----------
 
 /// `radian login` refuses without a terminal: a key pasted into a pipe would be visible, so
