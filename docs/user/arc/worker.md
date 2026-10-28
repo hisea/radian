@@ -242,7 +242,7 @@ The `session/prompt` response's `stopReason` decides the attempt:
 | `stopReason` | `Result.outcome` | What happens |
 |---|---|---|
 | `end_turn` | `completed` | The delivery check runs; the attempt passes when it delivers. |
-| `max_tokens` | `max_tokens` | A failed attempt named after the reason; the retry rules apply. The turn ends this way only on a truncated response with no tool calls after two truncated responses in a row had already continued it; a truncated response with tool calls continues the turn. |
+| `max_tokens` | `max_tokens` | A failed attempt named after the reason; the retry rules apply. The turn ended `Incomplete` for a truncated answer that could not continue; see [the exit-code rule](../cli.md#a-truncated-answer) for when that happens. |
 | `max_turn_requests` | `max_turn_requests` | The same. |
 | `refusal` | `refusal` | The same. |
 | `cancelled` | `cancelled` | The same, unless arc itself cancelled the attempt: then it is a cancel and the task ends `failed.cancelled`. |

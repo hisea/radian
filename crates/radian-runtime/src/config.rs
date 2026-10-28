@@ -41,6 +41,13 @@ impl ConfigSlot {
         *self.value.write().unwrap_or_else(|e| e.into_inner()) = value;
         self.revision.store(revision, Ordering::SeqCst);
     }
+
+    /// Test seam: write a value the way the driver's turn-boundary apply does, without a
+    /// driver. The production path is [`ConfigSlot::apply`], called only by the driver.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_for_test(&self, value: Value) {
+        self.apply(value, self.revision() + 1);
+    }
 }
 
 /// Changes queued by the host. The driver drains this at the next turn boundary.
