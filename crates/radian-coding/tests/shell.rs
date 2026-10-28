@@ -1262,6 +1262,19 @@ async fn the_full_set_keeps_the_shell_description_byte_for_byte() {
              timeout_secs. Read the job with `job`."
         )
     );
+    // `read`'s full text is pinned too: `patch` is in the set, so today's sentence stays.
+    let read = spec_named(&by_default, "read");
+    assert_eq!(read, spec_named(&explicit, "read"));
+    assert_eq!(
+        read.description,
+        "Read a UTF-8 text file, a directory, or an image. Each text line starts with its \
+         line number and `\": \"`. This prefix is not part of the file. Remove it before you \
+         use the text in `patch`. For a large file, read one part at a time with `offset` and \
+         `limit`. Do not increase `max_bytes` to get a later part. An image (PNG, JPEG, GIF or \
+         WebP, judged by its magic number, never its extension) returns a text line and the \
+         image itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
+         when over). An image is read whole: `offset` and `limit` are ignored."
+    );
 }
 
 /// The Terminal-Bench arm: `read,write,patch,shell` has no `grep`, `glob` or `job`. The shell
