@@ -882,3 +882,19 @@ confirmed byte-identical with `shasum -a 256`.
 | TK0176-M4 | `resolve_read` drops the early absolute-`..` refusal, so the path reaches `normalise_absolute` and the `full`-tier outside route | ✅ 1 failed | `absolute_inside::an_absolute_path_with_a_parent_component_is_refused_in_the_full_tier` (`read` on `<workspace>/sub/../a.txt` returned `1: INSIDE` instead of refusing) |
 
 1/1 caught.
+
+## TK0216: a tool description names only mounted tools (2026-10-27, branch `work/TK0216-shell-description-follows-tool-set`)
+
+A restricted `--tools` set must not leave a mounted tool's text naming an absent one (ADR 0043 §4).
+`ToolPresence` is built from the allow-list at `HostTools::open_session`, and `shell`/`read` build
+their text from it; the full set passes `ToolPresence::ALL` and stays byte-identical. Each mutation
+was applied by hand, the named test binary was run, and the source was restored from a copy under
+`.radian/` (`git diff` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0216-M1 | `shell::description` always adds the `read` advice (`if true` instead of `if presence.read`) | ✅ 1 failed (rc=100) | `shell_alone_keeps_only_its_own_rules` (`"`read`" must be absent when only `shell` is mounted`) |
+| TK0216-M2 | both search sentences are always appended (the `presence.grep`/`presence.glob` match forced to `(true, true)`) | ✅ 1 failed (rc=100) | `a_read_write_patch_shell_set_names_no_search_or_job_tool` (`` `grep` `` appears in the four-tool description) |
+| TK0216-M3 | `shell::spec` always passes `job = true` to the schema, so the `background` field keeps "Read the job with `job`." | ✅ 1 failed (rc=100) | `a_read_write_patch_shell_set_names_no_search_or_job_tool` (the background note names `job`) |
+| TK0216-M4 | `read::spec` always adds "Remove it before you use the text in `patch`." (`if true`) | ✅ 1 failed (rc=100) | `read_names_patch_only_when_patch_is_mounted` (the `read,glob,grep` set still names `patch`) |
+

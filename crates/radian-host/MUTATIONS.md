@@ -1525,3 +1525,15 @@ test binary was run, and the source was restored from a copy under `.radian/` (`
 | TK0214-M5 | a failed probe returns the first error without the tried list and the rule hint (`Err(first)`) | ✅ 1 failed (rc=100) | `named_probe::every_attempt_failing_keeps_the_first_error_and_writes_nothing` (no `tried …` line) |
 | TK0214-M6 | `remember` always queues the probed route instead of respecting a queued switch | ✅ 1 failed (rc=100) | `named_probe::a_queued_model_switch_is_not_undone_by_a_probe` (the old route is the last queued change) |
 | TK0214-M7 | `save_rule` ignores the read-only verdict (`false` instead of `config_target.read_only`) | ✅ 1 failed (rc=100) | `named_probe::a_read_only_config_is_not_saved` (the schema-99 file was rewritten) |
+
+## TK0216: the host passes its tool set into the session's descriptions (2026-10-27, branch `work/TK0216-shell-description-follows-tool-set`)
+
+ADR 0043 §4: a tool description names another tool only when that tool is mounted. `HostTools::open_session`
+passes `ToolPresence::from_allow(self.tool_allow)` to `CodingTools::open_session_with`; the mutation
+drops that link. It was applied by hand to `crates/radian-host/src/tools.rs`, the `radian` binary was
+rebuilt, the named test ran, and the source was restored from `.radian/host-tools.rs.bak`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0216-M5 | `HostTools::open_session` opens coding tools with `ToolPresence::ALL`, ignoring `tool_allow` | ✅ 1 failed (rc=100) | `an_explore_child_has_only_the_three_read_tools_and_write_is_refused` (`crates/radian-exec/tests/subagent.rs`: the `read,glob,grep` child's `read` description named `patch`) |
+
