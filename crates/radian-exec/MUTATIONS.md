@@ -582,3 +582,22 @@ passed 18/18.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0222-M1 | the prompt wait ignores which turn claimed the message and stops at the next journaled turn end (the old generation-counter shape), and takes the newest turn's live status | ✅ 1 failed | `acp::a_wake_turn_end_does_not_answer_the_prompt_after_it` (the wake turn's failed end answered: `stopReason: refusal`, `_meta.radian.text: PROMPT-ONE`) |
+
+## `radian acp`: a prompt's `_meta` is its own turn's (TK0222 rework, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. The answer's cost and text are folded
+from the claimed turn's own journal records (`jsonl::summarize_turn`, selected by turn id), and
+`_meta.radian.error` is kept per turn id in the `TurnLedger`, so a turn that starts and finishes
+before the answer task reads the journal cannot stand in for the prompt's turn. The mutations
+were applied in place to `crates/radian-exec/src/acp/{mod,events}.rs`, the `radian` binary was
+rebuilt (`cargo build -p radian-tui --bin radian`), and the source was restored from
+`.radian/mut/` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M3 | `prompt_turn` folds the whole session again (`summarize_journal`) for the answer's cost and text | ✅ 1 failed | `acp::a_prompt_reports_its_own_turns_cost_and_text_not_the_sessions` (`cost.micros` was 2700 — the first turn's and the wake turn's fees — instead of the prompt turn's 1350) |
+| TK0222-M5 | the ledger keeps one session-global error slot instead of keying it by turn (`turn_failed` stores under a fixed key, `error` ignores the turn) | ✅ 1 failed | `acp::events::tests::a_later_turn_failure_does_not_replace_an_earlier_turns_error` (`error("t-1")` read the wake turn's message) |
+
+2/2 caught. The cost test's wake turn **succeeds** and reports usage, so the session-wide fold
+differs from the prompt's own turn; the earlier wake test's wake turn fails and reports no
+usage, so it could not tell the two folds apart.

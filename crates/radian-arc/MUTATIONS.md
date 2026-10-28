@@ -1633,3 +1633,19 @@ which `cmp` found identical. The test ran with `cargo nextest run -p radian-arc 
 | TK0212-M1 | `clear` removes the record without taking the record lock (`lock_record` dropped from its body) | `run::a_reset_does_not_put_back_the_started_record_a_pass_already_read` (the record the reset removed is back as `started`, with the pass's pid) | ✅ 1 failed |
 
 1/1 caught.
+
+## A radian worker attempt costs its own prompt turn (TK0222, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. `radian acp`'s `_meta.radian.cost` is
+the fee of the turn that answered the prompt (ADR 0049), and a `radian` worker attempt is one
+prompt, so `attempt_cost` uses that value as it stands instead of the session-total delta a
+command worker needs (ADR 0048 decision 12). The mutation was applied in place to
+`crates/radian-arc/src/store/attempt_ops.rs`, and the file was restored from
+`.radian/mut/arc-attempt_ops.rs` (`cmp` identical). Test:
+`cargo nextest run -p radian-arc --locked --profile sandbox --test attempt -E
+'test(a_radian_workers_resumed_attempt_counts_its_own_prompt_turn)'`. Unmutated, the test
+passed.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M6 | `attempt_cost` takes the session delta for the `radian` worker too (the `if false` branch) | ✅ 1 failed | `attempt::a_radian_workers_resumed_attempt_counts_its_own_prompt_turn` (`cost_usd` was 0.5, the increase over the previous attempt, instead of 1.5, the prompt turn's fee) |

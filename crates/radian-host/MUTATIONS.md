@@ -1550,3 +1550,20 @@ was run, and the source was restored from `.radian/model.rs.good` (`cmp` empty).
 |---|---|---|---|
 | TK0220-M1 | the candidate loop builds with `self.ctx.args_for_route` again, so it sends the startup level | ✅ 2 failed (rc=100) | `named_probe::a_probe_candidate_carries_the_thinking_level_in_force` (candidate body was `adaptive`, not `enabled:4095`) and `a_remembered_probe_follows_a_later_thinking_change` (`high` request was `adaptive`) |
 | TK0220-M2 | the non-refusal check is removed, so every candidate error continues to the next protocol | ✅ 2 failed (rc=100) | `named_probe::a_candidate_that_streams_then_fails_ends_the_probe` (a third, Responses request was sent) and `a_candidate_that_is_not_a_refusal_ends_the_probe` (the 429/500 rounds each sent a third request) |
+
+## `radian acp`: the claim-hold test seam is installed (TK0222, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. `open_session` reads
+`RADIAN_CLAIM_HOLD_FILE` and hands it to `Driver::set_claim_hold`, so the ACP test can put the
+job's completion notice and the second prompt in one lane before the driver claims either. The
+mutation was applied in place to `crates/radian-host/src/session/open.rs`
+(`driver.set_claim_hold(None)`), the `radian` binary was rebuilt
+(`cargo build -p radian-tui --bin radian`), and the source was restored from
+`.radian/mut/host-open.rs` (`cmp` identical). Test:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(a_wake_turn_end_does_not_answer_the_prompt_after_it)'`. Unmutated, the `acp` binary passed
+19/19; under the mutation the test failed 4/4 runs.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M4 | `open_session` ignores the seam (`driver.set_claim_hold(None)`) | ✅ 1 failed (4/4 runs) | `acp::a_wake_turn_end_does_not_answer_the_prompt_after_it` ("the prompt must be enqueued before the driver claims the notice": without the hold the driver claims the notice at once, the wake turn runs before the prompt exists, and the test no longer exercises the defect) |
