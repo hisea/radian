@@ -29,6 +29,7 @@ mod trust;
 mod turn;
 mod ui;
 
+pub use acp::{ACP_MAX_INPUT_LINE_BYTES, ACP_OUTBOX_CAPACITY};
 pub use command::{Command, ConfigCommand, TrustCommand};
 pub(crate) use command::{ExportFormat, run_config, run_memory, run_trust};
 pub(crate) use error::{OutputError, SetupError, finish};

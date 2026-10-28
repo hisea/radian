@@ -22,14 +22,23 @@ use radian_core::{EventSink, InputSource, RunStatus};
 use radian_runtime::CancelCause;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use self::events::{AcpEvents, AcpRuntimeEvents};
-use self::wire::{Incoming, Outbox, PermissionOutcome, RpcError};
+use self::wire::{Incoming, IncomingLine, Outbox, PermissionOutcome, RpcError};
 
 use super::host::{self, HostWiring, OpenedSession};
 use super::{Cli, CommonArgs};
+
+/// The largest input line accepted, in bytes: 64 MiB, enough for a prompt that carries
+/// several images in base64. The reader discards the rest of a longer line as it arrives
+/// instead of holding it whole, and the line is answered with a JSON-RPC parse error.
+pub const ACP_MAX_INPUT_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// How many outgoing messages the writer's queue holds. A full queue makes the producer wait:
+/// no message is ever dropped, so a client that stops reading stdout stalls the turn instead
+/// of growing this queue without bound (ADR 0049).
+pub const ACP_OUTBOX_CAPACITY: usize = 64;
 
 /// The shared protocol and bridge state. One instance per process.
 pub(crate) struct State {
@@ -123,7 +132,7 @@ impl State {
         let id = self.next_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, sender);
-        self.out.request(id, method, params);
+        self.out.request(id, method, params).await;
         tokio::select! {
             biased;
             answer = receiver => match answer {
@@ -162,18 +171,31 @@ pub(crate) async fn run(mut common: CommonArgs, child_headers: Result<Vec<String
     let (out, writer) = wire::spawn_writer();
     let state = Arc::new(State::new(out));
     let mut child_headers = Some(child_headers);
-    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdin = wire::LineReader::new(tokio::io::stdin(), ACP_MAX_INPUT_LINE_BYTES);
     let mut sigterm = spawn_sigterm();
     let mut code = 0;
     loop {
         tokio::select! {
             line = stdin.next_line() => match line {
-                Ok(Some(line)) => {
+                Ok(IncomingLine::Line(line)) => {
                     if !handle_line(&state, &mut common, &mut child_headers, &line).await {
                         break;
                     }
                 }
-                Ok(None) | Err(_) => break,
+                // The over-long line was discarded as it was read: answer a parse error that
+                // names the limit and keep serving the next line (ADR 0049).
+                Ok(IncomingLine::TooLong) => {
+                    state
+                        .out()
+                        .respond_error(
+                            &Value::Null,
+                            protocol::PARSE_ERROR,
+                            &wire::input_line_limit_message(),
+                        )
+                        .await;
+                }
+                // End of input, including in the middle of an over-long line, is a shutdown.
+                Ok(IncomingLine::Eof) | Err(_) => break,
             },
             _ = async {
                 match sigterm.as_mut() {
@@ -205,19 +227,27 @@ async fn handle_line(
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(error) => {
-            state.out().respond_error(
-                &Value::Null,
-                protocol::INVALID_PARAMS,
-                &format!("invalid JSON: {error}"),
-            );
+            state
+                .out()
+                .respond_error(
+                    &Value::Null,
+                    protocol::INVALID_PARAMS,
+                    &format!("invalid JSON: {error}"),
+                )
+                .await;
             return true;
         }
     };
     match wire::classify(value) {
         Incoming::Request { id, method, params } => match method.as_str() {
-            "initialize" => state.out().respond(&id, protocol::initialize_result()),
+            "initialize" => {
+                state
+                    .out()
+                    .respond(&id, protocol::initialize_result())
+                    .await
+            }
             // There is no ACP authentication method: the key comes from `auth.json`.
-            "authenticate" => state.out().respond(&id, json!({})),
+            "authenticate" => state.out().respond(&id, json!({})).await,
             "session/new" => {
                 open_session_request(state, common, child_headers, &id, params, None).await;
             }
@@ -227,22 +257,30 @@ async fn handle_line(
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                 else {
-                    state.out().respond_error(
-                        &id,
-                        protocol::INVALID_PARAMS,
-                        "session/load needs the id of an existing session",
-                    );
+                    state
+                        .out()
+                        .respond_error(
+                            &id,
+                            protocol::INVALID_PARAMS,
+                            "session/load needs the id of an existing session",
+                        )
+                        .await;
                     return true;
                 };
                 open_session_request(state, common, child_headers, &id, params, Some(session_id))
                     .await;
             }
-            "session/prompt" => prompt_request(state, &id, params),
-            other => state.out().respond_error(
-                &id,
-                protocol::METHOD_NOT_FOUND,
-                &format!("method `{other}` is not supported"),
-            ),
+            "session/prompt" => prompt_request(state, &id, params).await,
+            other => {
+                state
+                    .out()
+                    .respond_error(
+                        &id,
+                        protocol::METHOD_NOT_FOUND,
+                        &format!("method `{other}` is not supported"),
+                    )
+                    .await
+            }
         },
         Incoming::Notification { method, params } => {
             if method == "session/cancel" {
@@ -274,7 +312,8 @@ async fn handle_line(
         Incoming::Invalid(message) => {
             state
                 .out()
-                .respond_error(&Value::Null, protocol::INVALID_PARAMS, &message);
+                .respond_error(&Value::Null, protocol::INVALID_PARAMS, &message)
+                .await;
         }
     }
     true
@@ -298,13 +337,16 @@ async fn open_session_request(
         "session/new"
     };
     if let Some(session_id) = state.session_id() {
-        state.out().respond_error(
-            id,
-            protocol::INVALID_PARAMS,
-            &format!(
-                "one process holds one session; this process already opened session {session_id}"
-            ),
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                &format!(
+                    "one process holds one session; this process already opened session {session_id}"
+                ),
+            )
+            .await;
         return;
     }
     // `--resume` already names the session this process was started for; a `session/load` of a
@@ -313,14 +355,17 @@ async fn open_session_request(
         && let Some(explicit) = &common.resume
         && explicit != session_id
     {
-        state.out().respond_error(
-            id,
-            protocol::INVALID_PARAMS,
-            &format!(
-                "one process holds one session; session/load names {session_id}, but this process \
-                 was started to resume {explicit}"
-            ),
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                &format!(
+                    "one process holds one session; session/load names {session_id}, but this process \
+                     was started to resume {explicit}"
+                ),
+            )
+            .await;
         return;
     }
     #[derive(Deserialize)]
@@ -335,26 +380,33 @@ async fn open_session_request(
         Err(error) => {
             state
                 .out()
-                .respond_error(id, protocol::INVALID_PARAMS, &format!("{method}: {error}"));
+                .respond_error(id, protocol::INVALID_PARAMS, &format!("{method}: {error}"))
+                .await;
             return;
         }
     };
     if !request.cwd.is_absolute() {
-        state.out().respond_error(
-            id,
-            protocol::INVALID_PARAMS,
-            &format!("{method} cwd {} must be absolute", request.cwd.display()),
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                &format!("{method} cwd {} must be absolute", request.cwd.display()),
+            )
+            .await;
         return;
     }
     let requested = match radian_host::resolve_workspace(Some(&request.cwd)) {
         Ok(workspace) => workspace,
         Err(error) => {
-            state.out().respond_error(
-                id,
-                protocol::INVALID_PARAMS,
-                &format!("{method} cwd: {error}"),
-            );
+            state
+                .out()
+                .respond_error(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    &format!("{method} cwd: {error}"),
+                )
+                .await;
             return;
         }
     };
@@ -363,24 +415,30 @@ async fn open_session_request(
             let flag = match radian_host::resolve_workspace(Some(Path::new(flag))) {
                 Ok(workspace) => workspace,
                 Err(error) => {
-                    state.out().respond_error(
-                        id,
-                        protocol::INVALID_PARAMS,
-                        &format!("--workspace: {error}"),
-                    );
+                    state
+                        .out()
+                        .respond_error(
+                            id,
+                            protocol::INVALID_PARAMS,
+                            &format!("--workspace: {error}"),
+                        )
+                        .await;
                     return;
                 }
             };
             if flag != requested {
-                state.out().respond_error(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    &format!(
-                        "one process holds one session; {method} cwd {} is not --workspace {}",
-                        requested.display(),
-                        flag.display()
-                    ),
-                );
+                state
+                    .out()
+                    .respond_error(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        &format!(
+                            "one process holds one session; {method} cwd {} is not --workspace {}",
+                            requested.display(),
+                            flag.display()
+                        ),
+                    )
+                    .await;
                 return;
             }
             flag
@@ -401,7 +459,8 @@ async fn open_session_request(
     {
         state
             .out()
-            .respond_error(id, protocol::INVALID_PARAMS, &message);
+            .respond_error(id, protocol::INVALID_PARAMS, &message)
+            .await;
         return;
     }
     // The session's copy of the arguments is built here and written back only once the
@@ -420,7 +479,8 @@ async fn open_session_request(
         Err(error) => {
             state
                 .out()
-                .respond_error(id, protocol::INVALID_PARAMS, &error);
+                .respond_error(id, protocol::INVALID_PARAMS, &error)
+                .await;
             return;
         }
     };
@@ -428,11 +488,14 @@ async fn open_session_request(
     // config, a missing key) leaves them in place, so the client can fix the cause and retry
     // `session/new` in the same process.
     let Some(headers) = child_headers.as_ref() else {
-        state.out().respond_error(
-            id,
-            protocol::INTERNAL_ERROR,
-            "the internal child headers were already consumed",
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INTERNAL_ERROR,
+                "the internal child headers were already consumed",
+            )
+            .await;
         return;
     };
     let cli = Cli {
@@ -444,7 +507,8 @@ async fn open_session_request(
         Err(error) => {
             state
                 .out()
-                .respond_error(id, protocol::INTERNAL_ERROR, &error.0);
+                .respond_error(id, protocol::INTERNAL_ERROR, &error.0)
+                .await;
             return;
         }
     };
@@ -489,7 +553,8 @@ async fn open_session_request(
             *state.runtime_events.lock().unwrap() = None;
             state
                 .out()
-                .respond_error(id, protocol::INTERNAL_ERROR, &error.0);
+                .respond_error(id, protocol::INTERNAL_ERROR, &error.0)
+                .await;
             return;
         }
     };
@@ -512,39 +577,51 @@ async fn open_session_request(
     // journal's (`LocalSession::history`), so the replay and the model's next request agree.
     if load.is_some() {
         for update in replay::updates(&session.history, session.workspace()) {
-            state.out().notify(
-                "session/update",
-                json!({ "sessionId": session_id, "update": update }),
-            );
+            state
+                .out()
+                .notify(
+                    "session/update",
+                    json!({ "sessionId": session_id, "update": update }),
+                )
+                .await;
         }
         // `LoadSessionResponse` has no required field.
-        state.out().respond(id, json!({}));
+        state.out().respond(id, json!({})).await;
     } else {
-        state.out().respond(id, json!({ "sessionId": session_id }));
+        state
+            .out()
+            .respond(id, json!({ "sessionId": session_id }))
+            .await;
     }
 }
 
 /// Accepts `session/prompt` when the session is idle; a second prompt during a turn is
 /// refused. The turn itself runs in its own task so the read loop keeps handling
 /// `session/cancel` and permission answers.
-fn prompt_request(state: &Arc<State>, id: &Value, params: Value) {
+async fn prompt_request(state: &Arc<State>, id: &Value, params: Value) {
     let Some(session) = state.session() else {
-        state.out().respond_error(
-            id,
-            protocol::INVALID_PARAMS,
-            "session/prompt before session/new or session/load",
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                "session/prompt before session/new or session/load",
+            )
+            .await;
         return;
     };
     let busy = state.prompt_active.load(Ordering::Acquire)
         || session.turn_running()
         || state.events().is_some_and(|events| events.busy());
     if busy {
-        state.out().respond_error(
-            id,
-            protocol::INVALID_PARAMS,
-            "a second session/prompt during a turn is refused",
-        );
+        state
+            .out()
+            .respond_error(
+                id,
+                protocol::INVALID_PARAMS,
+                "a second session/prompt during a turn is refused",
+            )
+            .await;
         return;
     }
     state.prompt_active.store(true, Ordering::Release);
@@ -553,8 +630,10 @@ fn prompt_request(state: &Arc<State>, id: &Value, params: Value) {
     let task = tokio::spawn(async move {
         let result = prompt_turn(&task_state, params).await;
         match result {
-            Ok(result) => task_state.out().respond(&id, result),
-            Err((code, message)) => task_state.out().respond_error(&id, code, &message),
+            Ok(result) => task_state.out().respond(&id, result).await,
+            Err((code, message)) => {
+                task_state.out().respond_error(&id, code, &message).await;
+            }
         }
         task_state.prompt_active.store(false, Ordering::Release);
     });

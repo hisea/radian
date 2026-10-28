@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 pub(crate) const PROTOCOL_VERSION: u64 = 1;
 
 /// JSON-RPC error codes.
+pub(crate) const PARSE_ERROR: i64 = -32700;
 pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 pub(crate) const INVALID_PARAMS: i64 = -32602;
 pub(crate) const INTERNAL_ERROR: i64 = -32603;

@@ -148,6 +148,14 @@ and permission rules as the other hosts.
 
 ## Limits
 
+- One input line is at most 64 MiB (67108864 bytes): enough for a prompt that carries several
+  images in base64. A longer line is discarded as it is read — it is never held whole — and
+  answered with a JSON-RPC parse error, code `-32700` and id `null`, whose message names the
+  limit. The process then serves the next line normally; end of input in the middle of an
+  over-long line is a normal end of input.
+- The output queue holds at most 64 messages. When it is full the producer waits instead of
+  dropping anything, so a client that stops reading stdout stalls the running turn until it
+  reads again; responses and `session/update` notifications then arrive in order, none missing.
 - One prompt runs at a time per process. Parallel work belongs to another process or to the
   `subagent` tool.
 - Background jobs are not awaited: the prompt response reports the turn, and a later

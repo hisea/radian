@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
+use radian_exec::{ACP_MAX_INPUT_LINE_BYTES, ACP_OUTBOX_CAPACITY};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -133,6 +134,26 @@ impl Acp {
             .await
             .expect("write timed out")
             .expect("write");
+        self.stdin.flush().await.expect("flush");
+    }
+
+    /// Writes raw bytes to the child's stdin, without a newline of its own.
+    async fn write_bytes(&mut self, bytes: &[u8]) {
+        timeout(IO, self.stdin.write_all(bytes))
+            .await
+            .expect("write timed out")
+            .expect("write");
+    }
+
+    /// Writes `count` `b'x'` bytes in small chunks, so the test never holds the filler whole.
+    async fn write_filler(&mut self, count: usize) {
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut left = count;
+        while left > 0 {
+            let take = left.min(chunk.len());
+            self.write_bytes(&chunk[..take]).await;
+            left -= take;
+        }
         self.stdin.flush().await.expect("flush");
     }
 
@@ -305,6 +326,29 @@ impl Acp {
             .expect("wait");
         let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
         (status.code().unwrap_or(-1), stderr)
+    }
+
+    /// Closes stdin and reads stdout to EOF before waiting, so a test can assert that nothing
+    /// was written after the input ended.
+    async fn finish_reading(mut self) -> (i32, String, Vec<Value>) {
+        drop(self.stdin);
+        let mut messages = std::mem::take(&mut self.queued);
+        loop {
+            match timeout(EXIT, self.stdout.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    messages.push(serde_json::from_str(&line).expect("a JSON line"))
+                }
+                Ok(Ok(None)) | Ok(Err(_)) => break,
+                Err(_) => panic!("the agent did not close stdout after stdin ended"),
+            }
+        }
+        drop(self.stdout);
+        let status = timeout(EXIT, self.child.wait())
+            .await
+            .expect("the agent did not exit")
+            .expect("wait");
+        let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
+        (status.code().unwrap_or(-1), stderr, messages)
     }
 }
 
@@ -1915,4 +1959,170 @@ async fn a_second_prompt_back_to_back_is_refused_and_the_first_answers_its_own_t
     assert_eq!(run.result()["stopReason"], "cancelled", "{}", run.response);
     let (code, stderr) = acp.finish().await;
     assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049: one input line is at most `ACP_MAX_INPUT_LINE_BYTES`. A longer line is discarded
+/// as it is read and answered with a JSON-RPC parse error whose message names the limit, and
+/// the next line is served normally. The old reader held the whole line and reported it as
+/// invalid params instead.
+#[tokio::test]
+async fn an_over_long_line_is_a_parse_error_and_the_next_line_is_served() {
+    let env = Env::fresh("long-line");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    acp.write_filler(ACP_MAX_INPUT_LINE_BYTES + 1).await;
+    acp.write_bytes(b"\n").await;
+
+    let error = acp.read().await;
+    assert_eq!(error["jsonrpc"], "2.0", "{error}");
+    assert_eq!(
+        error["id"],
+        Value::Null,
+        "a parse error has a null id: {error}"
+    );
+    assert_eq!(error["error"]["code"], json!(-32700), "{error}");
+    let message = error["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&ACP_MAX_INPUT_LINE_BYTES.to_string()),
+        "the parse error names the limit: {message}"
+    );
+
+    let init = acp.initialize().await;
+    assert!(init.get("error").is_none(), "{init}");
+    assert_eq!(init["result"]["protocolVersion"], json!(1), "{init}");
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049: a line exactly at the limit is accepted and parsed.
+#[tokio::test]
+async fn a_line_exactly_at_the_limit_is_accepted() {
+    let env = Env::fresh("limit-line");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    let prefix =
+        br#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":1},"pad":""#;
+    let suffix = b"\"}";
+    let filler = ACP_MAX_INPUT_LINE_BYTES - prefix.len() - suffix.len();
+    acp.write_bytes(prefix).await;
+    acp.write_filler(filler).await;
+    acp.write_bytes(suffix).await;
+    acp.write_bytes(b"\n").await;
+
+    let response = acp.read().await;
+    assert_eq!(response["id"], json!(7), "{response}");
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["protocolVersion"],
+        json!(1),
+        "{response}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049: end of input in the middle of an over-long line is a normal end of input: the
+/// process exits cleanly and writes no parse error for a line that never ended.
+#[tokio::test]
+async fn eof_in_the_middle_of_an_over_long_line_is_a_clean_shutdown() {
+    let env = Env::fresh("long-eof");
+    let mut acp = Acp::spawn(&["--model", "m", "--base-url", "http://127.0.0.1:1"], &env);
+    acp.write_filler(ACP_MAX_INPUT_LINE_BYTES + 1024).await;
+    let (code, stderr, messages) = acp.finish_reading().await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        messages.is_empty(),
+        "an unterminated over-long line is not a parse error: {messages:?}"
+    );
+}
+
+/// ADR 0049: the outgoing queue is bounded and never drops a message. A client that stops
+/// reading stdout cannot make the turn finish (the old unbounded queue did), and when it reads
+/// again every `session/update` arrives in order with nothing missing.
+#[tokio::test]
+async fn a_client_that_stops_reading_gets_every_update_in_order_when_it_reads_again() {
+    // Far more than the writer's queue plus the stdout pipe holds.
+    let texts: Vec<String> = (0..2000)
+        .map(|index| format!("[{index:04}]{}", "x".repeat(4090)))
+        .collect();
+    let mut chunks: Vec<Value> = texts
+        .iter()
+        .map(|text| chunk(json!({ "content": text }), None))
+        .collect();
+    chunks.push(chunk(json!({}), Some("stop")));
+    let server = MockServer::start(vec![Reply::sse(&chunks)]).await;
+    let env = Env::fresh("backpressure");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let path = env.sessions.join(format!("{session}.jsonl"));
+
+    let id = acp.send_prompt(&session, "stream it").await;
+    wait_for_requests(&server, 1, "the streaming turn's model call").await;
+    // The client does not read stdout: the queue fills and the turn must wait. The old
+    // unbounded queue let the turn finish while the client was not reading.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let events = journal(&path);
+        assert!(
+            !events.iter().any(|event| event["event"] == "TurnFinished"),
+            "the turn finished while the client was not reading, so the output was not \
+             backpressured: {events:#?}"
+        );
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let run = acp.collect_prompt(id, &session, Decision::None).await;
+    let result = run.result();
+    assert_eq!(result["stopReason"], "end_turn", "{result}");
+    let streamed: String = run
+        .updates
+        .iter()
+        .filter(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|update| update["content"]["text"].as_str())
+        .collect();
+    let expected: String = texts.concat();
+    assert_eq!(
+        streamed, expected,
+        "every update arrived in order and none was dropped"
+    );
+    assert_eq!(result["_meta"]["radian"]["text"], expected, "{result}");
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// The manual's ACP limits come from the code, not from prose that can drift: the line limit,
+/// the queue capacity and the parse-error code are the constants themselves.
+#[test]
+fn the_manual_names_the_acp_limits_from_the_code() {
+    let text = radian_coding::docs::find("acp.md").expect("acp.md is in the table");
+    let mib = ACP_MAX_INPUT_LINE_BYTES / (1024 * 1024);
+    assert!(
+        text.contains(&format!("{mib} MiB")),
+        "acp.md names the {mib} MiB input line limit"
+    );
+    assert!(
+        text.contains(&ACP_MAX_INPUT_LINE_BYTES.to_string()),
+        "acp.md names the exact input line byte limit"
+    );
+    assert!(
+        text.contains(&format!("{ACP_OUTBOX_CAPACITY} messages")),
+        "acp.md names the {ACP_OUTBOX_CAPACITY} message output queue"
+    );
+    assert!(text.contains("-32700"), "acp.md names the parse-error code");
 }

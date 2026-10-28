@@ -1,9 +1,9 @@
 //! Live events to `session/update` (ADR 0049), and the runtime events the prompt response
 //! needs.
 //!
-//! The sink runs synchronously inside the turn loop: it only appends to the writer's channel
-//! and takes one short lock, so a slow client never stalls a turn and durable journal writes
-//! are untouched.
+//! The sink runs synchronously inside the turn loop: it only appends to the writer's bounded
+//! channel and takes one short lock. When the queue is full it waits (the turn stalls) instead
+//! of dropping an update, while durable journal writes are untouched.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -200,7 +200,9 @@ impl AcpEvents {
     }
 
     fn notify(&self, update: serde_json::Value) {
-        self.out.notify("session/update", {
+        // The sink is called synchronously from the turn loop, so it uses the outbox's blocking
+        // path: a full queue stalls the turn until the client reads, and drops nothing.
+        self.out.notify_blocking("session/update", {
             serde_json::json!({
                 "sessionId": self.session_id,
                 "update": update,
