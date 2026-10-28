@@ -176,12 +176,14 @@ the same recovery, the same model route and access the journal records. Its `cwd
 `session/new` rule (an absolute directory equal to `--workspace`, or the workspace when the
 flag is absent), and its `mcpServers` are merged exactly as `session/new`'s are (decision 9).
 The named session must belong to that workspace: its `SessionCreated.workspace` must equal the
-process workspace, the rule `--export` applies. Both values are canonical paths (the host
-resolves both with `resolve_workspace`), so a workspace reached through a symlink matches the
-directory it names. A session created in another workspace is refused with an
-invalid-parameters error that names it, before the session is opened, so the refusal writes
-nothing and the process can still load a session of its own workspace or start one with
-`session/new`. An unknown id is an error from the opener that names the id, and a file whose
+process workspace, the rule `--export` and `--resume` apply (ADR 0006 §4). Both values are
+canonical paths (the host resolves both with `resolve_workspace`), so a workspace reached
+through a symlink matches the directory it names. A session created in another workspace is
+refused with an invalid-parameters error that names it, before the session is opened, so the
+refusal writes nothing and the process can still load a session of its own workspace or start
+one with `session/new`. `session/load` and `--resume` therefore agree: a `radian` or
+`radian exec --resume` of that session is refused too, and `session/new` with `--resume` fails
+the same way. An unknown id is an error from the opener that names the id, and a file whose
 `SessionCreated` cannot be read is that opener's error too, never this refusal.
 
 The response is an empty `LoadSessionResponse`. Before it, the journal's transcript — the
@@ -226,7 +228,8 @@ journaled turn end is delayed (the answer must wait for it), a prompt whose own 
 job-completion wake turn (the wake turn's end must not answer it, and the answer reports that
 turn's own cost and text, not the session's), the one-session refusal, a `session/load` of a
 session created in another workspace (refused by name, then a load of a session in the process
-workspace succeeds), the shared flag set, and `session/load` — a session written by one process
+workspace succeeds, and the same workspace through a symlink is accepted), the shared flag
+set, and `session/load` — a session written by one process
 and loaded by a second,
 whose replay and continued journal the test checks by folding the journal. `journal-selfcheck`
 replays the sessions the suite writes. The touched crates' mutation records name the tests that

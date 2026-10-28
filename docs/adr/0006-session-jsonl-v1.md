@@ -95,6 +95,8 @@ Naming note: `Message` becomes `MessageAppended` on disk to avoid confusion with
 
 Required `data` fields: `workspace` (absolute path that the session attaches to) and `config_snapshot` (effective session-level configuration snapshot at creation, holding at least the model route reference).
 
+`workspace` is the session's workspace, and a host opens an existing session for a resume or a load only when this value is the process workspace: `--list` and `--search` filter by it, and `--export`, `--resume` and `radian acp`'s `session/load` refuse another workspace's session with an error that names it. Both sides are canonical paths (the host resolves both with `resolve_workspace`), so a workspace reached through a symlink matches the directory it names. A refused open writes nothing. A file with no readable `SessionCreated` is the opener's error, never a workspace refusal.
+
 Optional fields (the reader ignores them when the writer omits them): `agent_id`, `profile_ref`, `workspace_binding`, `parent`.
 
 `parent = { session_id, seq, turn_id?, call_id?, relation? }`: `relation` defaults to `"fork"`. A subagent child session writes `"subagent"`. `seq` is the fork point in the parent log. `turn_id`/`call_id` are optional and record "forked from a turn/call" lineage.
@@ -254,4 +256,4 @@ After SQLite deletion, JSONL alone must fully rebuild: index fields all derive f
 
 ## 11. Verification
 
-Read and write tests in `crates/radian-session` cover envelope completeness, `seq` continuity, LF endings, `OpaqueJson` round trips, accept/skip/reject/torn-tail expectations for all fixtures, safe append after torn tails, `index` continuity, over-new schema versions, crash injection, index rebuild, and repair write-back. `docs/schema/check-fixtures.sh` checks all fixtures through an independent Python state machine. Its conclusions agree with Rust.
+Read and write tests in `crates/radian-session` cover envelope completeness, `seq` continuity, LF endings, `OpaqueJson` round trips, accept/skip/reject/torn-tail expectations for all fixtures, safe append after torn tails, `index` continuity, over-new schema versions, crash injection, index rebuild, and repair write-back. `docs/schema/check-fixtures.sh` checks all fixtures through an independent Python state machine. Its conclusions agree with Rust. `radian-host`'s session tests cover the workspace rule: a resume of another workspace's session is refused before the journal is written, the same workspace through a symlink is accepted, and a file with no readable `SessionCreated` is the opener's error. `radian-exec` and `radian-tui` cover the `--resume` refusal end to end.
