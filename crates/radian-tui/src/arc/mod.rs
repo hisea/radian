@@ -1213,64 +1213,97 @@ impl ArcApp {
         };
         let id = page.id.clone();
         let attempt = page.attempt;
-        let stdout = attempt.and_then(|attempt| stdout_worker(&self.store, &id, attempt));
+        let worker = attempt.and_then(|attempt| attempt_worker(&self.store, &id, attempt));
         let stdout_path = attempt.map(|attempt| {
             radian_arc::store::attempt_ops::run_dir(&self.store, &id, attempt).join("result.jsonl")
         });
-        let Some(page) = self.task.as_mut() else {
-            return;
-        };
-        if let (Some(program), Some(attempt), Some(path)) = (stdout, attempt, stdout_path) {
-            page.journal = None;
-            page.journal_error = None;
-            match &mut page.stdout {
-                Some(view) if view.is_for(&id, attempt) => view.set_program(program),
-                _ => page.stdout = Some(StdoutView::new(&id, attempt, path, program)),
-            }
-            if let Some(view) = &mut page.stdout
-                && let Err(error) = view.poll()
-            {
-                page.journal_error = Some(error);
-            }
-            return;
-        }
-        page.stdout = None;
         let session = match attempt.and_then(|attempt| {
             radian_arc::store::attempt_ops::attempt_session_id(&self.store, &id, attempt)
         }) {
             Some(session) => session,
             None => id.clone(),
         };
-        if page
-            .journal
+        let journal_path = self
+            .session_dir
             .as_ref()
-            .is_some_and(|view| view.id() == session.as_str())
-        {
-            if let Some(view) = &mut page.journal
-                && let Err(error) = view.poll()
-            {
-                page.journal_error = Some(error);
-            }
-            return;
-        }
-        // No view yet, or one for another attempt: start over from the selected session.
-        page.journal = None;
-        page.journal_error = None;
-        let Some(dir) = self.session_dir.clone() else {
-            page.journal_error = Some("no session directory is known".to_owned());
+            .map(|dir| dir.join(format!("{session}.jsonl")));
+        let journal_exists = journal_path.as_ref().is_some_and(|path| path.is_file());
+        let stdout_exists = stdout_path.as_ref().is_some_and(|path| path.is_file());
+        let Some(page) = self.task.as_mut() else {
             return;
         };
-        let path = dir.join(format!("{session}.jsonl"));
-        if !path.is_file() {
+        // A command worker or a flow's ACP agent: the attempt's stdout. An ACP stream is folded
+        // into the attach view's transcript; a command worker's rows are drawn as before and
+        // switch to the fold only when its lines are the protocol (ADR 0048 §13).
+        if let (Some(worker), Some(attempt), Some(path)) = (&worker, attempt, stdout_path.clone())
+            && worker.kind != WorkerKind::Radian
+        {
+            open_stdout(
+                page,
+                &id,
+                attempt,
+                path,
+                worker.program.clone(),
+                worker.kind == WorkerKind::Acp,
+            );
             return;
         }
-        match AttachView::open(&path, &session) {
-            Ok(mut view) => {
-                view.set_theme(self.theme.clone());
-                page.journal = Some(view);
-                page.journal_error = None;
+        if journal_exists {
+            page.stdout = None;
+            if page
+                .journal
+                .as_ref()
+                .is_some_and(|view| view.id() == session.as_str())
+            {
+                if let Some(view) = &mut page.journal
+                    && let Err(error) = view.poll()
+                {
+                    page.journal_error = Some(error);
+                }
+                return;
             }
-            Err(error) => page.journal_error = Some(error),
+            // No view yet, or one for another attempt: start over from the selected session.
+            page.journal = None;
+            page.journal_error = None;
+            let Some(path) = journal_path else {
+                page.journal_error = Some("no session directory is known".to_owned());
+                return;
+            };
+            match AttachView::open(&path, &session) {
+                Ok(mut view) => {
+                    view.set_theme(self.theme.clone());
+                    page.journal = Some(view);
+                    page.journal_error = None;
+                }
+                Err(error) => page.journal_error = Some(error),
+            }
+            return;
+        }
+        // The radian worker is `radian acp`, so when its session journal does not exist yet
+        // the attempt is writing its protocol lines to `result.jsonl`. An attempt with no
+        // record whose file exists is shown the same way, but only switches to the fold when
+        // its lines are ACP: an older `radian exec` stream keeps the row view.
+        if let Some(path) = stdout_path
+            && (worker.is_some() || stdout_exists)
+        {
+            let program = worker
+                .as_ref()
+                .map(|worker| worker.program.clone())
+                .unwrap_or_else(|| "radian acp".to_owned());
+            let acp = worker
+                .as_ref()
+                .is_some_and(|worker| worker.kind == WorkerKind::Acp);
+            let attempt = attempt.unwrap_or_default();
+            open_stdout(page, &id, attempt, path, program, acp);
+            return;
+        }
+        // Neither a journal nor a stdout file: the weak line a `radian` attempt shows while
+        // its worker has written nothing yet.
+        page.stdout = None;
+        page.journal = None;
+        page.journal_error = None;
+        if self.session_dir.is_none() {
+            page.journal_error = Some("no session directory is known".to_owned());
         }
     }
 
@@ -2843,16 +2876,33 @@ impl ArcApp {
     }
 }
 
-/// The program of the worker whose conversation is its stdout (`command` or a flow's `acp`)
-/// that ran, or is running, one attempt; `None` when the attempt's worker is `radian`
-/// (ADR 0048 decisions 4, 7 and 13).
+/// The worker an attempt's records name (ADR 0048 decisions 4, 7 and 13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerKind {
+    /// `radian acp`: the attempt's conversation is its session journal, or its ACP stdout when
+    /// the journal does not exist yet.
+    Radian,
+    /// A program whose stdout is the conversation, one row per line unless the lines are ACP.
+    Command,
+    /// A flow's ACP agent: its protocol lines are folded into the transcript.
+    Acp,
+}
+
+struct AttemptWorker {
+    kind: WorkerKind,
+    program: String,
+}
+
+/// The worker (and its program) whose conversation is its stdout (`command` or a flow's `acp`)
+/// that ran, or is running, one attempt; `None` when no record names a worker (ADR 0048
+/// decisions 4, 7 and 13).
 ///
 /// The attempt's own records decide, never the current configuration: the claim writes the
 /// worker it decided on to `start.json` (the key takes effect at the next claim), the wrapper
 /// writes the worker it started to `identity.json`, and its end record `execution.json` names it
 /// too. A reader takes the first record that names a worker, so a `[worker] command` change
 /// while an attempt runs cannot switch the tab between its journal and its stdout.
-fn stdout_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
+fn attempt_worker(store: &Store, task: &str, attempt: u32) -> Option<AttemptWorker> {
     let run = radian_arc::store::attempt_ops::run_dir(store, task, attempt);
     let attempt_dir = radian_arc::store::attempt_ops::attempt_dir(store, task, attempt);
     let worker = [
@@ -2862,17 +2912,40 @@ fn stdout_worker(store: &Store, task: &str, attempt: u32) -> Option<String> {
     ]
     .into_iter()
     .find_map(|path| worker_in(&path))?;
-    let kind = worker
-        .get("kind")
+    let kind = match worker.get("kind").and_then(serde_json::Value::as_str) {
+        Some("command") => WorkerKind::Command,
+        Some("acp") => WorkerKind::Acp,
+        _ => WorkerKind::Radian,
+    };
+    let program = worker
+        .get("program")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    (kind == "command" || kind == "acp").then(|| {
-        worker
-            .get("program")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    })
+        .unwrap_or("radian acp")
+        .to_owned();
+    Some(AttemptWorker { kind, program })
+}
+
+/// Opens, or polls, an attempt's stdout view. `acp` starts the view folded (the attempt's record
+/// names an ACP worker); a row view switches to the fold when its first ACP line arrives.
+fn open_stdout(
+    page: &mut TaskPage,
+    id: &str,
+    attempt: u32,
+    path: PathBuf,
+    program: String,
+    acp: bool,
+) {
+    page.journal = None;
+    page.journal_error = None;
+    match &mut page.stdout {
+        Some(view) if view.is_for(id, attempt) => view.set_program(program),
+        _ => page.stdout = Some(StdoutView::new(id, attempt, path, program, acp)),
+    }
+    if let Some(view) = &mut page.stdout
+        && let Err(error) = view.poll()
+    {
+        page.journal_error = Some(error);
+    }
 }
 
 /// The `worker` object one attempt record names, when the record exists and parses. A record

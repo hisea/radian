@@ -50,6 +50,8 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Warning => "! ",
         // Rule 2: two cells like every other marker; the `Tip:` label is content now.
         EntryKind::Tip => "  ",
+        // The attempt's outcome line has no marker of its own: it is the worker's final row.
+        EntryKind::Outcome { .. } => "",
         // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
         EntryKind::Bash { .. } => "$ ",
     }
@@ -102,6 +104,10 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         // The compaction one-liner is structural (ADR 0035): the `frame`
         // role, the same dim level every other structural line uses.
         EntryKind::Compaction => theme.frame,
+        // The worker's outcome (ADR 0048 §13): the done or the failed colour, as the row
+        // view draws it.
+        EntryKind::Outcome { ok: true } => theme.status_ok,
+        EntryKind::Outcome { ok: false } => theme.status_error,
         // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
         EntryKind::Bash {
             exclude_from_context: false,
@@ -140,6 +146,8 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.
         EntryKind::Compaction => theme.notice_body,
+        EntryKind::Outcome { ok: true } => theme.status_ok,
+        EntryKind::Outcome { ok: false } => theme.status_error,
         // ADR 0033: the same split as `marker`.
         EntryKind::Bash {
             exclude_from_context: false,

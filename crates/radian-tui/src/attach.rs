@@ -392,37 +392,44 @@ impl AttachView {
     /// Draws the transcript into `area` (no footer): the arc TUI's conversation tab puts the
     /// same blocks inside its own frame, so an attached session and a task's journal agree.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let width = area.width as usize;
-        let height = area.height as usize;
         let theme = self.app.theme.clone();
-        // The image run follows the area's height (ADR 0028 R10), exactly as in the TUI's own
-        // frame; the width is recorded through the same call.
-        self.app.set_transcript_size(width, area.height);
-        let modes = self.app.display_modes();
-        // Measure first (the per-entry line counts are cached), then clamp the scroll position
-        // against the real total, then cut the visible window — the order the TUI's own frame
-        // uses (`render::draw`), so the scroll keys and the footer agree with what is drawn.
-        let (total, _) = crate::render::visible_lines_with(
-            &mut self.app.session.entries,
-            modes,
-            width,
-            height,
-            0,
-            0,
-            &theme,
-            crate::spinner::Frame::default(),
-        );
-        self.app.set_viewport(area.height, total);
-        let (_, visible) = crate::render::visible_lines_with(
-            &mut self.app.session.entries,
-            modes,
-            width,
-            height,
-            self.app.session.scroll,
-            height,
-            &theme,
-            crate::spinner::Frame::default(),
-        );
-        frame.render_widget(Paragraph::new(visible), area);
+        draw_entries(&mut self.app, frame, area, &theme);
     }
+}
+
+/// Draws an [`App`]'s transcript entries into `area` with the attach view's layout, theme and
+/// scroll state. The attach view and the arc conversation tab's folded ACP stream both call
+/// this, so both draw the same blocks by construction (ADR 0048 §13).
+pub(crate) fn draw_entries(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    // The image run follows the area's height (ADR 0028 R10), exactly as in the TUI's own
+    // frame; the width is recorded through the same call.
+    app.set_transcript_size(width, area.height);
+    let modes = app.display_modes();
+    // Measure first (the per-entry line counts are cached), then clamp the scroll position
+    // against the real total, then cut the visible window — the order the TUI's own frame
+    // uses (`render::draw`), so the scroll keys and the footer agree with what is drawn.
+    let (total, _) = crate::render::visible_lines_with(
+        &mut app.session.entries,
+        modes,
+        width,
+        height,
+        0,
+        0,
+        theme,
+        crate::spinner::Frame::default(),
+    );
+    app.set_viewport(area.height, total);
+    let (_, visible) = crate::render::visible_lines_with(
+        &mut app.session.entries,
+        modes,
+        width,
+        height,
+        app.session.scroll,
+        height,
+        theme,
+        crate::spinner::Frame::default(),
+    );
+    frame.render_widget(Paragraph::new(visible), area);
 }

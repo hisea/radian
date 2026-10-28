@@ -1,26 +1,36 @@
-//! A command worker's stdout as the task page's conversation tab draws it (ADR 0048 §13): the
-//! attempt's `runs/<task>/attempts/<attempt>/result.jsonl`, one row per line, oldest first,
-//! followed while the attempt runs.
+//! A worker's stdout as the task page's conversation tab draws it (ADR 0048 §13): the
+//! attempt's `runs/<task>/attempts/<attempt>/result.jsonl`, oldest first, followed while the
+//! attempt runs.
 //!
-//! The format is the worker's, not radian's, so nothing here knows a provider's events: a line
-//! that parses as a JSON object shows its `type` (or `-`) in the weak style and then one
-//! summary, and everything else is the line itself. A summary is the first non-empty string
-//! under [`SUMMARY_KEYS`], at the top level first and then one level down inside an
-//! object-valued field (Codex's `item.text` and `item.command`). A `Result` row also shows its
-//! `outcome` in the done or the failed state colour.
+//! The format is the worker's, not radian's, so nothing here knows a provider's events. A
+//! `command` worker's JSON lines are drawn one row per line: a JSON object shows its `type` (or
+//! `-`) in the weak style and then one summary, and everything else is the line itself. A
+//! summary is the first non-empty string under [`SUMMARY_KEYS`], at the top level first and then
+//! one level down inside an object-valued field (Codex's `item.text` and `item.command`). A
+//! `Result` row also shows its `outcome` in the done or the failed state colour.
+//!
+//! An ACP worker writes protocol lines (`{"type":"acp",...}`) instead, and those are folded
+//! into the transcript the attach view draws ([`acp::AcpFold`]): the attempt's records name an
+//! `acp` worker, or a `radian` worker whose session journal does not exist yet, or the first
+//! lines the file gains are ACP. The fold is the same rendering path a resumed session uses —
+//! Markdown, thinking blocks, tool cards and diffs — not a row per streamed token. A line that
+//! is neither ACP nor `Result` still keeps the row drawing, so a mixed file stays readable. A
+//! `command` worker that prints non-ACP JSONL keeps the row view unchanged.
 //!
 //! The worker's file is not radian's and has no size limit, so the view is bounded on purpose.
 //! It reads incrementally, a chunk at a time and at most [`READ_CAP`] bytes per poll, so a
-//! 2-second refresh never reads the whole file and never holds it. It keeps the newest
+//! 2-second refresh never reads the whole file and never holds it. The row view keeps the newest
 //! [`MAX_LINES`] complete rows and the line the worker is still writing, each line cut at
-//! [`MAX_LINE_BYTES`]; a worker that prints without bound then costs a fixed amount of memory,
-//! and scrolling reaches the rows of that window. A line the worker is still writing is a row
-//! too, and is replaced when it completes; [`poll`](StdoutView::poll) drops its partial bytes
-//! when the file is truncated or replaced. A truncation is a shorter file; a replacement is a
-//! file with another device or inode at the same path, even when it is not shorter. A rewrite
-//! of the same file to the same length is not observable and is read as no change. Scrolling
-//! and following are the attach view's: `j`/`k` pause the follow when they leave the end, `f`
-//! returns to it.
+//! [`MAX_LINE_BYTES`]. The folded view keeps at most [`acp::MAX_ENTRIES`] entries and the newest
+//! [`acp::MAX_ENTRY_BYTES`] of each one's text, appending instead of rebuilding; when the window
+//! is full the oldest entries are dropped. Either way a worker that prints without bound costs
+//! a fixed amount of memory, and scrolling reaches the kept window. A line the worker is still
+//! writing is a row in the row view and is not folded until it is complete; [`poll`](StdoutView::poll)
+//! drops its partial bytes when the file is truncated or replaced, and resets the fold with it.
+//! A truncation is a shorter file; a replacement is a file with another device or inode at the
+//! same path, even when it is not shorter. A rewrite of the same file to the same length is not
+//! observable and is read as no change. Scrolling and following are the attach view's: `j`/`k`
+//! pause the follow when they leave the end, `f` returns to it.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
@@ -35,6 +45,10 @@ use serde_json::{Map, Value};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
+
+mod acp;
+
+use acp::AcpFold;
 
 /// The keys a row's summary is taken from, in this order (ADR 0048 §13).
 pub const SUMMARY_KEYS: [&str; 5] = ["text", "message", "command", "content", "summary"];
@@ -51,13 +65,21 @@ const MAX_LINES: usize = 4096;
 /// very long line, or of one the worker has not terminated yet, is dropped.
 const MAX_LINE_BYTES: usize = 8 * 1024;
 
-/// One attempt's `result.jsonl`, read incrementally and drawn one row per line.
+/// What the conversation renders: the row view, or a folded ACP transcript.
+enum Mode {
+    Rows,
+    Acp(Box<AcpFold>),
+}
+
+/// One attempt's `result.jsonl`, read incrementally and drawn either one row per line (a command
+/// worker) or as the folded ACP transcript (an ACP worker).
 pub struct StdoutView {
     task: String,
     attempt: u32,
     program: String,
     path: PathBuf,
-    /// The newest complete lines read, oldest first. Bounded by [`MAX_LINES`].
+    /// The newest complete lines read, oldest first. Bounded by [`MAX_LINES`]. Used by the row
+    /// view, and as the seed of the fold when the file turns out to be ACP.
     lines: VecDeque<String>,
     /// The bytes after the newest newline: the line the worker is still writing. Shown as the
     /// last row and replaced when it completes. Bounded by [`MAX_LINE_BYTES`].
@@ -67,18 +89,21 @@ pub struct StdoutView {
     /// The device and inode of the file the offset belongs to, while it is known. A different
     /// file at the same path is a replacement even when its length is not smaller.
     identity: Option<(u64, u64)>,
-    /// The first row the last frame drew.
+    /// What the conversation draws.
+    mode: Mode,
+    /// The first row the last frame drew (the row view).
     scroll: usize,
-    /// The last row the last frame could draw, from its measured height.
+    /// The last row the last frame could draw, from its measured height (the row view).
     max_scroll: usize,
-    /// Whether new rows keep the end in view.
+    /// Whether new rows keep the end in view (the row view).
     follow: bool,
 }
 
 impl StdoutView {
     /// The view of one attempt's `result.jsonl`. The file may not exist yet; the first
-    /// [`poll`](Self::poll) reads what is there.
-    pub fn new(task: &str, attempt: u32, path: PathBuf, program: String) -> Self {
+    /// [`poll`](Self::poll) reads what is there. `acp` says the attempt's record names an ACP
+    /// worker; a `command` worker starts on the row view and switches when its lines are ACP.
+    pub fn new(task: &str, attempt: u32, path: PathBuf, program: String, acp: bool) -> Self {
         Self {
             task: task.to_owned(),
             attempt,
@@ -88,6 +113,11 @@ impl StdoutView {
             tail: Vec::new(),
             offset: 0,
             identity: None,
+            mode: if acp {
+                Mode::Acp(Box::new(AcpFold::new()))
+            } else {
+                Mode::Rows
+            },
             scroll: 0,
             max_scroll: 0,
             follow: true,
@@ -112,7 +142,11 @@ impl StdoutView {
 
     /// Whether the view has no row at all.
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty() && self.tail.is_empty()
+        match &self.mode {
+            // A partial line is not folded until it is complete, so it is not a row either.
+            Mode::Acp(fold) => fold.is_empty(),
+            Mode::Rows => self.lines.is_empty() && self.tail.is_empty(),
+        }
     }
 
     /// Reads the bytes appended since the last read, in chunks and up to [`READ_CAP`] of them. A
@@ -142,6 +176,9 @@ impl StdoutView {
             self.lines.clear();
             self.tail.clear();
             self.offset = 0;
+            if let Mode::Acp(_) = &self.mode {
+                self.mode = Mode::Acp(Box::new(AcpFold::new()));
+            }
         }
         self.identity = Some(identity);
         if len == self.offset {
@@ -199,12 +236,35 @@ impl StdoutView {
         Ok(true)
     }
 
-    /// Adds one complete line, dropping the oldest row past [`MAX_LINES`].
+    /// Adds one complete line: to the row view, or to the folded transcript. The first ACP line
+    /// of a row view switches it to the fold, and the rows read before it are seeded into the
+    /// fold in order (ADR 0048 §13).
     fn push_line(&mut self, line: String) {
-        if self.lines.len() == MAX_LINES {
-            self.lines.pop_front();
+        match &mut self.mode {
+            Mode::Rows => {
+                if is_acp_line(&line) {
+                    self.enter_acp(&line);
+                } else {
+                    if self.lines.len() == MAX_LINES {
+                        self.lines.pop_front();
+                    }
+                    self.lines.push_back(line);
+                }
+            }
+            Mode::Acp(fold) => fold.push_line(&line),
         }
-        self.lines.push_back(line);
+    }
+
+    /// Switches a row view to the fold: every row already read becomes the fold's first entries,
+    /// then `line` is folded.
+    fn enter_acp(&mut self, line: &str) {
+        let rows = std::mem::take(&mut self.lines);
+        let mut fold = AcpFold::new();
+        for row in rows {
+            fold.push_line(&row);
+        }
+        fold.push_line(line);
+        self.mode = Mode::Acp(Box::new(fold));
     }
 
     /// One row: a complete line, or the line the worker is still writing.
@@ -218,6 +278,10 @@ impl StdoutView {
     /// Scrolls the rows one line at a time, up (`delta < 0`) or down. Leaving the end pauses
     /// the follow; returning to it resumes it, as the transcript's scroll does.
     pub fn scroll_lines(&mut self, delta: i32) {
+        if let Mode::Acp(fold) = &mut self.mode {
+            fold.scroll_lines(delta);
+            return;
+        }
         let step = delta.unsigned_abs() as usize;
         let next = if delta < 0 {
             self.scroll.saturating_sub(step)
@@ -230,13 +294,22 @@ impl StdoutView {
 
     /// Pins the view to its end (follow again).
     pub fn follow_end(&mut self) {
+        if let Mode::Acp(fold) = &mut self.mode {
+            fold.follow_end();
+            return;
+        }
         self.scroll = self.max_scroll;
         self.follow = true;
     }
 
-    /// Draws the visible rows into `area`, one row per line, each cut to the area's width. The
-    /// frame's own rail is drawn by the caller, as it is for the attach view.
+    /// Draws the visible rows into `area`, one row per line, each cut to the area's width (or the
+    /// folded ACP transcript through the attach view's renderer). The frame's own rail is drawn
+    /// by the caller, as it is for the attach view.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if let Mode::Acp(fold) = &mut self.mode {
+            fold.draw(frame, area, theme);
+            return;
+        }
         let width = area.width as usize;
         let height = area.height as usize;
         let total = self.lines.len() + usize::from(!self.tail.is_empty());
@@ -263,9 +336,6 @@ fn row_line(raw: &str, width: usize, theme: &Theme) -> Line<'static> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(raw) else {
         return Line::from(spans_row(vec![(raw.to_owned(), theme.text)], width));
     };
-    if object.get("type").and_then(Value::as_str) == Some("acp") {
-        return acp_row(&object, width, theme);
-    }
     let kind = object.get("type").and_then(Value::as_str).unwrap_or("-");
     let mut parts = vec![(kind.to_owned(), theme.hint)];
     // A `Result` row's outcome is the state of the attempt: done when `completed`, failed for
@@ -324,85 +394,12 @@ fn line_breaks_to_spaces(text: &str) -> String {
     text.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }
 
-/// One ACP line (ADR 0048 decision 7): the wrapper writes every protocol line into
-/// `result.jsonl` as `{"type": "acp", "message": <the protocol object>}`, and a permission
-/// request's answer as `{"type": "acp", "answer": {...}}`. A `tool_call` or
-/// `tool_call_update` draws like a `radian exec` tool row, the update's kind in the weak style
-/// and then its title; a message chunk is its text.
-fn acp_row(object: &Map<String, Value>, width: usize, theme: &Theme) -> Line<'static> {
-    if let Some(answer) = object.get("answer").and_then(Value::as_object) {
-        let kind = answer.get("kind").and_then(Value::as_str).unwrap_or("-");
-        return Line::from(spans_row(
-            vec![
-                ("permission ".to_owned(), theme.hint),
-                (kind.to_owned(), theme.text),
-            ],
-            width,
-        ));
-    }
-    let Some(message) = object.get("message") else {
-        return Line::from(spans_row(
-            vec![(Value::Object(object.clone()).to_string(), theme.text)],
-            width,
-        ));
-    };
-    let method = message.get("method").and_then(Value::as_str).unwrap_or("-");
-    if method != "session/update" {
-        return Line::from(spans_row(vec![(method.to_owned(), theme.hint)], width));
-    }
-    let update = message.pointer("/params/update");
-    let update_kind = update
-        .and_then(|update| update.get("sessionUpdate"))
-        .and_then(Value::as_str)
-        .unwrap_or("-");
-    match update_kind {
-        "agent_message_chunk" => {
-            let text = update
-                .and_then(|update| update.pointer("/content/text"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            Line::from(spans_row(
-                vec![(line_breaks_to_spaces(text), theme.text)],
-                width,
-            ))
-        }
-        "tool_call" | "tool_call_update" => {
-            let title = update
-                .and_then(|update| {
-                    update
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .or_else(|| update.get("kind").and_then(Value::as_str))
-                })
-                .unwrap_or_default();
-            let mut parts = vec![
-                (update_kind.to_owned(), theme.hint),
-                (" ".to_owned(), theme.text),
-                (line_breaks_to_spaces(title), theme.text),
-            ];
-            if let Some(status) = update
-                .and_then(|update| update.get("status"))
-                .and_then(Value::as_str)
-            {
-                parts.push((" ".to_owned(), theme.text));
-                parts.push((status.to_owned(), theme.hint));
-            }
-            Line::from(spans_row(parts, width))
-        }
-        _ => {
-            let body = update
-                .map(Value::to_string)
-                .unwrap_or_else(|| "-".to_owned());
-            Line::from(spans_row(
-                vec![
-                    (update_kind.to_owned(), theme.hint),
-                    (" ".to_owned(), theme.text),
-                    (body, theme.text),
-                ],
-                width,
-            ))
-        }
-    }
+/// Whether one complete line is an ACP envelope (`{"type":"acp",...}`). A row view that meets
+/// one switches to the fold, so a command worker that happens to print the protocol is drawn as
+/// a transcript too (ADR 0048 §13).
+fn is_acp_line(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some("acp"))
 }
 
 /// The styled parts of one row, cut to `width` cells. A row that is too long keeps the start of
@@ -449,6 +446,9 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
     use super::*;
 
     fn text(line: &Line<'_>) -> String {
@@ -483,11 +483,21 @@ mod tests {
         }
     }
 
-    /// A view on an existing file, polled once.
-    fn opened(path: &Path) -> StdoutView {
-        let mut view = StdoutView::new("TK0001-task", 1, path.to_path_buf(), "codex".to_owned());
+    /// A view on an existing file, polled once. The row view unless `acp` asks for the fold.
+    fn opened_with(path: &Path, acp: bool) -> StdoutView {
+        let mut view = StdoutView::new(
+            "TK0001-task",
+            1,
+            path.to_path_buf(),
+            "codex".to_owned(),
+            acp,
+        );
         view.poll().expect("the file is readable");
         view
+    }
+
+    fn opened(path: &Path) -> StdoutView {
+        opened_with(path, false)
     }
 
     #[test]
@@ -509,39 +519,84 @@ mod tests {
         assert_eq!(first_summary(&object), Some("nested"));
     }
 
-    /// An ACP `tool_call` row is the update's kind in the weak style and its title, the shape
-    /// of a `radian exec` tool row; a message chunk is its text (ADR 0048 decision 7).
+    /// A command worker's non-ACP rows keep the row view; the first ACP line switches the view
+    /// to the fold and seeds the rows read before it (ADR 0048 §13).
     #[test]
-    fn an_acp_tool_call_row_names_the_tool_and_its_title() {
-        let theme = Theme::default();
-        let call = row_line(
-            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Edit image.txt","kind":"edit","status":"pending"}}}}"#,
-            80,
-            &theme,
+    fn an_acp_line_switches_a_row_view_to_the_fold() {
+        let scratch = Scratch::new("switch");
+        let path = scratch.file();
+        let acp = serde_json::json!({
+            "type": "acp",
+            "message": {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "the folded answer"},
+                    },
+                },
+            },
+        })
+        .to_string();
+        fs::write(
+            &path,
+            [
+                r#"{"type":"item.completed","item":{"text":"the first row"}}"#.to_owned(),
+                acp,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let view = opened(&path);
+        let Mode::Acp(fold) = &view.mode else {
+            panic!("the view folded the ACP stream");
+        };
+        assert_eq!(fold.app.session.entries.len(), 2);
+        assert_eq!(
+            fold.app.session.entries[0].kind,
+            crate::app::EntryKind::Notice
         );
         assert_eq!(
-            text(&call),
-            "tool_call Edit image.txt pending",
-            "the tool row names the update and its title"
+            fold.app.session.entries[0].text,
+            "item.completed the first row"
         );
-        let update = row_line(
-            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","title":"Edit image.txt","status":"completed"}}}}"#,
-            80,
-            &theme,
+        assert_eq!(
+            fold.app.session.entries[1].kind,
+            crate::app::EntryKind::Assistant
         );
-        assert_eq!(text(&update), "tool_call_update Edit image.txt completed");
-        let chunk = row_line(
-            r#"{"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"the image is ready"}}}}}"#,
-            80,
-            &theme,
-        );
-        assert_eq!(text(&chunk), "the image is ready");
-        let answer = row_line(
-            r#"{"type":"acp","answer":{"requestId":7,"kind":"allow_once","optionId":"allow"}}"#,
-            80,
-            &theme,
-        );
-        assert_eq!(text(&answer), "permission allow_once");
+        assert_eq!(fold.app.session.entries[1].text, "the folded answer");
+    }
+
+    /// A view whose attempt record names an ACP worker starts folded, so the first line is a
+    /// transcript block rather than one row (ADR 0048 §13).
+    #[test]
+    fn a_record_naming_an_acp_worker_starts_folded() {
+        let scratch = Scratch::new("acp-start");
+        let path = scratch.file();
+        let acp = serde_json::json!({
+            "type": "acp",
+            "message": {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "the answer"},
+                    },
+                },
+            },
+        })
+        .to_string();
+        fs::write(&path, format!("{acp}\n")).unwrap();
+        let view = opened_with(&path, true);
+        let Mode::Acp(fold) = &view.mode else {
+            panic!("the view starts folded");
+        };
+        assert_eq!(fold.app.session.entries.last().unwrap().text, "the answer");
     }
 
     #[test]
@@ -739,5 +794,116 @@ mod tests {
 
     fn path_len(path: &Path) -> u64 {
         fs::metadata(path).unwrap().len()
+    }
+
+    fn acp_chunk(text: &str) -> String {
+        serde_json::json!({
+            "type": "acp",
+            "message": {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text},
+                    },
+                },
+            },
+        })
+        .to_string()
+    }
+
+    /// A truncated or replaced file resets the fold, as the row view resets its rows: the next
+    /// content starts from an empty transcript (ADR 0048 §13).
+    #[test]
+    fn a_truncated_acp_file_resets_the_fold() {
+        let scratch = Scratch::new("acp-reset");
+        let path = scratch.file();
+        fs::write(
+            &path,
+            format!("{}\n{}\n", acp_chunk("the old answer"), acp_chunk(" more")),
+        )
+        .unwrap();
+        let mut view = opened_with(&path, true);
+        let Mode::Acp(fold) = &view.mode else {
+            panic!("the view is folded");
+        };
+        assert_eq!(fold.app.session.entries.len(), 1);
+        assert_eq!(fold.app.session.entries[0].text, "the old answer more");
+
+        // A shorter file is a truncation: the fold starts over from its content.
+        let fresh = acp_chunk("fresh");
+        fs::write(&path, format!("{fresh}\n")).unwrap();
+        assert!(view.poll().unwrap());
+        let Mode::Acp(fold) = &view.mode else {
+            panic!("the view stays folded");
+        };
+        assert_eq!(fold.app.session.entries.len(), 1);
+        assert_eq!(fold.app.session.entries[0].text, "fresh");
+    }
+
+    /// A codex-like ACP stream of one-token Chinese chunks draws as one wrapped paragraph
+    /// through the attach renderer, not one row per chunk; the hidden `usage_update` is a weak
+    /// status line, never raw JSON (ADR 0048 §13).
+    #[test]
+    fn a_codex_like_stream_draws_as_one_paragraph_not_one_row_per_token() {
+        let scratch = Scratch::new("acp-render");
+        let path = scratch.file();
+        let mut content = String::new();
+        for _ in 0..200 {
+            content.push_str(&acp_chunk("你"));
+            content.push('\n');
+        }
+        content.push_str(
+            &serde_json::json!({
+                "type": "acp",
+                "message": {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s",
+                        "update": {"sessionUpdate": "usage_update", "used": 1, "size": 9000},
+                    },
+                },
+            })
+            .to_string(),
+        );
+        content.push('\n');
+        content.push_str(r#"{"type":"Result","outcome":"completed","text":"done"}"#);
+        content.push('\n');
+        fs::write(&path, content).unwrap();
+
+        let mut view = opened_with(&path, true);
+        let mut terminal = Terminal::new(TestBackend::new(40, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                view.draw(frame, area, &Theme::default());
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        assert_eq!(
+            screen.matches('你').count(),
+            200,
+            "the whole answer is drawn:\n{screen}"
+        );
+        let rows = screen.lines().filter(|row| row.contains('你')).count();
+        assert!(
+            (2..=20).contains(&rows),
+            "the chunks wrap into a paragraph, not 200 rows: {rows}\n{screen}"
+        );
+        assert!(
+            screen.contains("context 1/9000"),
+            "the usage is one weak line:\n{screen}"
+        );
+        assert!(
+            !screen.contains("usage_update") && !screen.contains("\"used\""),
+            "no usage JSON is dumped:\n{screen}"
+        );
+        assert!(
+            screen.contains("Result completed done"),
+            "the result line is drawn:\n{screen}"
+        );
     }
 }

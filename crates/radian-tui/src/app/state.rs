@@ -113,6 +113,13 @@ pub enum EntryKind {
     /// [`crate::blocks::context_lines`]. Same surface as the notices it
     /// replaces (the transcript).
     Context,
+    /// The attempt's outcome line the conversation tab draws for an ACP worker's `Result`
+    /// record: `Result <outcome> <text>`, in the done or the failed colour (ADR 0048 §13).
+    /// Every other transcript entry is a committed message or a host notice; this is the one
+    /// row a worker's stream contributes that is not a message.
+    Outcome {
+        ok: bool,
+    },
     /// A user's `!`/`!!` command and its output (ADR 0033). The renderer colors `!` (goes to
     /// the model's context) and `!!` (does not) differently; the first line is `$ cmd`.
     Bash {

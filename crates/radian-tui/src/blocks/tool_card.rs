@@ -201,11 +201,32 @@ fn head_tail(
             tail.push((ch, MdStyle::Dim, None));
         }
     }
-    let glyph = match head_status(entry, entry.tool.as_deref()) {
-        HeadStatus::Ok => Some((status_marks(modes.glyphs).0, MdStyle::StatusOk)),
-        HeadStatus::Error => Some((status_marks(modes.glyphs).1, MdStyle::StatusError)),
-        HeadStatus::Running => Some((running_glyph(modes.glyphs), MdStyle::StatusRunning)),
-        HeadStatus::None => None,
+    // An ACP tool call names its state (`queued`, `running`, `done`, `failed`) instead of
+    // drawing the glyph: a `terminal` content block has no result to pair, so the glyph would
+    // stay a running frame after the call has finished (ADR 0048 §13).
+    let status = entry
+        .tool
+        .as_deref()
+        .and_then(|card| card.status.as_deref());
+    if let Some(status) = status {
+        let style = match status {
+            "done" => MdStyle::StatusOk,
+            "failed" => MdStyle::StatusError,
+            _ => MdStyle::Dim,
+        };
+        for ch in format!(" · {status}").chars() {
+            tail.push((ch, style, None));
+        }
+    }
+    let glyph = if status.is_some() {
+        None
+    } else {
+        match head_status(entry, entry.tool.as_deref()) {
+            HeadStatus::Ok => Some((status_marks(modes.glyphs).0, MdStyle::StatusOk)),
+            HeadStatus::Error => Some((status_marks(modes.glyphs).1, MdStyle::StatusError)),
+            HeadStatus::Running => Some((running_glyph(modes.glyphs), MdStyle::StatusRunning)),
+            HeadStatus::None => None,
+        }
     };
     if let Some((glyph, style)) = glyph {
         tail.push((' ', MdStyle::Plain, None));

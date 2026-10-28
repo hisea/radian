@@ -64,6 +64,11 @@ pub struct ToolCard {
     /// shows the tool's own error text instead of the call's edits, and no `+N −M`
     /// (`crates/radian-tui/src/app/transcript.rs` sets it when the result arrives).
     pub is_error: bool,
+    /// The ACP tool call's status, as the conversation tab draws it: `queued`, `running`,
+    /// `done` or `failed` (ADR 0048 §13). It rides on the head's meta instead of the status
+    /// glyph, so a `terminal` content block (which has no result to pair) still shows its
+    /// state. `None` for every radian-owned tool call, whose status is the glyph alone.
+    pub status: Option<String>,
 }
 
 impl ToolCard {
@@ -76,6 +81,7 @@ impl ToolCard {
             duration_ms: None,
             result_lines: None,
             is_error: false,
+            status: None,
         }
     }
 

@@ -2358,6 +2358,141 @@ fn the_conversation_tab_follows_a_running_attempts_journal() {
     );
 }
 
+/// One `session/update` line in the `result.jsonl` envelope the ACP wrapper writes (ADR 0048
+/// decision 7).
+fn acp_update(update: serde_json::Value) -> String {
+    json!({
+        "type": "acp",
+        "message": {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": "s", "update": update },
+        },
+    })
+    .to_string()
+}
+
+/// A flow's `acp` agent has no session: the conversation tab folds its protocol lines into the
+/// attach view's transcript, so a token-per-chunk answer is one paragraph and a `usage_update`
+/// is not raw JSON (ADR 0048 §13).
+#[test]
+fn the_conversation_tab_folds_an_acp_workers_stream() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    let attempt = 2;
+    write_start_worker(
+        &fixture,
+        &task,
+        attempt,
+        &format!("{task}-1"),
+        json!({"kind": "acp", "program": "codex-acp"}),
+    );
+    let path = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, attempt)
+        .join("result.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut content = String::new();
+    for _ in 0..200 {
+        content.push_str(&acp_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "你"},
+        })));
+        content.push('\n');
+    }
+    content.push_str(&acp_update(json!({
+        "sessionUpdate": "usage_update",
+        "used": 1,
+        "size": 9000,
+    })));
+    content.push('\n');
+    content.push_str(r#"{"type":"Result","outcome":"completed","text":"done"}"#);
+    content.push('\n');
+    fs::write(&path, content).unwrap();
+
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    let text = screen(&mut app, 80, 40);
+    assert!(
+        text.contains("conversation · codex-acp stdout"),
+        "the title names the program:\n{text}"
+    );
+    assert_eq!(
+        text.matches('你').count(),
+        200,
+        "the answer is whole:\n{text}"
+    );
+    let rows = text.lines().filter(|row| row.contains('你')).count();
+    assert!(
+        rows <= 10,
+        "the tokens fold into a paragraph, not 200 rows: {rows}\n{text}"
+    );
+    assert!(
+        text.contains("context 1/9000"),
+        "the usage is one weak line:\n{text}"
+    );
+    assert!(
+        !text.contains("usage_update"),
+        "no usage JSON is dumped:\n{text}"
+    );
+    assert!(text.contains("Result completed done"), "{text}");
+}
+
+/// The radian worker is `radian acp`; when its session journal does not exist yet, the tab folds
+/// the protocol lines it is writing to `result.jsonl` instead of showing the empty-journal line
+/// (ADR 0048 §13).
+#[test]
+fn a_radian_attempt_without_a_journal_folds_its_acp_stdout() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_identity_worker(
+        &fixture,
+        &task,
+        1,
+        &format!("{task}-1"),
+        json!({"kind": "radian"}),
+    );
+    let run = radian_arc::store::attempt_ops::run_dir(&fixture.store, &task, 1);
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("result.jsonl"),
+        format!(
+            "{}\n",
+            acp_update(json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "the folded answer"},
+            }))
+        ),
+    )
+    .unwrap();
+
+    let mut app = ArcApp::with_session_dir(fixture.store.clone(), None);
+    app.plan_sel = app
+        .plans
+        .iter()
+        .position(|view| view.plan.item.id == fixture.plan)
+        .unwrap();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("conversation · radian acp stdout"),
+        "the title names the radian worker's program:\n{text}"
+    );
+    assert!(
+        text.contains("the folded answer"),
+        "the ACP stdout is folded:\n{text}"
+    );
+    assert!(
+        !text.contains("no session journal yet"),
+        "the empty-journal line is not shown when stdout has the conversation:\n{text}"
+    );
+}
+
 /// A `[worker] command` attempt has no radian session: the conversation tab shows the attempt's
 /// `result.jsonl`, one row per line, under a title that names the program (ADR 0048 §13).
 ///
