@@ -655,3 +655,26 @@ Unmutated, every test named here passes.
 5/5 caught. M5 and M1 together are the pre-change behavior for `session/load`: the rewritten
 symlink and truncated tests fail on them, which is what the review asked for.
 
+## `radian acp`: bounded stdio (TK0224, 2026-10-28)
+
+Branch `work/TK0224-acp-stdio-bounded`. Each mutation was applied in place to
+`crates/radian-exec/src/acp/{wire,mod}.rs`, and the source was restored from `.radian/mut/`
+(`cmp` identical). The unit-test rows ran
+`cargo nextest run -p radian-exec --locked --profile sandbox --lib -E 'test(<name>)'`; the
+integration rows rebuilt the `radian` binary (`cargo build -p radian-tui --bin radian`) and ran
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E 'test(<name>)'`.
+Unmutated, the `acp` binary passed 30/30 and the `radian-exec` lib passed 41 of its 42 tests
+(one is skipped under the sandbox profile).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0224-M1 | the reader appends past the limit (`take <= self.limit` and the append cap removed) | ✅ 2 failed | `acp::wire::tests::a_line_longer_than_the_limit_is_discarded_without_being_held` (the over-long line came back as a line, and the accumulated buffer passed the limit) and `acp::wire::tests::eof_in_the_middle_of_an_over_long_line_is_eof` |
+| TK0224-M2 | both producers drop when the queue is full (`try_send` instead of waiting) | ✅ 1 failed | `acp::wire::tests::a_full_outbox_makes_both_producers_wait_and_drops_nothing` (a producer resolved at once instead of waiting) |
+| TK0224-M3 | an over-long line is answered as invalid params (`-32602`) instead of a parse error (`-32700`) | ✅ 1 failed | `acp::an_over_long_line_is_a_parse_error_and_the_next_line_is_served` |
+| TK0224-M4 | an over-long line with no newline before EOF is answered as over the limit instead of end of input | ✅ 2 failed | `acp::wire::tests::eof_in_the_middle_of_an_over_long_line_is_eof` and `acp::eof_in_the_middle_of_an_over_long_line_is_a_clean_shutdown` |
+| TK0224-M5 | the exact-limit boundary is `<` instead of `<=` | ✅ 1 failed | `acp::wire::tests::a_line_exactly_at_the_limit_is_accepted` |
+
+5/5 caught. M2's mutation is the "bounded but lossy" alternative: the queue stays at its
+capacity, but the update is dropped, which is what the test's waiting and delivery assertions
+refuse.
+
