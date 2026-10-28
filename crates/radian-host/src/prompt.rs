@@ -13,6 +13,13 @@ use std::sync::{Arc, Mutex};
 
 /// The built-in role prompt (ADR 0036). Layer 1 for every session; `--system`
 /// replaces it.
+///
+/// Layer 1 is byte-stable for every session, so it is not built from `ToolPresence`
+/// (ADR 0043 §4): it says "the file tools" and "the shell" in prose and names no tool by a
+/// backticked identifier. A session that mounts no `shell` therefore reads no dangling tool
+/// name here; the per-tool descriptions carry the mounted-only rule. Keeping this layer
+/// dynamic would break the cached prefix, so generic words are the intended answer, not an
+/// oversight.
 pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
 
 /// Layer 0a: the runtime facts the host generates from what it actually mounted. Never
@@ -384,6 +391,33 @@ mod tests {
         assert!(DEFAULT_ROLE.contains("unless the task asks for that action"));
         assert!(!DEFAULT_ROLE.contains("End your turn only when the task is done"));
         assert!(DEFAULT_ROLE.contains("Write file references as `path:line`"));
+    }
+
+    /// ADR 0036 and ADR 0043 §4: layer 1 is the same for every session, so it never names a
+    /// tool by its identifier. The generic words ("the file tools", "the shell") stay; a
+    /// backticked tool name would point a restricted `--tools` session at a tool that is not
+    /// mounted. See the [`DEFAULT_ROLE`] comment for why the layer stays static.
+    #[test]
+    fn the_builtin_role_names_no_tool_identifier() {
+        for tool in [
+            "read",
+            "write",
+            "patch",
+            "glob",
+            "grep",
+            "shell",
+            "job",
+            "memory_search",
+            "ask_user",
+            "skill",
+            "subagent",
+            "goal",
+        ] {
+            assert!(
+                !DEFAULT_ROLE.contains(&format!("`{tool}`")),
+                "layer 1 names `{tool}`, which is not mounted in every session"
+            );
+        }
     }
 
     /// Layer 1 is the built-in default role, and `--system` replaces it. The hook writes the

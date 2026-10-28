@@ -898,3 +898,15 @@ was applied by hand, the named test binary was run, and the source was restored 
 | TK0216-M3 | `shell::spec` always passes `job = true` to the schema, so the `background` field keeps "Read the job with `job`." | ✅ 1 failed (rc=100) | `a_read_write_patch_shell_set_names_no_search_or_job_tool` (the background note names `job`) |
 | TK0216-M4 | `read::spec` always adds "Remove it before you use the text in `patch`." (`if true`) | ✅ 1 failed (rc=100) | `read_names_patch_only_when_patch_is_mounted` (the `read,glob,grep` set still names `patch`) |
 
+## TK0217: tool-description follow-ups (2026-10-27, branch `work/TK0217-tool-descriptions-match-tool-set-followups`)
+
+The review of TK0216 found that `job` still said "A `read` with no range", which reads as the
+file tool in a `shell,job` set that mounts no `read` (ADR 0043 §4). The description now says
+"The `read` op", so the word is the operation the tool accepts. The mutation put the old
+wording back; the source was restored from `.radian/jobs.rs.rework.orig` (never
+`git checkout`) and confirmed byte-identical with `shasum -a 256`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0217-M1 | `job_spec` puts the bare "A `read` with no range" back | ✅ 1 failed (rc=100) | `a_shell_job_set_names_the_read_op_not_the_read_tool` (`` `job` must say its `read` is an op, not the file tool ``) |
+

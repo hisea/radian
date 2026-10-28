@@ -1326,6 +1326,32 @@ async fn a_read_write_patch_shell_set_names_no_search_or_job_tool() {
     assert!(background.contains("no deadline"), "{background}");
 }
 
+/// `shell,job` without `read`: the `job` description says "the `read` op", so the word
+/// names the operation the tool accepts, not the file tool (ADR 0043 §4). The full set says
+/// the same text: the op wording never depends on which other tools are mounted.
+#[tokio::test]
+async fn a_shell_job_set_names_the_read_op_not_the_read_tool() {
+    let dir = TempDir::new("shell-spec-job-op");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let specs = restricted_specs(&tools, &["shell", "job"]).await;
+    assert_eq!(names_of(&specs), ["job", "shell"]);
+    let job = spec_named(&specs, "job");
+    assert!(
+        job.description.contains("The `read` op with no range"),
+        "`job` must say its `read` is an op, not the file tool: {}",
+        job.description
+    );
+    assert!(
+        !job.description.contains("A `read` with no range"),
+        "a bare `read` reads as the unmounted file tool: {}",
+        job.description
+    );
+    let full = spec_named(tools.open_session().await.unwrap().tool_specs(), "job");
+    assert_eq!(full.description, job.description);
+}
+
 /// `shell` alone: no `read`, no search tool, no prohibition about absent tools; the
 /// confinement, timeout and background sentences stay.
 #[tokio::test]

@@ -1018,10 +1018,13 @@ pub(crate) fn job_schema() -> serde_json::Value {
     })
 }
 
+/// The `job` spec. It says "the `read` op", never a bare "`read`": a set that mounts
+/// `shell,job` without `read` (the hidden `--tools` list) would otherwise read as the file
+/// tool (ADR 0043 §4). The op word is part of this tool, so it is always safe.
 pub(crate) fn job_spec() -> ToolSpec {
     ToolSpec {
         name: "job".into(),
-        description: "Read or stop one `shell` job. Pass its job id. A `read` with no \
+        description: "Read or stop one `shell` job. Pass its job id. The `read` op with no \
                       range returns the output since your last read, plus `[status: ...]`. \
                       `wait` blocks until the job ends or `timeout_ms` elapses. `wait` never \
                       kills the job. `kill` stops the job's whole process group. The tool \
