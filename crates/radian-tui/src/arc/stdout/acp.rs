@@ -327,6 +327,7 @@ impl AcpFold {
         } else {
             state.id.clone()
         };
+        let title = cap_text(title);
         let status = status_text(&state.status);
         let diff = state.content.as_ref().and_then(first_diff);
         let output = if diff.is_some() {
@@ -577,7 +578,8 @@ impl AcpFold {
 
     /// Appends one entry. Returns its index after the memory window was trimmed, or `None` when
     /// the entry itself fell out of the window.
-    fn push_entry(&mut self, entry: Entry) -> Option<usize> {
+    fn push_entry(&mut self, mut entry: Entry) -> Option<usize> {
+        cap_entry(&mut entry);
         self.app.session.entries.push(entry);
         let mut index = self.app.session.entries.len() - 1;
         let dropped = self.trim();

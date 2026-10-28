@@ -20,13 +20,15 @@
 //! The worker's file is not radian's and has no size limit, so the view is bounded on purpose.
 //! It reads incrementally, a chunk at a time and at most [`READ_CAP`] bytes per poll, so a
 //! 2-second refresh never reads the whole file and never holds it. The row view keeps the newest
-//! [`MAX_LINES`] complete rows and the line the worker is still writing, each line cut at
-//! [`MAX_LINE_BYTES`]. The folded view keeps at most [`acp::MAX_ENTRIES`] entries and the newest
+//! [`MAX_LINES`] complete rows, each stored line cut at [`MAX_LINE_BYTES`]; the line the worker
+//! is still writing is held up to [`MAX_READ_LINE_BYTES`] so a diff is not cut before it can be
+//! folded. The folded view keeps at most [`acp::MAX_ENTRIES`] entries and the newest
 //! [`acp::MAX_ENTRY_BYTES`] of each one's text, appending instead of rebuilding; when the window
 //! is full the oldest entries are dropped. Either way a worker that prints without bound costs
 //! a fixed amount of memory, and scrolling reaches the kept window. A line the worker is still
-//! writing is a row in the row view and is not folded until it is complete; [`poll`](StdoutView::poll)
-//! drops its partial bytes when the file is truncated or replaced, and resets the fold with it.
+//! writing is a row in the row view and is not folded until it is complete;
+//! [`poll`](StdoutView::poll) drops its partial bytes when the file is truncated or replaced, and
+//! resets the fold with it.
 //! A truncation is a shorter file; a replacement is a file with another device or inode at the
 //! same path, even when it is not shorter. A rewrite of the same file to the same length is not
 //! observable and is read as no change. Scrolling and following are the attach view's: `j`/`k`
@@ -61,9 +63,16 @@ const READ_CAP: u64 = 4 * 1024 * 1024;
 /// the tab follows the end, so they are what a person can scroll through (ADR 0048 §13).
 const MAX_LINES: usize = 4096;
 
-/// The most bytes one line keeps. A row is cut to the terminal's width anyway, so the rest of a
-/// very long line, or of one the worker has not terminated yet, is dropped.
+/// The most bytes one row view line keeps. A row is cut to the terminal's width anyway, so the
+/// rest of a very long line is dropped. The read buffer itself may hold a longer line (up to
+/// [`READ_CAP`]) so an ACP `tool_call`'s diff is not cut before it is folded; a row is
+/// truncated to this cap when it is stored.
 const MAX_LINE_BYTES: usize = 8 * 1024;
+
+/// The most bytes one unread line spends before it is cut. This is the poll's own cap: a line
+/// longer than one poll cannot be read whole anyway. In the fold this bound keeps a single
+/// huge diff from growing the read buffer past a poll.
+const MAX_READ_LINE_BYTES: usize = READ_CAP as usize;
 
 /// What the conversation renders: the row view, or a folded ACP transcript.
 enum Mode {
@@ -215,7 +224,7 @@ impl StdoutView {
                 if let Some(kept) = &mut fragment {
                     if byte == b'\n' {
                         fragment = None;
-                    } else if kept.len() < MAX_LINE_BYTES {
+                    } else if kept.len() < MAX_READ_LINE_BYTES {
                         kept.push(byte);
                     }
                     continue;
@@ -223,7 +232,7 @@ impl StdoutView {
                 if byte == b'\n' {
                     let line = std::mem::take(&mut self.tail);
                     self.push_line(String::from_utf8_lossy(&line).into_owned());
-                } else if self.tail.len() < MAX_LINE_BYTES {
+                } else if self.tail.len() < MAX_READ_LINE_BYTES {
                     self.tail.push(byte);
                 }
             }
@@ -248,7 +257,7 @@ impl StdoutView {
                     if self.lines.len() == MAX_LINES {
                         self.lines.pop_front();
                     }
-                    self.lines.push_back(line);
+                    self.lines.push_back(truncate_line(line));
                 }
             }
             Mode::Acp(fold) => fold.push_line(&line),
@@ -400,6 +409,20 @@ fn line_breaks_to_spaces(text: &str) -> String {
 fn is_acp_line(raw: &str) -> bool {
     serde_json::from_str::<Value>(raw)
         .is_ok_and(|value| value.get("type").and_then(Value::as_str) == Some("acp"))
+}
+
+/// Cuts a row view line to [`MAX_LINE_BYTES`] at a character boundary. The read buffer holds the
+/// whole line (an ACP line may carry a diff); a stored row keeps the row view's own bound.
+fn truncate_line(mut line: String) -> String {
+    if line.len() <= MAX_LINE_BYTES {
+        return line;
+    }
+    let mut end = MAX_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line.truncate(end);
+    line
 }
 
 /// The styled parts of one row, cut to `width` cells. A row that is too long keeps the start of
@@ -736,8 +759,10 @@ mod tests {
         );
     }
 
-    /// A line can be arbitrarily long, and the worker may never terminate it. The view keeps its
-    /// first [`MAX_LINE_BYTES`] and drops the rest; the row is drawn cut to the width anyway.
+    /// A line can be arbitrarily long, and the worker may never terminate it. The read buffer
+    /// holds it up to the poll's own [`MAX_READ_LINE_BYTES`] (an ACP line may carry a diff), and
+    /// a stored row keeps only its first [`MAX_LINE_BYTES`]; the row is drawn cut to the width
+    /// anyway.
     #[test]
     fn a_line_longer_than_the_cap_keeps_only_its_prefix() {
         let scratch = Scratch::new("long");
@@ -747,13 +772,18 @@ mod tests {
 
         let mut view = opened(&path);
         assert_eq!(view.offset, long.len() as u64);
-        assert_eq!(view.tail.len(), MAX_LINE_BYTES);
+        assert_eq!(
+            view.tail.len(),
+            long.len(),
+            "the unterminated line is held for the fold"
+        );
+        assert!(view.tail.len() <= MAX_READ_LINE_BYTES);
         assert!(!view.is_empty(), "the unterminated line is a row");
         let row = row_line(&view.row_text(0), 20, &Theme::default());
         assert_eq!(text(&row).width(), 20);
         assert!(text(&row).ends_with('…'));
 
-        // It completes: the kept prefix becomes one bounded line, the rest is dropped.
+        // It completes: the kept prefix becomes one bounded row, the rest is dropped.
         fs::write(&path, format!("{long}\nthe next line\n")).unwrap();
         view.poll().unwrap();
         assert_eq!(view.offset, path_len(&path));
@@ -790,6 +820,48 @@ mod tests {
         assert_eq!(view.lines.len(), 1);
         assert_eq!(view.lines[0], "other line");
         assert_eq!(view.offset, replacement.len() as u64);
+    }
+
+    /// ACP lines are not cut at the row view's 8 KiB before they are parsed: a tool call's diff
+    /// can be wider than a row, and the fold then caps the entry's own text (ADR 0048 §13).
+    #[test]
+    fn a_long_acp_line_is_folded_whole() {
+        let scratch = Scratch::new("acp-long-line");
+        let path = scratch.file();
+        let old = "a".repeat(12 * 1024);
+        let new = "b".repeat(12 * 1024);
+        let line = serde_json::json!({
+            "type": "acp",
+            "message": {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "c1",
+                        "title": "Edit a large file",
+                        "status": "completed",
+                        "content": [{"type": "diff", "path": "big.txt", "oldText": old, "newText": new}],
+                    },
+                },
+            },
+        })
+        .to_string();
+        assert!(line.len() > MAX_LINE_BYTES, "the line is wider than a row");
+        fs::write(&path, format!("{line}\n")).unwrap();
+        let view = opened_with(&path, true);
+        let Mode::Acp(fold) = &view.mode else {
+            panic!("the view is folded");
+        };
+        assert_eq!(fold.app.session.entries.len(), 2);
+        assert_eq!(fold.app.session.entries[0].text, "Edit a large file");
+        let result = &fold.app.session.entries[1];
+        assert!(
+            !result.text.is_empty() && result.text.len() <= 8 * 1024,
+            "the diff body is capped: {}",
+            result.text.len()
+        );
     }
 
     fn path_len(path: &Path) -> u64 {
