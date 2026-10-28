@@ -826,7 +826,9 @@ fn result_text(
     output: Option<&str>,
 ) -> Option<(String, Option<usize>)> {
     if diffs.is_empty() {
-        return output.map(|text| (cap_text(text.to_owned()), None));
+        // No diff: the text is the body, through the built-in renderer for the card's kind - a
+        // `write` still shows the content it wrote, a `patch` its own diff (ADR 0028).
+        return output.map(|text| (cap_text(tools::result_display_text(card, text)), None));
     }
     let diff_text = if diffs.len() == 1 {
         tools::result_display_text(card, "")
@@ -1340,6 +1342,32 @@ mod tests {
         assert_eq!(result.text, "nothing to change");
         assert_eq!(result.tool.as_ref().unwrap().name, "edit");
         assert_eq!(result.tool.as_ref().unwrap().trailing_from, None);
+    }
+
+    /// A text-only update with no diff still renders through the built-in renderer for its
+    /// kind: a `write` card shows the content it wrote, not the tool's summary text (ADR 0028).
+    #[test]
+    fn text_only_update_keeps_the_builtin_renderer_body() {
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Write a.txt",
+                "kind": "write",
+                "status": "completed",
+                "rawInput": {"path": "a.txt", "content": "l1\nl2"},
+                "content": [text_block("wrote 5 bytes to a.txt")],
+            }),
+        )]);
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::ToolResult]
+        );
+        let result = &fold.app.session.entries[1];
+        let card = result.tool.as_ref().unwrap();
+        assert_eq!(card.name, "write");
+        assert_eq!(result.text, "l1\nl2");
+        assert_eq!(card.trailing_from, None);
     }
 
     /// The entry cap cuts a huge text after the diff, never the diff itself (ADR 0048 §13).

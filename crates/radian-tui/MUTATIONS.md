@@ -3308,5 +3308,6 @@ A `tool_call_update` may carry `diff` blocks and `content` text in one `content`
 | TK0225-M2 | only the first block is read: `.iter().take(1).filter_map(...)` in `content_diffs` | ✅ 2 failed | `two_diffs_in_one_update_draw_both_files` (the second file's rows were missing); `content_text_before_a_diff_draws_the_same_way` (the leading text block hid the diff) |
 | TK0225-M3 | the trailing text keeps the diff's roles: `card.trailing_from = *split` is removed, so `diff_body` classifies "applied 1 hunk" as a diff row | ✅ 3 failed | `a_diff_and_content_text_in_one_update_both_draw` (`trailing_from` was `None` and the text row's role was not `Normal`); `content_text_before_a_diff_draws_the_same_way`; `a_huge_text_after_a_diff_is_cut_and_keeps_the_diff` |
 | TK0225-M4 | the renderer ignores the split: `diff_body` becomes `diff_lines(card, text)`, so the whole body keeps diff classifier roles | ✅ 2 failed | `a_diff_and_content_text_in_one_update_both_draw` (the text row's role was `DiffContext`, not `Normal`); `tools::tests::a_diff_cards_trailing_text_draws_as_ordinary_rows` (the trailing rows kept diff roles) |
+| TK0225-M5 | a text-only update skips the built-in renderer: `result_text`'s empty-diff branch returns `cap_text(text.to_owned())` instead of `cap_text(tools::result_display_text(card, text))` | ✅ 1 failed | `arc::stdout::acp::tests::text_only_update_keeps_the_builtin_renderer_body` (the result was `wrote 5 bytes to a.txt` instead of the written `l1\nl2`); the rework's review item |
 
-4/4 caught.
+5/5 caught (M5 is the review rework).
