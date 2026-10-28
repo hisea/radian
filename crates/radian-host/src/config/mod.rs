@@ -15,6 +15,9 @@
 //! - an obviously secret-looking string anywhere is refused (a heuristic, not a boundary);
 //! - an unknown `permissions` value is refused (fail-closed); an unknown `tui.*` value is
 //!   ignored with a warning;
+//! - a rules-only `[providers.<name>]` table (no `kind`, no `base_url`) needs an `auth.json`
+//!   entry of that name; [`load`] checks every table against this process's `auth.json`, not
+//!   only the provider the run resolves (ADR 0026 D10);
 //! - a missing file is an empty configuration (never created).
 //!
 //! No error message ever carries a value that could be a secret: the plaintext and heuristic
@@ -259,11 +262,38 @@ pub fn load_path(path: Option<&Path>) -> Result<Config, ConfigError> {
 /// Resolves the path for this process and reads it. A missing file is an empty configuration
 /// (it is never created). The command line's `--config` wins over `RADIAN_CONFIG`, which wins
 /// over `~/.radian/config/config.toml`.
+///
+/// This is the one read both hosts (`radian` and `radian exec`/`radian acp`) share, so the
+/// provider-table check that needs `auth.json` runs here, beside the reader's own provider
+/// refusals: every rules-only `[providers.<name>]` table must have an `auth.json` entry of
+/// that name (ADR 0026 D10). [`load_path`] stays auth-free for callers that read the file for
+/// something else (the arc TUI's theme).
 pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let env = std::env::var(RADIAN_CONFIG_ENV).ok();
     let home = crate::home::radian_home();
     let path = resolve_path(explicit, env.as_deref(), home.as_deref());
-    load_path(path.as_deref())
+    let config = load_path(path.as_deref())?;
+    check_rules_only_providers(&config)?;
+    Ok(config)
+}
+
+/// Refuses the first rules-only `[providers.<name>]` table whose name has no `auth.json` entry
+/// (ADR 0026 D10). Every table is checked, not only the provider this run resolves.
+///
+/// An unreadable `auth.json` counts as no entries: a store the process cannot read is no
+/// declaration, the same "no" [`crate::has_login`] gives a host deciding whether to refuse.
+fn check_rules_only_providers(config: &Config) -> Result<(), ConfigError> {
+    let auth = crate::AuthStore::open().ok();
+    let missing = crate::provider::rules_only_provider_without_auth(&config.providers, |name| {
+        auth.as_ref().is_some_and(|store| store.has_entry(name))
+    });
+    match missing {
+        Some(name) => Err(ConfigError::RulesOnlyProvider {
+            path: config.source.clone().unwrap_or_default(),
+            name,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// The path this process reads its configuration from (`--config` > `RADIAN_CONFIG` >
@@ -1420,6 +1450,42 @@ theme = "light"
                 .contains("openai-compatible|anthropic|openai-responses"),
             "{error}"
         );
+    }
+
+    /// ADR 0026 D10: a built-in id is never a missing named provider. A **rules-only** table
+    /// over one is refused by the reader as shadowing a built-in — the same refusal a full
+    /// table gets — so the startup auth check never sees it and its behaviour does not change.
+    #[test]
+    fn a_rules_only_table_over_a_built_in_id_is_refused_as_shadowing() {
+        let error = parse_str(concat!(
+            "schema_version = 1\n",
+            "[providers.anthropic]\n",
+            "prefer = [\"anthropic\"]\n",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidProviderName { .. }),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("providers.anthropic"), "{text}");
+        assert!(text.contains("built-in"), "{text}");
+    }
+
+    /// ADR 0026 D10: the startup refusal for a rules-only table with no `auth.json` entry
+    /// names the table and says the entry it adds to does not exist.
+    #[test]
+    fn a_rules_only_provider_refusal_names_the_table_and_the_missing_entry() {
+        let error = ConfigError::RulesOnlyProvider {
+            path: Path::new("/tmp/test/config.toml").to_path_buf(),
+            name: "orphan".to_owned(),
+        };
+        let text = error.to_string();
+        assert!(text.contains("providers.orphan"), "{text}");
+        assert!(text.contains("no `kind` and no `base_url`"), "{text}");
+        assert!(text.contains("auth.json"), "{text}");
+        assert!(text.contains("does not exist"), "{text}");
+        assert!(text.contains("`kind` and `base_url`"), "{text}");
     }
 
     /// ADR 0026 D10: every refusal names its key, and unknown keys inside a rule are skipped

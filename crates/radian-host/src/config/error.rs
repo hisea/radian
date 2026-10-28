@@ -73,6 +73,14 @@ pub enum ConfigError {
         key: String,
         reason: String,
     },
+    /// A rules-only `[providers.<name>]` table (no `kind`, no `base_url`) whose name has no
+    /// `auth.json` entry to add to (ADR 0026 D10). Checked for **every** table at startup,
+    /// not only the provider the run resolves, so a table that can never resolve is refused
+    /// before a later `/model` switch finds it.
+    RulesOnlyProvider {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -145,6 +153,13 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidProviderField { path, key, reason } => {
                 write!(f, "{}: `{key}` {reason}", path.display())
             }
+            ConfigError::RulesOnlyProvider { path, name } => write!(
+                f,
+                "{}: `providers.{name}` sets no `kind` and no `base_url`, so it adds to an \
+                 `auth.json` provider that does not exist; add `kind` and `base_url`, or log in \
+                 to it",
+                path.display()
+            ),
         }
     }
 }

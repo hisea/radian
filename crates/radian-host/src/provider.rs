@@ -1010,6 +1010,25 @@ pub fn resolve_provider_with_models(
     ))
 }
 
+/// The first rules-only `[providers.<name>]` table whose name has no `auth.json` entry, if any
+/// (ADR 0026 D10). Such a table (no `kind`, no `base_url`) adds `models`, `prefer`,
+/// `base_urls` or `reasoning_replay` to the auth-declared provider of its name, so without
+/// that entry it can never resolve. The hosts check **every** table once at startup, not only
+/// the provider they resolve, so a table that can never resolve is refused before a later
+/// `/model` switch finds it. `has_auth_entry` answers "is there an `auth.json` entry under this
+/// name?" — an entry of any type, not only a usable key. A built-in id is never missing: the
+/// reader refuses `[providers.<built-in>]` as shadowing a built-in, and this check leaves such
+/// a table alone.
+pub fn rules_only_provider_without_auth(
+    config_entries: &BTreeMap<String, ProviderDecl>,
+    has_auth_entry: impl Fn(&str) -> bool,
+) -> Option<String> {
+    config_entries.iter().find_map(|(name, decl)| {
+        (!decl.is_full() && descriptor(name).is_none() && !has_auth_entry(name))
+            .then(|| name.clone())
+    })
+}
+
 /// The protocol and endpoint an `auth.json` entry declares (ADR 0026 D10).
 fn auth_declaration(
     name: &str,
@@ -3376,6 +3395,47 @@ mod named_route_tests {
         let error = resolve_provider("magpie", &config, None).unwrap_err();
         assert!(error.contains("providers.magpie"), "{error}");
         assert!(error.contains("auth.json"), "{error}");
+    }
+
+    /// ADR 0026 D10 (TK0221): every rules-only table is checked at startup, not only the one
+    /// the run resolves. `reasoning_replay` alone is rules-only, an `auth.json` entry of any
+    /// type satisfies the table, a full declaration needs none, and a built-in id is never
+    /// "missing" (the reader refuses such a table as shadowing before this check runs).
+    #[test]
+    fn a_rules_only_table_without_an_auth_entry_is_found_for_every_table() {
+        let mut config = BTreeMap::new();
+        let replay_only = ProviderDecl {
+            reasoning_replay: Some(ReasoningReplayOverride::Field(
+                "reasoning_content".to_owned(),
+            )),
+            ..Default::default()
+        };
+        config.insert("orphan".to_owned(), replay_only);
+
+        // No `auth.json` entry: the table is named, whichever provider the run selects.
+        assert_eq!(
+            rules_only_provider_without_auth(&config, |_| false),
+            Some("orphan".to_owned())
+        );
+        // An entry of any type satisfies it.
+        assert_eq!(
+            rules_only_provider_without_auth(&config, |name| name == "orphan"),
+            None
+        );
+
+        // A full declaration starts without an auth entry and is never the missing one.
+        config.insert("corp".to_owned(), decl("anthropic", "https://corp.example"));
+        assert_eq!(
+            rules_only_provider_without_auth(&config, |_| false),
+            Some("orphan".to_owned())
+        );
+        config.remove("orphan");
+        assert_eq!(rules_only_provider_without_auth(&config, |_| false), None);
+
+        // A built-in id is not a missing named provider.
+        let mut built_in = BTreeMap::new();
+        built_in.insert("anthropic".to_owned(), ProviderDecl::default());
+        assert_eq!(rules_only_provider_without_auth(&built_in, |_| false), None);
     }
 
     /// A full table still wins over auth with one warning.

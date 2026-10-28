@@ -1550,3 +1550,18 @@ was run, and the source was restored from `.radian/model.rs.good` (`cmp` empty).
 |---|---|---|---|
 | TK0220-M1 | the candidate loop builds with `self.ctx.args_for_route` again, so it sends the startup level | ✅ 2 failed (rc=100) | `named_probe::a_probe_candidate_carries_the_thinking_level_in_force` (candidate body was `adaptive`, not `enabled:4095`) and `a_remembered_probe_follows_a_later_thinking_change` (`high` request was `adaptive`) |
 | TK0220-M2 | the non-refusal check is removed, so every candidate error continues to the next protocol | ✅ 2 failed (rc=100) | `named_probe::a_candidate_that_streams_then_fails_ends_the_probe` (a third, Responses request was sent) and `a_candidate_that_is_not_a_refusal_ends_the_probe` (the 429/500 rounds each sent a third request) |
+
+## TK0221: every rules-only provider table is refused at startup without its auth entry (2026-10-28, branch `work/TK0221-rules-only-table-refused-at-startup`)
+
+ADR 0026 D10: `config::load` checks **every** `[providers.<name>]` table, not only the provider
+the run resolves. `provider::rules_only_provider_without_auth` names the first table with no
+`kind` and no `base_url` whose name has no `auth.json` entry. Each mutation was applied in place
+to `crates/radian-host/src/config/mod.rs` or `provider.rs`, the `radian` binary was rebuilt (the
+exec tests refuse a stale one), the named tests ran, and the source was restored from
+`.radian/config-mod.rs.bak` / `.radian/provider.rs.bak` (`cmp` empty).
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0221-M1 | the startup call is removed (`check_rules_only_providers(&config)?` commented out), so only the per-resolution backstop remains | ✅ 4 failed (rc=100) | `a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup` (exit 0, the turn ran), `a_reasoning_replay_only_provider_table_without_an_auth_entry_is_refused_at_startup` and `a_read_only_config_with_an_orphan_rules_only_table_is_refused_at_startup` (both saw exit 2 for "no model", not the table), and `pty_a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup` (the app kept running) |
+| TK0221-M2 | the `!decl.is_full()` guard is dropped, so a full `kind` + `base_url` declaration without an auth entry is refused | ✅ 1 failed (rc=100) | `a_full_provider_table_without_an_auth_entry_starts` (exit 2, the table was refused) |
+| TK0221-M3 | the auth predicate is inverted (`has_auth_entry(name)` instead of `!has_auth_entry(name)`), so an entry counts as missing | ✅ 2 failed (rc=100) | `a_rules_only_provider_table_with_an_auth_entry_starts_without_a_warning` (exit 2) and `provider::named_route_tests::a_rules_only_table_without_an_auth_entry_is_found_for_every_table` |
