@@ -9538,24 +9538,32 @@ async fn a_reasoning_replay_only_provider_table_without_an_auth_entry_is_refused
     assert!(stderr.contains("auth.json"), "{stderr}");
 }
 
-/// With the same-name `auth.json` entry, the same rules-only table starts and adds to it with
-/// no "config wins" warning (an overlay never warns).
+/// With the same-name `auth.json` entry, the same rules-only table starts **while the run
+/// selects another provider**, and adds no "config wins" warning (an overlay never warns). The
+/// same config without the entry is refused by the same startup check, so this asserts the
+/// startup-wide check: without it the second run starts and the turn runs.
 #[tokio::test]
-async fn a_rules_only_provider_table_with_an_auth_entry_starts_without_a_warning() {
-    let server = MockServer::start(vec![text_reply("ORPHAN")]).await;
+async fn a_rules_only_provider_table_with_an_auth_entry_starts_while_another_provider_is_selected()
+{
+    let server = MockServer::start(vec![text_reply("BUILT-IN"), text_reply("BUILT-IN")]).await;
+    let orphan = MockServer::start(vec![text_reply("ORPHAN")]).await;
     let home = fresh_session_dir();
-    write_named_auth_json(&home, &[("orphan", "sk-orphan-1", &server.base_url)]);
+    write_named_auth_json(
+        &home,
+        &[
+            ("openai-compatible", "sk-test", &server.base_url),
+            ("orphan", "sk-orphan-1", &orphan.base_url),
+        ],
+    );
     write_home_config(
         &home,
         "schema_version = 1\n[providers.orphan]\nprefer = [\"anthropic\"]\n",
     );
-    let child = spawn_radian_raw(
-        &["--provider", "orphan", "--model", "m-1", "-p", "hi"],
-        &provider_home_envs(&home),
-    );
+    let args = ["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"];
+    let child = spawn_radian_raw(&args, &provider_home_envs(&home));
     let (code, stdout, stderr) = feed_and_wait(child, "").await;
     assert_eq!(code, 0, "{stdout}\n{stderr}");
-    assert_eq!(stdout, "ORPHAN\n");
+    assert_eq!(stdout, "BUILT-IN\n");
     assert!(
         !stderr.contains("declared in both config and auth.json"),
         "an overlay must not warn: {stderr}"
@@ -9564,28 +9572,69 @@ async fn a_rules_only_provider_table_with_an_auth_entry_starts_without_a_warning
         !stderr.contains("adds to an `auth.json` provider"),
         "{stderr}"
     );
+    assert!(
+        orphan.requests().is_empty(),
+        "the unselected overlay's provider must not be resolved: {stderr}"
+    );
+
+    // The same table, the same selected provider, without the entry: refused at startup.
+    write_named_auth_json(&home, &[("openai-compatible", "sk-test", &server.base_url)]);
+    let child = spawn_radian_raw(&args, &provider_home_envs(&home));
+    let (code, _, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(
+        stderr.contains("adds to an `auth.json` provider that does not exist"),
+        "{stderr}"
+    );
 }
 
-/// A full declaration (`kind` + `base_url`) needs no `auth.json` entry and starts.
+/// A full declaration (`kind` + `base_url`) needs no `auth.json` entry: the startup check skips
+/// it, so with a rules-only table beside it the refusal names only the rules-only one, and with
+/// the full table alone the run selects another provider and starts. Dropping the `is_full`
+/// guard makes the check refuse `corp` instead.
 #[tokio::test]
-async fn a_full_provider_table_without_an_auth_entry_starts() {
-    let server = MockServer::start(vec![text_reply("CORP")]).await;
+async fn a_full_provider_table_without_an_auth_entry_is_not_refused_at_startup() {
+    let server = MockServer::start(vec![text_reply("BUILT-IN")]).await;
+    let corp = MockServer::start(vec![text_reply("CORP")]).await;
     let home = fresh_session_dir();
+    write_named_auth_json(&home, &[("openai-compatible", "sk-test", &server.base_url)]);
+    let full = format!(
+        "schema_version = 1\n[providers.corp]\nkind = \"openai-compatible\"\n\
+         base_url = \"{}\"\n",
+        corp.base_url
+    );
+
+    // Both tables, neither name in `auth.json`: the refusal names the rules-only table only.
     write_home_config(
         &home,
-        &format!(
-            "schema_version = 1\n[providers.corp]\nkind = \"openai-compatible\"\n\
-             base_url = \"{}\"\n",
-            server.base_url
-        ),
+        &format!("{full}[providers.orphan]\nprefer = [\"anthropic\"]\n"),
     );
     let child = spawn_radian_raw(
-        &["--provider", "corp", "--model", "m-1", "-p", "hi"],
+        &["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"],
+        &provider_home_envs(&home),
+    );
+    let (code, _, stderr) = feed_and_wait(child, "").await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("providers.orphan"), "{stderr}");
+    assert!(
+        !stderr.contains("providers.corp"),
+        "a full declaration is not rules-only: {stderr}"
+    );
+
+    // The full table alone: it starts while another provider is selected, and is never resolved.
+    write_home_config(&home, &full);
+    let child = spawn_radian_raw(
+        &["--base-url", &server.base_url, "--model", "m-1", "-p", "hi"],
         &provider_home_envs(&home),
     );
     let (code, stdout, stderr) = feed_and_wait(child, "").await;
     assert_eq!(code, 0, "{stdout}\n{stderr}");
-    assert_eq!(stdout, "CORP\n");
+    assert_eq!(stdout, "BUILT-IN\n");
+    assert!(
+        corp.requests().is_empty(),
+        "the unselected full declaration must not be resolved: {stderr}"
+    );
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "{stderr}");
     assert_eq!(requests[0].json()["model"], "m-1");
