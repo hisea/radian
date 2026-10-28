@@ -1408,6 +1408,26 @@ async fn one_search_tool_names_only_itself() {
     for absent in ["`grep`", "or `grep`"] {
         assert!(!glob.description.contains(absent), "{}", glob.description);
     }
+
+    // Without `read`, the prohibition names only the search tool it belongs to.
+    let bare_grep = spec_named(&restricted_specs(&tools, &["grep", "shell"]).await, "shell");
+    assert!(
+        bare_grep
+            .description
+            .contains("Do not use `grep` through `shell`."),
+        "{}",
+        bare_grep.description
+    );
+    assert!(
+        !bare_grep.description.contains("`cat`"),
+        "{}",
+        bare_grep.description
+    );
+    assert!(
+        !bare_grep.description.contains("`ls`"),
+        "{}",
+        bare_grep.description
+    );
 }
 
 /// ADR 0043 §4: `read` names `patch` only when `patch` is mounted (the `explore` child's
