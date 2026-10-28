@@ -226,8 +226,8 @@ journaled turn end is delayed (the answer must wait for it), a prompt whose own 
 job-completion wake turn (the wake turn's end must not answer it, and the answer reports that
 turn's own cost and text, not the session's), the one-session refusal, a `session/load` of a
 session created in another workspace (refused by name, then a load of a session in the process
-workspace succeeds), the
-shared flag set, and `session/load` — a session written by one process and loaded by a second,
+workspace succeeds), the shared flag set, and `session/load` — a session written by one process
+and loaded by a second,
 whose replay and continued journal the test checks by folding the journal. `journal-selfcheck`
 replays the sessions the suite writes. The touched crates' mutation records name the tests that
 catch a cancelled turn answering `end_turn`, a second `session/new` being accepted, a
