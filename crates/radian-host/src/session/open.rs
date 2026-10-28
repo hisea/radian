@@ -559,6 +559,10 @@ pub async fn open_session(
             .and_then(|value| value.parse::<u64>().ok())
             .map(std::time::Duration::from_millis),
     );
+    // Test seam: while this file exists the driver's idle loop claims nothing, so a test can
+    // put two inputs in one lane in a known order (the ACP prompt a job-completion wake turn
+    // must not answer).
+    driver.set_claim_hold(std::env::var_os("RADIAN_CLAIM_HOLD_FILE").map(std::path::PathBuf::from));
     driver.set_runtime_events(Arc::clone(&runtime_events));
     // ADR 0021: the per-turn memory addition, placed in the inject lane
     // after the user's turn is claimed and before its first model call.

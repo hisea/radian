@@ -1565,3 +1565,19 @@ exec tests refuse a stale one), the named tests ran, and the source was restored
 | TK0221-M1 | the startup call is removed (`check_rules_only_providers(&config)` commented out), so only the per-resolution backstop remains | ✅ 6 failed (rc=100) | `a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup` (exit 0, the turn ran), `a_reasoning_replay_only_provider_table_without_an_auth_entry_is_refused_at_startup` and `a_read_only_config_with_an_orphan_rules_only_table_is_refused_at_startup` (both saw exit 2 for "no model", not the table), `a_rules_only_provider_table_with_an_auth_entry_starts_while_another_provider_is_selected` and `a_full_provider_table_without_an_auth_entry_is_not_refused_at_startup` (both exit 0, where the second half/first half expects the refusal), and `pty_a_rules_only_provider_table_without_an_auth_entry_is_refused_at_startup` (the app kept running) |
 | TK0221-M2 | the `!decl.is_full()` guard is dropped, so a full `kind` + `base_url` declaration without an auth entry is refused | ✅ 1 failed (rc=100) | `a_full_provider_table_without_an_auth_entry_is_not_refused_at_startup` (exit 2, and the refusal named `providers.corp`) |
 | TK0221-M3 | the auth predicate is inverted (`has_auth_entry(name)` instead of `!has_auth_entry(name)`), so an entry counts as missing | ✅ 2 failed (rc=100) | `a_rules_only_provider_table_with_an_auth_entry_starts_while_another_provider_is_selected` (exit 2) and `provider::named_route_tests::a_rules_only_table_without_an_auth_entry_is_found_for_every_table` |
+## `radian acp`: the claim-hold test seam is installed (TK0222, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. `open_session` reads
+`RADIAN_CLAIM_HOLD_FILE` and hands it to `Driver::set_claim_hold`, so the ACP test can put the
+job's completion notice and the second prompt in one lane before the driver claims either. The
+mutation was applied in place to `crates/radian-host/src/session/open.rs`
+(`driver.set_claim_hold(None)`), the `radian` binary was rebuilt
+(`cargo build -p radian-tui --bin radian`), and the source was restored from
+`.radian/mut/host-open.rs` (`cmp` identical). Test:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(a_wake_turn_end_does_not_answer_the_prompt_after_it)'`. Unmutated, the `acp` binary passed
+19/19; under the mutation the test failed 4/4 runs.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M4 | `open_session` ignores the seam (`driver.set_claim_hold(None)`) | ✅ 1 failed (4/4 runs) | `acp::a_wake_turn_end_does_not_answer_the_prompt_after_it` ("the prompt must be enqueued before the driver claims the notice": without the hold the driver claims the notice at once, the wake turn runs before the prompt exists, and the test no longer exercises the defect) |

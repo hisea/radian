@@ -2808,9 +2808,9 @@ fn run_acp_turn(
 /// The attempt's `Result` line (ADR 0048 decisions 7 and 12). For a flow's `acp` agent it is
 /// the `stopReason` mapping and the last message run; for the `radian` worker it is what
 /// `radian acp` puts in `_meta.radian`: `text` is the last assistant message, and `cost` is the
-/// same `{micros, incomplete, estimated}` object `radian exec` wrote (or null when no call had
-/// a price), so the task's cost, `cost_unknown` and the budget checks read it exactly as they
-/// read `radian exec`'s `Result.cost`.
+/// answering turn's fee in the `{micros, incomplete, estimated}` shape `radian exec` writes
+/// (ADR 0049), so the task's cost, `cost_unknown` and the budget checks can read the attempt's
+/// own cost from it.
 fn result_line(o: &Options, end: &acp::PromptEnd) -> Value {
     let mut result = json!({
         "type": "Result",
@@ -2824,8 +2824,8 @@ fn result_line(o: &Options, end: &acp::PromptEnd) -> Value {
 }
 
 /// `_meta.radian` on the attempt's `Result`: `text` is the last assistant message in full, and
-/// `cost` is the same object `radian exec` wrote, null included (ADR 0048 decision 12). A
-/// `_meta` without `radian` leaves the line as the protocol's own stop reason gave it.
+/// `cost` is the answering turn's fee (ADR 0049), null included. A `_meta` without `radian`
+/// leaves the line as the protocol's own stop reason gave it.
 fn apply_radian_meta(result: &mut Value, meta: &Value) {
     let Some(radian) = meta.get("radian") else {
         return;

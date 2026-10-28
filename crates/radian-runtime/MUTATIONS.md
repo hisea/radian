@@ -208,3 +208,17 @@ run, then restored with `cp` and confirmed with `cmp` (`git status --short` empt
 3/3 caught, none equivalent. The revision's own doc-comment says every surviving decision is
 pinned by a test: L1 by tests 1 and 3, L2 by test 2, L3 by test 4.
 
+
+## The driver forwards a turn's claim to the host (TK0222, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. The driver now reports
+`RuntimeEvent::InputClaimed` to the `RuntimeEvents` sink (after the journal append), both for the
+input that opens a turn and for the inputs `drain_steering` merges into it, so a host learns
+which turn will answer its own message. The mutation was applied in place to
+`crates/radian-runtime/src/driver.rs` and restored from `.radian/mut/runtime-driver.rs` (`cmp`
+identical). Test: `cargo nextest run -p radian-runtime --locked --profile sandbox --test
+pending_wake`. Unmutated, the binary passed 5/5.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M2 | `drain_steering` writes the merged `InputClaimed` to the journal but does not forward it to the sink | ✅ 1 failed | `pending_wake::an_absorbed_pending_wake_does_not_open_another_turn` ("the merged claim reaches the runtime-event sink": the sink never saw the notice's id) |

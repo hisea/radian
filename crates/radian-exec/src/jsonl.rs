@@ -227,6 +227,49 @@ pub(crate) fn summarize_journal_from(path: &Path, prefix_len: u64) -> JournalSum
     fold_bytes(&bytes[start..])
 }
 
+/// Folds the records of **one turn** into a [`JournalSummary`]: the usage records and
+/// assistant messages between the `TurnStarted` and `TurnFinished` with `turn_id`. A prompt's
+/// `_meta` reports the turn that answered it (ADR 0049), so a later turn's fees and text must
+/// not leak into it, and a turn that ran before it must not stand in for it.
+pub(crate) fn summarize_turn(path: &Path, turn_id: &str) -> JournalSummary {
+    let Ok(bytes) = std::fs::read(path) else {
+        return JournalSummary::default();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut summary = JournalSummary::default();
+    let mut inside = false;
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(event) = record.get("event").and_then(|e| e.as_str()) else {
+            continue;
+        };
+        let data = record.get("data");
+        match event {
+            "TurnStarted" => {
+                if turn_of(data) == Some(turn_id) {
+                    inside = true;
+                }
+            }
+            "TurnFinished" => {
+                if turn_of(data) == Some(turn_id) {
+                    summary.turns += 1;
+                    inside = false;
+                }
+            }
+            _ if inside => fold_record(&mut summary, event, data),
+            _ => {}
+        }
+    }
+    summary
+}
+
+/// The `turn_id` of a `TurnStarted`/`TurnFinished` body.
+fn turn_of(data: Option<&serde_json::Value>) -> Option<&str> {
+    data.and_then(|d| d.get("turn_id")).and_then(|t| t.as_str())
+}
+
 /// Folds journal bytes into a [`JournalSummary`]. Unparseable lines are skipped.
 fn fold_bytes(bytes: &[u8]) -> JournalSummary {
     let mut summary = JournalSummary::default();
@@ -238,42 +281,45 @@ fn fold_bytes(bytes: &[u8]) -> JournalSummary {
         let Some(event) = record.get("event").and_then(|e| e.as_str()) else {
             continue;
         };
-        let data = record.get("data");
-        match event {
-            "TurnFinished" => summary.turns += 1,
-            "ModelUsageRecorded" | "CompactionUsageRecorded" => {
-                if let Some(usage) = data.and_then(|d| d.get("usage")) {
-                    add_counter(&mut summary.input, usage.get("input"));
-                    add_counter(&mut summary.output, usage.get("output"));
-                    add_counter(&mut summary.cache_read, usage.get("cache_read"));
-                    add_counter(&mut summary.cache_write, usage.get("cache_write"));
-                }
-                if let Some(fee) = data.and_then(|d| d.get("fee"))
-                    && let Some(micros) = fee.get("micros").and_then(|m| m.as_u64())
-                {
-                    summary.fee_micros =
-                        Some(summary.fee_micros.unwrap_or(0).saturating_add(micros));
-                    if fee.get("incomplete").and_then(|i| i.as_bool()) == Some(true) {
-                        summary.fee_incomplete = true;
-                    }
-                }
-            }
-            "MessageAppended" => {
-                if let Some(text) = data
-                    .and_then(|d| d.get("message"))
-                    .and_then(|m| m.get("assistant"))
-                    .and_then(|a| a.get("content"))
-                    .and_then(|c| c.as_array())
-                    .map(|content| assistant_text(content))
-                    && !text.is_empty()
-                {
-                    summary.last_text = text;
-                }
-            }
-            _ => {}
-        }
+        fold_record(&mut summary, event, record.get("data"));
     }
     summary
+}
+
+/// Folds one record into a summary. Unparseable lines are skipped by the callers.
+fn fold_record(summary: &mut JournalSummary, event: &str, data: Option<&serde_json::Value>) {
+    match event {
+        "TurnFinished" => summary.turns += 1,
+        "ModelUsageRecorded" | "CompactionUsageRecorded" => {
+            if let Some(usage) = data.and_then(|d| d.get("usage")) {
+                add_counter(&mut summary.input, usage.get("input"));
+                add_counter(&mut summary.output, usage.get("output"));
+                add_counter(&mut summary.cache_read, usage.get("cache_read"));
+                add_counter(&mut summary.cache_write, usage.get("cache_write"));
+            }
+            if let Some(fee) = data.and_then(|d| d.get("fee"))
+                && let Some(micros) = fee.get("micros").and_then(|m| m.as_u64())
+            {
+                summary.fee_micros = Some(summary.fee_micros.unwrap_or(0).saturating_add(micros));
+                if fee.get("incomplete").and_then(|i| i.as_bool()) == Some(true) {
+                    summary.fee_incomplete = true;
+                }
+            }
+        }
+        "MessageAppended" => {
+            if let Some(text) = data
+                .and_then(|d| d.get("message"))
+                .and_then(|m| m.get("assistant"))
+                .and_then(|a| a.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|content| assistant_text(content))
+                && !text.is_empty()
+            {
+                summary.last_text = text;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Adds a reported usage counter to a session total. A missing or misshapen field is "not
@@ -603,6 +649,82 @@ mod tests {
         assert_eq!(
             summary.last_text, "second",
             "only the last assistant message counts"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A turn's own fold: only the records between its `TurnStarted` and `TurnFinished`, so a
+    /// prompt answer reports the fee and text of the turn that answered it (ADR 0049), never a
+    /// later or earlier turn's.
+    #[test]
+    fn a_turn_fold_takes_only_that_turns_records() {
+        let dir = std::env::temp_dir().join(format!("radian-jsonl-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("turn.jsonl");
+        let mut file = String::new();
+        let line = |seq: u64, event: &str, data: serde_json::Value| {
+            serde_json::json!({
+                "schema_version": 1,
+                "session_id": "s",
+                "seq": seq,
+                "ts": "2026-10-28T00:00:00Z",
+                "event": event,
+                "critical": true,
+                "data": data,
+            })
+        };
+        let assistant = |index: u64, text: &str| {
+            serde_json::json!({
+                "index": index,
+                "message": {"assistant": {"content": [{"text": {"text": text}}]}},
+            })
+        };
+        for event in [
+            line(0, "TurnStarted", serde_json::json!({"turn_id": "t-1"})),
+            line(1, "MessageAppended", assistant(0, "first")),
+            line(
+                2,
+                "ModelUsageRecorded",
+                serde_json::json!({"usage": {"input": 10, "output": 4}, "fee": {"micros": 30}}),
+            ),
+            line(3, "TurnFinished", serde_json::json!({"turn_id": "t-1"})),
+            line(4, "TurnStarted", serde_json::json!({"turn_id": "t-2"})),
+            line(5, "MessageAppended", assistant(1, "second")),
+            line(
+                6,
+                "ModelUsageRecorded",
+                serde_json::json!({
+                    "usage": {"input": 5, "output": 2},
+                    "fee": {"micros": 7, "incomplete": true},
+                }),
+            ),
+            line(7, "TurnFinished", serde_json::json!({"turn_id": "t-2"})),
+        ] {
+            file.push_str(&serde_json::to_string(&event).unwrap());
+            file.push('\n');
+        }
+        std::fs::write(&path, &file).unwrap();
+
+        let first = summarize_turn(&path, "t-1");
+        assert_eq!(first.turns, 1);
+        assert_eq!(first.last_text, "first");
+        assert_eq!(first.fee_micros, Some(30));
+        assert!(!first.fee_incomplete);
+        assert_eq!(first.input, Some(10), "only this turn's counters");
+
+        let second = summarize_turn(&path, "t-2");
+        assert_eq!(second.turns, 1);
+        assert_eq!(second.last_text, "second");
+        assert_eq!(second.fee_micros, Some(7));
+        assert!(second.fee_incomplete);
+        assert_eq!(second.input, Some(5));
+
+        let missing = summarize_turn(&path, "t-3");
+        assert_eq!(
+            missing,
+            JournalSummary::default(),
+            "an unknown turn is empty"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -216,15 +216,25 @@ impl Acp {
     }
 
     async fn prompt(&mut self, session_id: &str, text: &str, decision: Decision) -> PromptRun {
-        let id = self
-            .send_request(
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": [{ "type": "text", "text": text }],
-                }),
-            )
-            .await;
+        let id = self.send_prompt(session_id, text).await;
+        self.collect_prompt(id, session_id, decision).await
+    }
+
+    /// Sends one `session/prompt` and returns its request id without waiting for the answer.
+    async fn send_prompt(&mut self, session_id: &str, text: &str) -> i64 {
+        self.send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": text }],
+            }),
+        )
+        .await
+    }
+
+    /// Reads until `id`'s response, collecting the prompt's updates and answering its
+    /// permission requests.
+    async fn collect_prompt(&mut self, id: i64, session_id: &str, decision: Decision) -> PromptRun {
         let mut updates = Vec::new();
         let mut permissions = Vec::new();
         let mut cancelled = false;
@@ -276,6 +286,16 @@ impl Acp {
         }
     }
 
+    /// Sends `session/cancel` for `session_id`, the interruption ESC produces in the TUI.
+    async fn cancel(&mut self, session_id: &str) {
+        self.write(json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session_id },
+        }))
+        .await;
+    }
+
     async fn finish(mut self) -> (i32, String) {
         drop(self.stdin);
         drop(self.stdout);
@@ -312,6 +332,63 @@ fn tool_reply(id: &str, name: &str, arguments: Value) -> Reply {
         ),
         chunk(json!({}), Some("tool_calls")),
     ])
+}
+
+/// One real background job: the `shell` tool with `background: true` (ADR 0037).
+fn bg_reply(id: &str, command: &str) -> Reply {
+    tool_reply(
+        id,
+        "shell",
+        json!({ "command": command, "background": true }),
+    )
+}
+
+/// Waits until the session file holds an `event` the predicate accepts. Every trigger that
+/// would otherwise be a sleep-until-it-probably-happened is one of these.
+async fn wait_for_event(path: &Path, what: &str, event: &str, accept: impl Fn(&Value) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let events: Vec<Value> = std::fs::read_to_string(path)
+            .map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if events.iter().any(|e| e["event"] == event && accept(e)) {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("the journal never held {what}; it holds:\n{events:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until the mock server has recorded `count` requests.
+async fn wait_for_requests(server: &MockServer, count: usize, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while server.requests().len() < count {
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "the mock never saw {what} ({} of {count} requests)",
+                server.requests().len()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The message id of the `InboxEnqueued` record whose message carries `needle`.
+fn enqueued_id(events: &[Value], needle: &str) -> String {
+    events
+        .iter()
+        .find(|event| {
+            event["event"] == "InboxEnqueued"
+                && event["data"]["message"].to_string().contains(needle)
+        })
+        .and_then(|event| event["data"]["message_id"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("no InboxEnqueued carries {needle:?}: {events:#?}"))
 }
 
 /// A newline-delimited JSON journal, as `radian exec` writes it.
@@ -363,6 +440,89 @@ fn journal_summary(events: &[Value]) -> (String, Value) {
         None => Value::Null,
     };
     (text, cost)
+}
+
+/// The fee and last answer text the journal records for **one turn** (between its
+/// `TurnStarted` and `TurnFinished`), so a test can compare a prompt answer against its own
+/// turn rather than the session.
+fn turn_summary(events: &[Value], turn_id: &str) -> (String, Option<u64>, bool) {
+    let mut text = String::new();
+    let mut micros: Option<u64> = None;
+    let mut incomplete = false;
+    let mut inside = false;
+    for event in events {
+        let data = &event["data"];
+        match event["event"].as_str() {
+            Some("TurnStarted") if data["turn_id"] == turn_id => inside = true,
+            Some("TurnFinished") if data["turn_id"] == turn_id => break,
+            Some("MessageAppended") if inside => {
+                let Some(content) = data["message"]["assistant"]["content"].as_array() else {
+                    continue;
+                };
+                let message: String = content
+                    .iter()
+                    .filter_map(|part| part["text"]["text"].as_str())
+                    .collect();
+                if !message.is_empty() {
+                    text = message;
+                }
+            }
+            Some("ModelUsageRecorded" | "CompactionUsageRecorded") if inside => {
+                let fee = &data["fee"];
+                if let Some(value) = fee["micros"].as_u64() {
+                    micros = Some(micros.unwrap_or(0).saturating_add(value));
+                    incomplete |= fee["incomplete"].as_bool() == Some(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    (text, micros, incomplete)
+}
+
+/// The top-level `seq` of the first journal line the predicate accepts.
+fn line_seq(events: &[Value], what: &str, accept: impl Fn(&Value) -> bool) -> u64 {
+    events
+        .iter()
+        .find(|event| accept(event))
+        .and_then(|event| event["seq"].as_u64())
+        .unwrap_or_else(|| panic!("the journal never held {what}: {events:#?}"))
+}
+
+/// A text reply that also reports one call's usage, so the writer records a fee for the turn
+/// (the catalog cache the test writes supplies the prices).
+fn priced_text_reply(text: &str, prompt: u64, completion: u64) -> Reply {
+    Reply::sse(&[
+        chunk(json!({"content": text}), None),
+        chunk(json!({}), Some("stop")),
+        json!({
+            "choices": [],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
+        }),
+    ])
+}
+
+/// Writes the catalog cache a process prices its calls from (ADR 0018/0027): model `m` under
+/// `openai-compatible` (the provider `--base-url` resolves to), $3/M input and $15/M output.
+fn write_priced_catalog(home: &Path) {
+    let path = home.join("cache/catalog/models.json");
+    std::fs::create_dir_all(path.parent().expect("the cache directory"))
+        .expect("the catalog cache directory");
+    std::fs::write(
+        &path,
+        json!({
+            "openai-compatible": {
+                "models": {
+                    "m": {
+                        "limit": {"context": 200_000, "output": 8_192},
+                        "cost": {"input": 3.0, "output": 15.0},
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("the catalog cache");
 }
 
 /// ADR 0049: the answer follows the driver's journaled `TurnFinished`, not the core's live
@@ -1094,6 +1254,406 @@ async fn acp_help_has_the_conversation_flags_but_not_the_exec_only_ones() {
             "radian acp --help must not offer {flag}:\n{out}"
         );
     }
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 4: a prompt is answered by the turn that claimed **its** message. A
+/// background job from the earlier prompt settles between this prompt entering the inbox and
+/// the driver taking it, so the job's completion notice opens a system wake turn first (ADR
+/// 0037); that turn's end answers nothing, and its text and status are not reported.
+///
+/// The claim-hold file makes the order deterministic: while it exists the driver claims
+/// nothing, so the test queues the notice, then the prompt, and only then lets the loop run.
+#[tokio::test]
+async fn a_wake_turn_end_does_not_answer_the_prompt_after_it() {
+    let server = MockServer::start(vec![
+        bg_reply("call-1", "while [ ! -f go ]; do sleep 0.05; done"),
+        text_reply("PROMPT-ONE"),
+        // The wake turn fails: its end is a `refusal` with an error, so an answer taken from it
+        // shows in both `stopReason` and `_meta.radian.error`.
+        Reply::status(400, "the wake turn failed"),
+        text_reply("PROMPT-TWO"),
+    ])
+    .await;
+    let env = Env::fresh("wake-turn");
+    let hold = env.home.join("claim-hold");
+    let hold_path = hold.to_str().unwrap().to_owned();
+    let mut acp = Acp::spawn_with(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env,
+        &[("RADIAN_CLAIM_HOLD_FILE", &hold_path)],
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let path = env.sessions.join(format!("{session}.jsonl"));
+
+    let first = acp.prompt(&session, "start the job", Decision::None).await;
+    assert_eq!(
+        first.result()["_meta"]["radian"]["text"],
+        "PROMPT-ONE",
+        "{}",
+        first.response
+    );
+
+    // The first turn is over and the driver claims nothing now: hold the claim, settle the job
+    // on the test's signal, and queue the second prompt behind the notice.
+    std::fs::write(&hold, "").unwrap();
+    std::fs::write(env.workspace.join("go"), "").unwrap();
+    wait_for_event(
+        &path,
+        "the job's completion notice",
+        "InboxEnqueued",
+        |event| {
+            event["data"]["message"]
+                .to_string()
+                .contains("background job")
+        },
+    )
+    .await;
+    let id = acp.send_prompt(&session, "second question").await;
+    wait_for_event(
+        &path,
+        "the second prompt's enqueue",
+        "InboxEnqueued",
+        |event| {
+            event["data"]["message"]
+                .to_string()
+                .contains("second question")
+        },
+    )
+    .await;
+    std::fs::remove_file(&hold).unwrap();
+
+    let second = acp.collect_prompt(id, &session, Decision::None).await;
+    let result = second.result();
+    assert_eq!(
+        result["stopReason"], "end_turn",
+        "the wake turn's failed end answered the prompt: {result}"
+    );
+    assert!(
+        result["_meta"]["radian"].get("error").is_none(),
+        "the wake turn's error reached the prompt's answer: {result}"
+    );
+    assert_eq!(
+        result["_meta"]["radian"]["text"], "PROMPT-TWO",
+        "the wake turn's end answered the prompt: {result}"
+    );
+
+    // The journal agrees: three turns ran, the last one claimed the prompt's message, and the
+    // prompt's own turn is the one that ended last.
+    let events = journal(&path);
+    let finished: Vec<&str> = events
+        .iter()
+        .filter(|event| event["event"] == "TurnFinished")
+        .filter_map(|event| event["data"]["turn_id"].as_str())
+        .collect();
+    assert_eq!(
+        finished.len(),
+        3,
+        "a wake turn ran before the prompt's: {events:#?}"
+    );
+    let prompt_id = enqueued_id(&events, "second question");
+    // The hold put the prompt in the inbox **before** the driver claimed the notice — the
+    // defect's precondition. Without the hold the notice is claimed at once, the wake turn runs
+    // before the prompt exists, and the test would pass without exercising the defect.
+    let notice_id = enqueued_id(&events, "background job");
+    let prompt_enqueue = line_seq(&events, "the prompt's enqueue", |event| {
+        event["event"] == "InboxEnqueued"
+            && event["data"]["message_id"].as_str() == Some(prompt_id.as_str())
+    });
+    let notice_claim = line_seq(&events, "the notice's claim", |event| {
+        event["event"] == "InputClaimed"
+            && event["data"]["message_ids"]
+                .to_string()
+                .contains(&notice_id)
+    });
+    assert!(
+        prompt_enqueue < notice_claim,
+        "the prompt must be enqueued before the driver claims the notice: {events:#?}"
+    );
+    let claimed_turn = events
+        .iter()
+        .find(|event| {
+            event["event"] == "InputClaimed"
+                && event["data"]["message_ids"]
+                    .to_string()
+                    .contains(&prompt_id)
+        })
+        .and_then(|event| event["data"]["turn_id"].as_str())
+        .unwrap_or_else(|| panic!("the prompt's message was never claimed: {events:#?}"));
+    assert_eq!(
+        Some(claimed_turn),
+        finished.last().copied(),
+        "the prompt is answered by its own turn: {events:#?}"
+    );
+    assert_eq!(
+        server.requests().len(),
+        4,
+        "one model call per turn, three turns"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decisions 4 and 6: the answer's `_meta.radian` is the turn that answered the
+/// prompt, not the session. A job from the first prompt settles between the second prompt's
+/// enqueue and its claim; the notice's wake turn records its own priced call, so an answer that
+/// folded the session would report the first turn's and the wake turn's fees too.
+#[tokio::test]
+async fn a_prompt_reports_its_own_turns_cost_and_text_not_the_sessions() {
+    let server = MockServer::start(vec![
+        bg_reply("call-1", "while [ ! -f go ]; do sleep 0.05; done"),
+        priced_text_reply("PROMPT-ONE", 100, 10),
+        priced_text_reply("WAKE-ANSWER", 200, 20),
+        priced_text_reply("PROMPT-TWO", 300, 30),
+    ])
+    .await;
+    let env = Env::fresh("prompt-cost");
+    write_priced_catalog(&env.home);
+    let hold = env.home.join("claim-hold");
+    let hold_path = hold.to_str().unwrap().to_owned();
+    let mut acp = Acp::spawn_with(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env,
+        &[("RADIAN_CLAIM_HOLD_FILE", &hold_path)],
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let path = env.sessions.join(format!("{session}.jsonl"));
+
+    let first = acp.prompt(&session, "start the job", Decision::None).await;
+    assert_eq!(
+        first.result()["_meta"]["radian"]["text"],
+        "PROMPT-ONE",
+        "{}",
+        first.response
+    );
+    let first_fee = first.result()["_meta"]["radian"]["cost"]["micros"]
+        .as_u64()
+        .expect("the priced catalog gives the first turn a fee");
+    assert_eq!(
+        Some(first_fee),
+        turn_summary(&journal(&path), "t-1").1,
+        "the first answer reports its own turn's fee"
+    );
+
+    std::fs::write(&hold, "").unwrap();
+    std::fs::write(env.workspace.join("go"), "").unwrap();
+    wait_for_event(
+        &path,
+        "the job's completion notice",
+        "InboxEnqueued",
+        |event| {
+            event["data"]["message"]
+                .to_string()
+                .contains("background job")
+        },
+    )
+    .await;
+    let id = acp.send_prompt(&session, "second question").await;
+    wait_for_event(
+        &path,
+        "the second prompt's enqueue",
+        "InboxEnqueued",
+        |event| {
+            event["data"]["message"]
+                .to_string()
+                .contains("second question")
+        },
+    )
+    .await;
+    std::fs::remove_file(&hold).unwrap();
+
+    let second = acp.collect_prompt(id, &session, Decision::None).await;
+    let result = second.result();
+    let events = journal(&path);
+    let prompt_id = enqueued_id(&events, "second question");
+    let claimed_turn = events
+        .iter()
+        .find(|event| {
+            event["event"] == "InputClaimed"
+                && event["data"]["message_ids"]
+                    .to_string()
+                    .contains(&prompt_id)
+        })
+        .and_then(|event| event["data"]["turn_id"].as_str())
+        .unwrap_or_else(|| panic!("the prompt's message was never claimed: {events:#?}"));
+    let (text, micros, incomplete) = turn_summary(&events, claimed_turn);
+    assert_eq!(text, "PROMPT-TWO", "the prompt's own turn answered");
+    assert_eq!(
+        result["_meta"]["radian"]["text"], text,
+        "the answer reports its own turn's text: {result}"
+    );
+    let cost = &result["_meta"]["radian"]["cost"];
+    assert_eq!(
+        cost["micros"].as_u64(),
+        micros,
+        "the answer reports its own turn's fee, not the session's: {result}"
+    );
+    assert_eq!(
+        cost["incomplete"].as_bool(),
+        Some(incomplete),
+        "the answer reports its own turn's completeness: {result}"
+    );
+    assert_eq!(
+        cost["estimated"].as_bool(),
+        Some(false),
+        "a live turn's fee is priced as it arrives, never an estimate: {result}"
+    );
+    let (_, session_cost) = journal_summary(&events);
+    assert_ne!(
+        session_cost["micros"], cost["micros"],
+        "the first turn's and the wake turn's fees are not this answer's: {result}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 4: a prompt that arrives while a wake turn runs is refused, and the wake
+/// turn's end never answers it. Once the wake turn is over, the prompt gets its own turn.
+#[tokio::test]
+async fn a_prompt_during_a_wake_turn_is_refused_and_answers_after_it() {
+    let server = MockServer::start(vec![
+        bg_reply("call-1", "while [ ! -f go ]; do sleep 0.05; done"),
+        text_reply("PROMPT-ONE"),
+        // The wake turn's model call never answers: the turn stays running.
+        Reply::SseThenHang { pieces: Vec::new() },
+        text_reply("PROMPT-TWO"),
+    ])
+    .await;
+    let env = Env::fresh("wake-running");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+            "--approval",
+            "auto",
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let path = env.sessions.join(format!("{session}.jsonl"));
+
+    let first = acp.prompt(&session, "start the job", Decision::None).await;
+    assert_eq!(
+        first.result()["_meta"]["radian"]["text"],
+        "PROMPT-ONE",
+        "{}",
+        first.response
+    );
+    std::fs::write(env.workspace.join("go"), "").unwrap();
+    wait_for_event(&path, "the wake turn", "TurnStarted", |event| {
+        event["data"]["turn_id"] == "t-2"
+    })
+    .await;
+
+    let refused = acp
+        .prompt(&session, "second question", Decision::None)
+        .await;
+    let message = refused.response["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("a second session/prompt during a turn is refused"),
+        "a prompt during a wake turn is refused, not answered by the wake turn: {message}"
+    );
+
+    // End the wake turn, then the prompt gets a turn of its own. The cancel must land while the
+    // turn's model call is in flight: a cancel sent before the driver's turn starts is a no-op.
+    wait_for_requests(&server, 3, "the wake turn's model call").await;
+    acp.cancel(&session).await;
+    wait_for_event(&path, "the wake turn's end", "TurnFinished", |event| {
+        event["data"]["turn_id"] == "t-2" && event["data"]["outcome"] == "cancelled"
+    })
+    .await;
+    let run = acp
+        .prompt(&session, "second question", Decision::None)
+        .await;
+    let result = run.result();
+    assert_eq!(result["stopReason"], "end_turn", "{result}");
+    assert_eq!(result["_meta"]["radian"]["text"], "PROMPT-TWO", "{result}");
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049 decision 4: two prompts sent back to back without waiting are refused for the
+/// second (the first turn is still running), and the first answers from its own turn — a
+/// `cancelled` end is that turn's status, not a later turn's.
+#[tokio::test]
+async fn a_second_prompt_back_to_back_is_refused_and_the_first_answers_its_own_turn() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let env = Env::fresh("back-to-back");
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+
+    let first = acp.send_prompt(&session, "first").await;
+    let second = acp.send_prompt(&session, "second").await;
+    let refused = acp.collect_prompt(second, &session, Decision::None).await;
+    let message = refused.response["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("a second session/prompt during a turn is refused"),
+        "the second prompt is refused: {message}"
+    );
+
+    // Cancel once the turn is really running: a cancel that lands before the driver's turn
+    // starts is a no-op (the turn's cancellation episode begins with the turn).
+    wait_for_requests(&server, 1, "the first turn's model call").await;
+    acp.cancel(&session).await;
+    let run = acp.collect_prompt(first, &session, Decision::None).await;
+    assert_eq!(run.result()["stopReason"], "cancelled", "{}", run.response);
     let (code, stderr) = acp.finish().await;
     assert_eq!(code, 0, "{stderr}");
 }

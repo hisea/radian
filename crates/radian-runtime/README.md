@@ -35,6 +35,12 @@ after the transcript has actually taken the message (using the core's
 journal's `seq` counter and its per-event sync decision (ADR 0040) with the core's own
 records — `TurnFinished`/`TurnFailed` are sync points, the rest ride the next one.
 
+Once a record is durable the driver also hands it to the host's `RuntimeEvents` sink: the
+inbox does that for `InboxEnqueued`, and the driver for `InputClaimed` (the turn's opening
+input and every input `drain_steering` merges into it), `InputAdmitted`, `ConfigChanged`,
+`TurnStarted`, `TurnFailed` and `TurnFinished` (ADR 0049). A host that enqueued a message
+itself reads the claim to learn which turn will answer it, and waits for that turn's end.
+
 ## The driver
 
 `Driver::open(agent, journal, inbox, live_events, turn_options)` recovers state from the

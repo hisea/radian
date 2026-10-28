@@ -432,13 +432,13 @@ async fn open_session_request(
         }
     };
     let session_id = setup.session_id.clone();
-    let events = events::events(
+    let (events, runtime_events) = events::events(
         state.out().clone(),
         session_id.clone(),
         workspace.clone(),
         setup.window.context,
+        setup.secrets.clone(),
     );
-    let runtime_events = Arc::new(AcpRuntimeEvents::new(setup.secrets.clone()));
     *state.events.lock().unwrap() = Some(Arc::clone(&events));
     *state.runtime_events.lock().unwrap() = Some(Arc::clone(&runtime_events));
 
@@ -573,15 +573,11 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
     let hooks = session.hooks();
     hooks.set_turn_source(Some(InputSource::User));
     hooks.observe_input_source(InputSource::User);
-    let events = state
-        .events()
-        .ok_or((protocol::INTERNAL_ERROR, "no event sink".to_owned()))?;
     let runtime_events = state
         .runtime_events()
         .ok_or((protocol::INTERNAL_ERROR, "no runtime event sink".to_owned()))?;
-    let before = events.finished_generation();
-    let before_journaled = runtime_events.finished_generation();
-    session
+    let ledger = Arc::clone(runtime_events.ledger());
+    let message_id = session
         .inbox()
         .followup(radian_core::Message::user(text), InputSource::User)
         .await
@@ -591,50 +587,52 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
                 format!("cannot enqueue the prompt: {error}"),
             )
         })?;
-    // ADR 0049: the answer waits for the driver's journaled turn end, not only the core's
-    // live `RunFinished`. The live event comes first and carries the turn's status (used for
-    // `stopReason`); `TurnFinished` follows once the journal holds the turn end, so `_meta`
-    // and a client reading the session file after the answer see the completed turn (ADR
-    // 0010). Both generations are read before enqueueing, so a stale permit can never be
-    // taken for this turn's end.
-    loop {
-        let live = events.finished.notified();
-        let journaled = runtime_events.finished.notified();
-        let live_done = events.finished_generation() > before;
-        let journaled_done = runtime_events.finished_generation() > before_journaled;
-        if live_done && journaled_done {
-            break;
+    // ADR 0049: the answer waits for the driver's **journaled** turn end, not only the core's
+    // live `RunFinished`, and it waits for the end of the turn that claimed **this** message
+    // (`InputClaimed`) — never for the next turn end to happen. A background job from an
+    // earlier prompt can settle and open a system wake turn (ADR 0037) after the prompt was
+    // enqueued; that turn's end answers nothing, and the prompt keeps waiting for its own.
+    // When the prompt is merged into a turn with other queued input, that turn is its turn.
+    let turn = loop {
+        let changed = ledger.changed().notified();
+        if let Some(turn) = ledger
+            .turn_for(&message_id)
+            .filter(|turn| ledger.is_journaled(turn))
+        {
+            break turn;
         }
         if let Some(end) = state.driver_end() {
             return Err((protocol::INTERNAL_ERROR, driver_message(&end)));
         }
         tokio::select! {
             biased;
-            _ = live, if !live_done => {}
-            _ = journaled, if !journaled_done => {}
+            _ = changed => {}
             _ = state.driver_ended.notified() => {
                 let end = state.driver_end().unwrap_or(radian_host::DriverEnd::Ok);
                 return Err((protocol::INTERNAL_ERROR, driver_message(&end)));
             }
         }
-    }
-    let status = events.last_status();
-    let summary = super::jsonl::summarize_journal(session.journal_path());
+    };
+    // The status of **that** turn's live end: another turn's `RunFinished` must not decide this
+    // answer's `stopReason`.
+    let status = ledger.status(&turn);
+    // The fee and text are that turn's own (ADR 0049): folding the journal now is safe because
+    // the fold takes only the records between this turn's `TurnStarted` and `TurnFinished`, so
+    // a turn that starts after it cannot leak in. `estimated` is false: every call of a turn
+    // this process ran was priced as it arrived (ADR 0027).
+    let summary = super::jsonl::summarize_turn(session.journal_path(), &turn);
     let cost = summary.fee_micros.map(|micros| {
         json!({
             "micros": micros,
             "incomplete": summary.fee_incomplete,
-            "estimated": session.projection().read().cost_estimated(),
+            "estimated": false,
         })
     });
     let mut radian = json!({
         "cost": cost,
         "text": summary.last_text,
     });
-    if let Some(error) = state
-        .runtime_events()
-        .and_then(|events| events.last_error())
-    {
+    if let Some(error) = ledger.error(&turn) {
         radian["error"] = Value::String(error);
     }
     Ok(json!({

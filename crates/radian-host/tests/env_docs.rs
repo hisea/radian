@@ -201,6 +201,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "read in radian-host/src/session/open.rs: milliseconds between a turn's finish and its journal commit, to exercise fork timing",
     ),
     (
+        "RADIAN_CLAIM_HOLD_FILE",
+        "read in radian-host/src/session/open.rs: while this file exists the driver claims no next turn, so an ACP test can put a job notice and a prompt in one lane in a known order",
+    ),
+    (
         "RADIAN_TRACE_PHASES",
         "read in radian-session/src/trace.rs: prints a startup phase trace with timings, for development",
     ),

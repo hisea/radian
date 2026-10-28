@@ -64,8 +64,15 @@ this host advertises no image, audio or embedded-context capability.
 The response is sent after the driver has **journaled** the turn end
 (`RuntimeEvent::TurnFinished`), not when the core's live `RunFinished` fires: the journal then
 holds the turn end, so a client that reads the session file after the answer sees it, and the
-`_meta` cost and text are folded from the completed turn. The live `RunFinished` still supplies
-the turn's status for `stopReason`:
+`_meta` cost and text are folded from that turn's records only.
+
+The turn end is the end of **the turn that claimed this prompt's message**, which
+`RuntimeEvent::InputClaimed` names: a prompt is answered by its own turn and by no other. A
+background job from an earlier prompt can settle and open a system wake turn (ADR 0037) between
+the prompt entering the inbox and the driver taking it; that turn's end answers nothing, and the
+prompt keeps waiting for the turn that drains its message. When the prompt's message is merged
+into a turn together with other queued input, that turn is its turn. That turn's live
+`RunFinished` supplies the status for `stopReason` — never another turn's:
 
 | Turn end | `stopReason` |
 |---|---|
@@ -107,12 +114,15 @@ whose arguments name a path gets that resolved path as its location.
 
 The `session/prompt` response carries `_meta.radian`:
 
-- `cost`: the object `radian exec`'s `Result.cost` carries, `{ "micros", "incomplete",
-  "estimated" }`, or `null` when no call has a price. `estimated` is the projection's
-  re-pricing flag (ADR 0027).
-- `text`: the last assistant message's text in full, for the session.
-- `error`: present only on a `refusal` that a model or hook error caused; the masked error
-  text.
+- `cost`: the fee of the turn that answered the prompt, in the object `radian exec`'s
+  `Result.cost` carries, `{ "micros", "incomplete", "estimated" }`, or `null` when no call of
+  that turn had a price. `micros` and `incomplete` are folded from that turn's records only;
+  `estimated` is `false`, because every call of a turn this process ran was priced as it
+  arrived (ADR 0027), never by re-pricing restored history.
+- `text`: the last assistant message's text in full **of the turn that answered the prompt**,
+  or empty when that turn appended none.
+- `error`: present only on a `refusal` that a model or hook error of that turn caused; the
+  masked error text.
 
 A client that does not read `_meta` ignores it.
 
@@ -205,10 +215,13 @@ session has none: the first call that needs an approval asks again.
 `crates/radian-exec/tests/acp.rs` drives `radian acp` as a child over stdio: initialize,
 `session/new`, `session/prompt`, the update stream, the prompt `_meta`, a permission
 rejection, a cancellation with the interrupted journal prefix, a model error, a prompt whose
-journaled turn end is delayed (the answer must wait for it), the one-session refusal, the shared
-flag set, and `session/load` — a session written by one process and loaded by a second, whose
-replay and continued journal the test checks by folding the journal. `journal-selfcheck` replays
-the sessions the suite writes. The touched crates' mutation records name the tests that catch a
-cancelled turn answering `end_turn`, a second `session/new` being accepted, a `session/load` that
-starts a new journal instead of continuing the loaded one, and a prompt answer that follows the
-live `RunFinished` instead of the journaled turn end.
+journaled turn end is delayed (the answer must wait for it), a prompt whose own turn follows a
+job-completion wake turn (the wake turn's end must not answer it, and the answer reports that
+turn's own cost and text, not the session's), the one-session refusal, the
+shared flag set, and `session/load` — a session written by one process and loaded by a second,
+whose replay and continued journal the test checks by folding the journal. `journal-selfcheck`
+replays the sessions the suite writes. The touched crates' mutation records name the tests that
+catch a cancelled turn answering `end_turn`, a second `session/new` being accepted, a
+`session/load` that starts a new journal instead of continuing the loaded one, a prompt answer
+that follows the live `RunFinished` instead of the journaled turn end, and a prompt answered by
+the wake turn that ran before its own.

@@ -73,6 +73,8 @@ async fn open_env(
 struct TurnSink {
     started: Mutex<Vec<String>>,
     finished: Mutex<Vec<String>>,
+    /// `(message id, turn id)` for every `InputClaimed` the driver forwarded.
+    claimed: Mutex<Vec<(String, String)>>,
     signal: tokio::sync::Notify,
 }
 
@@ -85,6 +87,16 @@ impl TurnSink {
 
     fn started(&self) -> Vec<String> {
         self.started.lock().unwrap().clone()
+    }
+
+    /// The turn the host was told claimed `message`, or `None`.
+    fn claimed_turn(&self, message: &str) -> Option<String> {
+        self.claimed
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(id, _)| id == message)
+            .map(|(_, turn)| turn.clone())
     }
 
     async fn wait_finished(&self, n: usize) {
@@ -103,6 +115,15 @@ impl RuntimeEvents for TurnSink {
             RuntimeEvent::TurnFinished { turn_id, .. } => {
                 self.finished.lock().unwrap().push(turn_id.clone());
                 self.signal.notify_one();
+            }
+            RuntimeEvent::InputClaimed {
+                message_ids,
+                turn_id,
+            } => {
+                let mut claimed = self.claimed.lock().unwrap();
+                for id in message_ids {
+                    claimed.push((id.0.clone(), turn_id.clone()));
+                }
             }
             _ => {}
         }
@@ -345,6 +366,13 @@ async fn an_absorbed_pending_wake_does_not_open_another_turn() {
         claimed_turn,
         json!("t-1"),
         "the notice is claimed inside the running turn, not for a new one"
+    );
+    // The host hears the merged claim too (ADR 0049): a host waiting on its own message must
+    // learn which turn took it, and this one was taken mid-turn by `drain_steering`.
+    assert_eq!(
+        sink.claimed_turn(&notice.0),
+        Some("t-1".to_owned()),
+        "the merged claim reaches the runtime-event sink"
     );
     assert_eq!(
         count_of(&events, "InputClaimed", |d| d["message_ids"]

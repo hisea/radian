@@ -39,7 +39,7 @@ A `rework_session = "resume"` attempt opens the task's session with `session/loa
 Approvals and `ask_user` questions arrive as `session/request_permission`, and the wrapper answers them with the ACP default policy described under [An ACP agent as the worker](#an-acp-agent-as-the-worker): `allow_once` when every path the request names is inside the worktree, `reject_once` when one is outside it. `--yes` is not passed, so a tool that asks is answered by the wrapper instead of being pre-approved.
 The shell still runs under the `workspace` tier: the policy answers the question, the sandbox decides what the command can do.
 
-The attempt's `Result` comes from the response's `_meta.radian`: `text` is the last assistant message in full, and `cost` is the same `{micros, incomplete, estimated}` object `radian exec` wrote, or `null` when no call had a price.
+The attempt's `Result` comes from the response's `_meta.radian`: `text` is the last assistant message in full, and `cost` is the fee of the turn that answered the prompt, in the `{micros, incomplete, estimated}` shape `radian exec` writes, or `null` when no call of that turn had a price.
 The wrapper writes that line itself, as for any ACP worker, and the cost, budget, delivery and push rules are [the ones below](#what-the-wrapper-checks-after-the-worker-exits) and in [the result table](gate.md#failures-retries-and-the-budget).
 `radian exec` itself remains the headless command ([`radian exec`](../cli.md#radian-exec-the-headless-command)) and the gate's review session ([`gate`](gate.md)); it is no longer the worker.
 

@@ -1165,9 +1165,11 @@ pub fn retry_delay_secs(retry_count: u32) -> u64 {
 
 // ---- cost and budget -----------------------------------------------------------------
 
-/// One attempt's cost: the cost the attempt added. `Result.cost` is the session total
-/// (ADR 0044), so an attempt that shares the previous attempt's session (`resume`) adds the
-/// difference, and a `fresh` attempt, whose session is its own, adds the whole total.
+/// One attempt's cost: the cost the attempt added. A command worker's `Result.cost` is the
+/// session total (ADR 0044), so an attempt that shares the previous attempt's session (`resume`)
+/// adds the difference, and a `fresh` attempt, whose session is its own, adds the whole total.
+/// The `radian` worker's `Result.cost` is its prompt turn's fee (ADR 0048 decision 7, ADR 0049),
+/// so its attempt adds exactly that value, on a resumed session too.
 struct AttemptCost {
     cost_usd: f64,
     session_cost_usd: Option<f64>,
@@ -1180,18 +1182,24 @@ struct AttemptCost {
 
 fn attempt_cost(store: &Store, task: &str, attempt: u32) -> AttemptCost {
     let this = result_cost(store, task, attempt);
-    let shared_session = attempt > 1
-        && attempt_session_id(store, task, attempt).is_some_and(|session| {
-            attempt_session_id(store, task, attempt - 1).as_deref() == Some(session.as_str())
-        });
-    let previous = shared_session
-        .then(|| result_cost(store, task, attempt - 1))
-        .flatten()
-        .and_then(|cost| cost.micros);
     let micros = this.as_ref().and_then(|cost| cost.micros);
-    let delta = micros.unwrap_or(0).saturating_sub(previous.unwrap_or(0));
+    // The radian worker answers one prompt, and its `_meta.radian.cost` is that turn's fee, so
+    // no earlier turn is in the number and no delta may be taken from the previous attempt.
+    let added = if worker_kind(store, task, attempt).as_deref() == Some("radian") {
+        micros.unwrap_or(0)
+    } else {
+        let shared_session = attempt > 1
+            && attempt_session_id(store, task, attempt).is_some_and(|session| {
+                attempt_session_id(store, task, attempt - 1).as_deref() == Some(session.as_str())
+            });
+        let previous = shared_session
+            .then(|| result_cost(store, task, attempt - 1))
+            .flatten()
+            .and_then(|cost| cost.micros);
+        micros.unwrap_or(0).saturating_sub(previous.unwrap_or(0))
+    };
     AttemptCost {
-        cost_usd: delta as f64 / 1_000_000.0,
+        cost_usd: added as f64 / 1_000_000.0,
         session_cost_usd: micros.map(|micros| micros as f64 / 1_000_000.0),
         known: this.as_ref().is_some_and(|cost| cost.present),
     }
@@ -1285,11 +1293,16 @@ fn result_model_error(store: &Store, task: &str, attempt: u32) -> Option<Value> 
     None
 }
 
-/// Whether the attempt's recorded worker is a command worker (ADR 0048 decision 7): its
-/// `execution.json`, then `identity.json`, then the claim's `start.json`, the same precedence
-/// the session id uses. An attempt that names no worker is not a command worker: it keeps the
-/// radian worker's rules.
+/// Whether the attempt's recorded worker is a command worker (ADR 0048 decision 7). An attempt
+/// that names no worker is not a command worker: it keeps the radian worker's rules.
 fn worker_is_command(store: &Store, task: &str, attempt: u32) -> bool {
+    worker_kind(store, task, attempt).is_some_and(|kind| kind == "command")
+}
+
+/// The worker kind one attempt's records name (ADR 0048 decision 7), from the wrapper's
+/// `execution.json`, then `identity.json`, then the claim's `start.json`: the same precedence
+/// the session id uses. `None` for an old attempt or a worker-less `reverify`.
+fn worker_kind(store: &Store, task: &str, attempt: u32) -> Option<String> {
     [
         run_dir(store, task, attempt).join("execution.json"),
         attempt_dir(store, task, attempt).join("identity.json"),
@@ -1297,7 +1310,6 @@ fn worker_is_command(store: &Store, task: &str, attempt: u32) -> bool {
     ]
     .into_iter()
     .find_map(|path| worker_kind_in(&path))
-    .is_some_and(|kind| kind == "command")
 }
 
 fn worker_kind_in(path: &Path) -> Option<String> {
