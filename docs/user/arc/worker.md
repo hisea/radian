@@ -225,7 +225,7 @@ Every `session/update` the agent sends is written to `runs/<task>/attempts/<atte
 {"type":"acp","message":{"jsonrpc":"2.0","method":"session/update","params":{...}}}
 ```
 
-The arc TUI's conversation tab folds these lines into the transcript the attach view draws: message and thought chunks become one Markdown message or one thinking block, a tool call becomes a tool card with its title and its `queued`/`running`/`done`/`failed` status (a `diff` block draws the patch card's diff, `content` text its folded output, and a `terminal` block the title and status only), plan entries become one list, and a permission answer one weak line after the tool. `usage_update` and `session_info_update` become at most one weak status line with the latest `used`/`size` and title; `available_commands_update`, `current_mode_update` and an unknown update are not drawn (see [the task page's conversation tab](tui.md#the-task-page)).
+The arc TUI's conversation tab folds these lines into the transcript the attach view draws: message and thought chunks become one Markdown message or one thinking block, a tool call becomes a tool card with its title and its `queued`/`running`/`done`/`failed` status (a `diff` block draws the patch card's diff and `content` text its folded output, every `diff` block first and the text after it when one update carries both, and a `terminal` block the title and status only), plan entries become one list, and a permission answer one weak line after the tool. `usage_update` and `session_info_update` become at most one weak status line with the latest `used`/`size` and title; `available_commands_update`, `current_mode_update` and an unknown update are not drawn (see [the task page's conversation tab](tui.md#the-task-page)).
 
 `session/request_permission` is answered by one fixed policy, with no configuration key:
 
@@ -242,7 +242,7 @@ The `session/prompt` response's `stopReason` decides the attempt:
 | `stopReason` | `Result.outcome` | What happens |
 |---|---|---|
 | `end_turn` | `completed` | The delivery check runs; the attempt passes when it delivers. |
-| `max_tokens` | `max_tokens` | A failed attempt named after the reason; the retry rules apply. The turn ends this way only on a truncated response with no tool calls after two truncated responses in a row had already continued it; a truncated response with tool calls continues the turn. |
+| `max_tokens` | `max_tokens` | A failed attempt named after the reason; the retry rules apply. The turn ended `Incomplete` for a truncated answer that could not continue; see [the exit-code rule](../cli.md#a-truncated-answer) for when that happens. |
 | `max_turn_requests` | `max_turn_requests` | The same. |
 | `refusal` | `refusal` | The same. |
 | `cancelled` | `cancelled` | The same, unless arc itself cancelled the attempt: then it is a cancel and the task ends `failed.cancelled`. |

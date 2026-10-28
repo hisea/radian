@@ -346,13 +346,13 @@ impl AcpFold {
         };
         let title = cap_text(title);
         let status = status_text(&state.status);
-        let diff = state.content.as_ref().and_then(first_diff);
-        let output = if diff.is_some() {
-            Some(String::new())
-        } else {
-            tool_output(state)
-        };
-        let card = card_for(state, diff.as_ref(), status.clone());
+        let diffs = content_diffs(state.content.as_ref());
+        let output = tool_output(state);
+        let mut card = card_for(state, &diffs, status.clone());
+        let display = result_text(&card, &diffs, output.as_deref());
+        if let Some((_, split)) = &display {
+            card.trailing_from = *split;
+        }
         let result_state = match status.as_deref() {
             Some("done") => Some(false),
             Some("failed") => Some(true),
@@ -428,10 +428,9 @@ impl AcpFold {
             }
         }
 
-        let Some(output) = output else {
+        let Some((display, _)) = display else {
             return;
         };
-        let display = cap_text(tools::result_display_text(&card, &output));
         if let Some(index) = result {
             let mut entry = Entry::new(EntryKind::ToolResult, display);
             entry.tool = Some(Box::new(card));
@@ -735,14 +734,9 @@ struct DiffContent {
     new: String,
 }
 
-fn card_for(state: &ToolState, diff: Option<&DiffContent>, status: Option<String>) -> ToolCard {
-    let mut card = match diff {
-        Some(diff) => ToolCard::new(
-            state.id.clone(),
-            "patch",
-            json!({"path": diff.path, "old": diff.old, "new": diff.new}),
-        ),
-        None => ToolCard::new(
+fn card_for(state: &ToolState, diffs: &[DiffContent], status: Option<String>) -> ToolCard {
+    let mut card = match diffs {
+        [] => ToolCard::new(
             state.id.clone(),
             if state.kind.is_empty() {
                 "acp"
@@ -750,6 +744,26 @@ fn card_for(state: &ToolState, diff: Option<&DiffContent>, status: Option<String
                 state.kind.as_str()
             },
             state.raw_input.clone().unwrap_or(Value::Null),
+        ),
+        // One file keeps the single `old`/`new` pair, so its body is exactly the one the fold
+        // drew before and its `+N −M` counts come from the same arguments.
+        [diff] => ToolCard::new(
+            state.id.clone(),
+            "patch",
+            json!({"path": diff.path, "old": diff.old, "new": diff.new}),
+        ),
+        // Several files: the call's edits sum the counts, and the body is built from the
+        // blocks themselves so each file keeps its own header (`diffs_text`).
+        many => ToolCard::new(
+            state.id.clone(),
+            "patch",
+            json!({
+                "path": many[0].path,
+                "edits": many
+                    .iter()
+                    .map(|diff| json!({"old": diff.old, "new": diff.new}))
+                    .collect::<Vec<_>>(),
+            }),
         ),
     };
     card.status = status;
@@ -769,26 +783,90 @@ fn status_text(status: &str) -> Option<String> {
     }
 }
 
-fn first_diff(content: &Value) -> Option<DiffContent> {
-    content.as_array()?.iter().find_map(|item| {
-        (item.get("type").and_then(Value::as_str) == Some("diff")).then(|| DiffContent {
-            path: item
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            old: item
-                .get("oldText")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            new: item
-                .get("newText")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+/// Every `diff` content block of a tool's newest `content` array, in order. Each block draws:
+/// a call that edited two files draws both (ADR 0048 §13).
+fn content_diffs(content: Option<&Value>) -> Vec<DiffContent> {
+    let Some(items) = content.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.get("type").and_then(Value::as_str) != Some("diff") {
+                return None;
+            }
+            Some(DiffContent {
+                path: item
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                old: item
+                    .get("oldText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                new: item
+                    .get("newText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
         })
-    })
+        .collect()
+}
+
+/// The result entry's text: the `diff` blocks as the patch body, then the `content` text
+/// after them (ADR 0048 §13). The second value is the byte offset where that plain text
+/// starts, when a diff comes first and the text survives the entry cap; the body renderer
+/// uses it to draw the tail as ordinary rows instead of diff rows.
+fn result_text(
+    card: &ToolCard,
+    diffs: &[DiffContent],
+    output: Option<&str>,
+) -> Option<(String, Option<usize>)> {
+    if diffs.is_empty() {
+        // No diff: the text is the body, through the built-in renderer for the card's kind - a
+        // `write` still shows the content it wrote, a `patch` its own diff (ADR 0028).
+        return output.map(|text| (cap_text(tools::result_display_text(card, text)), None));
+    }
+    let diff_text = if diffs.len() == 1 {
+        tools::result_display_text(card, "")
+    } else {
+        diffs_text(diffs)
+    };
+    let split = diff_text.len();
+    let raw = match output {
+        // A blank row separates the diff from the text, so the text is not read as the last
+        // file's rows.
+        Some(text) => format!("{diff_text}\n{text}"),
+        None => diff_text,
+    };
+    let text = cap_text(raw);
+    let split = (split < text.len()).then_some(split);
+    Some((text, split))
+}
+
+/// Several `diff` blocks draw in order, each under its own `---`/`+++` file header, so the
+/// rows on either side of a file boundary are not read as one file's change and each file
+/// highlights by its own path (ADR 0048 §13).
+fn diffs_text(diffs: &[DiffContent]) -> String {
+    let mut out = String::new();
+    for diff in diffs {
+        out.push_str("--- a/");
+        out.push_str(&diff.path);
+        out.push('\n');
+        out.push_str("+++ b/");
+        out.push_str(&diff.path);
+        out.push('\n');
+        let card = ToolCard::new(
+            "",
+            "patch",
+            json!({"path": diff.path, "old": diff.old, "new": diff.new}),
+        );
+        out.push_str(&tools::result_display_text(&card, ""));
+    }
+    out
 }
 
 /// The result text a tool's `content` blocks carry: `content` text joined in order, else the
@@ -927,6 +1005,16 @@ mod tests {
         fields["sessionUpdate"] = json!(kind);
         fields["toolCallId"] = json!(id);
         envelope(fields)
+    }
+
+    /// One `diff` content block, as ACP writes it.
+    fn diff_block(path: &str, old: &str, new: &str) -> Value {
+        json!({"type": "diff", "path": path, "oldText": old, "newText": new})
+    }
+
+    /// One `content` block carrying text, as ACP writes it.
+    fn text_block(text: &str) -> Value {
+        json!({"type": "content", "content": {"type": "text", "text": text}})
     }
 
     fn permission_request(id: Value, tool: &str) -> String {
@@ -1098,6 +1186,224 @@ mod tests {
             fold.app.session.entries[1].tool.as_ref().unwrap().name,
             "patch"
         );
+    }
+
+    /// A `diff` block and a `content` text block in one `tool_call_update` both draw: the diff
+    /// first, then the text as ordinary body rows (ADR 0048 §13).
+    #[test]
+    fn a_diff_and_content_text_in_one_update_both_draw() {
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Edit image.txt",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    diff_block("image.txt", "one\n", "ONE\n"),
+                    text_block("applied 1 hunk"),
+                ],
+            }),
+        )]);
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::ToolResult]
+        );
+        let result = &fold.app.session.entries[1];
+        assert_eq!(result.text, "-one\n+ONE\n\napplied 1 hunk");
+        let card = result.tool.as_ref().unwrap();
+        assert_eq!(card.name, "patch");
+        assert_eq!(card.arguments["path"], "image.txt");
+        assert_eq!(card.trailing_from, Some("-one\n+ONE\n".len()));
+
+        // The diff rows keep their roles and the text after them is a plain row.
+        let body = tools::renderer_for(&card.name).body(card, &result.text);
+        assert_eq!(
+            body.iter()
+                .filter_map(|line| match line {
+                    tools::BodyLine::Text { role, .. } => Some(*role),
+                    tools::BodyLine::Diff(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                tools::LineRole::DiffRemoved,
+                tools::LineRole::DiffAdded,
+                tools::LineRole::Normal,
+                tools::LineRole::Normal,
+            ]
+        );
+        let last = body.last().unwrap();
+        let tools::BodyLine::Text { source, .. } = last else {
+            panic!("the text row is a text row: {last:?}");
+        };
+        assert_eq!(&result.text[source.clone()], "applied 1 hunk");
+    }
+
+    /// The order inside the `content` array does not matter: a `content` text block before the
+    /// `diff` still draws the diff first and the text after it (ADR 0048 §13).
+    #[test]
+    fn content_text_before_a_diff_draws_the_same_way() {
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Edit image.txt",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    text_block("applied 2 hunks"),
+                    diff_block("image.txt", "one\n", "ONE\n"),
+                ],
+            }),
+        )]);
+        let result = &fold.app.session.entries[1];
+        assert_eq!(result.text, "-one\n+ONE\n\napplied 2 hunks");
+        assert_eq!(
+            result.tool.as_ref().unwrap().trailing_from,
+            Some("-one\n+ONE\n".len())
+        );
+    }
+
+    /// Two `diff` blocks in one update draw both files, each under its own header, instead of
+    /// only the first (ADR 0048 §13).
+    #[test]
+    fn two_diffs_in_one_update_draw_both_files() {
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Edit two files",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    diff_block("one.txt", "a\n", "A\n"),
+                    diff_block("two.txt", "b\n", "B\n"),
+                ],
+            }),
+        )]);
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::ToolResult]
+        );
+        let result = &fold.app.session.entries[1];
+        assert_eq!(
+            result.text,
+            "--- a/one.txt\n+++ b/one.txt\n-a\n+A\n--- a/two.txt\n+++ b/two.txt\n-b\n+B\n"
+        );
+        let card = result.tool.as_ref().unwrap();
+        assert_eq!(card.name, "patch");
+        assert_eq!(card.arguments["path"], "one.txt");
+        // Both files' rows are there, and the second file's header names its path.
+        let body = tools::renderer_for(&card.name).body(card, &result.text);
+        let removed: Vec<String> = body
+            .iter()
+            .filter_map(|line| match line {
+                tools::BodyLine::Text {
+                    source,
+                    role: tools::LineRole::DiffRemoved,
+                    ..
+                } => Some(result.text[source.clone()].to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, vec!["-a".to_owned(), "-b".to_owned()]);
+    }
+
+    /// A later `tool_call_update` that replaces the content with text only shows the new text:
+    /// the old diff does not stay behind (ADR 0048 §13).
+    #[test]
+    fn a_later_text_only_update_replaces_the_diff() {
+        let mut fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Edit image.txt",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    diff_block("image.txt", "one\n", "ONE\n"),
+                    text_block("applied 1 hunk"),
+                ],
+            }),
+        )]);
+        fold.push_line(&tool(
+            "tool_call_update",
+            "c1",
+            json!({
+                "status": "completed",
+                "content": [text_block("nothing to change")],
+            }),
+        ));
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::ToolResult]
+        );
+        let result = &fold.app.session.entries[1];
+        assert_eq!(result.text, "nothing to change");
+        assert_eq!(result.tool.as_ref().unwrap().name, "edit");
+        assert_eq!(result.tool.as_ref().unwrap().trailing_from, None);
+    }
+
+    /// A text-only update with no diff still renders through the built-in renderer for its
+    /// kind: a `write` card shows the content it wrote, not the tool's summary text (ADR 0028).
+    #[test]
+    fn text_only_update_keeps_the_builtin_renderer_body() {
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Write a.txt",
+                "kind": "write",
+                "status": "completed",
+                "rawInput": {"path": "a.txt", "content": "l1\nl2"},
+                "content": [text_block("wrote 5 bytes to a.txt")],
+            }),
+        )]);
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::ToolResult]
+        );
+        let result = &fold.app.session.entries[1];
+        let card = result.tool.as_ref().unwrap();
+        assert_eq!(card.name, "write");
+        assert_eq!(result.text, "l1\nl2");
+        assert_eq!(card.trailing_from, None);
+    }
+
+    /// The entry cap cuts a huge text after the diff, never the diff itself (ADR 0048 §13).
+    #[test]
+    fn a_huge_text_after_a_diff_is_cut_and_keeps_the_diff() {
+        let text = "x".repeat(MAX_ENTRY_BYTES + 500);
+        let fold = folded(&[tool(
+            "tool_call",
+            "c1",
+            json!({
+                "title": "Edit image.txt",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    diff_block("image.txt", "one\n", "ONE\n"),
+                    text_block(&text),
+                ],
+            }),
+        )]);
+        let result = &fold.app.session.entries[1];
+        assert_eq!(result.text.len(), MAX_ENTRY_BYTES);
+        assert!(result.text.starts_with("-one\n+ONE\n\n"), "{}", result.text);
+        assert_eq!(
+            result.tool.as_ref().unwrap().trailing_from,
+            Some("-one\n+ONE\n".len())
+        );
+        // The diff rows are still the first rows of the drawn body.
+        let card = result.tool.as_ref().unwrap();
+        let body = tools::renderer_for(&card.name).body(card, &result.text);
+        assert!(matches!(
+            body[0],
+            tools::BodyLine::Text {
+                role: tools::LineRole::DiffRemoved,
+                ..
+            }
+        ));
     }
 
     /// A `terminal` block has only an id: the title and the status are the whole card.
