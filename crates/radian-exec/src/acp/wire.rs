@@ -4,13 +4,14 @@
 //! The writer's queue is bounded ([`super::ACP_OUTBOX_CAPACITY`] messages): a producer waits
 //! for room instead of dropping a message or growing the queue without bound. Async producers
 //! (the read loop, the prompt task, the bridge) wait with `send`. The live-event sink is
-//! synchronous and runs inside the turn loop on a multi-thread runtime, so it waits through
-//! `block_in_place` and `blocking_send`: the writer keeps draining on another worker while the
-//! turn stalls.
+//! synchronous and runs inside the turn loop on a multi-thread runtime, so it waits with
+//! `block_in_place` and `Handle::block_on`: the writer keeps draining on another worker while
+//! the turn stalls. Both waits also race [`Outbox::close`], so a process that is shutting down
+//! (stdin ended, or SIGTERM) never waits for a client that stopped reading stdout.
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::{ACP_MAX_INPUT_LINE_BYTES, ACP_OUTBOX_CAPACITY};
 
@@ -149,20 +150,58 @@ fn append_line(line: &mut Vec<u8>, bytes: &[u8], limit: usize) {
 #[derive(Clone)]
 pub(crate) struct Outbox {
     tx: mpsc::Sender<Value>,
+    /// Set by [`Outbox::close`] when the process is shutting down: a producer that is waiting
+    /// for room stops instead of holding the shutdown for a client that is not reading.
+    closed: watch::Sender<bool>,
 }
 
 impl Outbox {
-    /// Sends one message, waiting for room in the bounded queue. No message is ever dropped.
-    async fn send(&self, message: Value) {
-        let _ = self.tx.send(message).await;
+    fn new(tx: mpsc::Sender<Value>) -> Self {
+        let (closed, _) = watch::channel(false);
+        Self { tx, closed }
     }
 
-    /// The synchronous producer's path (the live-event sink). `block_in_place` moves the turn
-    /// off its worker while it waits, so the writer task keeps draining stdout. The ACP process
-    /// always builds a multi-thread runtime (`run_acp_blocking`), which this requires.
+    /// Releases every producer that is waiting for room: the transport is ending, so the
+    /// messages that were not written yet are dropped. A producer that is not waiting is not
+    /// affected, and a message already in the queue is still written if the client reads.
+    pub(crate) fn close(&self) {
+        self.closed.send_replace(true);
+    }
+
+    /// Resolves once [`Outbox::close`] has run (immediately when it already has).
+    async fn wait_closed(&self) {
+        let mut closed = self.closed.subscribe();
+        let _ = closed.wait_for(|closed| *closed).await;
+    }
+
+    /// Sends one message, waiting for room in the bounded queue. No message is ever dropped
+    /// while the outbox is open.
+    async fn send(&self, message: Value) {
+        tokio::select! {
+            _ = self.tx.send(message) => {}
+            _ = self.wait_closed() => {}
+        }
+    }
+
+    /// The synchronous producer's path (the live-event sink). A free queue slot never blocks;
+    /// a full queue waits with `block_in_place`, which moves the turn off its worker so the
+    /// writer keeps draining on another one, and `Handle::block_on` runs the select there.
+    /// `wait_closed` makes that wait end at shutdown. The ACP process always builds a
+    /// multi-thread runtime (`run_acp_blocking`), which `block_in_place` requires.
     fn send_blocking(&self, message: Value) {
+        let message = match self.tx.try_send(message) {
+            Ok(()) => return,
+            // The writer is gone: nothing can be delivered, and nothing waits.
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+            Err(mpsc::error::TrySendError::Full(message)) => message,
+        };
         tokio::task::block_in_place(|| {
-            let _ = self.tx.blocking_send(message);
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::select! {
+                    _ = self.tx.send(message) => {}
+                    _ = self.wait_closed() => {}
+                }
+            });
         });
     }
 
@@ -222,7 +261,7 @@ fn notification(method: &str, params: Value) -> Value {
 pub(crate) fn spawn_writer() -> (Outbox, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(ACP_OUTBOX_CAPACITY);
     let task = tokio::spawn(write_messages(tokio::io::stdout(), rx));
-    (Outbox { tx }, task)
+    (Outbox::new(tx), task)
 }
 
 /// Drains the queue to `out` in order. `write_all` blocks when the client stops reading, which
@@ -461,7 +500,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_full_outbox_makes_both_producers_wait_and_drops_nothing() {
         let (tx, mut rx) = mpsc::channel(ACP_OUTBOX_CAPACITY);
-        let out = Outbox { tx };
+        let out = Outbox::new(tx);
         for id in 0..ACP_OUTBOX_CAPACITY {
             out.respond(&json!(id), json!(id)).await;
         }
@@ -546,6 +585,81 @@ mod tests {
                 .count(),
             1,
             "the synchronous update was delivered, not dropped: {tail:?}"
+        );
+    }
+
+    /// ADR 0049: a shutdown must not wait for a client that stopped reading. Closing the
+    /// outbox releases the synchronous event sink from its wait for room, so the driver joins
+    /// instead of hanging in `session.join`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_the_outbox_releases_a_waiting_synchronous_producer() {
+        let (tx, rx) = mpsc::channel(ACP_OUTBOX_CAPACITY);
+        let out = Outbox::new(tx);
+        for id in 0..ACP_OUTBOX_CAPACITY {
+            out.respond(&json!(id), json!(id)).await;
+        }
+
+        let (done, released) = oneshot::channel();
+        let blocked = out.clone();
+        let task = tokio::spawn(async move {
+            blocked.notify_blocking("session/update", json!({ "n": "blocked" }));
+            let _ = done.send(());
+        });
+        let mut released = released;
+        assert!(
+            timeout(Duration::from_millis(300), &mut released)
+                .await
+                .is_err(),
+            "the synchronous sink waits for room while the outbox is open"
+        );
+
+        out.close();
+        timeout(Duration::from_secs(5), released)
+            .await
+            .expect("closing the outbox releases the wait")
+            .expect("the producer signalled");
+        task.await.unwrap();
+        assert_eq!(
+            rx.len(),
+            ACP_OUTBOX_CAPACITY,
+            "the released producer did not add a message to the closed outbox"
+        );
+    }
+
+    /// The async twin: a prompt task or the bridge that waits for room must also be released
+    /// by a shutdown, or the session cannot join.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_the_outbox_releases_a_waiting_async_producer() {
+        let (tx, rx) = mpsc::channel(ACP_OUTBOX_CAPACITY);
+        let out = Outbox::new(tx);
+        for id in 0..ACP_OUTBOX_CAPACITY {
+            out.respond(&json!(id), json!(id)).await;
+        }
+
+        let (done, released) = oneshot::channel();
+        let blocked = out.clone();
+        let task = tokio::spawn(async move {
+            blocked.respond(&json!("late"), json!("late")).await;
+            let _ = done.send(());
+        });
+        let mut released = released;
+        assert!(
+            timeout(Duration::from_millis(300), &mut released)
+                .await
+                .is_err(),
+            "the async producer waits for room while the outbox is open"
+        );
+
+        out.close();
+        timeout(Duration::from_secs(5), released)
+            .await
+            .expect("closing the outbox releases the wait")
+            .expect("the producer signalled");
+        task.await.unwrap();
+        assert_eq!(
+            rx.len(),
+            ACP_OUTBOX_CAPACITY,
+            "the released producer did not add a message to the closed outbox"
         );
     }
 }

@@ -317,6 +317,32 @@ impl Acp {
         .await;
     }
 
+    /// Closes stdin and waits for the process to exit **without reading stdout or dropping its
+    /// read end**. A writer blocked on a full pipe therefore stays blocked, so the exit shows
+    /// that the shutdown path itself does not wait for the client (ADR 0049).
+    async fn exit_after_stdin_ends(mut self) -> (i32, String) {
+        drop(self.stdin);
+        wait_with_stdout_held(&mut self.child, &self.stderr_path).await
+    }
+
+    /// Waits for the process to exit without closing stdin and **without reading stdout or
+    /// dropping its read end**, so the exit can only come from a signal (ADR 0049).
+    async fn exit_while_input_stays_open(mut self) -> (i32, String) {
+        wait_with_stdout_held(&mut self.child, &self.stderr_path).await
+    }
+
+    /// Sends `signal` to the child.
+    #[cfg(unix)]
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: signal delivery to our own child process.
+        unsafe {
+            libc::kill(
+                self.child.id().expect("the child is running") as libc::pid_t,
+                signal,
+            );
+        }
+    }
+
     async fn finish(mut self) -> (i32, String) {
         drop(self.stdin);
         drop(self.stdout);
@@ -350,6 +376,18 @@ impl Acp {
         let stderr = std::fs::read_to_string(&self.stderr_path).unwrap_or_default();
         (status.code().unwrap_or(-1), stderr, messages)
     }
+}
+
+/// Waits for the child to exit while its stdout (and, for a signal, its stdin) stays open: a
+/// writer blocked on a full pipe stays blocked, so the exit shows that the shutdown path itself
+/// does not wait for the client (ADR 0049).
+async fn wait_with_stdout_held(child: &mut Child, stderr_path: &Path) -> (i32, String) {
+    let status = timeout(EXIT, child.wait())
+        .await
+        .expect("the agent did not exit while stdout was held open")
+        .expect("wait");
+    let stderr = std::fs::read_to_string(stderr_path).unwrap_or_default();
+    (status.code().unwrap_or(-1), stderr)
 }
 
 fn text_reply(text: &str) -> Reply {
@@ -2104,6 +2142,79 @@ async fn a_client_that_stops_reading_gets_every_update_in_order_when_it_reads_ag
     assert_eq!(result["_meta"]["radian"]["text"], expected, "{result}");
     let (code, stderr) = acp.finish().await;
     assert_eq!(code, 0, "{stderr}");
+}
+
+/// A session whose first prompt streams far more text than the stdout pipe and the output
+/// queue hold, with the client not reading stdout: the turn is stalled in a wait for room when
+/// this returns. The `MockServer` is returned so the caller keeps it alive.
+async fn stalled_stream(prefix: &str) -> (MockServer, Env, Acp, String) {
+    let mut chunks: Vec<Value> = (0..2000)
+        .map(|index| {
+            chunk(
+                json!({ "content": format!("[{index:04}]{}", "x".repeat(4090)) }),
+                None,
+            )
+        })
+        .collect();
+    chunks.push(chunk(json!({}), Some("stop")));
+    let server = MockServer::start(vec![Reply::sse(&chunks)]).await;
+    let env = Env::fresh(prefix);
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+    let path = env.sessions.join(format!("{session}.jsonl"));
+    acp.send_prompt(&session, "stream it").await;
+    wait_for_requests(&server, 1, "the streaming turn's model call").await;
+    // The client reads nothing: the queue fills, the sink waits, and no turn end is journaled.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let events = journal(&path);
+        assert!(
+            !events.iter().any(|event| event["event"] == "TurnFinished"),
+            "the turn finished while the client was not reading: {events:#?}"
+        );
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    (server, env, acp, session)
+}
+
+/// ADR 0049: end of input while the output is backpressured is still a clean shutdown. The
+/// client stops reading stdout mid-turn (the queue fills and the sink waits), then closes
+/// stdin and keeps the pipe open. The process must exit instead of waiting for a client that
+/// will not read: the pre-change code hung in `session.join` and this test timed out.
+#[tokio::test]
+async fn closing_stdin_while_output_is_backpressured_still_shuts_down() {
+    let (_server, _env, acp, _session) = stalled_stream("backpressure-eof").await;
+    let (code, stderr) = acp.exit_after_stdin_ends().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
+/// ADR 0049: SIGTERM while the output is backpressured is the same shutdown: the signal must
+/// not wait behind a producer that waits for a client that is not reading.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_while_output_is_backpressured_still_shuts_down() {
+    let (_server, _env, acp, _session) = stalled_stream("backpressure-term").await;
+    acp.signal(libc::SIGTERM);
+    let (code, stderr) = acp.exit_while_input_stays_open().await;
+    assert_eq!(code, 143, "{stderr}");
 }
 
 /// The manual's ACP limits come from the code, not from prose that can drift: the line limit,

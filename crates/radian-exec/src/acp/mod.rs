@@ -763,6 +763,11 @@ fn driver_message(end: &radian_host::DriverEnd) -> String {
 /// driver, and flush the audit.
 async fn shutdown(state: &Arc<State>) {
     state.cancel.notify_waiters();
+    // A client that stopped reading stdout can hold a producer in a wait for room. The
+    // process is ending, so end every such wait before the join: the driver can be the one
+    // waiting (the live-event sink), and `join` would otherwise never return (ADR 0049).
+    // Messages already queued are still written if the client reads.
+    state.out().close();
     let session = state.session();
     if let Some(session) = &session {
         session.inbox().cancel(CancelCause::Requested);

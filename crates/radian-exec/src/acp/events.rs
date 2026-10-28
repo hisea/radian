@@ -3,7 +3,8 @@
 //!
 //! The sink runs synchronously inside the turn loop: it only appends to the writer's bounded
 //! channel and takes one short lock. When the queue is full it waits (the turn stalls) instead
-//! of dropping an update, while durable journal writes are untouched.
+//! of dropping an update, while durable journal writes are untouched. A shutdown releases the
+//! wait, so the driver can still join when the client stopped reading.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;

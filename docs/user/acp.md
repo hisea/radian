@@ -156,6 +156,8 @@ and permission rules as the other hosts.
 - The output queue holds at most 64 messages. When it is full the producer waits instead of
   dropping anything, so a client that stops reading stdout stalls the running turn until it
   reads again; responses and `session/update` notifications then arrive in order, none missing.
+  Ending the input stream or a `SIGTERM` still ends the process: a producer that is waiting for
+  room stops waiting, and the messages that were not written yet are abandoned.
 - One prompt runs at a time per process. Parallel work belongs to another process or to the
   `subagent` tool.
 - Background jobs are not awaited: the prompt response reports the turn, and a later
