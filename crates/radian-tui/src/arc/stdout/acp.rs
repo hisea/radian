@@ -10,7 +10,8 @@
 //! run or updates a tool card in place. It keeps at most [`MAX_ENTRIES`] entries, each text
 //! capped at [`MAX_ENTRY_BYTES`]; when the window is full the oldest [`DROP`] entries are
 //! dropped, so the memory cost is fixed and a worker that prints without bound cannot exhaust
-//! the TUI. `usage_update`, `session_info_update`, `available_commands_update`,
+//! the TUI. Unanswered permission request ids are capped at [`MAX_PERMISSIONS`] for the same
+//! reason. `usage_update`, `session_info_update`, `available_commands_update`,
 //! `current_mode_update` and an unknown `sessionUpdate` are not transcript rows; at most one
 //! weak status line carries the latest context use and title. A line that is neither ACP nor
 //! `Result` keeps the row view's text as one weak notice, so a mixed file stays readable.
@@ -38,6 +39,19 @@ pub(super) const MAX_ENTRY_BYTES: usize = 8 * 1024;
 /// How many oldest entries are dropped when the window is full. Dropping in a batch keeps the
 /// per-line cost amortised instead of shifting the whole vector on every chunk.
 const DROP: usize = 128;
+
+/// The most unanswered permission requests the fold remembers. An id leaves the map when its
+/// answer arrives, so the cap only bites on a stream of requests that are never answered; the
+/// oldest is evicted and its answer falls back to the newest tool, as any unknown id does.
+/// Keeping the map bounded is what makes the fold's memory fixed (ADR 0048 §13).
+const MAX_PERMISSIONS: usize = 64;
+
+/// One unanswered `session/request_permission`: the `toolCallId` it asks about and when it
+/// arrived, so the oldest entry is the one evicted at [`MAX_PERMISSIONS`].
+struct PermissionRequest {
+    tool: String,
+    seq: u64,
+}
 
 /// One tool call as the protocol reports it, merged across `tool_call` and `tool_call_update`.
 struct ToolState {
@@ -86,8 +100,10 @@ pub(super) struct AcpFold {
     tools: HashMap<String, ToolState>,
     plan: Option<usize>,
     status: Option<StatusLine>,
-    /// `session/request_permission` request id → the `toolCallId` it asks about.
-    permissions: HashMap<u64, String>,
+    /// Unanswered `session/request_permission` request ids → the tool they ask about.
+    permissions: HashMap<String, PermissionRequest>,
+    /// Arrival order of the entries in `permissions`; the oldest is evicted at the cap.
+    permission_seq: u64,
     /// The newest tool a permission answer can be attached to when its request id is unknown.
     last_tool: Option<String>,
 }
@@ -103,6 +119,7 @@ impl AcpFold {
             plan: None,
             status: None,
             permissions: HashMap::new(),
+            permission_seq: 0,
             last_tool: None,
         }
     }
@@ -189,8 +206,8 @@ impl AcpFold {
                     .and_then(|tool| tool.get("toolCallId"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                if let (Some(id), Some(tool)) = (message.get("id").and_then(Value::as_u64), &tool) {
-                    self.permissions.insert(id, tool.clone());
+                if let (Some(id), Some(tool)) = (message.get("id").and_then(request_key), &tool) {
+                    self.remember_permission(id, tool.clone());
                 }
                 if tool.is_some() {
                     self.last_tool = tool;
@@ -533,14 +550,33 @@ impl AcpFold {
         }
     }
 
+    /// Remembers one unanswered request. At [`MAX_PERMISSIONS`] the oldest entry is evicted, so
+    /// a stream of requests that are never answered cannot grow the map without bound.
+    fn remember_permission(&mut self, id: String, tool: String) {
+        self.permission_seq += 1;
+        let seq = self.permission_seq;
+        if self.permissions.len() >= MAX_PERMISSIONS && !self.permissions.contains_key(&id) {
+            let oldest = self
+                .permissions
+                .iter()
+                .min_by_key(|(_, request)| request.seq)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.permissions.remove(&oldest);
+            }
+        }
+        self.permissions.insert(id, PermissionRequest { tool, seq });
+    }
+
     /// The answer to a permission request: one weak line after the tool it answers.
     fn permission(&mut self, answer: &Map<String, Value>) {
         self.run = None;
         let kind = answer.get("kind").and_then(Value::as_str).unwrap_or("-");
         let text = format!("permission {kind}");
-        let request = answer.get("requestId").and_then(Value::as_u64);
+        let request = answer.get("requestId").and_then(request_key);
         let tool = request
             .and_then(|id| self.permissions.remove(&id))
+            .map(|request| request.tool)
             .or_else(|| self.last_tool.clone());
         let Some(tool) = tool else {
             self.push_entry(Entry::new(EntryKind::Notice, text));
@@ -678,6 +714,17 @@ impl AcpFold {
                 self.last_tool = None;
             }
         }
+    }
+}
+
+/// A JSON-RPC request id as a map key. The protocol allows a number or a string id and the
+/// wrapper logs the agent's own `id` value unchanged, so both become keys; the prefix keeps the
+/// number `7` and the string `"7"` apart, as the protocol treats them as two requests.
+fn request_key(id: &Value) -> Option<String> {
+    match id {
+        Value::Number(number) => Some(format!("n:{number}")),
+        Value::String(text) => Some(format!("s:{text}")),
+        _ => None,
     }
 }
 
@@ -882,7 +929,7 @@ mod tests {
         envelope(fields)
     }
 
-    fn permission_request(id: u64, tool: &str) -> String {
+    fn permission_request(id: Value, tool: &str) -> String {
         json!({
             "type": "acp",
             "message": {
@@ -895,7 +942,7 @@ mod tests {
         .to_string()
     }
 
-    fn permission_answer(id: u64, kind: &str) -> String {
+    fn permission_answer(id: Value, kind: &str) -> String {
         json!({
             "type": "acp",
             "answer": {"requestId": id, "kind": kind, "optionId": null},
@@ -1147,8 +1194,8 @@ mod tests {
                 "c2",
                 json!({"title": "Read notes.txt", "kind": "read", "status": "pending"}),
             ),
-            permission_request(7, "c1"),
-            permission_answer(7, "allow_once"),
+            permission_request(json!(7), "c1"),
+            permission_answer(json!(7), "allow_once"),
             tool(
                 "tool_call_update",
                 "c1",
@@ -1183,11 +1230,84 @@ mod tests {
             "c2",
             json!({"status": "in_progress"}),
         ));
-        fold.push_line(&permission_answer(99, "reject_once"));
+        fold.push_line(&permission_answer(json!(99), "reject_once"));
         assert_eq!(
             fold.app.session.entries.last().unwrap().text,
             "permission reject_once"
         );
+    }
+
+    /// A JSON-RPC id may be a string, and the wrapper logs the agent's own `id` and `requestId`
+    /// values unchanged, so a string request id must find its tool instead of falling back to
+    /// the newest one (ADR 0048 §13).
+    #[test]
+    fn a_permission_answer_matches_a_string_request_id() {
+        let fold = folded(&[
+            tool(
+                "tool_call",
+                "c1",
+                json!({"title": "Write image.txt", "kind": "edit", "status": "pending"}),
+            ),
+            tool(
+                "tool_call",
+                "c2",
+                json!({"title": "Read notes.txt", "kind": "read", "status": "pending"}),
+            ),
+            permission_request(json!("perm-1"), "c1"),
+            tool("tool_call_update", "c2", json!({"status": "in_progress"})),
+            permission_answer(json!("perm-1"), "allow_once"),
+        ]);
+        assert_eq!(
+            kinds(&fold),
+            vec![EntryKind::ToolCall, EntryKind::Notice, EntryKind::ToolCall]
+        );
+        assert_eq!(
+            texts(&fold),
+            vec!["Write image.txt", "permission allow_once", "Read notes.txt"]
+        );
+    }
+
+    /// The numeric id `7` and the string id `"7"` are different JSON-RPC requests; their
+    /// answers attach to their own tools (ADR 0048 §13).
+    #[test]
+    fn a_numeric_and_a_string_request_id_do_not_collide() {
+        let fold = folded(&[
+            tool(
+                "tool_call",
+                "c1",
+                json!({"title": "Write image.txt", "kind": "edit", "status": "pending"}),
+            ),
+            tool(
+                "tool_call",
+                "c2",
+                json!({"title": "Read notes.txt", "kind": "read", "status": "pending"}),
+            ),
+            permission_request(json!(7), "c1"),
+            permission_request(json!("7"), "c2"),
+            tool("tool_call_update", "c1", json!({"status": "in_progress"})),
+            permission_answer(json!("7"), "allow_once"),
+            permission_answer(json!(7), "reject_once"),
+        ]);
+        assert_eq!(
+            texts(&fold),
+            vec![
+                "Write image.txt",
+                "permission reject_once",
+                "Read notes.txt",
+                "permission allow_once",
+            ]
+        );
+    }
+
+    /// Unanswered permission requests cannot grow the request-id map without bound: the fold
+    /// promises fixed memory (ADR 0048 §13).
+    #[test]
+    fn outstanding_permission_requests_are_bounded() {
+        let mut fold = AcpFold::new();
+        for index in 0..200 {
+            fold.push_line(&permission_request(json!(index), "c1"));
+        }
+        assert_eq!(fold.permissions.len(), 64);
     }
 
     /// A `Result` line is the outcome line in the done or the failed colour; an empty text adds

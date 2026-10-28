@@ -3282,3 +3282,18 @@ filter; the unmutated files pass the same filters.
 | TK0218-M7 | the attempt's worker record is ignored: `attempt_worker` always returns `Radian` with program `radian acp`, so a flow's `acp` agent is not recognised | ✅ 1 failed | `the_conversation_tab_folds_an_acp_workers_stream` (the title was not `conversation · codex-acp stdout`) |
 
 7/7 caught.
+
+## TK0219: the ACP fold matches string request ids and bounds them (2026-10-28, branch `work/TK0219-acp-conversation-as-transcript-followups`)
+
+Rework of TK0218's review: a `session/request_permission` id may be a JSON string and the
+wrapper logs it unchanged, so the fold keys the map by a typed id; unanswered ids are capped so
+the fixed-memory promise holds. The mutations were applied by hand to
+`crates/radian-tui/src/arc/stdout/acp.rs`, backed up under `.radian/*.bak`, and restored (`cmp`
+identical). Each ran the `arc::stdout::acp::tests` nextest filter; the unmutated file passes it.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0219-M1 | `request_key` ignores string ids: `Value::String(text) => Some(format!("s:{text}"))` becomes `Value::String(_) => None`, so a string request id never enters the map and the answer falls back to `last_tool` | ✅ 2 failed | `arc::stdout::acp::tests::a_permission_answer_matches_a_string_request_id` (kinds were `[ToolCall, ToolCall, Notice]` instead of `[ToolCall, Notice, ToolCall]`); `arc::stdout::acp::tests::a_numeric_and_a_string_request_id_do_not_collide` (the string `"7"` answer attached to `c1`, replacing the numeric `7` answer instead of adding `permission allow_once` after `c2`) |
+| TK0219-M2 | the permission map never evicts: the `remember_permission` guard becomes `if false && self.permissions.len() >= MAX_PERMISSIONS ...`, so a stream of unanswered requests grows the map | ✅ 1 failed | `arc::stdout::acp::tests::outstanding_permission_requests_are_bounded` (200 entries were kept instead of 64) |
+
+2/2 caught.
