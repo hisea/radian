@@ -47,6 +47,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use radian_coding::ToolPresence;
 use radian_core::{
     Message, ModelUsage, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
     ToolOutput, ToolProvider, ToolSession, ToolSpec,
@@ -118,6 +119,13 @@ pub struct SubagentTools {
     /// to it at a turn boundary, so a child started after a switch names the new route.
     route_slot: Arc<ConfigSlot>,
     permissions: Arc<PermissionHooks>,
+    /// The parent's mounted built-in tools, so the description names `read`/`glob`/`grep` in
+    /// the `explore` parenthetical only when the parent mounts them (ADR 0043 §4). [`new`]
+    /// defaults to every tool; the host sets its allow-list view with [`with_presence`].
+    ///
+    /// [`new`]: SubagentTools::new
+    /// [`with_presence`]: SubagentTools::with_presence
+    presence: ToolPresence,
 }
 
 impl SubagentTools {
@@ -141,7 +149,15 @@ impl SubagentTools {
             sandbox,
             route_slot,
             permissions,
+            presence: ToolPresence::ALL,
         }
+    }
+
+    /// The parent's mounted built-in tools (ADR 0043 §4). [`SubagentTools::new`] defaults to
+    /// every tool, which keeps the full set's description byte-identical.
+    pub fn with_presence(mut self, presence: ToolPresence) -> Self {
+        self.presence = presence;
+        self
     }
 }
 
@@ -180,19 +196,26 @@ impl Kind {
 }
 
 /// The `subagent` spec. `Shared` (ADR 0043 1a point 3): several calls in one reply are the
-/// parallelism, and the core's own batch concurrency is the only limit.
-fn spec() -> ToolSpec {
+/// parallelism, and the core's own batch concurrency is the only limit. The `explore`
+/// parenthetical names `read`/`glob`/`grep` only when the parent mounts them (ADR 0043 §4).
+fn spec(presence: ToolPresence) -> ToolSpec {
+    let explore_tools = if presence.read && presence.glob && presence.grep {
+        " (read glob grep only)"
+    } else {
+        ""
+    };
     ToolSpec {
         name: "subagent".into(),
-        description: "Run one task in a fresh child session. The call blocks until the \
-                      child finishes. The tool returns the last assistant text of the child. \
-                      `explore` (read glob grep only) is for reading and searching. \
-                      `general` (the default) has this session's tools minus `subagent` \
-                      itself. The child starts blank. `task` is its first input. The child \
-                      inherits this session's permission tier. It never gets a wider tier. \
-                      Several `subagent` calls in one reply run at the same time. This turn's \
-                      cancellation kills the child."
-            .into(),
+        description: format!(
+            "Run one task in a fresh child session. The call blocks until the \
+             child finishes. The tool returns the last assistant text of the child. \
+             `explore`{explore_tools} is for reading and searching. \
+             `general` (the default) has this session's tools minus `subagent` \
+             itself. The child starts blank. `task` is its first input. The child \
+             inherits this session's permission tier. It never gets a wider tier. \
+             Several `subagent` calls in one reply run at the same time. This turn's \
+             cancellation kills the child."
+        ),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -226,7 +249,7 @@ impl ToolProvider for SubagentTools {
             sandbox: self.sandbox.clone(),
             route_slot: Arc::clone(&self.route_slot),
             permissions: Arc::clone(&self.permissions),
-            specs: vec![spec()],
+            specs: vec![spec(self.presence)],
         })
     }
 }
@@ -693,6 +716,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// ADR 0043 §4: the `explore` parenthetical names `read`/`glob`/`grep` only when the
+    /// parent mounts all three; the full set keeps today's text byte for byte.
+    #[test]
+    fn the_explore_parenthetical_names_only_mounted_tools() {
+        let full = spec(ToolPresence::ALL);
+        assert!(
+            full.description
+                .contains("`explore` (read glob grep only) is for reading and searching."),
+            "{}",
+            full.description
+        );
+        let reduced = spec(ToolPresence::from_names(["subagent", "goal"]));
+        assert!(
+            !reduced.description.contains("`read`"),
+            "{}",
+            reduced.description
+        );
+        assert!(
+            !reduced.description.contains("`glob`"),
+            "{}",
+            reduced.description
+        );
+        assert!(
+            !reduced.description.contains("`grep`"),
+            "{}",
+            reduced.description
+        );
+        assert!(
+            reduced
+                .description
+                .contains("`explore` is for reading and searching."),
+            "{}",
+            reduced.description
+        );
+    }
+
     /// The last assistant message wins, an assistant that only called tools (no text) is
     /// skipped, and usage records are summed field by field.
     #[test]
@@ -744,7 +803,7 @@ mod tests {
     /// default in the description) and no longer repeats either in prose.
     #[test]
     fn the_agent_field_does_not_repeat_the_explore_general_difference() {
-        let spec = spec();
+        let spec = spec(ToolPresence::ALL);
         assert!(
             spec.description
                 .contains("`explore` (read glob grep only) is for reading and searching"),

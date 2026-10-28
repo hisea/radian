@@ -1536,4 +1536,5 @@ rebuilt, the named test ran, and the source was restored from `.radian/host-tool
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0216-M5 | `HostTools::open_session` opens coding tools with `ToolPresence::ALL`, ignoring `tool_allow` | ✅ 1 failed (rc=100) | `an_explore_child_has_only_the_three_read_tools_and_write_is_refused` (`crates/radian-exec/tests/subagent.rs`: the `read,glob,grep` child's `read` description named `patch`) |
+| TK0216-M6 | `subagent::spec` always keeps the `explore` parenthetical (`if true` instead of the read/glob/grep presence) | ✅ 1 failed (rc=100) | `subagent::tests::the_explore_parenthetical_names_only_mounted_tools` (the `subagent,goal` set still named `read glob grep`) |
 

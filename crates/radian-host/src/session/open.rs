@@ -395,6 +395,13 @@ pub async fn open_session(
     radian_session::trace::took("open/hooks+skills", t0);
     let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
+    // ADR 0043 §4: the allow-list decides which tools' names a description may use. The coding
+    // tools and `subagent` read the same view; without a coding provider none of its tools
+    // exist, whatever the allow-list says.
+    let mut tool_presence = radian_coding::ToolPresence::from_allow(tools_allow.as_deref());
+    if coding.is_none() {
+        tool_presence = radian_coding::ToolPresence::NONE;
+    }
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
         .with_tool_allow(tools_allow)
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
@@ -423,16 +430,19 @@ pub async fn open_session(
         .as_ref()
         .is_some_and(|parent| parent.relation() == "subagent");
     if !is_subagent_child && let Some(parts) = subagent_parts {
-        tools = tools.with_subagent(SubagentTools::new(
-            parts,
-            session_dir.clone(),
-            session_id.as_str(),
-            workspace.clone(),
-            coding_root.clone(),
-            sandbox_slot.clone(),
-            Arc::clone(&config_slot),
-            Arc::clone(&hooks),
-        ));
+        tools = tools.with_subagent(
+            SubagentTools::new(
+                parts,
+                session_dir.clone(),
+                session_id.as_str(),
+                workspace.clone(),
+                coding_root.clone(),
+                sandbox_slot.clone(),
+                Arc::clone(&config_slot),
+                Arc::clone(&hooks),
+            )
+            .with_presence(tool_presence),
+        );
     }
     // ADR 0036: the system prompt is assembled from layers. 0a <runtime> carries
     // the tier/sandbox facts; 1 <role> is the role

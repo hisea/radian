@@ -147,6 +147,17 @@ impl ToolPresence {
         job: true,
     };
 
+    /// No tool. A session with no provider mounts none of them.
+    pub const NONE: Self = Self {
+        read: false,
+        write: false,
+        patch: false,
+        glob: false,
+        grep: false,
+        shell: false,
+        job: false,
+    };
+
     /// The tools `names` holds. Each name is matched exactly.
     pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         let names: Vec<&str> = names.into_iter().collect();
