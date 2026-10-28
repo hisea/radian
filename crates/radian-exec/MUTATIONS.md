@@ -563,3 +563,22 @@ passed 14/14.
 |---|---|---|---|
 | TK0209-M1 | the prompt answer waits only for the live `RunFinished` again (`if live_done && journaled_done` → `if live_done`) | ✅ 1 failed | `acp::the_prompt_answer_waits_for_the_journaled_turn_end` ("the answer arrived before the turn was durable": the journal held `MessageAppended` but no `TurnFinished`) |
 
+
+## `radian acp`: a prompt is answered by its own turn (TK0222, 2026-10-28)
+
+Branch `work/TK0222-acp-prompt-waits-for-its-own-turn`. `prompt_turn` now waits for the
+journaled end of the turn that claimed **its** `InputClaimed` message (the `TurnLedger`) and
+reads that turn's live `RunFinished` status, instead of the next turn end and whatever status
+came last. The test drives a real background job whose settle opens a wake turn between the
+prompt's enqueue and its claim; the existing `RADIAN_CLAIM_HOLD_FILE` test seam makes that order
+deterministic (the driver claims nothing while the file exists). The mutation was applied in
+place to `crates/radian-exec/src/acp/{mod,events}.rs`, the `radian` binary was rebuilt
+(`cargo build -p radian-tui --bin radian`), and the source was restored from `.radian/mut/`
+(`cmp` identical). Test:
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E
+'test(a_wake_turn_end_does_not_answer_the_prompt_after_it)'`. Unmutated, the whole `acp` binary
+passed 18/18.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0222-M1 | the prompt wait ignores which turn claimed the message and stops at the next journaled turn end (the old generation-counter shape), and takes the newest turn's live status | ✅ 1 failed | `acp::a_wake_turn_end_does_not_answer_the_prompt_after_it` (the wake turn's failed end answered: `stopReason: refusal`, `_meta.radian.text: PROMPT-ONE`) |
