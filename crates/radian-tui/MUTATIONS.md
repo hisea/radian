@@ -3297,3 +3297,16 @@ identical). Each ran the `arc::stdout::acp::tests` nextest filter; the unmutated
 | TK0219-M2 | the permission map never evicts: the `remember_permission` guard becomes `if false && self.permissions.len() >= MAX_PERMISSIONS ...`, so a stream of unanswered requests grows the map | ✅ 1 failed | `arc::stdout::acp::tests::outstanding_permission_requests_are_bounded` (200 entries were kept instead of 64) |
 
 2/2 caught.
+
+## TK0225: an ACP tool card keeps the text beside the diff (2026-10-28, branch `work/TK0225-acp-fold-keeps-text-beside-diff`)
+
+A `tool_call_update` may carry `diff` blocks and `content` text in one `content` array; both now draw, and several `diff` blocks each draw under their own header. The mutations were applied by hand to `crates/radian-tui/src/arc/stdout/acp.rs`, backed up under `.radian/mut/` and restored (`cmp` identical). Each ran `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(arc::stdout::acp::tests)'`; the unmutated file passes the same filter.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0225-M1 | the old defect: a diff drops the text, `let raw = match output { ... }` becomes `let raw = diff_text;` in `result_text` | ✅ 3 failed | `arc::stdout::acp::tests::a_diff_and_content_text_in_one_update_both_draw` (the result was `-one\n+ONE\n` with `applied 1 hunk` missing); `content_text_before_a_diff_draws_the_same_way` (same); `a_huge_text_after_a_diff_is_cut_and_keeps_the_diff` (the text was dropped, not cut) |
+| TK0225-M2 | only the first block is read: `.iter().take(1).filter_map(...)` in `content_diffs` | ✅ 2 failed | `two_diffs_in_one_update_draw_both_files` (the second file's rows were missing); `content_text_before_a_diff_draws_the_same_way` (the leading text block hid the diff) |
+| TK0225-M3 | the trailing text keeps the diff's roles: `card.trailing_from = *split` is removed, so `diff_body` classifies "applied 1 hunk" as a diff row | ✅ 3 failed | `a_diff_and_content_text_in_one_update_both_draw` (`trailing_from` was `None` and the text row's role was not `Normal`); `content_text_before_a_diff_draws_the_same_way`; `a_huge_text_after_a_diff_is_cut_and_keeps_the_diff` |
+| TK0225-M4 | the renderer ignores the split: `diff_body` becomes `diff_lines(card, text)`, so the whole body keeps diff classifier roles | ✅ 2 failed | `a_diff_and_content_text_in_one_update_both_draw` (the text row's role was `DiffContext`, not `Normal`); `tools::tests::a_diff_cards_trailing_text_draws_as_ordinary_rows` (the trailing rows kept diff roles) |
+
+4/4 caught.

@@ -452,7 +452,31 @@ pub(super) fn memory_head(card: &ToolCard, _text: &str) -> String {
 /// file's number: `+` and context rows the **new** file's, `-` rows the **old** file's (the
 /// unified rule). A diff whose text carries no `@@` header keeps today's numberless form — the
 /// sign column, no gutter (`DiffRow::number` stays `None` → the layout draws no gutter at all).
+///
+/// A card that carries a plain result text after its diff ([`ToolCard::trailing_from`], ADR
+/// 0048 §13) draws that tail as ordinary body rows: the diff's roles stop where the text
+/// starts, so an "applied 3 hunks" line is never mistaken for a removed one.
 pub(super) fn diff_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
+    match card.trailing_from {
+        // The diff is empty: the whole body is the plain text.
+        Some(0) if !text.is_empty() => text_body_lines(text, |_| LineRole::Normal),
+        Some(at) if at < text.len() && text.is_char_boundary(at) => {
+            let mut out = diff_lines(card, &text[..at]);
+            let mut tail = text_body_lines(&text[at..], |_| LineRole::Normal);
+            for line in &mut tail {
+                if let BodyLine::Text { source, .. } = line {
+                    *source = source.start + at..source.end + at;
+                }
+            }
+            out.extend(tail);
+            out
+        }
+        _ => diff_lines(card, text),
+    }
+}
+
+/// The diff rows alone: [`diff_body`] without the trailing plain text.
+fn diff_lines(card: &ToolCard, text: &str) -> Vec<BodyLine> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     // The language comes from the file's own path: `patch` and `write` name it in the call;
