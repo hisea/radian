@@ -3261,3 +3261,24 @@ passes 1/1.
 | TK0191-M1 | the startup route's `request_output` is `RouteOutput::None` (the catalog cap is never resolved), so `R`, `B` and the sent `max_tokens` all fall back to none / 16384 / 922000 | ✅ 1 failed (rc=100) | `pty_the_startup_notice_names_the_catalog_cap_and_sends_it` (the startup line printed `C 1000000, I 922000, output 384000, R 16384, B 922000` instead of `R 250000, B 750000`; the request would carry no `max_tokens`) |
 
 1/1 caught.
+
+## TK0218: an ACP worker's conversation is the attach renderer's transcript (2026-10-27, branch `work/TK0218-acp-stdout-folds-into-transcript`)
+
+An ACP worker's `result.jsonl` is folded into the attach view's `Entry` list
+(`crates/radian-tui/src/arc/stdout/acp.rs`) instead of one row per protocol line, and the
+conversation tab picks the fold from the attempt's record. The mutations were applied by hand
+to the fold, `crates/radian-tui/src/arc/stdout.rs` and `crates/radian-tui/src/arc/mod.rs`,
+backed up under `.radian/*.bak`, and restored (`cmp` identical). Each ran a targeted nextest
+filter; the unmutated files pass the same filters.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0218-M1 | a chunk never appends to the current run: `run.kind == kind` becomes `false`, so every token opens its own entry | ✅ 2 failed | `arc::stdout::acp::tests::chunks_merge_into_one_block_and_thought_and_message_alternate` (200 message chunks became 200 entries, or the thought/message run split); `arc::stdout::tests::a_codex_like_stream_draws_as_one_paragraph_not_one_row_per_token` (the Chinese answer no longer drew as one paragraph) |
+| TK0218-M2 | `usage_update` is drawn as a raw row: the arm becomes `self.push_row(&update.to_string())` instead of the shared weak status line | ✅ 2 failed | `arc::stdout::acp::tests::hidden_update_kinds_leave_one_weak_status_line` (the entry text was the `usage_update` JSON, not `context 1234/200000 · Ship it`); `arc::stdout::tests::a_codex_like_stream_draws_as_one_paragraph_not_one_row_per_token` (the rendered frame contained `usage_update`) |
+| TK0218-M3 | `trim` never drops: `len <= MAX_ENTRIES` becomes `len <= MAX_ENTRIES || true`, so the fold grows without bound | ✅ 1 failed | `arc::stdout::acp::tests::the_fold_keeps_a_bounded_window_and_capped_text` (2,000 rows were kept instead of at most 512) |
+| TK0218-M4 | a permission request records the newest tool instead of its own `toolCall.toolCallId` (the request arm takes `self.last_tool`), so the answer attaches to the wrong tool | ✅ 1 failed | `arc::stdout::acp::tests::a_permission_answer_sits_after_the_tool_it_answers` (kinds were `[ToolCall, ToolResult, ToolCall, Notice]` instead of `[ToolCall, ToolResult, Notice, ToolCall]`) |
+| TK0218-M5 | a tool's `diff` content is ignored: `state.content.as_ref().and_then(first_diff)` becomes `None`, so no patch body is built | ✅ 1 failed | `arc::stdout::acp::tests::diff_content_draws_the_patch_body` (one `ToolCall` instead of the call and its diff result) |
+| TK0218-M6 | a truncated or replaced file does not reset the fold: the `Mode::Acp` reset in `poll` is removed, so new bytes append to the old transcript | ✅ 1 failed | `arc::stdout::tests::a_truncated_acp_file_resets_the_fold` (the entry became `the old answer morefresh` instead of `fresh`) |
+| TK0218-M7 | the attempt's worker record is ignored: `attempt_worker` always returns `Radian` with program `radian acp`, so a flow's `acp` agent is not recognised | ✅ 1 failed | `the_conversation_tab_folds_an_acp_workers_stream` (the title was not `conversation · codex-acp stdout`) |
+
+7/7 caught.
