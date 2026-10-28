@@ -40,7 +40,7 @@ The built-in tool **max catalog** is 12:
 
 `read`, `write`, `patch`, `glob`, `grep`, `shell`, `job`, `memory_search`, `ask_user`, `skill`, `subagent`, `goal`.
 
-**Each request carries only schemas the session really mounts**, never the whole catalog unconditionally.
+**Each request carries only schemas the session really mounts**, never the whole catalog unconditionally. A tool's description names another tool only when that tool is mounted in the same request.
 
 - Coding tools mount only with a workspace/tool provider. `shell` with `job` also need a sandbox. Foreground-truncation keeps (ADR 0037 decision 3a) also need caller-provided session-private output dirs. With none, `job` still mounts, only with no foreground entries.
 - `memory_search` mounts only with memory **and** Active records past inject budget (ADR 0021 D7). No memory write tools exist. `ask_user` mounts only with an answerable human prompter. `skill` mounts only with discovered skills. `subagent` never mounts in child sessions (depth 1). `goal` always mounts (host level: no goal answers `no_active_goal`, ADR 0047).
