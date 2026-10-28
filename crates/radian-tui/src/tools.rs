@@ -69,6 +69,11 @@ pub struct ToolCard {
     /// glyph, so a `terminal` content block (which has no result to pair) still shows its
     /// state. `None` for every radian-owned tool call, whose status is the glyph alone.
     pub status: Option<String>,
+    /// The byte offset in the result entry's display text where a plain `content` text starts
+    /// after a `diff` body (ADR 0048 §13). `None` when the body is all one kind, which is every
+    /// card but an ACP one that carries a diff and text in the same `tool_call_update`: the
+    /// diff rows keep their roles and the text rows draw as ordinary body lines.
+    pub trailing_from: Option<usize>,
 }
 
 impl ToolCard {
@@ -82,6 +87,7 @@ impl ToolCard {
             result_lines: None,
             is_error: false,
             status: None,
+            trailing_from: None,
         }
     }
 
@@ -1199,6 +1205,50 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A card whose result text follows a diff (`ToolCard::trailing_from`, ADR 0048 §13) draws
+    /// that text as ordinary rows: the diff roles stop at the split and the source ranges stay
+    /// in the entry's text, so copy and search see the real characters.
+    #[test]
+    fn a_diff_cards_trailing_text_draws_as_ordinary_rows() {
+        let mut patch = card(
+            "patch",
+            json!({"path": "a.txt", "old": "gone\n", "new": "added\n"}),
+        );
+        let text = "-gone\n+added\n\napplied 1 hunk\n";
+        patch.trailing_from = Some("-gone\n+added\n".len());
+        let body = diff_body(&patch, text);
+        assert_eq!(
+            text_role(&body),
+            vec![
+                LineRole::DiffRemoved,
+                LineRole::DiffAdded,
+                LineRole::Normal,
+                LineRole::Normal,
+            ]
+        );
+        let BodyLine::Text { source, .. } = &body[3] else {
+            panic!("the text row is a text row: {body:?}");
+        };
+        assert_eq!(&text[source.clone()], "applied 1 hunk");
+        // A text line that starts with a diff sign is still plain text after the split.
+        let text = "-gone\n+added\n\n+not a diff row\n";
+        patch.trailing_from = Some("-gone\n+added\n".len());
+        let body = diff_body(&patch, text);
+        assert_eq!(
+            text_role(&body),
+            vec![
+                LineRole::DiffRemoved,
+                LineRole::DiffAdded,
+                LineRole::Normal,
+                LineRole::Normal,
+            ]
+        );
+        // An empty diff leaves the whole body to the text.
+        patch.trailing_from = Some(0);
+        let body = diff_body(&patch, "\n+still text\n");
+        assert_eq!(text_role(&body), vec![LineRole::Normal, LineRole::Normal]);
     }
 
     /// The hunk header parser: both start lines, with the counts optional (a one-line range
