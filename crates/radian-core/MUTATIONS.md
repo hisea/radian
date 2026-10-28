@@ -65,3 +65,14 @@ Branch `work/TK0211-max-tokens-continuation-followups`. The mutation was applied
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0211-M1 | the continuation consults the call cap only again (`self.run.cap_end().is_some()` instead of `self.run.pre_call_end()`) | ✅ 1 failed (rc=100) | `tests/turn.rs::a_passed_deadline_beats_a_truncation_continuation` (the deadline that passed after the response still journaled a notice, `left: 1, right: 0`) |
+
+## The exit-4 truncation rule (TK0226, 2026-10-28)
+
+Branch `work/TK0226-cli-manual-exit-4-truncation-rule`. Each mutation was applied in place, only
+`tests/turn.rs` was run, and the source was restored from `.radian/turn.rs.clean` (`cmp`
+identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0226-M1 | TK0208's continuation is reverted: no streak is kept and a `MaxTokens` response with no tool calls ends the turn at once | ✅ 2 failed (rc=100) | `tests/turn.rs::two_truncated_responses_without_calls_then_a_normal_one_complete` (the first truncation ended `Incomplete(MaxTokens)` instead of `Completed`) and `tests/turn.rs::truncated_tool_call_responses_share_the_streak` (2 model calls instead of 4: the second truncation ended the turn) |
+| TK0226-M2 | a truncated response with tool calls does not count toward the streak (`&& tool_calls.is_empty()` in the streak update) | ✅ 2 failed (rc=100) | `tests/turn.rs::truncated_tool_call_responses_share_the_streak` and `tests/turn.rs::a_truncated_tool_call_response_counts_toward_the_streak` (both ended `Completed` instead of `Incomplete(MaxTokens)`) |

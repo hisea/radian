@@ -191,14 +191,15 @@ async fn three_truncated_responses_without_calls_end_incomplete_with_two_notices
     assert!(matches!(&t[5], Message::Assistant { .. }));
 }
 
-/// Truncated responses with tool calls share the streak with truncated answers without them
-/// (ADR 0017 §2).
+/// Truncated responses with tool calls share the streak with truncated answers without them,
+/// and a tool-call truncation continues the turn even after the streak passed two (ADR 0017 §2).
 #[tokio::test]
 async fn truncated_tool_call_responses_share_the_streak() {
     let model = ScriptedModel::new([
         calls_with(StopReason::MaxTokens, vec![call("c1", "echo", json!({}))]),
+        stop(StopReason::MaxTokens, "second"),
         calls_with(StopReason::MaxTokens, vec![call("c2", "echo", json!({}))]),
-        stop(StopReason::MaxTokens, "third"),
+        stop(StopReason::MaxTokens, "fourth"),
         text("never sent"),
     ]);
     let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
@@ -210,19 +211,22 @@ async fn truncated_tool_call_responses_share_the_streak() {
         .await
         .unwrap();
 
+    // The first truncation (with calls) makes the second one the second in the streak, so that
+    // one continues with a notice. The tool-call truncation after it is the third and still
+    // continues without one; the fourth truncation, with no calls, ends the turn.
     assert_eq!(
         outcome.status,
         RunStatus::Incomplete(IncompleteReason::MaxTokens)
     );
-    assert_eq!(outcome.model_calls, 3);
-    assert_eq!(model.requests().len(), 3);
+    assert_eq!(outcome.model_calls, 4);
+    assert_eq!(model.requests().len(), 4);
     assert!(log.started().is_empty(), "truncated calls never execute");
     assert_eq!(code(result_for(chat.transcript(), "c1")), Some("truncated"));
     assert_eq!(code(result_for(chat.transcript(), "c2")), Some("truncated"));
     assert_eq!(
         notice_count(chat.transcript()),
-        0,
-        "tool-call cases add none"
+        1,
+        "only the second truncation, with no calls, continued with a notice"
     );
 }
 
@@ -257,6 +261,34 @@ async fn a_truncated_tool_call_response_counts_toward_the_streak() {
         "the second truncation was continued"
     );
     assert_eq!(code(result_for(chat.transcript(), "c1")), Some("truncated"));
+}
+
+/// Two truncated answers with no tool calls each gain a notice, and the normal answer after
+/// them completes the turn (ADR 0017 §2).
+#[tokio::test]
+async fn two_truncated_responses_without_calls_then_a_normal_one_complete() {
+    let model = ScriptedModel::new([
+        stop(StopReason::MaxTokens, "one"),
+        stop(StopReason::MaxTokens, "two"),
+        text("done"),
+    ]);
+    let mut chat = agent(model.clone(), NoTools).open_session().await.unwrap();
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(outcome.model_calls, 3);
+    assert_eq!(notice_count(chat.transcript()), 2);
+    let t = chat.transcript();
+    assert_eq!(t.len(), 6, "input, two answers, two notices, the answer");
+    assert_eq!(t[1].text(), "one");
+    assert_eq!(t[2].text(), MAX_TOKENS_NOTICE);
+    assert_eq!(t[3].text(), "two");
+    assert_eq!(t[4].text(), MAX_TOKENS_NOTICE);
+    assert_eq!(t[5].text(), "done");
 }
 
 /// Any response that is not `MaxTokens` resets the streak (ADR 0017 §2).
