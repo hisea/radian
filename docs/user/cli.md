@@ -371,7 +371,21 @@ panic and without an error line.
 | `1` | The run failed: a model or turn error, a failed sandbox probe target, a missing record, a refused write. |
 | `2` | Bad use or refused setup: clap usage errors, a bad configuration, an unknown keybinding, a startup refusal, a reserved subcommand, an unknown `docs` topic or footer preset, a bad `memory` invocation. |
 | `3` | The budget ran out: `BudgetExceeded` or a exceeded deadline. |
-| `4` | The answer is unfinished: `Incomplete` (a response truncated at the output token limit after two truncated responses in a row, a content-filtered answer, an unknown stop reason) or `Refused`. |
+| `4` | The answer is unfinished: `Incomplete` (a truncated answer that could not continue, a content-filtered answer, an unknown stop reason) or `Refused`. A truncated answer with no tool calls continues the turn after a fixed notice, and ends it here only when two truncated answers in a row already came before it; an answer with tool calls continues without a notice, counts toward that streak, and never ends it by itself. See [a truncated answer](#a-truncated-answer). |
 | `101` | The app panicked. A crash log lands under `~/.radian/cache/diagnostics`. |
 | `130` | Requested cancellation, or a forced exit after a second Ctrl-C. |
 | `143` | SIGTERM (`128 + 15`). A signal-driven exit otherwise follows the shell rule `128 + signal`. |
+
+### A truncated answer
+
+A response that ends at the output token limit is truncated. It stays in the transcript, and it
+counts toward a streak of consecutive truncated responses in the turn, with or without tool
+calls; any other stop reason resets the streak to 0.
+A truncated response with tool calls resolves every call as not run and continues the turn with
+no notice, however long the streak is.
+A truncated response with no tool calls continues the turn by adding one fixed notice that asks
+the model to resume without repeating itself, unless the turn already saw two truncated
+responses in a row; that one ends the turn as `Incomplete` with no notice.
+A cancel, the turn deadline or the model-call cap that already ends the next call wins instead
+and writes no notice; the context budget is decided by the next request, so the notice is
+written and the budget's outcome still wins.
