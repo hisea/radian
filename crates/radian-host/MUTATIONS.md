@@ -1538,3 +1538,15 @@ rebuilt, the named test ran, and the source was restored from `.radian/host-tool
 | TK0216-M5 | `HostTools::open_session` opens coding tools with `ToolPresence::ALL`, ignoring `tool_allow` | ✅ 1 failed (rc=100) | `an_explore_child_has_only_the_three_read_tools_and_write_is_refused` (`crates/radian-exec/tests/subagent.rs`: the `read,glob,grep` child's `read` description named `patch`) |
 | TK0216-M6 | `subagent::spec` always keeps the `explore` parenthetical (`if true` instead of the read/glob/grep presence) | ✅ 1 failed (rc=100) | `subagent::tests::the_explore_parenthetical_names_only_mounted_tools` (the `subagent,goal` set still named `read glob grep`) |
 
+
+## TK0220: a probe uses the thinking level in force and stops on a non-refusal candidate (2026-10-28, branch `work/TK0220-probe-current-thinking-and-stream-start`)
+
+ADR 0026 D10: `probe` builds each candidate from the `thinking` level it receives (shared with
+`model_for` through `route_context`), and it moves to the next protocol only when the candidate
+error is one of `PROBE_STATUSES`. Each mutation was applied in place, the `named_probe` binary
+was run, and the source was restored from `.radian/model.rs.good` (`cmp` empty).
+
+| # | Mutation | Result | Test(s) that caught it |
+|---|---|---|---|
+| TK0220-M1 | the candidate loop builds with `self.ctx.args_for_route` again, so it sends the startup level | ✅ 2 failed (rc=100) | `named_probe::a_probe_candidate_carries_the_thinking_level_in_force` (candidate body was `adaptive`, not `enabled:4095`) and `a_remembered_probe_follows_a_later_thinking_change` (`high` request was `adaptive`) |
+| TK0220-M2 | the non-refusal check is removed, so every candidate error continues to the next protocol | ✅ 2 failed (rc=100) | `named_probe::a_candidate_that_streams_then_fails_ends_the_probe` (a third, Responses request was sent) and `a_candidate_that_is_not_a_refusal_ends_the_probe` (the 429/500 rounds each sent a third request) |

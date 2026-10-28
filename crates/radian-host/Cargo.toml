@@ -90,6 +90,9 @@ radian-coding = { path = "../radian-coding", features = ["testing"] }
 # The crate's own tests always build with the worktree-root test seam, so a plain `cargo test`
 # (the AGENTS.md Verify list) runs it too; production builds stay unarmed.
 radian-host = { path = ".", features = ["testing"] }
+# The slot's test-only write (`set_for_test`): a probe test applies a `/thinking` change
+# directly, without standing up a driver.
+radian-runtime = { path = "../radian-runtime", features = ["testing"] }
 # The parse-counting seam: the resume-perf B test asserts a resumed journal is parsed once.
 radian-session = { path = "../radian-session", features = ["testing"] }
 # The catalog tests use the adapter's local mock HTTP server, never the real network.
