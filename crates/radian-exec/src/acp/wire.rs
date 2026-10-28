@@ -42,7 +42,8 @@ pub(crate) fn input_line_limit_message() -> String {
 pub(crate) struct LineReader<R> {
     reader: BufReader<R>,
     limit: usize,
-    /// The bytes of the line being read. It is cleared (not reallocated) between lines.
+    /// The bytes of the line being read, emptied before each line. Its length never passes
+    /// `limit`, so an over-long line is never held whole.
     line: Vec<u8>,
     /// The longest the accumulated line ever got. Tests assert it never passes the limit,
     /// which is what "never held whole" means without measuring RSS.
