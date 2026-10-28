@@ -23,6 +23,9 @@ normally, and end of input in the middle of an over-long line is a normal end of
 writer's queue holds at most 64 messages. When it is full the producer waits instead of
 dropping a message, so a client that stops reading stdout stalls the running turn until it
 reads again; responses and `session/update` notifications arrive in order, none missing.
+When the client stops reading and then ends the input stream or the process receives a
+termination signal, that wait ends: the process shuts down without waiting for room, and the
+messages that were not written yet are abandoned.
 
 The JSON-RPC and ACP wire layer is written in `radian-exec` rather than taken from the
 `agent-client-protocol` crate: the published crate is not version 1, and the host needs
@@ -243,9 +246,12 @@ and loaded by a second,
 whose replay and continued journal the test checks by folding the journal — and the two stdio
 bounds: an over-long line answered with a parse error while the next line is served, a line
 exactly at the limit accepted, a client that stops reading stdout receiving every update in
-order once it reads again, and end of input in the middle of an over-long line. The line
-reader's own tests bound the buffer it accumulates, and the outbox's tests show that a full
-queue makes both an async producer and the synchronous event sink wait without dropping.
+order once it reads again, end of input in the middle of an over-long line, and a shutdown
+while the queue is full and the client is not reading (stdin end of input and SIGTERM),
+which must exit instead of waiting for the client. The line reader's own tests bound the
+buffer it accumulates, and the outbox's tests show that a full queue makes both an async
+producer and the synchronous event sink wait without dropping, and that closing the outbox
+releases both.
 `journal-selfcheck` replays the sessions the suite writes. The touched crates' mutation records
 name the tests that catch a cancelled turn answering `end_turn`, a second `session/new` being
 accepted, a `session/load` that starts a new journal instead of continuing the loaded one, a
