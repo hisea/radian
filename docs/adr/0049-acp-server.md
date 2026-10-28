@@ -15,6 +15,15 @@ The transport is newline-delimited JSON-RPC 2.0 over stdin and stdout
 ([Agent Client Protocol](https://agentclientprotocol.com), protocol version 1). stdout
 carries protocol messages only; every diagnostic, startup line and error stays on stderr.
 
+The stdio framing is bounded in both directions. One input line is at most 64 MiB
+(67,108,864 bytes), enough for a prompt carrying several images in base64. A longer line is
+discarded as it is read — it is never held whole — and answered with a JSON-RPC parse error
+(`-32700`, id `null`) whose message names the limit; the process then serves the next line
+normally, and end of input in the middle of an over-long line is a normal end of input. The
+writer's queue holds at most 64 messages. When it is full the producer waits instead of
+dropping a message, so a client that stops reading stdout stalls the running turn until it
+reads again; responses and `session/update` notifications arrive in order, none missing.
+
 The JSON-RPC and ACP wire layer is written in `radian-exec` rather than taken from the
 `agent-client-protocol` crate: the published crate is not version 1, and the host needs
 only a small, closed subset of the protocol. The wire names, field spelling and enum values
@@ -229,11 +238,17 @@ job-completion wake turn (the wake turn's end must not answer it, and the answer
 turn's own cost and text, not the session's), the one-session refusal, a `session/load` of a
 session created in another workspace (refused by name, then a load of a session in the process
 workspace succeeds, and the same workspace through a symlink is accepted), the shared flag
-set, and `session/load` — a session written by one process
+set, `session/load` — a session written by one process
 and loaded by a second,
-whose replay and continued journal the test checks by folding the journal. `journal-selfcheck`
-replays the sessions the suite writes. The touched crates' mutation records name the tests that
-catch a cancelled turn answering `end_turn`, a second `session/new` being accepted, a
-`session/load` that starts a new journal instead of continuing the loaded one, a prompt answer
-that follows the live `RunFinished` instead of the journaled turn end, and a prompt answered by
-the wake turn that ran before its own.
+whose replay and continued journal the test checks by folding the journal — and the two stdio
+bounds: an over-long line answered with a parse error while the next line is served, a line
+exactly at the limit accepted, a client that stops reading stdout receiving every update in
+order once it reads again, and end of input in the middle of an over-long line. The line
+reader's own tests bound the buffer it accumulates, and the outbox's tests show that a full
+queue makes both an async producer and the synchronous event sink wait without dropping.
+`journal-selfcheck` replays the sessions the suite writes. The touched crates' mutation records
+name the tests that catch a cancelled turn answering `end_turn`, a second `session/new` being
+accepted, a `session/load` that starts a new journal instead of continuing the loaded one, a
+prompt answer that follows the live `RunFinished` instead of the journaled turn end, a prompt
+answered by the wake turn that ran before its own, an input line that is accumulated past its
+limit, and an output queue that drops a message when it is full.
