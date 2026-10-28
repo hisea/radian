@@ -71,7 +71,7 @@ its transcript to the client. `initialize` advertises `loadSession: true`.
 | `initialize` | Negotiates protocol version 1 and advertises `loadSession: true`. |
 | `session/new` | Creates (or, with `--resume`, continues) the one session; see above. |
 | `session/load` | Opens an existing session by id, replays its transcript as updates, and continues it; see above. |
-| `session/prompt` | Sends the prompt's text as a user message (a resource link becomes a text line) and answers once the turn's end is written to the session file. |
+| `session/prompt` | Sends the prompt's text as a user message (a resource link becomes a text line) and answers once the end of **its own** turn is written to the session file. |
 | `session/cancel` | Interrupts the running turn, like ESC in the full-screen interface; the journal keeps the interrupted prefix. |
 | `session/request_permission` | Sent by radian for every approval and every `ask_user` question. |
 | `session/update` | Sent by radian for the live turn and for a `session/load` replay; see below. |
@@ -83,13 +83,16 @@ limit and the turn could not continue: two truncated responses in a row had alre
 A truncated response with tool calls continues the turn, and a truncated response without calls
 continues it with a fixed notice until two earlier truncations in a row. The answer waits for the
 driver to journal the turn end, so a client that reads the session file right after the response
-already sees it. A second prompt while a turn runs is refused. The response's `_meta.radian`
+already sees it. The turn is the one that took the prompt's message: a background job's
+completion notice can wake a turn of its own before that turn runs, and the wake turn's end
+answers nothing — the prompt keeps waiting for its own turn's answer. A second prompt while a
+turn runs is refused. The response's `_meta.radian`
 carries what ACP has no field for:
 
 | Field | Meaning |
 |---|---|
 | `cost` | `{ "micros", "incomplete", "estimated" }`, the same object `radian exec`'s `Result.cost` carries, or `null` when no call has a price. |
-| `text` | The last assistant message's text, in full. |
+| `text` | The last assistant message's text, in full — for a prompt, the text of the turn that answered it. |
 | `error` | Present only on a `refusal` caused by a model or hook error: the masked error text. |
 
 A client that does not read `_meta` ignores it.

@@ -16,6 +16,7 @@
 //! state does **not** survive a process restart (plan Phase 2, last point).
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -146,6 +147,10 @@ pub struct Driver<M: Model, P: ToolProvider, H: Hooks> {
     /// Test hook: how long to wait after the turn ends and before the journaled
     /// `TurnFinished` (a controllable gap between `RunFinished` and the commit).
     commit_delay: Option<std::time::Duration>,
+    /// Test seam: while this file exists, the idle loop does not claim the next turn. A test
+    /// creates it to put two inputs in one lane in a known order — the ACP prompt that a
+    /// wake turn must not answer — and removes it to let the claims run.
+    claim_hold: Option<PathBuf>,
     /// A host listener for the runtime events this driver writes (ADR 0017). `None` keeps the
     /// behavior a host that never installed one had before.
     runtime_events: Option<Arc<dyn RuntimeEvents>>,
@@ -259,6 +264,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             options,
             turn_timeout: None,
             commit_delay: None,
+            claim_hold: None,
             runtime_events: None,
             #[cfg(feature = "testing")]
             testing_wake_branch: Arc::new(tokio::sync::Notify::new()),
@@ -389,6 +395,13 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         self.commit_delay = delay;
     }
 
+    /// Test seam: hold the idle loop's next claim while `path` exists. A test creates the file
+    /// to place two inputs in one lane in a known order before the driver takes either, and
+    /// removes it to let the loop run.
+    pub fn set_claim_hold(&mut self, path: Option<PathBuf>) {
+        self.claim_hold = path;
+    }
+
     /// Test seam: the wake-branch signal (fired when the turn loop enters the wake branch).
     #[cfg(feature = "testing")]
     pub fn testing_wake_branch(&self) -> Arc<tokio::sync::Notify> {
@@ -464,7 +477,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 result?;
                 continue;
             }
-            let Some(entry) = self.inbox.claim_next_turn().await else {
+            let Some(entry) = self.claim_next_turn().await else {
                 // Idle. A `followup`/`steer`/`cancel`/`close` wakes us; `inject` does not.
                 // Claiming also opens a turn with a leftover waking `next_step` entry (ADR
                 // 0011 revision 1 decision 2), so the wake above is not wasted on an empty
@@ -480,6 +493,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             result?;
         }
         Ok(())
+    }
+
+    /// Claims the input that opens the next turn, after the claim-hold seam: while the test's
+    /// file exists the loop waits, so a test can put two inputs in one lane in a known order
+    /// before either is taken. The hold is off in production (`claim_hold` is `None`).
+    async fn claim_next_turn(&mut self) -> Option<InboxEntry> {
+        if let Some(path) = &self.claim_hold {
+            while path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        self.inbox.claim_next_turn().await
     }
 
     /// Runs exactly one turn for a claimed input. The `ActiveRun` is created and dropped
@@ -515,12 +540,17 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
         if let Some(timeout) = self.turn_timeout {
             options.deadline = Some(tokio::time::Instant::now() + timeout);
         }
-        journal
-            .append_runtime_event(RuntimeEvent::InputClaimed {
-                message_ids: vec![entry.id.clone()],
-                turn_id: turn_id.clone(),
-            })
-            .await?;
+        let claimed_event = RuntimeEvent::InputClaimed {
+            message_ids: vec![entry.id.clone()],
+            turn_id: turn_id.clone(),
+        };
+        journal.append_runtime_event(claimed_event.clone()).await?;
+        // The host hears the claim like the start and the end (ADR 0049): it is what links a
+        // message the host enqueued — its own prompt — to the turn that will answer it. A sink
+        // that does not need the link ignores the event.
+        if let Some(sink) = &runtime_events {
+            sink.on_runtime_event(&claimed_event);
+        }
         let started = RuntimeEvent::TurnStarted {
             turn_id: turn_id.clone(),
         };
@@ -566,6 +596,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
             &turn_id,
             &mut claimed,
             &mut claimed_entries,
+            &runtime_events,
         )
         .await?;
 
@@ -609,6 +640,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                         &turn_id,
                         &mut claimed,
                         &mut claimed_entries,
+                        &runtime_events,
                     )
                     .await?;
                 }
@@ -783,6 +815,7 @@ async fn drain_steering(
     turn_id: &str,
     claimed: &mut Vec<MessageId>,
     claimed_entries: &mut Vec<InboxEntry>,
+    runtime_events: &Option<Arc<dyn RuntimeEvents>>,
 ) -> Result<(), DriverError> {
     let mut batch = Vec::new();
     while let Some(entry) = inbox.claim_next_step().await {
@@ -792,12 +825,16 @@ async fn drain_steering(
         return Ok(());
     }
     let ids: Vec<MessageId> = batch.iter().map(|e| e.id.clone()).collect();
-    journal
-        .append_runtime_event(RuntimeEvent::InputClaimed {
-            message_ids: ids,
-            turn_id: turn_id.to_owned(),
-        })
-        .await?;
+    let claim = RuntimeEvent::InputClaimed {
+        message_ids: ids,
+        turn_id: turn_id.to_owned(),
+    };
+    journal.append_runtime_event(claim.clone()).await?;
+    // The host hears the merged claim too (ADR 0049): an input that joins a running turn
+    // belongs to **that** turn, so a host waiting on its own message must see the link.
+    if let Some(sink) = runtime_events {
+        sink.on_runtime_event(&claim);
+    }
     for entry in batch {
         let InboxEntry {
             id,
