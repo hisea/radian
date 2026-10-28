@@ -940,10 +940,13 @@ fn attempt_text(protocol: crate::Protocol, error: &ModelError) -> String {
     format!("{} ({detail})", protocol.kind())
 }
 
-/// `error` with one extra line, for the rule hint and the tried list (ADR 0026 D10). Only the
-/// two response variants carry a body a caller can extend; a probe never starts on the others.
+/// `error` with one extra line, for the rule hint and the tried list (ADR 0026 D10). A probe
+/// only *starts* on a refusal, but it can **end** on any candidate error (a 429, a 5xx, a
+/// transport error, or a stream that already started), so every variant that carries text is
+/// extended. `EmptyResponse` has no text to extend and stays as it is.
 fn with_line(error: ModelError, line: String) -> ModelError {
     match error {
+        ModelError::Transport(message) => ModelError::Transport(format!("{message}\n{line}")),
         ModelError::Protocol(message) => ModelError::Protocol(format!("{message}\n{line}")),
         ModelError::Unavailable {
             message,
@@ -954,8 +957,27 @@ fn with_line(error: ModelError, line: String) -> ModelError {
             retry_after,
             status,
         },
+        ModelError::UsageLimit { message, resets_in } => ModelError::UsageLimit {
+            message: format!("{message}\n{line}"),
+            resets_in,
+        },
+        ModelError::ContextOverflow(message) => {
+            ModelError::ContextOverflow(format!("{message}\n{line}"))
+        }
         other => other,
     }
+}
+
+/// The one line every failed probe ends with: what was tried, and the rule that would pin the
+/// protocol (ADR 0026 D10).
+fn rule_hint(plan: &ProbePlan, route: &ModelRoute, tried: &[String]) -> String {
+    format!(
+        "tried {}. Set the protocol: [[providers.{}.models]] match = \"{}\" kind = \"<{}>\"",
+        tried.join(", "),
+        plan.named.name,
+        route.model,
+        crate::provider::PROVIDER_KINDS.join("|")
+    )
 }
 
 /// The route key the probe remembers a working protocol under: the `ConfigChanged` route
@@ -1120,19 +1142,32 @@ impl SwitchableModel {
         if let Some(model) = cache.get(&key) {
             return Ok(model.clone());
         }
-        let ctx = RouteContext {
-            thinking: thinking.to_owned(),
-            ..self.ctx.clone()
-        };
-        let args = ctx.args_for_route(&route.provider, &route.model, api_key, forced.as_ref())?;
+        let args = self.route_context(thinking).args_for_route(
+            &route.provider,
+            &route.model,
+            api_key,
+            forced.as_ref(),
+        )?;
         let model = build_model(args).map(Arc::new)?;
         cache.insert(key, model.clone());
         Ok(model)
     }
 
+    /// The startup facts with the thinking level **in force** (ADR 0026 D11). `model_for` and
+    /// [`SwitchableModel::probe`] both build through this, so a probe after `/thinking` sends
+    /// the level the session uses, not the level it started at.
+    fn route_context(&self, thinking: &str) -> RouteContext {
+        RouteContext {
+            thinking: thinking.to_owned(),
+            ..self.ctx.clone()
+        }
+    }
+
     /// Probes the other protocols for `route` (ADR 0026 D10) and returns the first success.
-    /// On success it remembers the route, queues the `ConfigChanged` and saves the rule. When
-    /// every attempt fails it returns `first` with the tried list and the rule hint appended.
+    /// On success it remembers the route, queues the `ConfigChanged` and saves the rule. A
+    /// candidate that is refused (one of [`PROBE_STATUSES`]) is skipped; any other candidate
+    /// error ends the probe at once with that candidate's error, the tried list and the rule
+    /// hint. When every attempt refuses, it returns `first` with the same line.
     #[allow(clippy::too_many_arguments)] // the request's own state, threaded without a struct
     async fn probe(
         &self,
@@ -1152,18 +1187,19 @@ impl SwitchableModel {
         for protocol in plan.named.probe_candidates(&route.model, failed) {
             let forced = plan.named.probe_route(&route.model, protocol);
             let built = self
-                .ctx
+                .route_context(thinking)
                 .args_for_route(&route.provider, &route.model, api_key, Some(&forced))
                 .and_then(build_model)
                 .map(Arc::new);
             let model = match built {
                 Ok(model) => model,
                 Err(message) => {
-                    // Building the attempt failed before it reached the provider. It still
-                    // counts as a tried protocol, with the message as its reason.
+                    // The candidate could not even be built, so it never reached the provider.
+                    // Like any other non-refusal it ends the probe; the tried line names it
+                    // with its own reason.
                     let error = ModelError::Protocol(message);
                     tried.push(attempt_text(protocol, &error));
-                    continue;
+                    return Err(with_line(error, rule_hint(plan, route, &tried)));
                 }
             };
             let result = model
@@ -1190,17 +1226,20 @@ impl SwitchableModel {
                     ));
                     return Ok(response);
                 }
-                Err(error) => tried.push(attempt_text(protocol, &error)),
+                Err(error) => {
+                    tried.push(attempt_text(protocol, &error));
+                    // ADR 0026 D10: only a refusal means "this protocol is wrong for the
+                    // model", so only a refusal moves on. A 401/403/429, a 5xx, a transport
+                    // error or a stream that already started ends the probe: reporting this
+                    // candidate's error is better than a second protocol answering over a
+                    // partial one.
+                    if probe_status(&error).is_none() {
+                        return Err(with_line(error, rule_hint(plan, route, &tried)));
+                    }
+                }
             }
         }
-        let hint = format!(
-            "tried {}. Set the protocol: [[providers.{}.models]] match = \"{}\" kind = \"<{}>\"",
-            tried.join(", "),
-            plan.named.name,
-            route.model,
-            crate::provider::PROVIDER_KINDS.join("|")
-        );
-        Err(with_line(first, hint))
+        Err(with_line(first, rule_hint(plan, route, &tried)))
     }
 
     /// Remembers a probe's working route (in memory for later requests, and by the rule on
