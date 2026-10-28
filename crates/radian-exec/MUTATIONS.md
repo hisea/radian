@@ -678,3 +678,25 @@ Unmutated, the `acp` binary passed 30/30 and the `radian-exec` lib passed 41 of 
 capacity, but the update is dropped, which is what the test's waiting and delivery assertions
 refuse.
 
+## `radian acp`: shutdown releases the output wait (TK0224 rework, 2026-10-28)
+
+Branch `work/TK0224-acp-stdio-bounded`. This rework makes an outbox wait end at shutdown, so
+`shutdown` can join a driver that waits for a client that stopped reading. Each mutation was
+applied in place to `crates/radian-exec/src/acp/{wire,mod}.rs` and the source was restored from
+`.radian/mut/` (`cmp` identical). The unit-test rows ran
+`cargo nextest run -p radian-exec --locked --profile sandbox --lib -E 'test(<name>)'`; the
+integration rows rebuilt the `radian` binary (`cargo build -p radian-tui --bin radian`) and ran
+`cargo nextest run -p radian-exec --locked --profile sandbox --test acp -E 'test(<name>)'`.
+Unmutated, the `acp` binary passed 32/32 and the lib's eight `acp::` tests passed.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0224-M6 | `shutdown` does not close the outbox before `session.join` | ✅ 2 failed | `acp::closing_stdin_while_output_is_backpressured_still_shuts_down` and `acp::sigterm_while_output_is_backpressured_still_shuts_down` (both timed out with "the agent did not exit") |
+| TK0224-M7 | the synchronous sink ignores the close and uses `blocking_send` | ✅ 1 failed | `acp::wire::tests::closing_the_outbox_releases_a_waiting_synchronous_producer` |
+| TK0224-M8 | the async producer ignores the close and awaits `tx.send` alone | ✅ 1 failed | `acp::wire::tests::closing_the_outbox_releases_a_waiting_async_producer` |
+
+3/3 caught. M7 and M8 are the two producers the queue bound stalls (the live-event sink and the
+async prompt/bridge paths); M6 is the shutdown that must release them before it waits for the
+driver.
+
+
