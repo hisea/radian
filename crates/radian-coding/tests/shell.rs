@@ -15,10 +15,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{TempDir, sentinel_outside};
-use radian_coding::{CodingTools, CodingToolsError, Limits};
+use radian_coding::{CodingTools, CodingToolsError, Limits, ToolPresence};
 use radian_core::{
     CancellationToken, ContentPart, NoopSink, ToolCall, ToolContext, ToolOutput, ToolProvider,
-    ToolSession,
+    ToolSession, ToolSpec,
 };
 use radian_sandbox::{
     ProbeReport, Sandbox, SandboxBackend, SandboxCommand, SandboxError, SandboxMode, SandboxPolicy,
@@ -1188,6 +1188,246 @@ async fn the_shell_description_states_the_timing_numbers_and_the_process_group()
                 )
                 && text.contains("Run tests and builds in the foreground with timeout_secs.")),
         "the `background` field must say a background command has no deadline and when to use it: {background}"
+    );
+}
+
+/// Opens the coding tools with only `names` mounted (the hidden `--tools` view).
+async fn restricted_specs(tools: &CodingTools, names: &[&str]) -> Vec<ToolSpec> {
+    tools
+        .open_session_with(ToolPresence::from_names(names.iter().copied()))
+        .await
+        .unwrap()
+        .tool_specs()
+        .to_vec()
+}
+
+fn spec_named(specs: &[ToolSpec], name: &str) -> ToolSpec {
+    specs
+        .iter()
+        .find(|spec| spec.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "the {name} spec: {:?}",
+                specs.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        })
+        .clone()
+}
+
+fn names_of(specs: &[ToolSpec]) -> Vec<String> {
+    let mut names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// ADR 0043 §4: the full set is today's text, byte for byte (ADR 0037 pins its size). The
+/// trait `open_session` and an explicit `ToolPresence::ALL` must agree.
+#[tokio::test]
+async fn the_full_set_keeps_the_shell_description_byte_for_byte() {
+    let dir = TempDir::new("shell-spec-full");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+    let by_default = tools.open_session().await.unwrap().tool_specs().to_vec();
+    let explicit = restricted_specs(
+        &tools,
+        &["read", "write", "patch", "glob", "grep", "shell", "job"],
+    )
+    .await;
+    assert_eq!(names_of(&by_default), names_of(&explicit));
+    let shell = spec_named(&by_default, "shell");
+    assert_eq!(
+        shell,
+        spec_named(&explicit, "shell"),
+        "the full set is unchanged"
+    );
+    assert_eq!(
+        shell.description,
+        "Run a shell command with `/bin/sh -c`. The command runs with no sandbox (`full`). \
+         It can read and write all files that you can. The network is on. This is the \
+         built-in default. Use `read` to read and list files. Use `grep` and `glob` to \
+         search files. Do not use `cat`, `sed`, `ls`, or `find` through `shell`. `grep` and \
+         `glob` report truncation. They use less context. They run in parallel. `shell` runs \
+         alone. A timeout or a cancellation kills the whole process group. A foreground \
+         command never moves to the background on its own: background happens only with an \
+         explicit `background: true`.",
+        "the full set's shell description must stay byte-identical"
+    );
+    assert_eq!(
+        shell.input_schema["properties"]["background"]["description"].as_str(),
+        Some(
+            "Run in the background and return at once with a job id. A background command \
+             has no deadline. Default: false. Use for servers, watchers and commands expected \
+             to run longer than 600 s. Run tests and builds in the foreground with \
+             timeout_secs. Read the job with `job`."
+        )
+    );
+}
+
+/// The Terminal-Bench arm: `read,write,patch,shell` has no `grep`, `glob` or `job`. The shell
+/// description keeps the `read` advice and names none of the absent tools; the `background`
+/// field stops naming `job`.
+#[tokio::test]
+async fn a_read_write_patch_shell_set_names_no_search_or_job_tool() {
+    let dir = TempDir::new("shell-spec-4tools");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let specs = restricted_specs(
+        &transparent_tools(&root),
+        &["read", "write", "patch", "shell"],
+    )
+    .await;
+    assert_eq!(names_of(&specs), ["patch", "read", "shell", "write"]);
+    let shell = spec_named(&specs, "shell");
+    for absent in [
+        "`grep`",
+        "`glob`",
+        "`find`",
+        "search files",
+        "Do not use `cat`, `sed`, `ls`, or `find`",
+    ] {
+        assert!(
+            !shell.description.contains(absent),
+            "{absent:?} must be absent without `grep`/`glob`: {}",
+            shell.description
+        );
+    }
+    assert!(
+        shell
+            .description
+            .contains("Use `read` to read and list files")
+    );
+    assert!(
+        shell
+            .description
+            .contains("Do not use `cat`, `sed`, or `ls` through `shell`"),
+        "the `read` part keeps its own prohibition: {}",
+        shell.description
+    );
+    assert!(shell.description.contains("`shell` runs alone"));
+    assert!(shell.description.contains("kills the whole process group"));
+    let background = shell.input_schema["properties"]["background"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(!background.contains("`job`"), "{background}");
+    assert!(background.contains("no deadline"), "{background}");
+}
+
+/// `shell` alone: no `read`, no search tool, no prohibition about absent tools; the
+/// confinement, timeout and background sentences stay.
+#[tokio::test]
+async fn shell_alone_keeps_only_its_own_rules() {
+    let dir = TempDir::new("shell-spec-alone");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let specs = restricted_specs(&transparent_tools(&root), &["shell"]).await;
+    assert_eq!(names_of(&specs), ["shell"]);
+    let shell = spec_named(&specs, "shell");
+    for absent in [
+        "`read`",
+        "`grep`",
+        "`glob`",
+        "`find`",
+        "Do not use",
+        "report truncation",
+    ] {
+        assert!(
+            !shell.description.contains(absent),
+            "{absent:?} must be absent when only `shell` is mounted: {}",
+            shell.description
+        );
+    }
+    assert!(shell.description.contains("`shell` runs alone"));
+    assert!(
+        shell
+            .description
+            .contains("never moves to the background on its own")
+    );
+}
+
+/// `grep` without `glob`: the `grep` advice and the `grep`-through-`shell` prohibition, no
+/// `glob` and no `find`; `glob` without `grep` is the mirror.
+#[tokio::test]
+async fn one_search_tool_names_only_itself() {
+    let dir = TempDir::new("shell-spec-search");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let grep = spec_named(
+        &restricted_specs(&tools, &["read", "grep", "shell"]).await,
+        "shell",
+    );
+    assert!(grep.description.contains("Use `grep` to search files"));
+    assert!(
+        grep.description
+            .contains("Do not use `cat`, `sed`, `ls`, or `grep` through `shell`"),
+        "{}",
+        grep.description
+    );
+    assert!(
+        grep.description
+            .contains("`grep` reports truncation. It uses less context. It runs in parallel."),
+        "{}",
+        grep.description
+    );
+    for absent in ["`glob`", "`find`"] {
+        assert!(!grep.description.contains(absent), "{}", grep.description);
+    }
+
+    let glob = spec_named(
+        &restricted_specs(&tools, &["read", "glob", "shell"]).await,
+        "shell",
+    );
+    assert!(glob.description.contains("Use `glob` to search files"));
+    assert!(
+        glob.description
+            .contains("Do not use `cat`, `sed`, `ls`, or `find` through `shell`"),
+        "{}",
+        glob.description
+    );
+    assert!(
+        glob.description
+            .contains("`glob` reports truncation. It uses less context. It runs in parallel."),
+        "{}",
+        glob.description
+    );
+    for absent in ["`grep`", "or `grep`"] {
+        assert!(!glob.description.contains(absent), "{}", glob.description);
+    }
+}
+
+/// ADR 0043 §4: `read` names `patch` only when `patch` is mounted (the `explore` child's
+/// `read,glob,grep` set must not point at an absent tool).
+#[tokio::test]
+async fn read_names_patch_only_when_patch_is_mounted() {
+    let dir = TempDir::new("shell-spec-read");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = transparent_tools(&root);
+
+    let with_patch = spec_named(&restricted_specs(&tools, &["read", "patch"]).await, "read");
+    assert!(
+        with_patch
+            .description
+            .contains("Remove it before you use the text in `patch`.")
+    );
+
+    let without_patch = spec_named(
+        &restricted_specs(&tools, &["read", "glob", "grep"]).await,
+        "read",
+    );
+    assert!(
+        !without_patch.description.contains("`patch`"),
+        "{}",
+        without_patch.description
+    );
+    assert!(
+        without_patch
+            .description
+            .contains("This prefix is not part of the file. For a large file"),
+        "{}",
+        without_patch.description
     );
 }
 

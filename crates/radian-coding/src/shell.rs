@@ -48,7 +48,7 @@ use crate::args;
 use crate::fail;
 use crate::foreground::{ForegroundOutputs, Retention};
 use crate::jobs::Jobs;
-use crate::provider::Limits;
+use crate::provider::{Limits, ToolPresence};
 use crate::workspace::WorkspaceRoot;
 
 /// How long the supervisor waits for the output readers after the session is killed. The
@@ -67,10 +67,11 @@ const REAP_GRACE: Duration = Duration::from_secs(10);
 
 /// The `shell` input schema for `mode`. `FullAccess` has no sandbox, so the advertised
 /// schema leaves out `outside_sandbox` and `outside_sandbox_reason`; both `WorkspaceWrite`
-/// variants keep them. [`run`] still parses with the full [`schema`], so a call that sends
-/// them in `full` parses and behaves exactly as before.
-pub(crate) fn spec_schema(mode: SandboxMode) -> serde_json::Value {
-    let mut schema = schema();
+/// variants keep them. `job` says whether the `job` tool is mounted too: the `background`
+/// note names it only then (ADR 0043 §4). [`run`] still parses with the full [`schema`], so a
+/// call that sends the fields in `full` parses and behaves exactly as before.
+pub(crate) fn spec_schema(mode: SandboxMode, job: bool) -> serde_json::Value {
+    let mut schema = schema_with(job);
     if mode == SandboxMode::FullAccess
         && let Some(properties) = schema
             .get_mut("properties")
@@ -83,6 +84,24 @@ pub(crate) fn spec_schema(mode: SandboxMode) -> serde_json::Value {
 }
 
 pub(crate) fn schema() -> serde_json::Value {
+    schema_with(true)
+}
+
+/// The `background` note. Its last sentence names `job`, so it appears only when that tool is
+/// mounted.
+fn background_description(job: bool) -> String {
+    let mut text = String::from(
+        "Run in the background and return at once with a job id. A background command has no \
+         deadline. Default: false. Use for servers, watchers and commands expected to run \
+         longer than 600 s. Run tests and builds in the foreground with timeout_secs.",
+    );
+    if job {
+        text.push_str(" Read the job with `job`.");
+    }
+    text
+}
+
+fn schema_with(job: bool) -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
@@ -110,11 +129,7 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "background": {
                 "type": "boolean",
-                "description": "Run in the background and return at once with a job id. A \
-                                background command has no deadline. Default: false. Use for \
-                                servers, watchers and commands expected to run longer than 600 s. \
-                                Run tests and builds in the foreground with timeout_secs. Read the \
-                                job with `job`."
+                "description": background_description(job)
             },
             "outside_sandbox": {
                 "type": "boolean",
@@ -134,14 +149,16 @@ pub(crate) fn schema() -> serde_json::Value {
 
 /// The `shell` spec for `mode`. The description names the enforcement level, because the
 /// model (and a human reading a transcript) must be able to tell a confined run from an
-/// unsandboxed one.
+/// unsandboxed one. It also names only the file and job tools that `presence` says are
+/// mounted (ADR 0043 §4): a restricted set (the hidden `--tools` list) never points the model
+/// at `read`, `grep`, `glob` or `job` when they are absent.
 ///
 /// `git_writable` is the sandbox's **effective** answer for this session (ADR 0038 decision 4;
 /// [`radian_sandbox::Sandbox::git_writable_except_exec`]), not the policy's request: a general
 /// session in the `workspace` tier commits with native git on both backends, while a backend
 /// without the carve-out keeps `.git` read-only, and the description says which. It is ignored
 /// outside `workspace` mode.
-pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
+pub(crate) fn spec(mode: SandboxMode, git_writable: bool, presence: ToolPresence) -> ToolSpec {
     let confinement = match mode {
         SandboxMode::WorkspaceWrite if git_writable => {
             "The command runs under the OS sandbox (`workspace`). Writes stay in the \
@@ -165,19 +182,76 @@ pub(crate) fn spec(mode: SandboxMode, git_writable: bool) -> ToolSpec {
     };
     ToolSpec {
         name: "shell".into(),
-        description: format!(
-            "Run a shell command with `/bin/sh -c`. {confinement} Use `read` to read \
-             and list files. Use `grep` and `glob` to search files. Do not use `cat`, \
-             `sed`, `ls`, or `find` through `shell`. `grep` and `glob` report \
-             truncation. They use less context. They run in parallel. `shell` runs \
-             alone. A timeout or a cancellation kills the whole process group. A \
-              foreground command never moves to the background on its own: background \
-              happens only with an explicit `background: true`."
-        ),
-        input_schema: spec_schema(mode),
+        description: description(confinement, presence),
+        input_schema: spec_schema(mode, presence.job),
         // A shell command has side effects and is not safe to overlap with other calls.
         concurrency: ToolConcurrency::Exclusive,
     }
+}
+
+/// Joins a list for a prohibition sentence: ``a``, ``a`` or ``b``, ``a``, ``b``, or ``c``.
+fn join_or(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} or {second}"),
+        _ => {
+            let (last, rest) = items.split_last().expect("non-empty");
+            format!("{}, or {last}", rest.join(", "))
+        }
+    }
+}
+
+/// The `shell` description for the mounted tools. The full set reproduces today's text byte
+/// for byte (ADR 0037 pins its size); a reduced set drops the advice about absent tools.
+fn description(confinement: &str, presence: ToolPresence) -> String {
+    let mut out = format!("Run a shell command with `/bin/sh -c`. {confinement}");
+    if presence.read {
+        out.push_str(" Use `read` to read and list files.");
+    }
+    match (presence.grep, presence.glob) {
+        (true, true) => out.push_str(" Use `grep` and `glob` to search files."),
+        (true, false) => out.push_str(" Use `grep` to search files."),
+        (false, true) => out.push_str(" Use `glob` to search files."),
+        (false, false) => {}
+    }
+    // `cat`/`sed`/`ls` belong to `read`; `find` belongs to `glob`; a bare `grep` command is
+    // the search tool's shell equivalent only when `glob` is absent. The full set therefore
+    // keeps today's exact clause.
+    let mut forbidden = Vec::new();
+    if presence.read {
+        forbidden.extend(["`cat`", "`sed`", "`ls`"]);
+    }
+    if presence.grep && !presence.glob {
+        forbidden.push("`grep`");
+    }
+    if presence.glob {
+        forbidden.push("`find`");
+    }
+    if !forbidden.is_empty() {
+        out.push_str(&format!(
+            " Do not use {} through `shell`.",
+            join_or(&forbidden)
+        ));
+    }
+    match (presence.grep, presence.glob) {
+        (true, true) => out.push_str(
+            " `grep` and `glob` report truncation. They use less context. They run in parallel.",
+        ),
+        (true, false) => {
+            out.push_str(" `grep` reports truncation. It uses less context. It runs in parallel.")
+        }
+        (false, true) => {
+            out.push_str(" `glob` reports truncation. It uses less context. It runs in parallel.")
+        }
+        (false, false) => {}
+    }
+    out.push_str(
+        " `shell` runs alone. A timeout or a cancellation kills the whole process group. A \
+         foreground command never moves to the background on its own: background happens only \
+         with an explicit `background: true`.",
+    );
+    out
 }
 
 /// The result of a user's `!`/`!!` command (ADR 0033), from the same sandboxed executor the
@@ -1871,7 +1945,7 @@ mod tests {
             (SandboxMode::WorkspaceWrite, true),
             (SandboxMode::WorkspaceWrite, false),
         ] {
-            let bytes = size(&spec(mode, git_writable));
+            let bytes = size(&spec(mode, git_writable, ToolPresence::ALL));
             assert!(
                 bytes <= 2730,
                 "shell ({mode:?}, git {git_writable}) is {bytes} B, over the 2,730 B cap"

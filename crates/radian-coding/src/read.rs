@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::args;
 use crate::fail;
 use crate::image::{self, ImageError, ImageSupport, MAX_IMAGE_BYTES};
-use crate::provider::Limits;
+use crate::provider::{Limits, ToolPresence};
 use crate::workspace::{WorkspaceRoot, io_failure};
 
 #[derive(Deserialize)]
@@ -55,18 +55,26 @@ pub(crate) fn schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn spec() -> ToolSpec {
+pub(crate) fn spec(presence: ToolPresence) -> ToolSpec {
+    // The prefix note is complete without the `patch` instruction; name that tool only when
+    // it is mounted (ADR 0043 §4).
+    let patch_hint = if presence.patch {
+        " Remove it before you use the text in `patch`."
+    } else {
+        ""
+    };
     ToolSpec {
         name: "read".into(),
-        description: "Read a UTF-8 text file, a directory, or an image. Each text line starts \
-                      with its line number and `\": \"`. This prefix is not part of the file. \
-                      Remove it before you use the text in `patch`. For a large file, read one \
-                      part at a time with `offset` and `limit`. Do not increase `max_bytes` \
-                      to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
-                      magic number, never its extension) returns a text line and the image \
-                      itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
-                      when over). An image is read whole: `offset` and `limit` are ignored."
-            .into(),
+        description: format!(
+            "Read a UTF-8 text file, a directory, or an image. Each text line starts \
+             with its line number and `\": \"`. This prefix is not part of the file.{patch_hint} \
+             For a large file, read one \
+             part at a time with `offset` and `limit`. Do not increase `max_bytes` \
+             to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
+             magic number, never its extension) returns a text line and the image \
+             itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
+             when over). An image is read whole: `offset` and `limit` are ignored."
+        ),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }

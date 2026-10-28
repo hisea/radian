@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 
 use agent_extensions::{McpSession, McpToolProvider};
-use radian_coding::{AskSession, AskTools, CodingSession, CodingTools};
+use radian_coding::{AskSession, AskTools, CodingSession, CodingTools, ToolPresence};
 use radian_core::{
     ToolCall, ToolContext, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec,
 };
@@ -148,7 +148,11 @@ impl ToolProvider for HostTools {
         // Open MCP first: if it fails, no built-in state needs unwinding.
         let mcp = self.mcp.open_session().await?;
         let coding = match &self.coding {
-            Some(coding) => Some(coding.open_session().await?),
+            Some(coding) => Some(
+                coding
+                    .open_session_with(ToolPresence::from_allow(self.tool_allow.as_deref()))
+                    .await?,
+            ),
             None => None,
         };
         let memory = match &self.memory {

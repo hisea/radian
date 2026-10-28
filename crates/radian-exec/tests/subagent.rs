@@ -287,6 +287,27 @@ async fn an_explore_child_has_only_the_three_read_tools_and_write_is_refused() {
         ["glob", "grep", "read"],
         "an explore child's tool list is exactly the read tools"
     );
+    // ADR 0043 §4 (TK0216): the child's reduced set has no `patch`, so `read` must not
+    // name it. A child that mounted the general set would fail this too.
+    let tools = server.requests()[index].json()["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let read = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "read")
+        .expect("the child advertises read");
+    let description = read["function"]["description"]
+        .as_str()
+        .expect("the read description");
+    assert!(
+        !description.contains("`patch`"),
+        "the explore set has no `patch`: {description}"
+    );
+    assert!(
+        description.contains("This prefix is not part of the file."),
+        "the prefix note survives without `patch`: {description}"
+    );
     assert!(
         tool_contents(&server, index + 1).contains("no tool named `write`"),
         "a write call must be refused as unknown: {}",

@@ -2915,6 +2915,75 @@ async fn the_workspace_flag_turns_the_sandbox_on() {
     );
 }
 
+/// ADR 0043 §4 (TK0216): a request carries only mounted schemas, and a description names
+/// another tool only when that tool is mounted. The Terminal-Bench arm mounts
+/// `read,write,patch,shell`; `grep`, `glob` and `job` are absent, so the shell text must not
+/// name them.
+#[tokio::test]
+async fn a_four_tool_set_keeps_the_shell_description_inside_the_set() {
+    // `common::process_dir` stays inside the workspace sandbox's writable tree, so this test
+    // also runs under the `sandbox` nextest profile (no `/tmp`). `full` is the default and
+    // needs no backend, so no nested Seatbelt is asked for.
+    let dir = common::process_dir("radian-exec-tools-shell");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--tools",
+                "read,write,patch,shell",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        advertised_tools(&server, 0),
+        ["read", "write", "patch", "shell"],
+        "the reduced arm mounts exactly its four tools"
+    );
+    let tools = server.requests()[0].json()["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let shell = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "shell")
+        .expect("shell is mounted");
+    let description = shell["function"]["description"]
+        .as_str()
+        .expect("the shell description");
+    for absent in ["`grep`", "`glob`", "`find`", "search files"] {
+        assert!(
+            !description.contains(absent),
+            "{absent:?} must not be named without its tool: {description}"
+        );
+    }
+    assert!(
+        description.contains("Use `read` to read and list files"),
+        "{description}"
+    );
+    let background = shell["function"]["parameters"]["properties"]["background"]["description"]
+        .as_str()
+        .expect("the background field");
+    assert!(
+        !background.contains("`job`"),
+        "`job` is not mounted, so the background note must not name it: {background}"
+    );
+}
+
 /// Writes `<ws>/.radian/config.toml` with `text`.
 fn write_project_config(ws: &Path, text: &str) {
     let dir = ws.join(".radian");

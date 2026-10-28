@@ -119,6 +119,58 @@ impl Default for Limits {
     }
 }
 
+/// Which of the built-in tools a session's request carries (ADR 0043 §4). A tool's
+/// description names another tool only when `ToolPresence` says that tool is mounted, so a
+/// restricted set (the hidden `--tools` list) never points the model at a tool it cannot call.
+/// [`ToolProvider::open_session`] uses [`ToolPresence::ALL`], which keeps today's text byte
+/// for byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolPresence {
+    pub read: bool,
+    pub write: bool,
+    pub patch: bool,
+    pub glob: bool,
+    pub grep: bool,
+    pub shell: bool,
+    pub job: bool,
+}
+
+impl ToolPresence {
+    /// Every tool: the full set's descriptions and specs, unchanged.
+    pub const ALL: Self = Self {
+        read: true,
+        write: true,
+        patch: true,
+        glob: true,
+        grep: true,
+        shell: true,
+        job: true,
+    };
+
+    /// The tools `names` holds. Each name is matched exactly.
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let names: Vec<&str> = names.into_iter().collect();
+        let has = |name: &str| names.contains(&name);
+        Self {
+            read: has("read"),
+            write: has("write"),
+            patch: has("patch"),
+            glob: has("glob"),
+            grep: has("grep"),
+            shell: has("shell"),
+            job: has("job"),
+        }
+    }
+
+    /// The tools an allow-list names. `None` mounts every built-in (and keeps today's text).
+    pub fn from_allow(allow: Option<&[String]>) -> Self {
+        match allow {
+            None => Self::ALL,
+            Some(names) => Self::from_names(names.iter().map(String::as_str)),
+        }
+    }
+}
+
 /// Why a [`CodingTools`] could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum CodingToolsError {
@@ -278,10 +330,15 @@ impl CodingTools {
     }
 }
 
-impl ToolProvider for CodingTools {
-    type Session = CodingSession;
-
-    async fn open_session(&self) -> Result<Self::Session, ToolError> {
+impl CodingTools {
+    /// Open one session whose specs and descriptions are restricted to `presence` (ADR 0043
+    /// §4). The hidden `--tools` list is the caller: a tool outside the list is not built at
+    /// all, and a description never names it. [`ToolProvider::open_session`] passes
+    /// [`ToolPresence::ALL`], so an ordinary session is unchanged.
+    pub async fn open_session_with(
+        &self,
+        presence: ToolPresence,
+    ) -> Result<CodingSession, ToolError> {
         let (jobs, foreground) = match &self.jobs {
             Some(jobs) => {
                 let jobs = Arc::clone(jobs);
@@ -321,10 +378,18 @@ impl ToolProvider for CodingTools {
             limits: self.limits,
             image_support: Arc::clone(&self.image_support),
             sandbox: self.sandbox.clone(),
-            specs: specs(shell),
+            specs: specs(shell, presence),
             jobs,
             foreground,
         })
+    }
+}
+
+impl ToolProvider for CodingTools {
+    type Session = CodingSession;
+
+    async fn open_session(&self) -> Result<Self::Session, ToolError> {
+        self.open_session_with(ToolPresence::ALL).await
     }
 }
 
@@ -367,18 +432,31 @@ impl CodingSession {
     }
 }
 
-fn specs(shell: Option<(SandboxMode, bool)>) -> Vec<ToolSpec> {
-    let mut specs = vec![
-        read::spec(),
-        write::spec(),
-        patch::spec(),
-        glob::spec(),
-        grep::spec(),
-    ];
-    if let Some((mode, git_writable)) = shell {
-        specs.push(shell::spec(mode, git_writable));
+fn specs(shell: Option<(SandboxMode, bool)>, presence: ToolPresence) -> Vec<ToolSpec> {
+    let mut specs = Vec::new();
+    if presence.read {
+        specs.push(read::spec(presence));
+    }
+    if presence.write {
+        specs.push(write::spec());
+    }
+    if presence.patch {
+        specs.push(patch::spec());
+    }
+    if presence.glob {
+        specs.push(glob::spec());
+    }
+    if presence.grep {
+        specs.push(grep::spec());
+    }
+    if let Some((mode, git_writable)) = shell
+        && presence.shell
+    {
+        specs.push(shell::spec(mode, git_writable, presence));
         // The job tool exists only with `shell`: without a sandbox there are no jobs.
-        specs.push(jobs::job_spec());
+        if presence.job {
+            specs.push(jobs::job_spec());
+        }
     }
     specs
 }

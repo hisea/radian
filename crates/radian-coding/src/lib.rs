@@ -102,7 +102,7 @@ pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
     SweepSummary,
 };
-pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits};
+pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits, ToolPresence};
 pub use read_roots::ReadRoots;
 pub use shell::{
     UserBash, kill_session, own_session, run_user_bash, signal_session, stop_leader, wait_for_exit,
