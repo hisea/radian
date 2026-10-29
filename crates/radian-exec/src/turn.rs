@@ -164,27 +164,9 @@ pub(crate) async fn one_shot(
         // (ADR 0044); the `Result` record names the budget and the unhandled counts. A
         // degraded `Stop` verdict waits the same way: no running job, no wake pending,
         // not busy, and exec would otherwise exit 0 with the verdict unread.
-        let unhandled = run
-            .session
-            .job_notifier()
-            .map(|notifier| notifier.degraded_pending())
-            .unwrap_or(0);
-        let unhandled_stop = run.session.command_hooks().degraded_pending();
+        let (unhandled, unhandled_stop) = degraded_counts(run);
         if unhandled + unhandled_stop > 0 {
-            eprintln!(
-                "radian: the wake budget is used up with {unhandled} job completion \
-                 notice(s) and {unhandled_stop} Stop verdict(s) unhandled; ending the run"
-            );
-            if let Err(error) = close_and_join(&run.inbox, &run.session).await {
-                eprintln!("radian: {}", redact(&error, &run.secrets));
-            }
-            return LoopDone {
-                code: 3,
-                end: ExecEnd::WakeBudget {
-                    unhandled,
-                    unhandled_stop,
-                },
-            };
+            return degraded_budget_end(run, unhandled, unhandled_stop).await;
         }
         // A lost notice never opens a turn either (its enqueue failed every attempt, ADR
         // 0037 decision 5's failure rule): end the session the same way — exit 3 and one
@@ -202,6 +184,14 @@ pub(crate) async fn one_shot(
             return LoopDone { code: 3, end };
         }
         if jobs_quiescent(run).await {
+            // The last Stop run can finish between the count read above and this check: it
+            // marks its degraded verdict and then drops its pending count, so one pass can
+            // read "nothing degraded" and "nothing pending" from two different moments.
+            // Re-read before exiting, or the run ends 0 with the verdict unread.
+            let (unhandled, unhandled_stop) = degraded_counts(run);
+            if unhandled + unhandled_stop > 0 {
+                return degraded_budget_end(run, unhandled, unhandled_stop).await;
+            }
             break;
         }
         match wait_for_progress(
@@ -368,6 +358,37 @@ async fn jobs_quiescent(run: &Run) -> bool {
     let stops = run.session.command_hooks().pending_stops();
     let after = run.inbox.version();
     after == before && may_exit(running, settled, handled, wake_pending, active, stops)
+}
+
+/// The degraded counts no turn will ever meet: job notices and Stop verdicts. Read
+/// together, because the exit decision compares their sum.
+fn degraded_counts(run: &Run) -> (u64, u64) {
+    let unhandled = run
+        .session
+        .job_notifier()
+        .map(|notifier| notifier.degraded_pending())
+        .unwrap_or(0);
+    let unhandled_stop = run.session.command_hooks().degraded_pending();
+    (unhandled, unhandled_stop)
+}
+
+/// The budget ending for degraded notices no turn will meet: one stderr row, the session
+/// closed, exit 3 (ADR 0044 §2a).
+async fn degraded_budget_end(run: &Run, unhandled: u64, unhandled_stop: u64) -> LoopDone {
+    eprintln!(
+        "radian: the wake budget is used up with {unhandled} job completion \
+         notice(s) and {unhandled_stop} Stop verdict(s) unhandled; ending the run"
+    );
+    if let Err(error) = close_and_join(&run.inbox, &run.session).await {
+        eprintln!("radian: {}", redact(&error, &run.secrets));
+    }
+    LoopDone {
+        code: 3,
+        end: ExecEnd::WakeBudget {
+            unhandled,
+            unhandled_stop,
+        },
+    }
 }
 
 /// After a `-p` turn ends with jobs still outstanding: waits for the next thing that can
