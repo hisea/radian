@@ -3125,6 +3125,25 @@ mod tests {
             gone,
             "the observe run's process group survived the deadline"
         );
+        // The killed run's recent-runs entry says `cancelled` (ADR 0045 §6): the deadline
+        // kills it and its end is recorded, never delivered.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if fixture
+                .hooks
+                .hook_runs()
+                .iter()
+                .any(|run| run.end == HookRunEnd::Cancelled)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the killed observe run was not recorded cancelled: {:?}",
+                fixture.hooks.hook_runs()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// A `Notification` hook never postpones an exit: `wait_observe` returns without waiting
