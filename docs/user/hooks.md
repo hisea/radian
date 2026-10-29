@@ -40,9 +40,9 @@ an allowed call, and an `auto`-approved call never fire it.
 their stdout is not read, and their exit code or timeout only adds one Recent
 runs entry: they never block a turn, a prompt or an exit, and never change an
 exit code. Their default timeout is 60 seconds; an explicit `timeout` still
-wins. `async` on either is accepted and inert: they always run in the
-background, so the field changes nothing (the 600-second async default does
-not apply either).
+wins. `async` and `asyncRewake` on either are accepted and inert: they always
+run in the background, so the fields change nothing (the 600-second async
+default does not apply either).
 
 ## Where hooks live
 
