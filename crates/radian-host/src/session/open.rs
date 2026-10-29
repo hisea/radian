@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_extensions::McpToolProvider;
 use radian_core::{Agent, AgentConfig, ModelUsage};
-use radian_permissions::{Approver, PermissionHooks, PermissionRequestHooks};
-use radian_runtime::{Driver, Inbox, ModelRoute};
+use radian_permissions::{Approver, NotificationHooks, PermissionHooks, PermissionRequestHooks};
+use radian_runtime::{Driver, Inbox, ModelRoute, RuntimeEvents};
 use radian_sandbox::{Sandbox, SandboxSlot};
 
 use super::facade::{DriverEnd, SessionError};
@@ -400,6 +400,17 @@ pub async fn open_session(
     hooks.set_permission_request_hooks(Some(
         Arc::clone(&command_hooks) as Arc<dyn PermissionRequestHooks>
     ));
+    // ADR 0045 §6: the same chain observes a prompt about to reach a human. The notification
+    // call starts its work in the background, so a hanging hook never delays the modal.
+    hooks.set_notification_hooks(Some(
+        Arc::clone(&command_hooks) as Arc<dyn NotificationHooks>
+    ));
+    // ADR 0045 §6: the driver's model-error path fires `StopFailure` through this layer,
+    // before the host's own sink sees the same event.
+    let runtime_events: Arc<dyn RuntimeEvents> = Arc::new(HookRuntimeEvents {
+        hooks: Arc::clone(&command_hooks),
+        inner: runtime_events,
+    });
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
@@ -803,4 +814,31 @@ pub async fn open_session(
         config_snapshot,
         history: recovered_history,
     })
+}
+
+/// The runtime-event layer that fires the observe-only `StopFailure` hook (ADR 0045 §6)
+/// before forwarding the event to the host's own sink. It exists only for the driver: the
+/// host's sink keeps its old shape and ignores the extra callback.
+struct HookRuntimeEvents {
+    hooks: Arc<crate::CommandHooks>,
+    inner: Arc<dyn RuntimeEvents>,
+}
+
+impl RuntimeEvents for HookRuntimeEvents {
+    fn on_runtime_event(&self, event: &radian_session::RuntimeEvent) {
+        self.inner.on_runtime_event(event);
+    }
+
+    fn on_model_error(&self, error: &radian_core::ModelError) {
+        self.inner.on_model_error(error);
+    }
+
+    fn on_stop_failure(&self, error: &radian_core::ModelError, last_assistant_message: &str) {
+        self.hooks.run_stop_failure(error, last_assistant_message);
+        self.inner.on_stop_failure(error, last_assistant_message);
+    }
+
+    fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
+        self.inner.on_hook_event(name, data);
+    }
 }

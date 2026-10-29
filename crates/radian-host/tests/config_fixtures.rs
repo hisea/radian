@@ -150,9 +150,10 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"tui.theme".to_string()));
 }
 
-/// `hooks.toml` (ADR 0045 slice A): the four events parse with matchers and commands;
-/// the non-subset entries (`http`, `async` on `PreToolUse`, unknown event) are skipped,
-/// never refused, and `async`/`asyncRewake` load on `PostToolUse`.
+/// `hooks.toml` (ADR 0045 slice A and §6): the four deciding events and the two
+/// observe-only events parse with matchers and commands; the non-subset entries (`http`,
+/// `async` on `PreToolUse`, unknown event) are skipped, never refused, and
+/// `async`/`asyncRewake` load on `PostToolUse`.
 #[test]
 fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     let (path, text) = fixture("hooks.toml");
@@ -182,6 +183,17 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     );
     assert_eq!(config.hooks.stop.len(), 1);
     assert_eq!(config.hooks.stop[0].hooks[0].timeout_secs, Some(30));
+    // ADR 0045 §6: the observe-only events load with their closed-set matchers.
+    assert_eq!(config.hooks.stop_failure.len(), 1);
+    assert_eq!(
+        config.hooks.stop_failure[0].matcher.as_deref(),
+        Some("usage_limit")
+    );
+    assert_eq!(config.hooks.notification.len(), 1);
+    assert_eq!(
+        config.hooks.notification[0].matcher.as_deref(),
+        Some("permission_prompt")
+    );
     assert_eq!(
         config.hooks.intent_stop,
         Some(false),

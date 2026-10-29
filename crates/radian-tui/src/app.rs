@@ -54,6 +54,7 @@ mod find;
 mod footer;
 pub(crate) mod goal_mode;
 mod history;
+pub(crate) mod idle_prompt;
 mod input;
 mod inspector;
 mod layers;
@@ -93,6 +94,10 @@ pub use loop_mode::{loop_iteration, loop_message};
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long a TUI turn may sit idle before the `Notification` `idle_prompt` observers fire
+/// (ADR 0045 §6): a fixed constant, no config key. Input restarts the timer.
+pub const IDLE_PROMPT_DELAY: Duration = Duration::from_secs(radian_host::config::IDLE_PROMPT_SECS);
+
 /// How long a `/fork` waits for the last turn's boundary to reach the journal (the runtime
 /// `TurnFinished`) before giving up. The fork reads the parent file, so forking before the
 /// append would copy an empty history. Long enough for an fsync, short enough to tell the
@@ -113,6 +118,9 @@ pub enum Effect {
     CancelSideQuestion,
     /// Leave the app.
     Quit,
+    /// The TUI's idle timer fired (ADR 0045 §6): run the session's `Notification` hooks with
+    /// `idle_prompt`. It observes only and never opens a turn.
+    NotifyIdle,
     /// Answer the pending request `request_id` (ADR 0023 U7). The loop runs it through the
     /// session's facade, which re-validates the `AnswerRequest` capability.
     AnswerRequest {
@@ -758,6 +766,12 @@ pub struct App {
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
     pub quit_pending: Option<Instant>,
+    /// When the current idle stretch began: a turn end, or the last input. `None` before the
+    /// first turn. The `idle_prompt` timer reads it (ADR 0045 §6).
+    pub idle_since: Option<Instant>,
+    /// The `idle_prompt` observer already fired for this idle stretch; a later input clears
+    /// it and restarts the timer.
+    pub idle_notified: bool,
     /// The last request the UI answered: the queue's head stays that request for a moment, and
     /// re-showing it would flash a form the user just submitted.
     last_answered: Option<u64>,

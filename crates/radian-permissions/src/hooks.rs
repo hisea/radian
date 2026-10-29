@@ -12,7 +12,10 @@ use crate::approval::{ApprovalOutcome, ApprovalRequest, Approver};
 use crate::audit::{Approver as AuditApprover, AuditSink, PermissionResolved, ResolvedDecision};
 use crate::profile::{ApprovalPolicy, Preset, Profile};
 use crate::readonly::{self, ReadOnlyHit};
-use crate::request::{PermissionRequestDecision, PermissionRequestHooks};
+use crate::request::{
+    NOTIFICATION_PERMISSION_PROMPT, NotificationHooks, PermissionRequestDecision,
+    PermissionRequestHooks,
+};
 use crate::rule::{Action, Evaluated, Resource, evaluate, resolve, resource_of};
 use crate::shell;
 
@@ -73,6 +76,9 @@ pub struct PermissionHooks {
     /// today's path. `radian-host`'s `CommandHooks` implements it, and the host installs it,
     /// so this crate never depends on the host.
     permission_request: RwLock<Option<Arc<dyn PermissionRequestHooks>>>,
+    /// The host's `Notification` hook chain (ADR 0045 §6), fired just before the approver
+    /// asks a human. `None` keeps today's path.
+    notification: RwLock<Option<Arc<dyn NotificationHooks>>>,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
     grants: Mutex<HashSet<SessionGrant>>,
@@ -102,6 +108,7 @@ impl PermissionHooks {
             task_approver: AtomicBool::new(false),
             tool_gate: RwLock::new(None),
             permission_request: RwLock::new(None),
+            notification: RwLock::new(None),
             audit,
             grants: Mutex::new(HashSet::new()),
             hook_grants: Mutex::new(HashSet::new()),
@@ -170,6 +177,13 @@ impl PermissionHooks {
             .permission_request
             .write()
             .unwrap_or_else(|e| e.into_inner()) = hooks;
+    }
+
+    /// Installs the host's `Notification` hook chain (ADR 0045 §6). It is called right before
+    /// the approver asks a human, after the `PermissionRequest` chain gave no decision, so a
+    /// script can tell that a prompt is waiting. `None` clears it.
+    pub fn set_notification_hooks(&self, hooks: Option<Arc<dyn NotificationHooks>>) {
+        *self.notification.write().unwrap_or_else(|e| e.into_inner()) = hooks;
     }
 
     /// The gate's verdict for one tool name, if a gate is installed.
@@ -598,6 +612,19 @@ impl PermissionHooks {
             arguments: call.arguments.clone(),
             reason: evaluated.reason.clone(),
         };
+        // ADR 0045 §6: a human is about to be asked. Fire the `permission_prompt` observers
+        // now — after the `PermissionRequest` chain gave no decision, before the approver —
+        // and at once: the chain starts its work in the background, so a hanging hook cannot
+        // delay the prompt. Only the tool name leaves, never its arguments.
+        if human
+            && let Some(notification) = self
+                .notification
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        {
+            notification.notification(NOTIFICATION_PERMISSION_PROMPT, Some(&call.name));
+        }
         let outcome = tokio::select! {
             biased;
             _ = cx.cancellation.cancelled() => {

@@ -1,7 +1,8 @@
 //! The `[hooks]` section (ADR 0045 slice A): the Claude/Codex command-hook subset in
 //! `config.toml`.
 //!
-//! Only four events exist — `PreToolUse`, `PostToolUse`, `Stop` and `PermissionRequest` — each
+//! Only six events exist — `PreToolUse`, `PostToolUse`, `Stop`, `PermissionRequest`,
+//! `StopFailure` and `Notification` — each
 //! a list of `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args,
 //! timeout, async, asyncRewake }`
 //! table. `args` is optional: with it `command` is the program and the hook starts without a
@@ -21,7 +22,9 @@
 //!
 //! `async` (default `false`) and `asyncRewake` (default `false`; `true` implies `async`)
 //! are accepted on `PostToolUse` and `Stop` only (ADR 0045 §1/§5): the hook starts like a
-//! synchronous one and the tool result or the `Stop` chain continues at once.
+//! synchronous one and the tool result or the `Stop` chain continues at once. On the
+//! observe-only `StopFailure` and `Notification` events `async` is accepted and inert: those
+//! hooks always run in the background (§6).
 
 use toml::Value;
 
@@ -30,7 +33,14 @@ use super::Config;
 /// The hook events this slice implements. The single source for the match arms below,
 /// the project hooks reader, and the manual's drift test: adding an event means adding
 /// it here first.
-pub const HOOK_EVENTS: &[&str] = &[PRE_TOOL_USE, PERMISSION_REQUEST, POST_TOOL_USE, STOP];
+pub const HOOK_EVENTS: &[&str] = &[
+    PRE_TOOL_USE,
+    PERMISSION_REQUEST,
+    POST_TOOL_USE,
+    STOP,
+    STOP_FAILURE,
+    NOTIFICATION,
+];
 /// The tool-call hook that runs before the tool runs.
 pub const PRE_TOOL_USE: &str = "PreToolUse";
 /// The hook that answers an `ask` before anyone is asked (ADR 0045 §4).
@@ -39,6 +49,22 @@ pub const PERMISSION_REQUEST: &str = "PermissionRequest";
 pub const POST_TOOL_USE: &str = "PostToolUse";
 /// The hook that runs when the model stops.
 pub const STOP: &str = "Stop";
+/// The observe-only hook that runs when a turn ends on a model error (ADR 0045 §6).
+pub const STOP_FAILURE: &str = "StopFailure";
+/// The observe-only hook that runs when radian is about to ask a human, or a TUI turn left
+/// the session idle (ADR 0045 §6).
+pub const NOTIFICATION: &str = "Notification";
+
+/// The `StopFailure` matcher's closed set: the [`radian_core::MODEL_ERROR_KINDS`] names, so
+/// the parser, the manual and the drift test read one declaration.
+pub const STOP_FAILURE_MATCHERS: &[&str] = radian_core::MODEL_ERROR_KINDS;
+/// The `Notification` matcher's closed set (ADR 0045 §6).
+pub const NOTIFICATION_TYPES: &[&str] = radian_permissions::NOTIFICATION_TYPES;
+pub const NOTIFICATION_PERMISSION_PROMPT: &str = radian_permissions::NOTIFICATION_PERMISSION_PROMPT;
+pub const NOTIFICATION_IDLE_PROMPT: &str = radian_permissions::NOTIFICATION_IDLE_PROMPT;
+
+/// The `idle_prompt` delay, in seconds (ADR 0045 §6): a fixed constant, no config key.
+pub const IDLE_PROMPT_SECS: u64 = 60;
 
 /// The default per-hook timeout, in seconds (Claude's default): how long one hook command
 /// may run before it counts as a hook error (fail closed).
@@ -90,6 +116,16 @@ impl HookCommand {
             Some(secs) => std::time::Duration::from_secs(secs),
         }
     }
+
+    /// The timeout of an observe-only run (`StopFailure`, `Notification`): the configured one,
+    /// or the synchronous 60 s default. `async` is inert on those events and never moves this
+    /// default (ADR 0045 §6).
+    pub fn observe_timeout(&self) -> std::time::Duration {
+        match self.timeout_secs {
+            Some(0) | None => std::time::Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
+            Some(secs) => std::time::Duration::from_secs(secs),
+        }
+    }
 }
 
 /// One `{ matcher, hooks }` entry under an event name.
@@ -111,6 +147,10 @@ pub struct HooksConfig {
     pub permission_request: Vec<HookMatcher>,
     pub post_tool_use: Vec<HookMatcher>,
     pub stop: Vec<HookMatcher>,
+    /// The observe-only `StopFailure` entries (ADR 0045 §6).
+    pub stop_failure: Vec<HookMatcher>,
+    /// The observe-only `Notification` entries (ADR 0045 §6).
+    pub notification: Vec<HookMatcher>,
     /// `[hooks] intent_stop`: the built-in intent-stop validator on the `Stop` path
     /// (backlog `turn-end-continuation.md` §B). `None` means the default, **on**; the
     /// host reads `unwrap_or(true)`. `false` turns the validator off (user `Stop`
@@ -125,17 +165,28 @@ impl HooksConfig {
             && self.permission_request.is_empty()
             && self.post_tool_use.is_empty()
             && self.stop.is_empty()
+            && self.stop_failure.is_empty()
+            && self.notification.is_empty()
     }
 }
 
-/// Whether one matcher runs: `*`/empty/missing always does; otherwise the pattern must
-/// compile as `^(?:<matcher>)$` (the runtime's anchoring — `sh` does not match `shell`).
+/// Whether one tool-event matcher runs: `*`/empty/missing always does; otherwise the pattern
+/// must compile as `^(?:<matcher>)$` (the runtime's anchoring — `sh` does not match `shell`).
 /// The inspector's hooks page reads this, so the flag follows the same compile the
 /// runtime uses without a second regex dependency in the TUI.
 pub fn matcher_effective(matcher: Option<&str>) -> bool {
     match matcher {
         None | Some("") | Some("*") => true,
         Some(pattern) => regex::Regex::new(&format!("^(?:{pattern})$")).is_ok(),
+    }
+}
+
+/// The `StopFailure`/`Notification` matcher's effective flag: `*`/empty/missing always
+/// matches; otherwise the value must be one of `allowed` (a closed set, never a regex).
+pub fn observe_matcher_effective(allowed: &[&str], matcher: Option<&str>) -> bool {
+    match matcher {
+        None | Some("") | Some("*") => true,
+        Some(value) => allowed.contains(&value),
     }
 }
 
@@ -166,6 +217,8 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             PERMISSION_REQUEST => &mut config.hooks.permission_request,
             POST_TOOL_USE => &mut config.hooks.post_tool_use,
             STOP => &mut config.hooks.stop,
+            STOP_FAILURE => &mut config.hooks.stop_failure,
+            NOTIFICATION => &mut config.hooks.notification,
             _ => {
                 config.skipped.push(format!("hooks.{event}"));
                 continue;
@@ -175,7 +228,10 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             config.skipped.push(format!("hooks.{event}"));
             continue;
         };
-        let accepts_async = matches!(event.as_str(), POST_TOOL_USE | STOP);
+        let accepts_async = matches!(
+            event.as_str(),
+            POST_TOOL_USE | STOP | STOP_FAILURE | NOTIFICATION
+        );
         for (index, item) in items.iter().enumerate() {
             let parsed = parse_entry(item, accepts_async);
             // A bad `args`, or `async` on an event that does not accept it, drops that hook
@@ -449,9 +505,10 @@ mod tests {
         super::super::parse(Path::new("/tmp/test/config.toml"), text).unwrap()
     }
 
-    /// The subset parses: four events, matchers kept raw, commands with timeouts carried.
+    /// The subset parses: the four deciding events, matchers kept raw, commands with
+    /// timeouts carried.
     #[test]
-    fn the_four_events_parse_with_matchers_and_timeouts() {
+    fn the_four_deciding_events_parse_with_matchers_and_timeouts() {
         let config = parse_str(concat!(
             "schema_version = 1\n",
             "[[hooks.PreToolUse]]\n",
@@ -498,6 +555,53 @@ mod tests {
         );
         assert_eq!(config.hooks.stop.len(), 1);
         assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    }
+
+    /// The observe-only events parse with their closed-set matchers, they accept `async`
+    /// (inert), and that field never moves their default timeout to 600 s (ADR 0045 §6).
+    #[test]
+    fn stop_failure_and_notification_parse_and_async_is_inert() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.StopFailure]]\n",
+            "matcher = \"usage_limit\"\n",
+            "[[hooks.StopFailure.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo stopped\"\n",
+            "async = true\n",
+            "[[hooks.Notification]]\n",
+            "matcher = \"permission_prompt\"\n",
+            "[[hooks.Notification.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo notify\"\n",
+        ));
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+        assert_eq!(config.hooks.stop_failure.len(), 1);
+        assert_eq!(
+            config.hooks.stop_failure[0].matcher.as_deref(),
+            Some("usage_limit")
+        );
+        let hook = &config.hooks.stop_failure[0].hooks[0];
+        assert!(hook.async_hook, "async is accepted and inert");
+        assert_eq!(
+            hook.observe_timeout(),
+            std::time::Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
+            "async never moves an observe hook's default to 600 s"
+        );
+        assert_eq!(
+            hook.timeout(),
+            std::time::Duration::from_secs(DEFAULT_ASYNC_HOOK_TIMEOUT_SECS),
+            "the async field still has its old meaning for the events that use it"
+        );
+        assert_eq!(config.hooks.notification.len(), 1);
+        assert_eq!(
+            config.hooks.notification[0].matcher.as_deref(),
+            Some("permission_prompt")
+        );
+        assert_eq!(
+            config.hooks.notification[0].hooks[0].observe_timeout(),
+            std::time::Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS)
+        );
     }
 
     /// `[hooks] intent_stop` (backlog `turn-end-continuation.md` §B.6): a boolean is

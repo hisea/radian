@@ -222,3 +222,11 @@ pending_wake`. Unmutated, the binary passed 5/5.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0222-M2 | `drain_steering` writes the merged `InputClaimed` to the journal but does not forward it to the sink | ✅ 1 failed | `pending_wake::an_absorbed_pending_wake_does_not_open_another_turn` ("the merged claim reaches the runtime-event sink": the sink never saw the notice's id) |
+
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-runtime --test provider_failure --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M1 | the driver no longer calls `on_stop_failure` on a model error | ✅ 1 failed (rc=100) | `provider_failure::stop_failure_fires_only_for_a_model_error_turn` (no kind reached the sink) |

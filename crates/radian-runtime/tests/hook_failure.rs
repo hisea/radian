@@ -21,7 +21,7 @@ use radian_core::{
     Agent, AgentEvent, EventSink, HookContext, HookError, Hooks, InputSource, ModelRequest,
     RunStatus, TurnOptions,
 };
-use radian_runtime::{Driver, Inbox};
+use radian_runtime::{Driver, Inbox, RuntimeEvents};
 use radian_session::{EventData, Session, SessionJournal};
 use serde_json::json;
 
@@ -116,6 +116,68 @@ fn turn_failed_messages(path: &Path) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn a_hook_error_turn_calls_no_stop_failure() {
+    #[derive(Default)]
+    struct Sink {
+        calls: std::sync::Mutex<u32>,
+    }
+    impl RuntimeEvents for Sink {
+        fn on_runtime_event(&self, _event: &radian_session::RuntimeEvent) {}
+        fn on_stop_failure(&self, _error: &radian_core::ModelError, _last_assistant_message: &str) {
+            *self.calls.lock().unwrap() += 1;
+        }
+    }
+
+    let server = MockServer::start(Vec::new()).await;
+    let dir = TempDir::new("hook-no-stop-failure");
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    let agent = Arc::new(
+        Agent::new(
+            Anthropic::new(
+                AnthropicConfig::new(&server.base_url, "claude-test")
+                    .with_api_key(ApiKey::new("sk-ant-hook")),
+            )
+            .unwrap(),
+            MemTools::new(),
+        )
+        .with_hooks(FailOnCall {
+            calls: AtomicU32::new(0),
+            fail_at: 0,
+        }),
+    );
+    let sink = Arc::new(Sink::default());
+    let mut driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .expect("open the driver");
+    driver.set_runtime_events(Arc::clone(&sink) as Arc<dyn RuntimeEvents>);
+    let handle = tokio::spawn(async move { driver.run().await });
+    inbox.followup("hi", InputSource::User).await.unwrap();
+    wait_turn(&recorder).await;
+    assert_eq!(last_status(&recorder), Some(RunStatus::Failed));
+    inbox.close();
+    handle.await.unwrap().unwrap();
+
+    assert_eq!(
+        *sink.calls.lock().unwrap(),
+        0,
+        "a hook error is not a model error"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "the hook failed before the model was asked"
+    );
 }
 
 #[tokio::test]

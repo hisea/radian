@@ -1807,4 +1807,13 @@ named test ran with `cargo nextest run -p radian-host --lib --locked --profile s
 | TK0235-M8 | the session-end guard is dropped again: `end_session` sets `async_ended` without taking `deliver_gate`, and `deliver_async` checks the flag without it | ✅ 1 failed (rc=100) | `hooks::tests::the_session_end_waits_for_a_delivery_already_enqueueing` (the end returned while the delivery was still blocked in the journal) |
 | TK0235-M9 | the cap counts registered entries again (`running.len()`), including runs whose process already exited | ✅ 1 failed (rc=100) | `hooks::tests::the_cap_counts_running_processes_not_delivering_results` (the ninth hook was refused with no hook process running) |
 
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-host --lib --test claude_migrate --test command_hooks --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M2 | `ObserveMatcher::Value` matches every value instead of the named kind | ✅ 1 failed (rc=100) | `hooks::tests::stop_failure_selects_the_kind_and_carries_its_stdin` (the `transport` entry ran too) |
+| TK0236-M5 | the import table maps `rate_limit` to `transport` instead of `unavailable` | ✅ 1 failed (rc=100) | `claude_migrate::the_typical_fixtures_map_commands_hooks_and_agents_md` (the imported matcher was `transport`) |
+
 2/2 caught, no equivalent mutation.

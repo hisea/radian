@@ -99,6 +99,14 @@ fn user_home(dir: &Path) {
     "Stop": [
       { "hooks": [{ "type": "command", "command": "make check" }] }
     ],
+    "StopFailure": [
+      { "matcher": "rate_limit", "hooks": [{ "type": "command", "command": "echo rate" }] },
+      { "matcher": "max_output_tokens", "hooks": [{ "type": "command", "command": "echo dropped" }] }
+    ],
+    "Notification": [
+      { "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "echo prompt" }] },
+      { "matcher": "auth_success", "hooks": [{ "type": "command", "command": "echo dropped" }] }
+    ],
     "SessionStart": [
       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo hi" }] }
     ]
@@ -213,6 +221,34 @@ fn the_typical_fixtures_map_commands_hooks_and_agents_md() {
         Some("patch")
     );
     assert_eq!(config.hooks.stop.len(), 1);
+    // The two observe-only events come over too; a StopFailure category goes through the one
+    // table (rate_limit → unavailable), and an unmapped category/type is dropped with a line.
+    assert_eq!(config.hooks.stop_failure.len(), 1, "{:?}", config.hooks);
+    assert_eq!(
+        config.hooks.stop_failure[0].matcher.as_deref(),
+        Some("unavailable")
+    );
+    assert_eq!(config.hooks.notification.len(), 1, "{:?}", config.hooks);
+    assert_eq!(
+        config.hooks.notification[0].matcher.as_deref(),
+        Some("permission_prompt")
+    );
+    assert!(
+        draft
+            .notes
+            .iter()
+            .any(|note| note.contains("max_output_tokens") && note.contains("no radian kind")),
+        "the unmapped StopFailure category is reported: {:?}",
+        draft.notes
+    );
+    assert!(
+        draft
+            .notes
+            .iter()
+            .any(|note| note.contains("auth_success") && note.contains("no radian type")),
+        "the unsupported Notification type is reported: {:?}",
+        draft.notes
+    );
     assert!(
         draft
             .notes
@@ -1360,7 +1396,10 @@ fn async_hooks_are_imported_on_post_and_stop_but_not_on_pre() {
     let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
     let report = draft.notes.join("\n");
     assert!(
-        report.contains("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`"),
+        report.contains(
+            "`async`/`asyncRewake` is only supported on `PostToolUse`, `Stop`, `StopFailure` \
+             and `Notification`"
+        ),
         "the PreToolUse async hook is dropped with a report line: {report}"
     );
     let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
@@ -1438,7 +1477,10 @@ fn an_explicitly_false_async_field_on_pre_is_not_imported() {
     let report = draft.notes.join("\n");
     assert_eq!(
         report
-            .matches("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`")
+            .matches(
+                "`async`/`asyncRewake` is only supported on `PostToolUse`, `Stop`, `StopFailure` \
+                 and `Notification`"
+            )
             .count(),
         3,
         "one report line per dropped hook: {report}"

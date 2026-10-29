@@ -118,6 +118,13 @@ pub(crate) async fn close_and_join(
     inbox: &Arc<Inbox>,
     session: &Arc<radian_host::LocalSession>,
 ) -> Result<(), String> {
+    // ADR 0045 §6: `exec -p` waits at most 5 s for a `StopFailure` observer, then kills its
+    // process group. The run's exit code and output are already decided; this only gives the
+    // observer a bounded chance to finish.
+    session
+        .command_hooks()
+        .wait_observe(Duration::from_secs(5))
+        .await;
     inbox.close();
     match session.join().await {
         radian_host::DriverEnd::Ok => Ok(()),

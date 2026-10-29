@@ -145,4 +145,12 @@ empty).
 | TK0233-M2 | a hook grant needs a human turn too (`hook_granted && human`), so a `System` turn's grant never covers | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_grant_covers_a_non_human_turn` |
 | TK0233-M3 | the grant is recorded as the exact key instead of `session_grant_for`, so a `shell` prefix is lost | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_shell_grant_widens_to_the_prefix` |
 
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-host --test command_hooks --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M6 | a `PermissionRequest` `allow` also fires `permission_prompt` | ✅ 1 failed (rc=100) | `command_hooks::a_permission_prompt_fires_once_and_never_delays_the_prompt` (the answered ask wrote a notification) |
+
 3/3 caught, no equivalent mutation.
