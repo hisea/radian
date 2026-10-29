@@ -1785,3 +1785,27 @@ applied by hand to `crates/radian-arc/src/gate/integration.rs`, backed up under
 2/2 caught.
 
 
+
+## TK0241: `[integration] method = "command"` (2026-10-29, branch `work/TK0241-merge-method-command`)
+
+ADR 0048 decision 6: with `method = "command"` arc builds the candidate and runs the
+`key_commands` as before, then runs `[integration] command` in the repository root and reads
+its last non-empty line (a 40-hex sha checked against the remote target and the candidate's
+tree, `pending`, or `closed`). A non-zero exit or a timeout wins over the line. A `pending`
+answer leaves the task in `review.integrating`, and the next pass reuses the passing
+integration verdict while its `base_sha` is still the remote target. Each mutation was applied
+by hand to the committed files, backed up under `.radian/mut/`, the named tests ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test merge_command -E '<the test
+below>'`, and the files were restored from the copies with `cp` and confirmed identical with
+`diff -q`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0241-M1 | `last_non_empty_line` takes the literal last line instead of the last non-empty one | `merge_command::the_last_non_empty_line_is_read_and_a_crlf_is_trimmed` | ✅ 1 failed |
+| TK0241-M2 | the command's exit code is ignored when its last line is a sha | `merge_command::a_non_zero_exit_with_a_sha_last_is_a_failure` | ✅ 1 failed |
+| TK0241-M3 | `check_command_landed` skips the candidate-tree comparison | `merge_command::a_sha_whose_tree_differs_is_recorded_not_merged` | ✅ 1 failed |
+| TK0241-M4 | `check_command_landed` skips the "sha is on the remote target" check | `merge_command::a_sha_that_is_not_on_the_remote_target_is_not_merged` | ✅ 1 failed |
+| TK0241-M5 | a pass after `pending` rebuilds the candidate instead of reusing the integration verdict | `merge_command::pending_runs_reuse_the_candidate_and_merge_on_a_later_pass` | ✅ 1 failed |
+| TK0241-M6 | `config::parse` accepts `method = "command"` without `[integration] command` | `merge_command::method_command_without_a_command_is_refused_by_name` | ✅ 1 failed |
+
+6/6 caught.

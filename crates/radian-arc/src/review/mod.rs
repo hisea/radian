@@ -37,10 +37,10 @@ use sha2::Digest;
 use crate::gate::{
     CommandRun, IntegrationRun, PreviousReview, REVIEW_BLOCKING, REVIEW_UNAVAILABLE, ReviewItem,
     ReviewRun, ReviewSettings, Stage, StageSpec, Verdict, attempt_dir, effective_stages,
-    merge_ready, required_passed, verdict_path, verdict_set_digest,
+    merge_ready, required_passed, run_shell, verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
-use crate::store::config::IntegrationStyle;
+use crate::store::config::{Config, IntegrationMethod, IntegrationStyle};
 use crate::store::{Error, Loaded, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
@@ -341,6 +341,9 @@ pub struct Merged {
     /// it for the "changed arc's code" line (ADR 0048 decision 13). Empty unless the merge
     /// happened.
     pub changed_paths: Vec<String>,
+    /// The merge command answered `pending`: nothing merged yet and the task stays in
+    /// `review.integrating` (ADR 0048 decision 6). `radian arc merge` exits `3` for it.
+    pub pending: bool,
 }
 
 impl Merged {
@@ -2366,17 +2369,39 @@ pub fn merge(store: &Store, task_id: &str) -> Result<Merged, Error> {
 /// This is the synchronous path: approval, integration and push in one call. The scheduling
 /// loop uses `merge_step`, which starts the integration in the background.
 pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<Merged, Error> {
+    // A task resuming from `review.integrating` may be a `pending` merge command's: its
+    // integration verdict is still the candidate, so the command runs again instead of
+    // rebuilding the candidate, unless the target branch moved (ADR 0048 decision 6).
+    let resuming = store.load_task(task_id)?.item.phase == "integrating";
     let context = prepare_merge(store, task_id, approver)?;
+    let command_method = store.config()?.integration.method == IntegrationMethod::Command;
+    let mut prepared = if command_method && resuming {
+        reusable_command_verdict(store, &context)?
+    } else {
+        None
+    };
     let mut last = String::new();
     for round in 1..=MAX_INTEGRATION_ROUNDS {
-        let integration_label = next_integration_label(store, task_id, &context.label)?;
-        let verdict = run_integration(store, &context, &integration_label)?;
-        if !verdict.is_pass() {
-            return integration_failed(store, &context, &integration_label, &verdict, round);
-        }
-        let verdict_file = integration_verdict(store, task_id, &integration_label)?;
+        let (verdict_file, verdict) = match prepared.take() {
+            Some(pair) => pair,
+            None => {
+                let integration_label = next_integration_label(store, task_id, &context.label)?;
+                let verdict = run_integration(store, &context, &integration_label)?;
+                if !verdict.is_pass() {
+                    return integration_failed(
+                        store,
+                        &context,
+                        &integration_label,
+                        &verdict,
+                        round,
+                    );
+                }
+                let path = integration_verdict(store, task_id, &integration_label)?;
+                (path, verdict)
+            }
+        };
         match finish_integration(store, &context, &verdict, &verdict_file, round)? {
-            Integration::Merged(merged) => return Ok(*merged),
+            Integration::Merged(merged) | Integration::Pending(merged) => return Ok(*merged),
             Integration::Again(reason) => last = reason,
         }
     }
@@ -2653,6 +2678,9 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
 enum Integration {
     /// Boxed: the result is much larger than the other variant.
     Merged(Box<Merged>),
+    /// The `[integration] command` answered `pending`: nothing merged yet, and the task stays
+    /// in `review.integrating` so a later pass runs the command again (ADR 0048 decision 6).
+    Pending(Box<Merged>),
     /// Main moved or the push was rejected: the task is back in `review.integrating` and
     /// needs another round.
     Again(String),
@@ -2682,10 +2710,10 @@ fn task_change_paths(repo: &Path, main_sha: Option<&str>, base: &str, head: &str
         .collect()
 }
 
-/// Finishes a passing integration verdict: `review.ready_to_merge`, the push to the remote
-/// target branch, the check that what landed is the candidate, and `done.merged` (ADR 0048
-/// decisions 6 and 11). A failed post-push check sends the task to `review.rework_pending`
-/// instead of `done.merged`.
+/// Finishes a passing integration verdict: `review.ready_to_merge`, the merge by the
+/// configured `[integration] method`, the check that what landed is the candidate, and
+/// `done.merged` (ADR 0048 decisions 6 and 11). A failed post-merge check sends the task to
+/// `review.rework_pending` instead of `done.merged`.
 fn finish_integration(
     store: &Store,
     context: &MergeContext,
@@ -2708,6 +2736,18 @@ fn finish_integration(
         }
         Ok(())
     })?;
+    let config = store.config()?;
+    if config.integration.method == IntegrationMethod::Command {
+        return finish_by_command(
+            store,
+            context,
+            verdict,
+            verdict_path,
+            round,
+            candidate,
+            &config,
+        );
+    }
     if !merge_ready(store.repo(), &context.remote, &context.main_ref, verdict)
         .map_err(gate_error)?
     {
@@ -2781,35 +2821,276 @@ fn finish_integration(
         // The push succeeded, but the target branch does not hold what the gate verified. The
         // task never reaches `done.merged`; the reason is recorded for the lead (ADR 0048
         // decisions 6 and 10).
-        let reason = Reason::with_verdict(
-            "merge",
-            Stage::Integration,
-            text,
-            verdict_path.to_path_buf(),
-        );
-        reason.record(store, task_id, &context.label);
-        reset_conflict_rework(store, task_id)?;
-        to_rework(store, task_id)?;
-        return Ok(Integration::Merged(Box::new(Merged {
-            task: task_id.to_owned(),
-            state: "review",
-            phase: "rework_pending".to_owned(),
-            reason: Some(reason.text()),
-            candidate_sha: None,
-            rounds: round,
-            warning: None,
-            conflict: None,
-            followup: None,
-            changed_paths: Vec::new(),
-        })));
+        return failed_after_merge(store, context, verdict_path, round, text);
     }
+    Ok(Integration::Merged(Box::new(record_merged(
+        store,
+        task_id,
+        &candidate,
+        round,
+        task_change_paths(
+            store.repo(),
+            verdict.main_sha.as_deref(),
+            &context.base,
+            &context.head,
+        ),
+    )?)))
+}
+
+/// The `[integration] method = "command"` half of [`finish_integration`]: run the configured
+/// line in the repository root, read its last non-empty line, and check what it reports
+/// (ADR 0048 decision 6).
+///
+/// The environment is the hooks' ([`crate::hooks::command_env`]), plus `ARC_CANDIDATE_SHA`;
+/// the timeout is `[gate] command_timeout_secs`. A line that is neither a 40-hex sha,
+/// `pending` nor `closed`, a non-zero exit and a timeout are all a failed integration.
+#[allow(clippy::too_many_arguments)]
+fn finish_by_command(
+    store: &Store,
+    context: &MergeContext,
+    verdict: &Verdict,
+    verdict_path: &Path,
+    round: u32,
+    candidate: String,
+    config: &Config,
+) -> Result<Integration, Error> {
+    let task_id = context.task_id.as_str();
+    let Some(line) = config.integration.command.as_deref() else {
+        // `config::parse` refuses this pairing, so reaching it means the file is not one arc
+        // reads; a merge outcome would hide that.
+        return Err(Error::Failed(
+            "`integration.method` is `command` but `integration.command` is not set".to_owned(),
+        ));
+    };
+    let task = store.load_task(task_id)?.item;
+    let env = crate::hooks::command_env(store, config, &task, &candidate);
+    let log = attempt_dir(store.repo(), task_id, &context.label)
+        .map_err(gate_error)?
+        .join("merge-command.log");
+    if let Some(parent) = log.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        return Err(Error::Failed(format!(
+            "cannot create {}: {error}",
+            parent.display()
+        )));
+    }
+    let outcome = run_shell(
+        store.repo(),
+        line,
+        config.gate.command_timeout(),
+        &log,
+        &env,
+        None,
+    )
+    .map_err(|error| Error::Failed(format!("the merge command could not run: {error}")))?;
+    let output = fs::read_to_string(&log).unwrap_or_default();
+    if !outcome.passed() {
+        // The exit code wins over what the last line says (a command that prints the sha and
+        // then fails is a failed merge).
+        let ended = if outcome.timed_out() {
+            format!("timed out after {} s", config.gate.command_timeout_secs)
+        } else {
+            match outcome.exit_code {
+                Some(code) => format!("exited {code}"),
+                None => "was killed by a signal".to_owned(),
+            }
+        };
+        let text = format!("the merge command {ended}: {}", output_tail(&output));
+        return failed_after_merge(store, context, verdict_path, round, text);
+    }
+    match last_non_empty_line(&output) {
+        Some("pending") => {
+            // Nothing merged yet. The task returns to `review.integrating` and keeps the
+            // passing integration verdict, so the next pass runs the command again with the
+            // same candidate while the target branch has not moved (ADR 0048 decision 6).
+            back_to_integrating(store, task_id)?;
+            Ok(Integration::Pending(Box::new(pending_outcome(
+                task_id, round,
+            ))))
+        }
+        Some("closed") => {
+            // The merge was abandoned (a closed pull request, for example). The task's reason
+            // is exactly this text, with the stage and verdict kept for `reverify`.
+            let reason = Reason::with_display(
+                "merge",
+                Stage::Integration,
+                "closed by the merge command".to_owned(),
+                "closed by the merge command".to_owned(),
+                verdict_path.to_path_buf(),
+            );
+            reason.record(store, task_id, &context.label);
+            reset_conflict_rework(store, task_id)?;
+            to_rework(store, task_id)?;
+            Ok(Integration::Merged(Box::new(rework_outcome(
+                task_id,
+                reason.text(),
+                round,
+            ))))
+        }
+        Some(sha) if is_sha(sha) => {
+            let sha = sha.to_owned();
+            match check_command_landed(store, context, &candidate, &sha)? {
+                None => Ok(Integration::Merged(Box::new(record_merged(
+                    store,
+                    task_id,
+                    &sha,
+                    round,
+                    task_change_paths(
+                        store.repo(),
+                        verdict.main_sha.as_deref(),
+                        &context.base,
+                        &context.head,
+                    ),
+                )?))),
+                Some(text) => failed_after_merge(store, context, verdict_path, round, text),
+            }
+        }
+        Some(other) => failed_after_merge(
+            store,
+            context,
+            verdict_path,
+            round,
+            format!(
+                "the merge command's last line is `{other}`, not a sha, `pending` or `closed`: {}",
+                output_tail(&output)
+            ),
+        ),
+        None => failed_after_merge(
+            store,
+            context,
+            verdict_path,
+            round,
+            "the merge command printed nothing".to_owned(),
+        ),
+    }
+}
+
+/// The check ADR 0048 decision 6 makes on what a merge command reported: after a fetch the
+/// sha must be on the remote target branch (equal to its tip or in its history), and its tree
+/// must be the candidate's tree. Exact sha equality is not required. `None` when both hold;
+/// otherwise the reason the merge did not land the candidate.
+fn check_command_landed(
+    store: &Store,
+    context: &MergeContext,
+    candidate: &str,
+    sha: &str,
+) -> Result<Option<String>, Error> {
+    fetch_target(store.repo(), &context.remote, &context.target_branch)?;
+    let commit = format!("{sha}^{{commit}}");
+    if !git(store.repo(), &["cat-file", "-e", &commit])?.success() {
+        return Ok(Some(format!(
+            "`{sha}` is not a commit arc can read after fetching `{}`",
+            context.remote
+        )));
+    }
+    let reference = format!("refs/remotes/{}/{}", context.remote, context.target_branch);
+    let target = git(
+        store.repo(),
+        &["rev-parse", "--verify", "--quiet", &reference],
+    )?;
+    if !target.success() {
+        return Ok(Some(format!(
+            "`{}` `{}` is missing",
+            context.remote, context.target_branch
+        )));
+    }
+    if !is_ancestor(store.repo(), sha, target.stdout.trim())? {
+        return Ok(Some(format!(
+            "`{sha}` is not on `{}` `{}`",
+            context.remote, context.target_branch
+        )));
+    }
+    let reported = git(store.repo(), &["rev-parse", &format!("{sha}^{{tree}}")])?;
+    let expected = git(
+        store.repo(),
+        &["rev-parse", &format!("{candidate}^{{tree}}")],
+    )?;
+    if !reported.success() || reported.stdout.trim() != expected.stdout.trim() {
+        return Ok(Some(format!(
+            "the tree of `{sha}` is not the tree of candidate {candidate}"
+        )));
+    }
+    Ok(None)
+}
+
+/// A merge that did not land the candidate: the reason is written and the task goes to
+/// `review.rework_pending` (ADR 0048 decisions 6 and 10).
+fn failed_after_merge(
+    store: &Store,
+    context: &MergeContext,
+    verdict_path: &Path,
+    round: u32,
+    text: String,
+) -> Result<Integration, Error> {
+    let reason = Reason::with_verdict(
+        "merge",
+        Stage::Integration,
+        text,
+        verdict_path.to_path_buf(),
+    );
+    reason.record(store, &context.task_id, &context.label);
+    reset_conflict_rework(store, &context.task_id)?;
+    to_rework(store, &context.task_id)?;
+    Ok(Integration::Merged(Box::new(rework_outcome(
+        &context.task_id,
+        reason.text(),
+        round,
+    ))))
+}
+
+/// The outcome of a merge command that answered `pending`: the task stays in
+/// `review.integrating` (ADR 0048 decision 6).
+fn pending_outcome(task: &str, round: u32) -> Merged {
+    Merged {
+        task: task.to_owned(),
+        state: "review",
+        phase: "integrating".to_owned(),
+        reason: Some("the merge command is pending".to_owned()),
+        candidate_sha: None,
+        rounds: round,
+        warning: None,
+        conflict: None,
+        followup: None,
+        changed_paths: Vec::new(),
+        pending: true,
+    }
+}
+
+/// The outcome of a merge that recorded a reason and went to `review.rework_pending`.
+fn rework_outcome(task: &str, reason: String, round: u32) -> Merged {
+    Merged {
+        task: task.to_owned(),
+        state: "review",
+        phase: "rework_pending".to_owned(),
+        reason: Some(reason),
+        candidate_sha: None,
+        rounds: round,
+        warning: None,
+        conflict: None,
+        followup: None,
+        changed_paths: Vec::new(),
+        pending: false,
+    }
+}
+
+/// Moves a merged task to `done.merged`, records the sha the merge produced, and proposes the
+/// plan's review follow-up (ADR 0048 decision 10). Shared by every merge method.
+fn record_merged(
+    store: &Store,
+    task_id: &str,
+    merged_sha: &str,
+    round: u32,
+    changed_paths: Vec<String>,
+) -> Result<Merged, Error> {
+    let sha = merged_sha.to_owned();
     store.change_task(task_id, |task| {
         // The pending hook and the sha it reads are recorded in this same write, so a crash
         // after the merge cannot lose the hook: the holder of `runner.lock` runs it, at least
         // once, until the point is cleared (ADR 0048 decisions 10 and 13).
         task.enter(model::TaskState::Done, "merged");
         task.retry_at = None;
-        task.merged_sha = Some(candidate.clone());
+        task.merged_sha = Some(sha.clone());
         // The switch is read here, with the merged-state write, not when the merge started:
         // an auto merge can run its integration while the owner changes the setting, and the
         // task merged under the per-plan rule only when the switch is on at this moment and
@@ -2845,23 +3126,77 @@ fn finish_integration(
             None
         }
     };
-    Ok(Integration::Merged(Box::new(Merged {
+    Ok(Merged {
         task: task_id.to_owned(),
         state: "done",
         phase: "merged".to_owned(),
         reason: None,
-        candidate_sha: Some(candidate),
+        candidate_sha: Some(merged_sha.to_owned()),
         rounds: round,
         warning,
         conflict: None,
         followup,
-        changed_paths: task_change_paths(
-            store.repo(),
-            verdict.main_sha.as_deref(),
-            &context.base,
-            &context.head,
-        ),
-    })))
+        changed_paths,
+        pending: false,
+    })
+}
+
+/// The last non-empty line of a command's output, with a CRLF ending's `\r` trimmed and blank
+/// trailing lines skipped: a merge command's answer (ADR 0048 decision 6).
+fn last_non_empty_line(output: &str) -> Option<&str> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
+/// Whether a merge command's answer is a 40-hex sha.
+fn is_sha(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The last lines of a command's output for a failure reason: at most 10 non-empty lines,
+/// joined with `; ` and cut to 2,000 characters.
+fn output_tail(output: &str) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(10)..].join("; ");
+    if tail.is_empty() {
+        return "(no output)".to_owned();
+    }
+    if tail.chars().count() > 2000 {
+        let cut: String = tail.chars().take(2000).collect();
+        return format!("{cut}\u{2026}");
+    }
+    tail
+}
+
+/// The passing integration verdict a `pending` merge command left, when the target branch it
+/// was built on is still the remote target: the next run reuses the candidate instead of
+/// rebuilding it (ADR 0048 decision 6). `None` when there is none or the target moved.
+fn reusable_command_verdict(
+    store: &Store,
+    context: &MergeContext,
+) -> Result<Option<(PathBuf, Verdict)>, Error> {
+    let Some((path, verdict)) = latest_integration_verdict(store, &context.task_id, &context.head)
+    else {
+        return Ok(None);
+    };
+    if !verdict.is_pass() {
+        return Ok(None);
+    }
+    let Some(base) = verdict.base_sha.as_deref() else {
+        return Ok(None);
+    };
+    if verdict.candidate_sha.as_deref().is_none_or(str::is_empty) {
+        return Ok(None);
+    }
+    let current = ls_remote_branch(store.repo(), &context.remote, &context.target_branch)?;
+    Ok((current.as_deref() == Some(base)).then_some((path, verdict)))
 }
 
 /// A failed integration verdict: record the reason and send the task to
@@ -2903,6 +3238,7 @@ fn integration_failed(
             conflict: Some(conflict),
             followup: None,
             changed_paths: Vec::new(),
+            pending: false,
         });
     }
     // This integration did not end in a conflict, so the task's run of conflicts is over.
@@ -2919,6 +3255,7 @@ fn integration_failed(
         conflict: None,
         followup: None,
         changed_paths: Vec::new(),
+        pending: false,
     })
 }
 
@@ -3116,6 +3453,9 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                     }
                     return match finish_integration(store, &context, &verdict, &path, 1)? {
                         Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
+                        // A `pending` merge command writes no line every pass; the task's
+                        // phase says it is still integrating.
+                        Integration::Pending(_) => Ok(MergeStep::quiet()),
                         Integration::Again(reason) => Ok(MergeStep::line(format!(
                             "{task_id} integration -> review.integrating ({reason})"
                         ))),
@@ -3129,6 +3469,22 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         }
         if stop {
             return Ok(MergeStep::quiet());
+        }
+        // A `pending` merge command leaves the task here with its passing integration verdict
+        // and no gate record: run the command again with the candidate it built, as long as
+        // the target branch is still the one in the verdict. A moved target rebuilds the
+        // candidate through a new gate below (ADR 0048 decision 6).
+        if record.is_none() && store.config()?.integration.method == IntegrationMethod::Command {
+            let context = prepare_merge(store, task_id, Some("auto"))?;
+            if let Some((path, verdict)) = reusable_command_verdict(store, &context)? {
+                return match finish_integration(store, &context, &verdict, &path, 1)? {
+                    Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
+                    Integration::Pending(_) => Ok(MergeStep::quiet()),
+                    Integration::Again(reason) => Ok(MergeStep::line(format!(
+                        "{task_id} integration -> review.integrating ({reason})"
+                    ))),
+                };
+            }
         }
         return match crate::gate::background::start(
             store,
@@ -3153,6 +3509,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         Some((path, verdict)) if verdict.is_pass() => {
             match finish_integration(store, &context, &verdict, &path, 1)? {
                 Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
+                Integration::Pending(_) => Ok(MergeStep::quiet()),
                 Integration::Again(reason) => Ok(MergeStep::line(format!(
                     "{task_id} integration -> review.integrating ({reason})"
                 ))),
