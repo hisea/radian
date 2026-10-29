@@ -1742,4 +1742,27 @@ file was restored from `.radian/backup/` with `cp` (`cmp` identical).
 | TK0239-M14 | `TaskFile::from_text` skips `valid_pending_hook_state` for `pending_hook_states` | `store::model::tests::a_bad_pending_hook_state_is_refused_by_name` (a malformed entry loaded) | ✅ 1 failed |
 | TK0239-M15 | `run_point` clears the point but not its recorded state entry | `hooks::after_awaiting_human_fires_once_with_its_point_and_state` (the file kept the state after the point was cleared) | ✅ 1 failed |
 
+## TK0240: the integration styles (merge, squash, rebase) and the post-push check (2026-10-29, branch `work/TK0240-push-squash-rebase`)
+
+ADR 0048 decisions 6 and 10: `[integration] style` builds the candidate as a merge commit
+(`merge`), one commit on top of the target (`squash`), or the task's commits replayed on the
+target (`rebase`), and `finish_integration` checks what landed before `done.merged`: the sha
+for `merge`, the tree for `squash` and `rebase`. Each mutation was applied to the committed
+file, the named tests ran with `cargo nextest run -p radian-arc --locked --profile sandbox
+--no-fail-fast -E '<the tests below>'`, and the file was restored from a copy under
+`.radian/mut/` with `cp`; the restored file was compared byte for byte with `cmp`, and
+`git status --short` was empty afterwards.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0240-M1 | a `squash` candidate falls back to `head_sha` (no commit is made) | `integration::squash_with_main_unchanged_makes_one_commit_with_the_head_tree`, `integration::squash_with_main_moved_makes_one_commit_on_the_new_main` | ✅ 2 failed |
+| TK0240-M2 | a `rebase` candidate falls back to `head_sha` (the commits are not replayed) | `integration::rebase_replays_three_commits_onto_main`, `integration::rebase_of_a_branch_with_a_merge_commit_is_linearized`, `integration::a_rebase_conflict_is_aborted_and_leaves_the_checkout_clean` | ✅ 3 failed |
+| TK0240-M3 | the post-push check is skipped for `squash` and `rebase` | `review::a_squash_merge_whose_landed_tree_differs_goes_to_rework_pending` | ✅ 1 failed |
+| TK0240-M4 | a conflicted rebase is not aborted | `integration::a_rebase_conflict_is_aborted_and_leaves_the_checkout_clean` | ✅ 1 failed |
+| TK0240-M5 | a merged `rebase` task's diff uses the candidate's first-parent diff | `read::tests::a_rebase_merged_task_diffs_every_replayed_commit` | ✅ 1 failed |
+| TK0240-M6 | a `squash` commit message drops the task title | `integration::squash_with_main_unchanged_makes_one_commit_with_the_head_tree` | ✅ 1 failed |
+| TK0240-M7 | `is_ancestor(head, candidate)` runs for `squash` and `rebase` too | `review::a_squash_merge_pushes_one_commit_and_reaches_done_merged`, `review::a_rebase_merge_replays_the_branch_and_reaches_done_merged` | ✅ 2 failed |
+
+7/7 caught.
+
 
