@@ -1695,4 +1695,6 @@ the same `run` call can already reconcile a wrapper that exits at once. It ran w
 `cargo nextest run -p radian-arc --locked --profile sandbox --test run -E
 'test(a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass)'` after
 `cargo build -p radian-tui --bin radian`, and the file was restored from `.radian/mut/work_mod.rs`
-(`cmp` identical).
+(`cmp` identical). After the settle change the whole `run` binary passed 79/79 in each of three
+runs and in one run under load (alongside `cargo nextest run -p radian-arc -E 'not binary(run)'`,
+which passed 625/625), the same `--profile sandbox`, the `radian` binary rebuilt first.
