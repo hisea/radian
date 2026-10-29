@@ -220,6 +220,12 @@ drift apart. The rest of `.git` stays writable, and `full` has no such rules by 
   returns `ToolDecision::Deny` with that reason, `NoDecision` keeps the ordinary path, and
   `Err` fails closed as `hook_error` (never a prompt). `radian-host`'s `CommandHooks`
   implements the trait; this crate holds only the trait, so it never depends on the host.
+- **`Notification` hooks** (ADR 0045 §6): the host installs a `NotificationHooks` chain with
+  `PermissionHooks::set_notification_hooks`. It is called at the moment a human is about to
+  be asked — after the `PermissionRequest` chain gave no decision and before the approver —
+  with the tool name only, and never with arguments. It observes: it decides nothing, and an
+  implementation must start its work and return at once so a slow hook cannot delay the
+  prompt. `radian-host`'s `CommandHooks` implements it the same way.
 - Internal errors fail closed: a failed approver returns `Err` (Core denies) and still writes
   one policy denial (`an_internal_error_denies`).
 
