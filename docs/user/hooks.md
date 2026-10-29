@@ -101,11 +101,14 @@ with no tool call. At 8 in a row the continuation no longer opens a turn: its
 message waits visibly instead, the same degraded `inject` as a used-up wake
 budget. One notice line starts with `hook stop:` and says to send any
 message; herdr reports `blocked` with the category `hook stop`, never the
-hook's text. A continued turn that calls a tool resets the count, and so does
-a cancelled or otherwise unfinished turn and any message from you. The
-10-continuations-per-10-minutes wake budget still applies as a hard cap, and
-the built-in validator's own two-in-a-row rule stays separate from this
-count.
+hook's text. The label clears as soon as you send any message, including a `!`
+command that starts no turn. A continued turn that calls a tool resets the count,
+and so does a cancelled or otherwise unfinished turn and any message from you.
+The 10-continuations-per-10-minutes wake budget still applies as a hard cap, and
+the built-in validator's own two-in-a-row rule stays separate from this count.
+In `radian exec -p` the cap ends the run like a used-up wake budget: exit `3`,
+outcome `budget_exceeded`, `stop_reason` `wake_budget`, and the waiting verdict
+counted in `unhandled_stop_notices` (see [`cli`](cli.md)).
 
 ## The matcher
 

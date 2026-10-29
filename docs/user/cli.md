@@ -151,6 +151,11 @@ When the run ended because a turn failed on a model error, `Result` carries a `m
 The field is absent on every other run end: completed, cancelled, budget, a hook error, or a tool failure.
 It is never `null`.
 
+`-p` keeps waiting while a continuation can still open a turn.
+A degraded `Stop` verdict never meets one, so the run ends: exit `3`, outcome `budget_exceeded`, `stop_reason` `wake_budget`.
+That covers all three degradations — the 10-per-10-minutes wake budget, the built-in validator's cap after two continuations, and the consecutive idle hook-continuation cap of 8 (see [`hooks`](hooks.md)).
+The waiting Stop verdicts are counted in `unhandled_stop_notices`; `unhandled_job_notices` counts job notices.
+
 ```json
 {"model_error": {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}}
 ```

@@ -392,12 +392,20 @@ async fn p_exits_three_when_the_wake_gate_closes() {
 /// A `Stop` hook that always asks for another turn fills the rate gate the same way job
 /// wakes do: past ten continuations its verdict degrades to inject-only, so exec ends
 /// the session with exit 3 and names the unhandled Stop verdict (not a job notice) in
-/// the `Result` record.
+/// the `Result` record. Every continued turn calls a tool, so it does real work: the
+/// consecutive idle-continuation cap never fires and the window is the cap under test.
 /// Mutation: exec ignores a degraded Stop (exits 0 with the verdict unread) → this fails.
 #[tokio::test]
 async fn p_exits_three_when_a_stop_hook_fills_the_wake_gate() {
     let mut replies = vec![text_reply("first")];
     for i in 1..=10 {
+        // A tool call per continued turn: the turn's second model call ends it, and
+        // `model_calls > 1` resets the idle-continuation streak (ADR 0045 §3).
+        replies.push(tool_reply(
+            &format!("call-{i}"),
+            "shell",
+            &json!({"command": "true"}).to_string(),
+        ));
         replies.push(text_reply(&format!("again {i}")));
     }
     let server = MockServer::start(replies).await;
@@ -441,6 +449,75 @@ async fn p_exits_three_when_a_stop_hook_fills_the_wake_gate() {
         "{result}"
     );
     assert_eq!(result.get("turns"), Some(&json!(11)), "{result}");
+    assert!(
+        err.contains("wake budget is used up"),
+        "the degraded ending is visible on stderr: {err}"
+    );
+}
+
+/// The consecutive idle hook-continuation cap ends a `-p` run the same way a spent wake
+/// budget does: the continuation a hook asks for after seven idle continued turns degrades
+/// to inject-only, and no turn will ever meet it, so exec ends with the budget ending. This
+/// is the cap, not the window: only seven wakes were used, and eight turns ran (the prompt's
+/// turn plus seven continuations).
+/// Mutation: the cap stops counting as unhandled (`degraded`) → exec exits 0 with the
+/// verdict unread, and this fails.
+#[tokio::test]
+async fn p_ends_on_the_idle_hook_continuation_cap() {
+    let mut replies = vec![text_reply("first")];
+    for i in 1..=7 {
+        replies.push(text_reply(&format!("again {i}")));
+    }
+    let server = MockServer::start(replies).await;
+    let env = Env::fresh("stop-idle-cap");
+    let config = env.home.join("config.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[model]\nmodel = \"m\"\n\
+         [[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"exit 2\"\n",
+    )
+    .unwrap();
+    let (code, result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "stop-idle-cap",
+        "keep going",
+        &["--config", config.to_str().unwrap()],
+    )
+    .await;
+
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        result.get("outcome"),
+        Some(&json!("budget_exceeded")),
+        "{result}"
+    );
+    assert_eq!(result.get("exit_code"), Some(&json!(3)), "{result}");
+    assert_eq!(
+        result.get("stop_reason"),
+        Some(&json!("wake_budget")),
+        "the idle cap shares the wake-budget ending (docs/user/cli.md): {result}"
+    );
+    assert_eq!(
+        result.get("unhandled_job_notices"),
+        Some(&json!(0)),
+        "no job notice waits: {result}"
+    );
+    assert_eq!(
+        result.get("unhandled_stop_notices"),
+        Some(&json!(1)),
+        "{result}"
+    );
+    assert_eq!(
+        result.get("turns"),
+        Some(&json!(8)),
+        "the prompt's turn plus seven continuations; the eighth does not open: {result}"
+    );
+    assert_eq!(
+        result.get("text"),
+        Some(&json!("again 7")),
+        "the last turn only talked: {result}"
+    );
     assert!(
         err.contains("wake budget is used up"),
         "the degraded ending is visible on stderr: {err}"
