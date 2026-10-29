@@ -100,7 +100,7 @@ pub use image::{
 };
 pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
-    SweepSummary,
+    RunningTask, SweepSummary,
 };
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits, ToolPresence};
 pub use read_roots::ReadRoots;

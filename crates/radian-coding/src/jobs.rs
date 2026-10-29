@@ -135,6 +135,8 @@ enum Termination {
 pub(crate) struct JobCell {
     /// The command's first line (the summary the TUI `/jobs` list shows).
     command: String,
+    /// The command as given, for the `Stop` hook's `background_tasks` (ADR 0045 §2).
+    full_command: String,
     started: Instant,
     state: JobState,
     /// `true` for a retained foreground result (ADR 0037 decision 3a): a settled entry the
@@ -179,6 +181,17 @@ pub struct JobSummary {
     pub elapsed: Duration,
     /// [`OUTPUT_HINT`]; the output file is not readable by the model (ADR 0039 decision 1).
     pub output: String,
+}
+
+/// One background job running right now, as a `Stop` hook's `background_tasks` reports it
+/// (ADR 0045 §2): the full command plus its first-line summary.
+#[derive(Debug, Clone)]
+pub struct RunningTask {
+    pub id: String,
+    /// The command's first line, trimmed and bounded like [`JobSummary::command`].
+    pub description: String,
+    /// The command exactly as it was started.
+    pub command: String,
 }
 
 /// One job lifecycle notice for the host (ADR 0037 slices 3-4): the host writes the durable
@@ -339,6 +352,7 @@ impl Jobs {
         let (settled, _) = tokio::sync::watch::channel(false);
         let cell = Arc::new(Mutex::new(JobCell {
             command: first_line(command),
+            full_command: command.to_owned(),
             started: Instant::now(),
             state: JobState::Running,
             retained: false,
@@ -532,6 +546,26 @@ impl Jobs {
             .collect()
     }
 
+    /// The background jobs running right now, in start order, with the full command (the
+    /// `Stop` hook's `background_tasks`, ADR 0045 §2). A retained foreground entry (ADR
+    /// 0037 decision 3a) never runs and is never listed.
+    pub fn running_tasks(&self) -> Vec<RunningTask> {
+        let state = self.lock_state();
+        state
+            .order
+            .iter()
+            .filter_map(|id| {
+                let cell = state.jobs.get(id)?;
+                let cell = lock(cell);
+                cell.state.is_running().then(|| RunningTask {
+                    id: id.clone(),
+                    description: cell.command.clone(),
+                    command: cell.full_command.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Stop one job by id for the `/jobs` command (ADR 0037 decision 4). `Ok(None)` means it
     /// was running and the kill was requested; `Ok(Some(state))` means it had already settled.
     pub fn stop(&self, id: &str) -> Result<Option<String>, ToolFailure> {
@@ -614,6 +648,7 @@ impl Jobs {
         let (settled, _) = tokio::sync::watch::channel(true);
         let cell = Arc::new(Mutex::new(JobCell {
             command: first_line(&command),
+            full_command: command,
             started: Instant::now(),
             state,
             retained: true,
@@ -1282,6 +1317,7 @@ mod tests {
         let (settled, _) = tokio::sync::watch::channel(true);
         Arc::new(Mutex::new(JobCell {
             command: "test".into(),
+            full_command: "test".into(),
             started,
             state: JobState::Exited(0),
             retained,
@@ -1421,6 +1457,7 @@ mod tests {
         let (settled, _) = tokio::sync::watch::channel(false);
         Arc::new(Mutex::new(JobCell {
             command: "test".into(),
+            full_command: "test".into(),
             started: Instant::now(),
             state: JobState::Running,
             retained: false,

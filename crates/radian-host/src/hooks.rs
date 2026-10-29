@@ -132,6 +132,12 @@ pub struct CommandHooks {
     /// The TUI `/loop` mode owns the turn end while armed, so the validator stays off.
     /// The TUI loop syncs this after every update; `exec` never sets it (it has no loop).
     loop_active: Arc<AtomicBool>,
+    /// Whether the turn now running was opened by a `Stop` continuation (ADR 0045 §2). It
+    /// is set when the continuation followup is sent, stays `true` for that turn's own
+    /// `Stop` run (`stop_hook_active` on its stdin), and is cleared when that run ends
+    /// without opening another, on a non-completed turn, and by any user message
+    /// ([`CommandHooks::reset_wakes`]).
+    stop_hook_active: Arc<AtomicBool>,
     /// Consecutive validator-fired turn ends. The third consecutive hit reports `blocked`
     /// instead of continuing. A rule miss, a non-completed turn, or a user message
     /// ([`CommandHooks::reset_wakes`]) clears it.
@@ -196,6 +202,7 @@ impl CommandHooks {
             jobs: Arc::new(std::sync::Mutex::new(None)),
             goal: Arc::new(std::sync::Mutex::new(None)),
             loop_active: Arc::new(AtomicBool::new(false)),
+            stop_hook_active: Arc::new(AtomicBool::new(false)),
             consecutive: Arc::new(AtomicU32::new(0)),
             warn,
             wake,
@@ -211,11 +218,13 @@ impl CommandHooks {
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
     /// the background-job notifier gets, ADR 0037 decision 3). A degraded continuation
     /// still runs the hook (its exit-2 verdict degrades); only the *wake* is gated. The
-    /// validator's consecutive-hit count starts over too.
+    /// validator's consecutive-hit count starts over too, and no continuation is pending
+    /// any more: the next `Stop` reports `stop_hook_active: false` (ADR 0045 §2).
     pub fn reset_wakes(&self) {
         self.gate.reset_wakes();
         self.degraded.store(0, Ordering::SeqCst);
         self.consecutive.store(0, Ordering::SeqCst);
+        self.stop_hook_active.store(false, Ordering::SeqCst);
     }
 
     /// The background-job registry for the "no background job running" rule. The host
@@ -252,6 +261,12 @@ impl CommandHooks {
     /// `blocked` instead of continuing.
     pub fn consecutive_hits(&self) -> u32 {
         self.consecutive.load(Ordering::SeqCst)
+    }
+
+    /// Whether the turn now running was opened by a `Stop` continuation (tests); its
+    /// `Stop` stdin reports this as `stop_hook_active`.
+    pub fn stop_hook_active(&self) -> bool {
+        self.stop_hook_active.load(Ordering::SeqCst)
     }
 
     /// Background jobs running right now (tests). A missing or dropped registry reads
@@ -331,7 +346,10 @@ impl CommandHooks {
     /// [`Hooks::on_turn_end`] spawns this with the outcome; tests drive it directly so
     /// there is no timing involved.
     pub async fn run_stop_once(&self, outcome: &RunOutcome) {
+        // A non-completed turn ends the continuation: no Stop runs for it and no turn of
+        // its own is starting, so the next Stop starts from `false`.
         if !matches!(outcome.status, RunStatus::Completed) {
+            self.stop_hook_active.store(false, Ordering::SeqCst);
             return;
         }
         // Claude's field name: the last assistant message's text parts joined, so a user
@@ -341,11 +359,18 @@ impl CommandHooks {
             .as_ref()
             .map(Message::text)
             .unwrap_or_default();
+        // Read this turn's status before running the hooks: the value says whether *this*
+        // turn was opened by a continuation. It stays false unless this run opens another
+        // one (ADR 0045 §2).
+        let stop_hook_active = self.stop_hook_active.swap(false, Ordering::SeqCst);
         let stdin = serde_json::json!({
             "hook_event_name": "Stop",
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
             "last_assistant_message": last_message,
+            "stop_hook_active": stop_hook_active,
+            "background_tasks": self.background_tasks(),
+            "session_crons": self.session_crons(),
         });
         let mut reasons = Vec::new();
         // One run per command string, like the tool-call events (ADR 0045 slice B).
@@ -420,7 +445,10 @@ impl CommandHooks {
         // validator rides this same point: its continuation counts one wake.
         if self.gate.wake_allowed() {
             // The woken turn absorbs the waiting injects, so a wake also
-            // ends the degrade burst.
+            // ends the degrade burst. Set the flag before the enqueue so a turn that
+            // starts immediately already reads `stop_hook_active: true`; a failed
+            // enqueue opened nothing and leaves it false.
+            self.stop_hook_active.store(true, Ordering::SeqCst);
             if self
                 .inbox
                 .followup(message, InputSource::System)
@@ -429,6 +457,8 @@ impl CommandHooks {
             {
                 self.gate.note_wake();
                 self.degraded.store(0, Ordering::SeqCst);
+            } else {
+                self.stop_hook_active.store(false, Ordering::SeqCst);
             }
         } else if self
             .inbox
@@ -483,23 +513,78 @@ impl CommandHooks {
         true
     }
 
-    /// Whether an `Active` or `Paused` goal owns the turn end (it re-posts itself, so
-    /// the validator stays off). A missing goal reads as none.
-    fn goal_active(&self) -> bool {
+    /// The goal's status (`None` when no goal is set or the share was dropped).
+    fn goal_status(&self) -> Option<radian_session::GoalStatus> {
         self.goal
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .is_some_and(|goal| {
-                matches!(
-                    goal.lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .as_ref()
-                        .map(|state| state.status),
-                    Some(radian_session::GoalStatus::Active)
-                        | Some(radian_session::GoalStatus::Paused)
-                )
+            .and_then(|goal| {
+                goal.lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                    .map(|state| state.status)
             })
+    }
+
+    /// Whether an `Active` or `Paused` goal owns the turn end (it re-posts itself, so
+    /// the validator stays off). A missing goal reads as none.
+    fn goal_active(&self) -> bool {
+        matches!(
+            self.goal_status(),
+            Some(radian_session::GoalStatus::Active | radian_session::GoalStatus::Paused)
+        )
+    }
+
+    /// The background jobs running when `Stop` runs, as its `background_tasks` (ADR 0045
+    /// §2). A registry that was dropped, or never set, reads as no jobs running: the hook
+    /// still runs and the field is `[]`.
+    fn background_tasks(&self) -> Vec<serde_json::Value> {
+        let jobs = {
+            let slot = self
+                .jobs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            slot.as_ref().and_then(Weak::upgrade)
+        };
+        let Some(jobs) = jobs else {
+            return Vec::new();
+        };
+        jobs.running_tasks()
+            .into_iter()
+            .map(|task| {
+                serde_json::json!({
+                    "id": task.id,
+                    "type": "shell",
+                    "status": "running",
+                    "description": task.description,
+                    "command": task.command,
+                })
+            })
+            .collect()
+    }
+
+    /// The session-level schedulers that open turns by themselves, as the `Stop` stdin
+    /// `session_crons` (ADR 0045 §2): an armed `/loop`, then an `Active` or `Paused` goal.
+    fn session_crons(&self) -> Vec<serde_json::Value> {
+        let mut crons = Vec::new();
+        if self.loop_active.load(Ordering::SeqCst) {
+            crons.push(serde_json::json!({"id": "loop", "type": "loop"}));
+        }
+        match self.goal_status() {
+            Some(radian_session::GoalStatus::Active) => crons.push(serde_json::json!({
+                "id": "goal",
+                "type": "goal",
+                "status": "active",
+            })),
+            Some(radian_session::GoalStatus::Paused) => crons.push(serde_json::json!({
+                "id": "goal",
+                "type": "goal",
+                "status": "paused",
+            })),
+            _ => {}
+        }
+        crons
     }
 
     /// Runs one hook command with `stdin_json` on its stdin, inside the session sandbox
@@ -950,9 +1035,11 @@ impl Hooks for CommandHooks {
     /// work spawns onto the session runtime so this sync callback never blocks a turn.
     fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
         if !matches!(outcome.status, RunStatus::Completed) {
-            // A non-completed turn breaks the validator's chain (like a rule miss), and no
-            // Stop run will come for this turn: drop the turn-start count.
+            // A non-completed turn breaks the validator's chain (like a rule miss), ends
+            // any `Stop` continuation it was opened by, and no Stop run will come for
+            // this turn: drop the turn-start count.
             self.consecutive.store(0, Ordering::SeqCst);
+            self.stop_hook_active.store(false, Ordering::SeqCst);
             // Saturating: sessions that never called `note_turn_started` (only the
             // hosts that read `pending_stops` wire it) must not wrap the counter.
             self.pending
@@ -2327,5 +2414,252 @@ mod tests {
         let stdin: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
         assert_eq!(stdin["last_assistant_message"], "");
+    }
+
+    /// Runs one `Stop` cycle whose hook writes its stdin to `path`, and returns that JSON.
+    /// Removes an earlier copy first, so a hook that never ran cannot pass a stale read
+    /// off as this run's.
+    async fn stop_stdin_at(
+        fixture: &Fixture,
+        path: &Path,
+        outcome: &RunOutcome,
+    ) -> serde_json::Value {
+        let _ = std::fs::remove_file(path);
+        fixture.hooks.run_stop_once(outcome).await;
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Edge case 1: with no job, no `/loop` and no goal the three fields are present — not
+    /// omitted — as `stop_hook_active: false`, `background_tasks: []`, `session_crons: []`.
+    /// Inserting an array only when it is non-empty fails this.
+    #[tokio::test]
+    async fn stop_stdin_always_carries_the_three_new_fields() {
+        let root = TempRoot::new("stop-extra-empty");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!("cat > {}", stdin_path.display()));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let stdin = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            stdin["stop_hook_active"],
+            serde_json::json!(false),
+            "{stdin}"
+        );
+        assert_eq!(stdin["background_tasks"], serde_json::json!([]), "{stdin}");
+        assert_eq!(stdin["session_crons"], serde_json::json!([]), "{stdin}");
+    }
+
+    /// Edge case 2: a background job running at turn end is one `background_tasks` entry
+    /// with its id, `type: "shell"`, `status: "running"`, the first line as `description`
+    /// and the full multi-line command as `command`. Reporting the first-line summary as
+    /// the command fails this.
+    #[tokio::test]
+    async fn stop_stdin_lists_a_running_background_job() {
+        let root = TempRoot::new("stop-extra-job");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!("cat > {}", stdin_path.display()));
+        let ws = root.ws.clone();
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let jobs = Arc::new(radian_coding::Jobs::new(fixture._root.dir.join("jobs")));
+        let sandbox = radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::FullAccess, &ws)
+            .expect("full access needs no backend");
+        let started = jobs
+            .start(&sandbox, &ws, "sleep 60\necho done")
+            .expect("the job starts");
+        fixture.hooks.set_jobs(Some(&jobs));
+        let stdin = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        let tasks = stdin["background_tasks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("an array: {stdin}"));
+        assert_eq!(tasks.len(), 1, "{stdin}");
+        assert_eq!(tasks[0]["id"], started.id.as_str(), "{stdin}");
+        assert_eq!(tasks[0]["type"], "shell", "{stdin}");
+        assert_eq!(tasks[0]["status"], "running", "{stdin}");
+        assert_eq!(tasks[0]["description"], "sleep 60", "{stdin}");
+        assert_eq!(tasks[0]["command"], "sleep 60\necho done", "{stdin}");
+        jobs.kill_all();
+    }
+
+    /// Edge case 3: the turn a `Stop` exit-2 continuation opens reports
+    /// `stop_hook_active: true`; the turn after it, which opens nothing, reports `false`.
+    /// Never setting the flag fails the middle assertion; never clearing it fails the last.
+    #[tokio::test]
+    async fn the_continued_turn_reports_stop_hook_active() {
+        let root = TempRoot::new("stop-active");
+        let stdin_path = root.dir.join("stdin.json");
+        let marker = root.dir.join("continued");
+        let config = stop_config(&format!(
+            "cat > {stdin}; if [ -f {marker} ]; then exit 0; else touch {marker}; \
+             echo keep-going >&2; exit 2; fi",
+            stdin = stdin_path.display(),
+            marker = marker.display(),
+        ));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+
+        let first = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            first["stop_hook_active"],
+            serde_json::json!(false),
+            "{first}"
+        );
+        assert!(
+            fixture.hooks.stop_hook_active(),
+            "the exit 2 sets the flag for the turn it opens"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "the exit 2 opens the continued turn"
+        );
+
+        let continued = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            continued["stop_hook_active"],
+            serde_json::json!(true),
+            "the continued turn says so: {continued}"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the exit 0 opens nothing"
+        );
+
+        let after = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            after["stop_hook_active"],
+            serde_json::json!(false),
+            "the turn after the continuation is not one: {after}"
+        );
+    }
+
+    /// Edge case 4: a user message while a continuation is pending clears the flag, so the
+    /// next `Stop` reports `false`. Dropping the clear from `reset_wakes` (the
+    /// followup/steer/inject reset) fails this.
+    #[tokio::test]
+    async fn a_user_message_clears_stop_hook_active() {
+        let root = TempRoot::new("stop-active-user");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!(
+            "cat > {}; echo keep-going >&2; exit 2",
+            stdin_path.display()
+        ));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert!(fixture.hooks.stop_hook_active(), "the exit 2 set the flag");
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        // The same reset the three user-message lanes (followup, steer, inject) call.
+        fixture.hooks.reset_wakes();
+        let next = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            next["stop_hook_active"],
+            serde_json::json!(false),
+            "a user message ends the continuation: {next}"
+        );
+    }
+
+    /// Edge case 5: a non-completed (cancelled) turn after a continuation clears the flag;
+    /// the next completed turn's `Stop` reports `false`. Keeping the flag through a
+    /// non-completed turn fails this.
+    #[tokio::test]
+    async fn a_cancelled_turn_clears_stop_hook_active() {
+        let root = TempRoot::new("stop-active-cancel");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!(
+            "cat > {}; echo keep-going >&2; exit 2",
+            stdin_path.display()
+        ));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert!(fixture.hooks.stop_hook_active(), "the exit 2 set the flag");
+        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        fixture.hooks.on_turn_end(
+            &cx(),
+            &completed_outcome(
+                RunStatus::Cancelled(CancelReason::Requested),
+                Some("Now x."),
+            ),
+        );
+        assert!(
+            !fixture.hooks.stop_hook_active(),
+            "a non-completed turn ends the continuation"
+        );
+        let next = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(next["stop_hook_active"], serde_json::json!(false), "{next}");
+    }
+
+    /// Edge case 6: `session_crons` lists an armed `/loop` and an `Active` or `Paused` goal
+    /// with its status, and nothing for a `Done` or cleared goal. Reporting a paused goal as
+    /// active (or keeping a done one) fails this.
+    #[tokio::test]
+    async fn session_crons_lists_the_loop_and_the_goal() {
+        use radian_session::{GoalState, GoalStatus};
+
+        let root = TempRoot::new("stop-crons");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!("cat > {}", stdin_path.display()));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let share: crate::goal::SharedGoal = Arc::new(std::sync::Mutex::new(Some(
+            GoalState::fresh("ship it".into(), GoalState::default_budget()),
+        )));
+        fixture.hooks.set_goal(Arc::clone(&share));
+        fixture.hooks.set_loop_active(true);
+
+        let both = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            both["session_crons"],
+            serde_json::json!([
+                {"id": "loop", "type": "loop"},
+                {"id": "goal", "type": "goal", "status": "active"},
+            ]),
+            "the loop and the active goal: {both}"
+        );
+
+        share.lock().unwrap().as_mut().expect("a goal").status = GoalStatus::Paused;
+        fixture.hooks.set_loop_active(false);
+        let paused = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            paused["session_crons"],
+            serde_json::json!([{"id": "goal", "type": "goal", "status": "paused"}]),
+            "a paused goal is still a scheduler: {paused}"
+        );
+
+        share.lock().unwrap().as_mut().expect("a goal").status = GoalStatus::Done;
+        let done = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            done["session_crons"],
+            serde_json::json!([]),
+            "a done goal adds nothing: {done}"
+        );
+
+        *share.lock().unwrap() = None;
+        let cleared = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            cleared["session_crons"],
+            serde_json::json!([]),
+            "a cleared goal adds nothing: {cleared}"
+        );
+    }
+
+    /// Edge case 7: a job registry that was dropped (the `Weak` no longer upgrades) reads
+    /// as `background_tasks: []` and never panics. An `unwrap` on the upgrade panics here.
+    #[tokio::test]
+    async fn a_dropped_job_registry_reads_as_no_background_tasks() {
+        let root = TempRoot::new("stop-extra-dropped");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = stop_config(&format!("cat > {}", stdin_path.display()));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let jobs = Arc::new(radian_coding::Jobs::new(fixture._root.dir.join("jobs")));
+        fixture.hooks.set_jobs(Some(&jobs));
+        drop(jobs);
+        let stdin = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        assert_eq!(
+            stdin["background_tasks"],
+            serde_json::json!([]),
+            "a dropped registry reads as no jobs: {stdin}"
+        );
     }
 }

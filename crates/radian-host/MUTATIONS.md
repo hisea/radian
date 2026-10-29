@@ -1581,3 +1581,23 @@ mutation was applied in place to `crates/radian-host/src/session/open.rs`
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0222-M4 | `open_session` ignores the seam (`driver.set_claim_hold(None)`) | ✅ 1 failed (4/4 runs) | `acp::a_wake_turn_end_does_not_answer_the_prompt_after_it` ("the prompt must be enqueued before the driver claims the notice": without the hold the driver claims the notice at once, the wake turn runs before the prompt exists, and the test no longer exercises the defect) |
+
+## TK0228: the `Stop` stdin reports the continuation, the running jobs and the session crons (2026-10-29, branch `work/TK0228-stop-stdin-background-and-crons`)
+
+ADR 0045 §2 adds `stop_hook_active`, `background_tasks` and `session_crons` to the `Stop` stdin;
+`crates/radian-coding` keeps each job's full command so `background_tasks.command` is the command
+as started. Each mutation was applied in place to `crates/radian-host/src/hooks.rs`, the
+`radian-host` lib tests ran, and the source was restored from `.radian/mut/hooks.rs.orig` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0228-M1 | the continuation followup never sets the flag (`store(false)` where it stores `true`) | ✅ 1 failed (rc=100) | `hooks::tests::the_continued_turn_reports_stop_hook_active` ("the exit 2 sets the flag for the turn it opens") |
+| TK0228-M2 | `reset_wakes` leaves the flag set (the clear removed) | ✅ 1 failed (rc=100) | `hooks::tests::a_user_message_clears_stop_hook_active` (`stop_hook_active: true` after the user message) |
+| TK0228-M3 | `on_turn_end` keeps the flag through a non-completed turn (the clear removed) | ✅ 1 failed (rc=100) | `hooks::tests::a_cancelled_turn_clears_stop_hook_active` ("a non-completed turn ends the continuation") |
+| TK0228-M4 | `background_tasks` reports the first-line summary as `command` | ✅ 1 failed (rc=100) | `hooks::tests::stop_stdin_lists_a_running_background_job` (`command` was `sleep 60`, not the full multi-line command) |
+| TK0228-M5 | a paused goal reports `status: "active"` | ✅ 1 failed (rc=100) | `hooks::tests::session_crons_lists_the_loop_and_the_goal` (the paused scene carried `active`) |
+| TK0228-M6 | a dropped registry is unwrapped (panic) instead of read as no jobs | ✅ 1 failed (rc=100) | `hooks::tests::a_dropped_job_registry_reads_as_no_background_tasks` (panicked: "the registry is alive") |
+| TK0228-M7 | the `Stop` stdin drops an empty `session_crons` (the fields must always be present) | ✅ 1 failed (rc=100) | `hooks::tests::stop_stdin_always_carries_the_three_new_fields` (`session_crons` read as `Null`) |
+| TK0228-M8 | the continued turn's `Stop` reads the flag without clearing it (`load` instead of `swap`) | ✅ 1 failed (rc=100) | `hooks::tests::the_continued_turn_reports_stop_hook_active` (the turn after the continuation was still `true`) |
+| TK0228-M9 | `session_crons` never lists an armed `/loop` | ✅ 1 failed (rc=100) | `hooks::tests::session_crons_lists_the_loop_and_the_goal` (only the goal entry remained) |

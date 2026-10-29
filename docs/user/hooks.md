@@ -150,9 +150,25 @@ the last assistant message's text:
   "hook_event_name": "Stop",
   "cwd": "/path/to/workspace",
   "session_id": "0193…",
-  "last_assistant_message": "Done. …"
+  "last_assistant_message": "Done. …",
+  "stop_hook_active": false,
+  "background_tasks": [],
+  "session_crons": []
 }
 ```
+
+`Stop` always carries three more fields, present in every run:
+
+| Field | Type | Value when it does not apply | When it is filled |
+|---|---|---|---|
+| `stop_hook_active` | boolean | `false` | `true` when this turn was opened by a `Stop` continuation: a hook exit 2, or the built-in stop validator. |
+| `background_tasks` | array | `[]` | The background jobs running when `Stop` runs. An entry is `{"id": "job-…", "type": "shell", "status": "running", "description": "make check", "command": "make check\necho done"}`: `description` is the command's first line, `command` the full command. A host with no job registry reports `[]`. |
+| `session_crons` | array | `[]` | The session-level schedulers that open turns by themselves: `{"id": "loop", "type": "loop"}` while `/loop` is on, and `{"id": "goal", "type": "goal", "status": "active"}` or `{"id": "goal", "type": "goal", "status": "paused"}` while a goal is active or paused. `radian exec` has no `/loop`, so it can carry only the goal entry. |
+
+`stop_hook_active` becomes `true` when radian sends the continuation. It is
+cleared once that continued turn's own `Stop` ran, by any turn that ends
+without completing (cancelled, failed, and the other unfinished ends), and at
+once by any user message (`followup`, `steer` or `inject`).
 
 ## What a hook returns
 
