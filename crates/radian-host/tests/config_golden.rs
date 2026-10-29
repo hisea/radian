@@ -378,6 +378,10 @@ fn edge_cases() -> Vec<(String, String)> {
             "schema_version = 1\n[[hooks.PostToolUse]]\nmatcher = \"read\"\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\nasync = true\n",
         ),
         (
+            "hooks.async_on_pre",
+            "schema_version = 1\n[[hooks.PreToolUse]]\nmatcher = \"read\"\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\nasync = true\n",
+        ),
+        (
             "hooks.bad_timeout",
             "schema_version = 1\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"echo hi\"\ntimeout = \"x\"\n",
         ),

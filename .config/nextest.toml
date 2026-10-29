@@ -50,7 +50,7 @@ test-group = "pty"
 #    `ps -o lstart=` command exits 126 inside the sandbox, and arc treats a
 #    missing start time as a dead process.
 #
-# 3. A nested Seatbelt cannot apply a second profile (13 names). The probe fails,
+# 3. A nested Seatbelt cannot apply a second profile (14 names). The probe fails,
 #    the backend is `inherited`, and only the outer rules apply: profile-wiring
 #    probes see `ReadOnly`, sandboxed hooks cannot start, the arc worker deny-read
 #    check is not enforced, the nested-session refusal is skipped, and
@@ -312,6 +312,7 @@ not (
   | test(=reconcile_leaves_a_live_wrapper_and_applies_a_finished_one)
 
   | test(=hooks::tests::a_sandboxed_hook_writes_inside_the_workspace)
+  | test(=hooks::tests::an_async_hook_runs_inside_the_workspace_sandbox)
   | test(=hooks::tests::exec_args_run_inside_the_workspace_sandbox)
   | test(=hooks::tests::waiting_with_a_running_job_does_not_fire)
   | test(=hooks::tests::workspace_runs_the_hook_sandboxed)

@@ -16,10 +16,12 @@ arc 的全部状态是 `<repo>/.radian/arc/` 下的文件，单写者。调度�
 
 - 读：直接读各仓库的 arc 文件，返回与 `list --json` / `show --json` 相同的结构。
 - 写：owner 动作调 CLI 的同一组库函数，只拿该仓库的 `state.lock`；拿不到锁时返回 CLI 的那句消息，什么都不改。
-- 它不持有任何 `runner.lock`，不跑调度循环，不启动循环。某仓库没有循环在跑时，接口如实报告（读 `runner.lock` 是否被持有），客户端显示出来。
+- 调度：hub 对每个登记的仓库各拿一把 `runner.lock`，在自己的 task 里跑该仓库的调度循环，与 `radian arc serve` 调同一个库函数。ADR 0048 §13 的单写者规则是每仓库一把锁、持有者是唯一写者，一个进程可以持有多把；仓库之间的状态文件本来就分开。某仓库已被 `arc serve` 持锁时，hub 拿不到锁就只读它、不调度它，接口如实报告持锁者（hub、某个 pid、还是没有）。`radian arc serve` 保留为单仓库形态，TUI 打开时没锁就起一个的规则不变。
+- 全机上限 `[hub] concurrency`：所有登记仓库同时在 `doing` 的 task 总数；与每仓库的 `[limits] concurrency` 的关系（都要有空位，还是全机覆盖仓库）派发前定。
+- 故障隔离：一个仓库的 pass 出错只记进该仓库的 `loop.log`，HTTP 继续服务；二进制被替换时的重启沿用 `arc serve` 的规则，SSE 断一次，客户端按第 3 条重连重读。
 - 仓库登记是显式列表，不自动发现。
 
-hub 只是又一个读者和 owner 动作的入口，不是新的调度者，所以 ADR 0048「单写者、单循环」不变。
+hub 是登记仓库的调度者加对外接口，不是第二种写者：每个仓库仍只有一个 `runner.lock` 持有者，ADR 0048 §13 的措辞从「每仓库一个 `serve` 进程」改为「每仓库一把锁，持有者是 `arc serve` 或 hub」。进程模型见 `research/2026-10-29-radian-app-bundle.md`。
 
 ### 2. 只听 loopback，token 必须
 
@@ -63,7 +65,7 @@ v1 不提供会话的实时查看：不投影 journal，不发 block，不需要
 
 ## 派发前要定的小事
 
-- 子命令名（建议 `radian arc hub`：`radian arc serve` 已是调度循环），配对与换 token 的子命令名，默认端口。
+- 子命令是 `radian hub`（无参数起服务；hub 还列会话，位于 arc 之上，所以不在 `radian arc` 下）、`radian hub add | remove | list | pair | token rotate`；要定的只剩默认端口。
 - 仓库登记放在哪：`~/.radian/config/config.toml` 的一节，还是 `~/.radian/` 下单独一个文件；token 文件的路径。两者都要改 ADR 0020 的目录表。
 - 用哪个 HTTP 服务端 crate（工作区今天没有）。
 - `api_version` 与 `schema_version` 之间的关系写在哪一页手册。

@@ -1735,3 +1735,42 @@ restored from `.radian/mut/host-hooks.rs` (`cmp` empty).
 | TK0233-M7 | the field is a plain `Option<Value>` again, so a present `updatedPermissions: null` reads as an absent field and warns nothing (rework 2, restored from `.radian/mut/host-hooks-fixed.rs`) | ✅ 1 failed (rc=100) | `hooks::tests::a_non_array_updated_permissions_warns_including_null` |
 
 4/4 caught, no equivalent mutation.
+
+## TK0234: async hooks on `PostToolUse` and `Stop` (2026-10-29, branch `work/TK0234-async-hooks`)
+
+ADR 0045 §1/§5. Each mutation was applied in place to `crates/radian-host/src/hooks.rs`
+(or `src/config/hooks.rs` for the parser rows), the named test ran with
+`cargo nextest run -p radian-host --lib --locked --profile sandbox -E 'test(<name>)'`, and
+the source was restored from a backup under `.radian/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0234-M1 | the async `PostToolUse` fast path is removed, so the hook runs synchronously and holds the result for its whole sleep | ✅ 1 failed (rc=100) | `hooks::tests::an_async_post_hook_returns_at_once_and_injects_before_the_next_model_call` (the result took 2.03 s) |
+| TK0234-M2 | the async `Stop` fast path is removed, so the hook runs synchronously and joins the turn | ✅ 1 failed (rc=100) | `hooks::tests::a_running_async_stop_hook_stands_the_validator_down_and_is_in_background_tasks` (`async_hooks_running` was 0) |
+| TK0234-M3 | `inject_async` uses the `followup` lane, so an async result wakes a turn | ✅ 1 failed (rc=100) | `hooks::tests::async_results_never_wake_idle_or_busy` (a busy result opened the next turn) |
+| TK0234-M4 | the intent-stop validator counts only jobs (`jobs_running`) and not running async hooks | ✅ 1 failed (rc=100) | `hooks::tests::a_running_async_stop_hook_stands_the_validator_down_and_is_in_background_tasks` (the validator opened a turn) |
+| TK0234-M5 | `background_tasks` no longer lists running async hooks | ✅ 1 failed (rc=100) | `hooks::tests::a_running_async_stop_hook_stands_the_validator_down_and_is_in_background_tasks` (`background_tasks` was `[]`) |
+| TK0234-M6 | every event accepts `async` (the per-event check is `true`) | ✅ 1 failed (rc=100) | `config::hooks::tests::async_hooks_parse_on_post_and_stop_and_drop_on_pre` (the async `PreToolUse` hook loaded) |
+| TK0234-M7 | an async hook without `timeout` takes the synchronous 60 s default | ✅ 1 failed (rc=100) | `config::hooks::tests::async_hooks_parse_on_post_and_stop_and_drop_on_pre` (60 instead of 600) |
+| TK0234-M8 | the ignored exit-0 control fields are no longer reported | ✅ 1 failed (rc=100) | `hooks::tests::async_control_fields_are_ignored_with_one_warning` (no warning line) |
+
+8/8 caught, no equivalent mutation.
+
+## TK0234 (rework): async field presence and the imported zero timeout (2026-10-29, branch `work/TK0234-async-hooks`)
+
+Review rework: a pre-call hook that writes `async = false`/`asyncRewake = false` is dropped
+on presence, and an imported `timeout: 0` stays zero so the 600 s async default applies.
+Each mutation was applied in place to `crates/radian-host/src/config/hooks.rs`,
+`src/project_hooks.rs` and `src/config/migrate_claude.rs`, the named test ran with
+`cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast` (the lib or
+`claude_migrate` binary named below), and the source was restored from `.radian/mut/`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0234-M9 | the user-level reader drops on the effective value again (`(async_hook \|\| async_rewake) && !accepts_async`) | ✅ 1 failed (rc=100) | `config::hooks::tests::an_explicitly_false_async_field_on_pre_is_still_dropped` (three hooks loaded instead of one) |
+| TK0234-M10 | the project reader drops on the effective value again (the same condition in `project_hooks.rs`) | ✅ 1 failed (rc=100) | `project_hooks::tests::an_explicitly_false_async_field_on_pre_is_still_dropped` (three hooks loaded instead of one) |
+| TK0234-M11 | import-claude drops on the effective value again (`(async_hook \|\| async_rewake) && !event.accepts_async()`) | ✅ 1 failed (rc=100) | `claude_migrate::an_explicitly_false_async_field_on_pre_is_not_imported` (0 report lines instead of 3) |
+| TK0234-M12 | import-claude rewrites an imported `timeout: 0` to 60 again | ✅ 1 failed (rc=100) | `claude_migrate::an_imported_zero_timeout_keeps_the_async_default` (the draft said `timeout = 60`) |
+
+4/4 caught, no equivalent mutation.

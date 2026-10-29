@@ -1,9 +1,10 @@
 # ADR 0045 切片 A：用户级外部命令 hook（Claude/Codex 子集）。
 # 四个事件（`PreToolUse`/`PermissionRequest`/`PostToolUse`/`Stop`），每个是
-# `{ matcher, hooks }` 条目列表，每个 hook 是 `{ type = "command", command, args, timeout }`；
+# `{ matcher, hooks }` 条目列表，每个 hook 是 `{ type = "command", command, args, timeout, async, asyncRewake }`；
 # `args` 是可选的字符串数组（有它是 exec 形式，不经 shell；ADR 0045 §4）。
+# `async`/`asyncRewake` 只在 `PostToolUse` 与 `Stop` 上有效（ADR 0045 §5）。
 # `matcher` 只认 Radian 工具名（`shell`/`write`/`patch`/`read`……），`|` 分隔多个。
-# 子集之外（`type = "http"`、`async = true`、未知事件名）只跳过、不拒绝。
+# 子集之外（`type = "http"`、`PreToolUse` 上的 `async`、未知事件名）只跳过、不拒绝。
 schema_version = 1
 
 # 内建验证器的开关（backlog `turn-end-continuation.md` §B.6）：缺省开；`false` 关掉内建规则（用户 `Stop` hook 照跑）。
@@ -34,6 +35,18 @@ type = "command"
 command = "/work/example/hooks/format"
 args = ["--check", "src/lib.rs"]
 
+# 后台跑（ADR 0045 §5）：结果在下次模型调用前送达；`asyncRewake` 退出 2 唤醒空闲会话。
+[[hooks.PostToolUse]]
+matcher = "write"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/lint-async.sh"
+async = true
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/rewake.sh"
+asyncRewake = true
+
 [[hooks.Stop]]
 [[hooks.Stop.hooks]]
 type = "command"
@@ -47,11 +60,15 @@ matcher = "read"
 type = "http"
 command = "https://example.com/hook"
 
-[[hooks.PostToolUse]]
-matcher = "read"
-[[hooks.PostToolUse.hooks]]
+# `PreToolUse` 不接受 `async`：那个 hook 逐条跳过、其余 hook 照载。
+[[hooks.PreToolUse]]
+matcher = "write"
+[[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/work/example/hooks/late.sh"
+command = "/work/example/hooks/late-sync.sh"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/late-async.sh"
 async = true
 
 [[hooks.SessionStart]]
