@@ -1,6 +1,6 @@
 # arc 的合并方式与钩子：可配置
 
-- 状态：decided（可以派发；排在 `arc-run-nonblocking.md` 落地之后，两边都改 integration 的代码）
+- 状态：decided（可以派发；`arc-run-nonblocking.md` 已落地；`arc-serve.md` §4 的两个通知时间点并到这里一起做）
 - 涉及 ADR：0048（§10 gate 与 integration、§11 批准与 `verdict_set_digest`、§13 调度循环、§15 配置与目录）
 - 来源：arc 合并后远端留下 `work/<task>` 分支的讨论；`arc-flows.md`（每个仓库一套配置，不是 worker 种类）
 
@@ -22,11 +22,15 @@ gate 已经是"种类由二进制定，内容由配置写"：`commands` 跑配�
 
 ### 2. 合并方式由配置选
 
-`[integration]` 一节（`key_commands` 从 gate profile 移到这里，或 profile 里仍可覆盖，派发时定一处）：
+`[integration]` 一节。`key_commands` 从 gate profile 移到这里，只此一处（owner 2026-10-29）：gate profile 里再写 `key_commands` 时配置加载失败，消息指明搬到 `[integration] key_commands`。attempt 记录的 `profile.json` 里旧的 `key_commands` 照常读出但不再使用，集成一律用当前 `[integration]` 的值。
 
 - `method = "push"`（默认）：今天的做法。`style = "merge"`（默认，合并提交，不 rebase）、`"squash"`、`"rebase"`。在候选提交上跑 `key_commands`，无 force 推送，main 动了就重新集成（今天最多 3 次的规则不变）。
-- `method = "pr"`：推 `work/<task>`，开一个 PR 指向目标分支，记下 PR，之后的轮次查它的状态；PR 被合并后做第 1 条的核对再 `done.merged`，PR 被关闭则进 `rework_pending`。谁点合并（人、merge queue、CI 自动合并）不归 arc 管。
-- `method = "command"`：运行配置里的一条命令，由它完成合并，最后一行输出合并后目标分支的 sha；arc 拿这个 sha 做第 1 条的核对。退出码非 0 等同集成失败。
+- `method = "command"`：运行 `[integration] command` 这一条命令，由它完成合并。环境变量与第 3 条钩子相同（另加 `ARC_CANDIDATE_SHA`）。stdout 最后一行是三种之一：
+  - 一个 40 位 sha：合并完成，这是合并后目标分支的 sha；arc 拿它做第 1 条的核对。
+  - `pending`：还没合并（比如在等人点 PR 或等 merge queue）。task 留在 `review.integrating`，下一次调度轮次再跑同一条命令；不计入"最多 3 次重新集成"。
+  - `closed`：合并被放弃（PR 被关闭）。task 进 `review.rework_pending`，原因写进 task。
+  - 退出码非 0、超时或最后一行不是这三种：等同集成失败，进 `rework_pending`。
+- `method = "pr"`：`command` 的一个内置预设（owner 2026-10-29），不是另一套代码。选它等于 `method = "command"` 加一条内置的 `command`：用 `gh` 推 `work/<task>`、没有 PR 时开一个指向目标分支的 PR 并输出 `pending`、PR 已合并时输出合并后目标分支的 sha、PR 被关闭时输出 `closed`。预设命令全文写在手册里；想换平台（GitLab 等）就改用 `method = "command"` 自己写。谁点合并（人、merge queue、CI 自动合并）不归 arc 管。`method = "pr"` 时再写 `command` 配置加载失败。
 - 目标分支：默认 `[repository] main_branch`，`[integration] target_branch` 可改。
 
 以后的 gate 合批（`arc-gate-batch.md`）是另一种合并方式，不另开机制。
@@ -43,7 +47,10 @@ after_merge = [
 ```
 
 - 时间点由二进制定义。第一批：`after_merge`（task 进入 `done.merged` 之后）、`after_fail`（进入 `failed.*` 之后）、`after_rework`（进入 `review.rework_pending` 之后）。
-- 上下文用环境变量传：`ARC_TASK`、`ARC_PLAN`、`ARC_ATTEMPT_ID`、`ARC_BRANCH`、`ARC_WORKTREE`、`ARC_TARGET_BRANCH`、`ARC_MERGED_SHA`（只在 `after_merge`）、`ARC_STATE`。
+- `arc-serve.md` §4 的两个时间点也在这一批：`after_awaiting_human`（进入 `review.awaiting_human` 之后）、`after_proposed`（新 task 进入 `todo.proposed` 之后）。
+- 上下文用环境变量传：`ARC_TASK`、`ARC_PLAN`、`ARC_ATTEMPT`（与 worker 的 `ARC_ATTEMPT` 同名同值，`<task>-<n>`；原稿的 `ARC_ATTEMPT_ID` 不用，免得一个值两个名字）、`ARC_BRANCH`、`ARC_WORKTREE`、`ARC_TARGET_BRANCH`、`ARC_MERGED_SHA`（只在 `after_merge`）、`ARC_STATE`（`<state>.<phase>`）、`ARC_HOOK`（时间点名）。
+- 每个时间点是一个命令数组，按顺序跑；前一条失败后面照跑。
+- 不丢、不重复执行的边界：进入某个状态的那次写入（`change_task`）同时在 task 记录里记一个待跑钩子；钩子由持有 `runner.lock` 的进程跑：调度轮次每一轮开头先跑完所有待跑钩子；CLI 的 owner 动作（`merge`、`reject`、`cancel`、`start`）结束时若能非阻塞拿到 `runner.lock` 就自己跑，拿不到就留给 `serve`。MCP 的 `add_task` 只留记录。一条钩子跑完（无论成败）才清掉记录，所以进程在钩子中途崩溃时下一轮会再跑一次：至少一次，手册写明钩子要能重复执行。
 - 钩子在仓库根目录跑，超时用 `[gate] command_timeout_secs`，输出写进 task 的 run 目录。
 - 钩子失败只记一行 `warning:`，不回退合并，不改 task 状态。
 - 今天写死的"`done.merged` 后删本地 worktree"改为 `arc init` 写出的默认配置里的一行 `after_merge` 钩子；默认配置同时带上删远端和本地分支的两行。不想要的仓库删掉即可。
@@ -52,15 +59,12 @@ after_merge = [
 
 `method = "push"`、`style = "merge"`，`key_commands` 不变，`after_merge` 用上面三行。行为与今天相同，只多了删分支。
 
-## 派发前要定的小事
-
-- `key_commands` 放在 `[integration]` 还是留在 gate profile（一处为准，另一处报错）。
-- `pr` 方式第一版只支持 GitHub（`gh`）还是从一开始就做成 `command` 的一个预设。
 
 ## 验收
 
-- 三种方式各有集成测试（假远端、假 `gh` 或假命令）：`push` 三种 style、`pr` 合并与关闭、`command` 输出 sha 与输出错误 sha。
+- 三种方式各有集成测试（假远端、假 `gh` 或假命令）：`push` 三种 style、`pr` 开 PR 后 `pending`、合并、关闭、`command` 输出 sha、输出错误 sha、`pending` 后下一轮完成。
 - 第 1 条核对：`command` 输出的 sha 文件树与候选不同 → 不进 `done.merged`；squash 后文件树相同 → 通过。
-- 钩子：环境变量都到达、失败只记警告、合并结果不受影响、`after_fail` 与 `after_rework` 在对应转换后各跑一次。
+- 钩子：环境变量都到达、失败只记警告、合并结果不受影响、五个时间点在对应转换后各跑一次（含 CLI owner 动作与 MCP `add_task` 引起的转换）；钩子中途进程被杀后下一轮补跑；`serve` 不在时 CLI 动作自己跑。
+- gate profile 里写 `key_commands` 时加载失败且消息指向 `[integration]`。
 - 默认配置删掉 worktree 那行后，`done.merged` 不再删 worktree（不再有写死的删除）。
 - 手册 `docs/user/arc/index.md`：`[integration]` 与 `[hooks]` 每个键（类型、默认、全部取值、何时生效）、每个环境变量、merge 一节按新流程改写；配置 drift 测试看得到新键。

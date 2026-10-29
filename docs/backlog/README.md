@@ -34,7 +34,7 @@
 |---|---|---|---|
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
 | `build-cache-and-verify-time.md` | idea（3、4；1、2 已落地） | 无；第 4 项新 ADR | Linux worker 依赖缓存（sccache / ZFS block cloning）与合并测试二进制为 idea |
-| `arc-landing.md` | decided | 0048 | 合并方式可配置（`push` 三种 style、`pr`、`command`，arc 只保证验过的内容落地）与钩子（`after_merge`/`after_fail`/`after_rework` 跑配置里的命令，失败只警告）；默认钩子删 worktree 与 `work/<task>` 分支 |
+| `arc-landing.md` | decided | 0048 | 合并方式可配置（`push` 三种 style、`command` 输出 sha/`pending`/`closed`、`pr` 是 `command` 的 `gh` 预设，arc 只保证验过的内容落地；`key_commands` 移到 `[integration]`）与钩子（`after_merge`/`after_fail`/`after_rework`/`after_awaiting_human`/`after_proposed`，至少一次，失败只警告）；默认钩子删 worktree 与 `work/<task>` 分支 |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
@@ -54,14 +54,15 @@
 | `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `arc-gate-batch.md` | decided（排在 `arc-landing.md` 之后） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
 | `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
-| `arc-serve.md` | decided（钩子排在 `arc-landing.md` 之后） | 0048、0013、0020、0008、0034 | 远程客户端的服务端：一个 hub 管本机登记的所有仓库，不持 `runner.lock`，owner 动作走 CLI 库函数与 `state.lock`；只听 loopback，token 必须；`/v1/` 读接口与 `list`/`show --json` 同构，加报告、verdict、diff；SSE 事件只是提示；通知走 `[hooks]` 加 `after_awaiting_human`/`after_proposed`，radian 不发推送；v1 不看实时会话 |
+| `arc-serve.md` | decided（钩子排在 `arc-landing.md` 之后） | 0048、0013、0020、0008、0034 | 远程客户端的服务端：一个 hub 管本机登记的所有仓库，不持 `runner.lock`，owner 动作走 CLI 库函数与 `state.lock`；只听 loopback，token 必须；`/v1/` 读接口与 `list`/`show --json` 同构，加报告、verdict、diff；SSE 事件只是提示；通知走 `[hooks]`（两个时间点随 `arc-landing.md` 做），radian 不发推送；v1 不看实时会话 |
 | `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
 | `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表；第一阶段的用户是 arc（arc 即 ACP 客户端已落地） |
-| `hooks-stop-and-feedback.md` | idea | 0045、0037、0017、0012、0046 | `Stop` stdin 加 `stop_hook_active`/`background_tasks`/`session_crons`；`additionalContext` 非错误反馈与 `PostToolUse` `updatedToolOutput`；续跑计数在工具调用后清零、滑窗留作硬顶；`args` exec 形式与每次运行一行耗时 |
-| `hooks-async.md` | idea | 0045、0037、0011、0046 | `async: true` 的 hook 接到后台 job 上：exit 0 的 `additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；post-edit 测试不再拖慢回合 |
-| `hooks-permission-request.md` | idea | 0045、0012、0043、0048、0024、0011 | `PermissionRequest` 事件让脚本回答 ask（只回答 ask，不扩权）；headless worker 与 arc 的审批出口，`addRules` 到 `session` 记住选择；与 `subagent-ask-forwarding.md`、`arc-serve.md` 第 4 条同一需求 |
-| `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021、0034、0017、0013 | 五个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`Notification`（只两个 matcher）、`PreCompact`/`PostCompact`、`StopFailure`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
+| `hooks-stop-and-feedback.md` | decided（四条 hooks 串行，第一条） | 0045、0037、0017、0012、0046、0001 | `Stop` stdin 加 `stop_hook_active`/`background_tasks`/`session_crons`；`PostToolUse`/`Stop` 读 exit 0 JSON：`additionalContext` 非错误反馈、`decision: "block"`、`updatedToolOutput`；hook 续跑空转 8 次封顶、调工具清零；`args` exec 形式；每次运行一条带耗时的记录 |
+| `hooks-async.md` | decided（四条 hooks 的第三条） | 0045、0037、0011、0046 | `PostToolUse`/`Stop` 的 `async`/`asyncRewake`：`additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；不进 `/jobs`；同命令取代、8 个并发上限、会话结束全杀 |
+| `hooks-permission-request.md` | decided（四条 hooks 的第二条） | 0045、0012、0043、0048、0024、0017、0046 | `PermissionRequest` 在权限层判 ask 之后、问人之前触发，所有来源都触发；`allow`/`deny`，超时与错误等于拒绝；`addRules` 到 `session` 等于本会话允许；两层里 `deny` 优先 |
+| `hooks-stopfailure-notification.md` | decided（四条 hooks 的第四条） | 0045、0017、0034、0024、0013、0046 | `StopFailure`（模型错误结束回合，matcher 为 `ModelErrorKind` 闭集）与 `Notification`（`permission_prompt`、`idle_prompt` 60 s）；只观察、后台跑 |
+| `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
 | `provider-gemini-native.md` | idea（方向已定：做） | 0026、0014、0007、0015、0017 | Gemini 原生 `generateContent` adapter，过 provider contract；第二步 Vertex（同协议加 GCP 认证） |
 | `provider-azure-responses.md` | idea | 0026 | Azure OpenAI 走 Responses：同一 adapter 的配置变体（deployment URL、`api-version`、`api-key` header），有用户需要再做 |
 | `provider-bedrock-converse.md` | idea | 0026、0020、0013 | Bedrock Converse：SigV4 签名加 AWS 二进制事件流，没有明确需求不做；先看 OpenAI 兼容接口能否替代 |

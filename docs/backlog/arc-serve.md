@@ -1,6 +1,6 @@
 # arc：hub 接口与通知钩子（远程客户端的服务端）
 
-- 状态：decided（派发前要定的小事见末尾；通知钩子排在 `arc-landing.md` 落地之后，复用它的 `[hooks]`）
+- 状态：decided（派发前要定的小事见末尾；§4 的两个通知时间点并到 `arc-landing.md` 一起做）
 - 涉及 ADR：0048（§11 owner 动作、§13 调度循环与 `runner.lock`、§14 v0 排除项、§15 配置与目录）、0013（新的监听口）、0020（`~/.radian/` 下的新文件）、0008（新配置键）、0034（通知内容的隐私口径）
 - 来源：`docs/backlog/arc.md` 里「v1 要 desktop / iOS / web app」一条；`research/2026-10-22-arc-app-product-design.md`；客户端本身见 `arc-ios.md`
 
@@ -58,7 +58,7 @@ v1 不提供会话的实时查看：不投影 journal，不发 block，不需要
 ### 4. 通知走钩子，radian 不直接发推送
 
 - 锁屏通知由钩子命令发：用户在命令里自己调 Bark、ntfy 或别的推送服务，radian 不内置任何推送服务，也不持有 APNs 密钥。
-- 钩子是 `arc-landing.md` 的 `[hooks]`（同一组环境变量，同样的超时、输出与"失败只警告"规则），在调度循环里跑，所以 hub 不在时通知照样发。这里加两个时间点：`after_awaiting_human`（进入 `review.awaiting_human` 之后）、`after_proposed`（新 task 进入 `todo.proposed` 之后）。`after_fail`、`after_rework`、`after_merge` 已在 `arc-landing.md`。
+- 钩子是 `arc-landing.md` 的 `[hooks]`（同一组环境变量，同样的超时、输出与"失败只警告"规则），在调度循环里跑，所以 hub 不在时通知照样发。通知要的两个时间点 `after_awaiting_human`、`after_proposed` 随 `arc-landing.md` 一起做；hub 本身只需要在手册里给出示例钩子。
 - 隐私口径（ADR 0034）：手册的示例钩子只发仓库名、task id 与 phase，正文由客户端打开后连 hub 取。示例里通知点开后跳到客户端的 task 页（客户端的 URL scheme 见 `arc-ios.md`）。
 
 ## 派发前要定的小事
@@ -74,6 +74,5 @@ v1 不提供会话的实时查看：不投影 journal，不发 block，不需要
 - 每个 owner 动作经接口调用后，仓库文件的变化与 CLI 做同一个动作完全相同；reject 空 note 被拒；拿不到 `state.lock` 时返回 CLI 的消息、文件不变。
 - 没有 token、token 错误、换 token 后的旧 token：都返回 401，什么都不改。默认只绑 loopback。
 - SSE：两个仓库各做一次迁移，两条事件都到达且字段正确；断线期间的迁移，重连后读列表能看到。
-- 钩子：`after_awaiting_human`、`after_proposed` 在对应迁移后各跑一次，环境变量都到达；hub 不在时钩子照常运行。
 - 手机在 tailnet 内不装 ssh 客户端，能完成浏览、owner 动作与锁屏通知（手测，写进 `crates/radian-arc` 的手测清单）。
 - ADR 0048 新增 hub 一节并在 §14 写明 hub 不是调度者；ADR 0013 写明新监听口；ADR 0020 目录表加新文件；手册写出每个子命令、参数、配置键、钩子时间点与接口版本。
