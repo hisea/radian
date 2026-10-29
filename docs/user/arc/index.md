@@ -26,8 +26,10 @@ It runs anywhere inside the working tree and works on the repository root.
 It finds:
 
 - the repository root (`git rev-parse --show-toplevel`);
-- the `origin` URL (`git remote get-url origin`);
-- the main branch: `origin`'s own HEAD when it is known, else the checked-out branch, else `main`.
+- the remote: the `[repository] remote` of a `config.toml` that already exists, else `origin` when the repository has it, else the repository's only remote;
+- the main branch: that remote's own HEAD when it is known, else the checked-out branch, else `main`.
+
+Several remotes and no `origin` are ambiguous, so `init` refuses and names each one.
 
 It writes `config.toml` with those values, and it creates the layout below.
 It writes `worker-brief.md` with a short default when it does not exist, and never overwrites an existing file (see [the worker brief](files.md#worker-briefmd)).
@@ -59,8 +61,8 @@ Then it checks its requirements and prints one line per check:
 | Check | What it runs |
 |---|---|
 | `provider credential` | Reads the stored credential (`radian login` writes it to `~/.radian/credentials/auth.json`). No entry is a warning. |
-| `` `origin` reachable `` | `git ls-remote origin`. |
-| `` push to `origin` `<main>` `` | `git push --dry-run <main>:<main>`. A refusal here means the first real push will be refused too. |
+| `` `<remote>` reachable `` | `git ls-remote <remote>`. |
+| `` push to `<remote>` `<main>` `` | `git push --dry-run <main>:<main>`. A refusal here means the first real push will be refused too. |
 | `workspace sandbox` | Builds a `workspace` sandbox over the repository: `sandbox-exec` on macOS, bubblewrap on Linux. |
 
 A failed check is a warning line, not a refusal: `init` still exits `0`, because a missing credential or a slow remote is something you can fix after setup.
@@ -72,7 +74,7 @@ It does not change any configuration of its own:
 claude mcp add arc -- radian arc mcp
 ```
 
-`init` exits `0` when it wrote the layout and `1` when the directory is not a git working tree or the repository has no `origin` remote.
+`init` exits `0` when it wrote the layout and `1` when the directory is not a git working tree, the repository has no remote, or it has several remotes and none is `origin`.
 
 ## `radian arc add`
 
@@ -616,7 +618,7 @@ The exit codes are the command's own:
 The point names and their variables are fixed by the binary; only the command lines come from `config.toml`.
 This build runs one point, `after_merge`, a task reaching `done.merged`; the other points (`after_fail`, `after_rework`, `after_awaiting_human`, `after_proposed`) are not built yet, and a file that sets one is refused with a message naming it.
 
-`hooks.after_merge` is an array of shell command lines, run in the repository root, in order. Its default is `[]`, but [`radian arc init`](#radian-arc-init-track) writes these three lines (`init` replaces `origin` with the configured [`repository.remote`](files.md#configtoml) when it is not `origin`):
+`hooks.after_merge` is an array of shell command lines, run in the repository root, in order. Its default is `[]`, but [`radian arc init`](#radian-arc-init-track) writes these three lines, naming the remote it uses: a `config.toml` that already exists keeps and uses its `[repository] remote`, and a repository without one gets `origin` or its only remote (see [the init section](#radian-arc-init-track)):
 
 ```toml
 [hooks]

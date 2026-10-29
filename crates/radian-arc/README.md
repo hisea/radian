@@ -696,7 +696,7 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   every attempt's verdicts in any order is safe.
 - The integration stage has its own lock file, separate from the exclusive lock of `commands`
   and `mutation`, so an integration run and a `commands` stage may run at the same time.
-- `init` records `origin` as the remote; it is the only name it knows before a config exists.
+- `init` records the remote it uses: the `[repository] remote` of an existing `config.toml`, else `origin` when the repository has it, else the repository's only remote.
 - Plans and tasks count in separate id sequences, and each new id carries its kind's
   configured prefix (`[ids] plan_prefix`, default `PL`; `task_prefix`, default `TK`), then
   the next number above every item of that kind regardless of the item's own prefix. An id
