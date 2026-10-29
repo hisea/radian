@@ -1298,6 +1298,11 @@ impl CommandHooks {
             .async_running
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // Re-checked under the registry lock: an end that set the flag while this call waited
+        // for the lock must not be overtaken by a run it would never drain.
+        if self.async_ended.load(Ordering::SeqCst) {
+            return None;
+        }
         // THE SUPERSEDE RULE (ADR 0045 §5): a new run of the same hook kills the earlier
         // run's process group; that run delivers nothing and its record says `cancelled`. A
         // run whose process already exited (or whose group is already gone) is delivering its
