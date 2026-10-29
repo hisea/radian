@@ -275,11 +275,15 @@ pub(super) fn ui_loop(
             let goal_remaining = app
                 .goal_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
+            let idle_remaining = app
+                .idle_deadline()
+                .map(|deadline| deadline.saturating_duration_since(now));
             let wait_remaining = [
                 quit_remaining,
                 fork_remaining,
                 loop_remaining,
                 goal_remaining,
+                idle_remaining,
             ]
             .into_iter()
             .flatten()
@@ -304,6 +308,10 @@ pub(super) fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        // The wall clock is read here for the deadline checks below: the app
+                        // only sees it through `set_now`, and a deadline branch takes no
+                        // event that would set it.
+                        app.set_now(std::time::Instant::now());
                         // A `/fork` waiting for the journaled turn boundary: give up at its
                         // deadline with a notice, never an empty child session.
                         if app
@@ -327,6 +335,18 @@ pub(super) fn ui_loop(
                                 .goal_deadline()
                                 .is_some_and(|d| std::time::Instant::now() >= d))
                             && app.update(AppInput::LoopDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        // ADR 0045 §6: the idle period is over. One update fires the
+                        // `idle_prompt` observers (it re-checks that no turn, `/loop` or goal
+                        // took over).
+                        if app
+                            .idle_deadline()
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::IdleDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {
                             app.quit = true;

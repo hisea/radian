@@ -10,7 +10,8 @@
 //! Anything outside the subset — an unknown event name, a malformed entry, a hook whose `type`
 //! is not `"command"`, or an entry carrying one of the non-command handler keys (`if`,
 //! `http`, `prompt`, `agent`) — is skipped with one warning line, never refusing the file.
-//! `async`/`asyncRewake` are fields of their own, accepted on `PostToolUse` and `Stop` only;
+//! `async`/`asyncRewake` are fields of their own, accepted on `PostToolUse` and `Stop` only
+//! and accepted as inert on `StopFailure`/`Notification`;
 //! on `PreToolUse` and `PermissionRequest` that hook is dropped with one warning line and the
 //! entry's other hooks still load.
 //!
@@ -20,7 +21,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{HookCommand, HookMatcher, HooksConfig, POST_TOOL_USE, STOP};
+use crate::config::{
+    HookCommand, HookMatcher, HooksConfig, NOTIFICATION, POST_TOOL_USE, STOP, STOP_FAILURE,
+};
 
 /// The file name inside `<workspace>/.radian/`.
 pub const FILE_NAME: &str = "hooks.json";
@@ -75,7 +78,10 @@ pub fn parse_project_value(
             warnings.push(format!("{origin}: skipped hooks.{event} (not a list)"));
             continue;
         };
-        let accepts_async = matches!(event.as_str(), POST_TOOL_USE | STOP);
+        let accepts_async = matches!(
+            event.as_str(),
+            POST_TOOL_USE | STOP | STOP_FAILURE | NOTIFICATION
+        );
         for (index, item) in items.iter().enumerate() {
             let parsed = parse_entry(item, accepts_async);
             // A bad `args`, or `async` on an event that does not accept it, drops that hook
@@ -93,6 +99,8 @@ pub fn parse_project_value(
                     "PermissionRequest" => config.permission_request.push(entry),
                     "PostToolUse" => config.post_tool_use.push(entry),
                     "Stop" => config.stop.push(entry),
+                    "StopFailure" => config.stop_failure.push(entry),
+                    "Notification" => config.notification.push(entry),
                     _ => unreachable!("the event list is checked above"),
                 },
                 None if !parsed.dropped_any() => warnings.push(format!(
@@ -280,6 +288,8 @@ fn hook_count(config: &HooksConfig) -> usize {
         .chain(config.permission_request.iter())
         .chain(config.post_tool_use.iter())
         .chain(config.stop.iter())
+        .chain(config.stop_failure.iter())
+        .chain(config.notification.iter())
         .map(|entry| entry.hooks.len())
         .sum()
 }
@@ -423,6 +433,8 @@ pub fn preview_project(workspace: &Path) -> Option<ProjectHooksPreview> {
     push("PermissionRequest", &config.permission_request);
     push("PostToolUse", &config.post_tool_use);
     push("Stop", &config.stop);
+    push("StopFailure", &config.stop_failure);
+    push("Notification", &config.notification);
     Some(ProjectHooksPreview {
         entries,
         error: None,
@@ -512,9 +524,10 @@ mod tests {
         crate::test_support::TempDir::with_label("radian-host-project-hooks", tag)
     }
 
-    /// The subset parses: four events, matchers kept raw, commands with timeouts carried.
+    /// The subset parses: the four deciding events, matchers kept raw, commands with
+    /// timeouts carried.
     #[test]
-    fn the_four_events_parse_with_matchers_and_timeouts() {
+    fn the_four_deciding_events_parse_with_matchers_and_timeouts() {
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "PreToolUse": [{"matcher": "shell|write", "hooks": [{"type": "command", "command": "echo hi", "timeout": 10}]}],

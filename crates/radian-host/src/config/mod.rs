@@ -42,7 +42,10 @@ use std::path::{Path, PathBuf};
 pub use error::ConfigError;
 pub use hooks::{
     DEFAULT_ASYNC_HOOK_TIMEOUT_SECS, DEFAULT_HOOK_TIMEOUT_SECS, DEFAULT_INTENT_STOP, HOOK_EVENTS,
-    HookCommand, HookMatcher, HooksConfig, POST_TOOL_USE, PRE_TOOL_USE, STOP, matcher_effective,
+    HookCommand, HookMatcher, HooksConfig, IDLE_PROMPT_SECS, NOTIFICATION,
+    NOTIFICATION_IDLE_PROMPT, NOTIFICATION_PERMISSION_PROMPT, NOTIFICATION_TYPES, POST_TOOL_USE,
+    PRE_TOOL_USE, STOP, STOP_FAILURE, STOP_FAILURE_MATCHERS, matcher_effective,
+    observe_matcher_effective,
 };
 pub use model::{ModelConfig, PROVIDER_KIND_ALIASES, PROVIDER_KINDS, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};
@@ -1930,6 +1933,8 @@ future_option = "alpha"
             "hooks.PermissionRequest",
             "hooks.PostToolUse",
             "hooks.Stop",
+            "hooks.StopFailure",
+            "hooks.Notification",
             "hooks.intent_stop",
             "skills.extra_paths",
             "skills.builtin",
@@ -1990,6 +1995,8 @@ future_option = "alpha"
             "hooks.PermissionRequest",
             "hooks.PostToolUse",
             "hooks.Stop",
+            "hooks.StopFailure",
+            "hooks.Notification",
             "mcp.mcpServers",
             "memory.injection",
             "shell",
@@ -2076,6 +2083,16 @@ future_option = "alpha"
                 "command = \"echo hi\"\n",
                 "[[hooks.Stop]]\n",
                 "[[hooks.Stop.hooks]]\n",
+                "type = \"command\"\n",
+                "command = \"echo hi\"\n",
+                "[[hooks.StopFailure]]\n",
+                "matcher = \"usage_limit\"\n",
+                "[[hooks.StopFailure.hooks]]\n",
+                "type = \"command\"\n",
+                "command = \"echo hi\"\n",
+                "[[hooks.Notification]]\n",
+                "matcher = \"permission_prompt\"\n",
+                "[[hooks.Notification.hooks]]\n",
                 "type = \"command\"\n",
                 "command = \"echo hi\"\n",
                 "[hooks]\n",

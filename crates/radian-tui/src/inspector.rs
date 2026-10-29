@@ -322,11 +322,14 @@ pub fn mcp_entries(
 }
 
 /// Builds the hooks rows: every configured entry in config order, with the matcher shown
-/// as `*` when empty/missing and the effective flag following the same compile the
-/// runtime uses (an invalid pattern never runs).
+/// as `*` when empty/missing and the effective flag following the same rule the runtime
+/// uses (an invalid pattern or an out-of-set observe matcher never runs).
 pub fn hook_entries(config: &radian_host::config::HooksConfig) -> Vec<HookEntry> {
     let mut out = Vec::new();
-    let mut push = |event: &str, matcher: &radian_host::config::HookMatcher| {
+    let mut push = |event: &str,
+                    matcher: &radian_host::config::HookMatcher,
+                    effective: bool,
+                    observe: bool| {
         for hook in &matcher.hooks {
             let raw = matcher.matcher.clone().unwrap_or_default();
             let display = if raw.is_empty() { "*" } else { raw.as_str() };
@@ -334,24 +337,65 @@ pub fn hook_entries(config: &radian_host::config::HooksConfig) -> Vec<HookEntry>
                 event: event.to_owned(),
                 matcher: display.to_owned(),
                 command: hook.command.clone(),
-                timeout_secs: hook.timeout().as_secs(),
+                timeout_secs: if observe {
+                    hook.observe_timeout().as_secs()
+                } else {
+                    hook.timeout().as_secs()
+                },
                 source: "user config.toml".to_owned(),
                 level: "user".to_owned(),
-                effective: matcher_effective(matcher.matcher.as_deref()),
+                effective,
             });
         }
     };
     for matcher in &config.pre_tool_use {
-        push("PreToolUse", matcher);
+        push(
+            "PreToolUse",
+            matcher,
+            matcher_effective(matcher.matcher.as_deref()),
+            false,
+        );
     }
     for matcher in &config.permission_request {
-        push("PermissionRequest", matcher);
+        push(
+            "PermissionRequest",
+            matcher,
+            matcher_effective(matcher.matcher.as_deref()),
+            false,
+        );
     }
     for matcher in &config.post_tool_use {
-        push("PostToolUse", matcher);
+        push(
+            "PostToolUse",
+            matcher,
+            matcher_effective(matcher.matcher.as_deref()),
+            false,
+        );
     }
     for matcher in &config.stop {
-        push("Stop", matcher);
+        push("Stop", matcher, true, false);
+    }
+    for matcher in &config.stop_failure {
+        push(
+            "StopFailure",
+            matcher,
+            radian_host::config::observe_matcher_effective(
+                radian_host::config::STOP_FAILURE_MATCHERS,
+                matcher.matcher.as_deref(),
+            ),
+            true,
+        );
+    }
+    for matcher in &config.notification {
+        push(
+            "Notification",
+            matcher,
+            radian_host::config::observe_matcher_effective(
+                radian_host::config::NOTIFICATION_TYPES,
+                matcher.matcher.as_deref(),
+            ),
+            true,
+        );
     }
     out
 }

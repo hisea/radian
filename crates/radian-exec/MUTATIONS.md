@@ -713,5 +713,13 @@ Unmutated, the lib's nine `acp::` tests pass.
 |---|---|---|---|
 | TK0227-M1 | the async producer races `tx.send` against the close without trying the queue first | ✅ 1 failed | `acp::wire::tests::closing_the_outbox_does_not_drop_a_message_that_had_room` (32 of the 64 messages with room were dropped) |
 
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-exec --test hooks --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M3 | `close_and_join` drops its 5 s `wait_observe` | ✅ 1 failed (rc=100) | `hooks::p_waits_about_five_seconds_then_kills_a_slow_stop_failure_hook` (the run exited at once, before the observer's deadline) |
+
 1/1 caught. The mutation is the pre-fix `send`: `tokio::select!` with both branches ready picks
 at random, so a deliverable message disappeared once `close` had run.

@@ -18,6 +18,12 @@ impl App {
         if disarmed {
             self.quit_pending = None;
         }
+        // ADR 0045 §6: any input restarts the `idle_prompt` timer, whether it sends a
+        // message or just types.
+        if is_user_input(&input) {
+            self.idle_since = Some(self.now);
+            self.idle_notified = false;
+        }
         let mut result = match input {
             // The two clock-aware inputs the loop (or a test) sends.
             Input::Cancel { now } => self.cancel_or_quit_at(now),
@@ -27,6 +33,7 @@ impl App {
                 self.quit_pending = None;
                 UpdateResult::dirty()
             }
+            Input::IdleDeadline => self.idle_deadline_fired(),
             Input::ForkDeadline => {
                 // The wait for the turn boundary ran out: say so and drop the fork, so no
                 // empty child session is created.

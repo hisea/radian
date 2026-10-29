@@ -131,6 +131,37 @@ fn every_hook_event_name_appears_in_the_manual() {
     }
 }
 
+/// Every `StopFailure` matcher value appears in `docs/user/hooks.md`.
+///
+/// The source is the generated `MODEL_ERROR_KINDS` the parser reads, so a new kind fails here
+/// until the manual's StopFailure table names it (ADR 0045 §6).
+#[test]
+fn every_stop_failure_matcher_appears_in_the_manual() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let hooks_md = std::fs::read_to_string(manifest.join("../../docs/user/hooks.md"))
+        .expect("hooks.md exists");
+    for kind in radian_core::MODEL_ERROR_KINDS {
+        assert!(
+            hooks_md.contains(&format!("`{kind}`")),
+            "StopFailure matcher `{kind}` is missing from hooks.md"
+        );
+    }
+}
+
+/// Every `Notification` matcher value appears in `docs/user/hooks.md`.
+#[test]
+fn every_notification_type_appears_in_the_manual() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let hooks_md = std::fs::read_to_string(manifest.join("../../docs/user/hooks.md"))
+        .expect("hooks.md exists");
+    for kind in radian_host::config::NOTIFICATION_TYPES {
+        assert!(
+            hooks_md.contains(&format!("`{kind}`")),
+            "Notification matcher `{kind}` is missing from hooks.md"
+        );
+    }
+}
+
 /// Every hook-run end value appears in `docs/user/hooks.md`.
 ///
 /// The source is the one closed set the run record, the `/hooks` page and this test read

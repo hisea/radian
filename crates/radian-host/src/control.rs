@@ -414,6 +414,10 @@ impl RuntimeEvents for RuntimeFanout {
         self.inner.on_model_error(error);
     }
 
+    fn on_stop_failure(&self, error: &radian_core::ModelError, last_assistant_message: &str) {
+        self.inner.on_stop_failure(error, last_assistant_message);
+    }
+
     fn on_hook_event(&self, name: &str, data: &serde_json::Value) {
         self.server.push(json!({
             "event": {

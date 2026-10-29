@@ -129,6 +129,175 @@ fn production_chain(
     session_hooks(role, permissions, commands, memory, skills, goal, facts)
 }
 
+/// Edge case 5 + 7: a `permission_prompt` hook fires once, with the tool name and without its
+/// arguments, and it can never delay the modal; an ask a `PermissionRequest` hook answered
+/// fires none at all (ADR 0045 §6).
+#[tokio::test]
+async fn a_permission_prompt_fires_once_and_never_delays_the_prompt() {
+    use radian_permissions::{
+        ApprovalPolicy, NotificationHooks, PermissionRequestDecision, PermissionRequestHooks,
+        Preset, Profile,
+    };
+
+    struct AllowAsk;
+    impl PermissionRequestHooks for AllowAsk {
+        fn permission_request<'a>(
+            &'a self,
+            _call: &'a radian_core::ToolCall,
+        ) -> BoxFuture<'a, Result<PermissionRequestDecision, radian_core::HookError>> {
+            Box::pin(async {
+                Ok(PermissionRequestDecision::Allow {
+                    session_grant: false,
+                })
+            })
+        }
+    }
+
+    let ws = scratch("permission-prompt");
+    let stdin = ws.join("notification.json");
+    let config = radian_host::config::HooksConfig {
+        notification: vec![radian_host::config::HookMatcher {
+            matcher: Some("permission_prompt".into()),
+            hooks: vec![radian_host::config::HookCommand {
+                // The wait is the point: the prompt must still arrive at once.
+                command: format!("cat > '{}'; sleep 5", stdin.display()),
+                args: None,
+                timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
+            }],
+        }],
+        ..Default::default()
+    };
+    let inbox = radian_runtime::Inbox::new(64);
+    let commands = Arc::new(CommandHooks::new(
+        &config,
+        &radian_host::config::HooksConfig::default(),
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &inbox,
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ));
+    let approver = ScriptedApprover::denying();
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::OnAsk,
+        &ws,
+        Vec::new(),
+    )
+    .unwrap();
+    let permissions = Arc::new(PermissionHooks::new(
+        profile,
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(radian_permissions::NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    permissions.set_notification_hooks(Some(Arc::clone(&commands) as Arc<dyn NotificationHooks>));
+
+    let started = std::time::Instant::now();
+    let decision = permissions
+        .before_tool_call(&context(), &shell_call())
+        .await
+        .unwrap();
+    assert!(
+        matches!(decision, radian_core::ToolDecision::Deny { .. }),
+        "the scripted approver denies: {decision:?}"
+    );
+    assert_eq!(approver.calls(), 1, "the modal was asked");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "a hanging notification hook delayed the prompt: {:?}",
+        started.elapsed()
+    );
+    // The hook writes its stdin before sleeping. Wait for a complete JSON object (the `cat`
+    // creates the file before writing), then end the session to kill the sleep.
+    let mut text = String::new();
+    for _ in 0..500 {
+        if let Ok(read) = std::fs::read_to_string(&stdin)
+            && serde_json::from_str::<serde_json::Value>(&read).is_ok()
+        {
+            text = read;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    commands.end_session().await;
+    assert!(!text.is_empty(), "the notification hook ran");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["notification_type"], "permission_prompt");
+    assert_eq!(
+        value["message"],
+        "radian needs your permission to use shell"
+    );
+    assert!(!text.contains("git push"), "arguments never leave: {text}");
+
+    // A `PermissionRequest` hook decided the same ask: no human is asked, so no notification.
+    let stdin2 = ws.join("answered.json");
+    let config = radian_host::config::HooksConfig {
+        notification: vec![radian_host::config::HookMatcher {
+            matcher: Some("permission_prompt".into()),
+            hooks: vec![radian_host::config::HookCommand {
+                command: format!("cat > '{}'", stdin2.display()),
+                args: None,
+                timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
+            }],
+        }],
+        ..Default::default()
+    };
+    let commands2 = Arc::new(CommandHooks::new(
+        &config,
+        &radian_host::config::HooksConfig::default(),
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &inbox,
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ));
+    let approver2 = ScriptedApprover::denying();
+    let profile2 = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::OnAsk,
+        &ws,
+        Vec::new(),
+    )
+    .unwrap();
+    let permissions2 = Arc::new(PermissionHooks::new(
+        profile2,
+        Some(Arc::clone(&approver2) as Arc<dyn Approver>),
+        Arc::new(radian_permissions::NoopAudit),
+    ));
+    permissions2.set_turn_source(Some(InputSource::User));
+    permissions2.set_notification_hooks(Some(Arc::clone(&commands2) as Arc<dyn NotificationHooks>));
+    permissions2.set_permission_request_hooks(Some(Arc::new(AllowAsk)));
+    let decision = permissions2
+        .before_tool_call(&context(), &shell_call())
+        .await
+        .unwrap();
+    assert!(
+        matches!(decision, radian_core::ToolDecision::Allow),
+        "{decision:?}"
+    );
+    assert_eq!(approver2.calls(), 0, "a hook answered, no human was asked");
+    commands2
+        .wait_observe(std::time::Duration::from_secs(1))
+        .await;
+    assert!(
+        !stdin2.exists(),
+        "an answered ask fires no permission_prompt"
+    );
+}
+
 /// ADR 0045 §2: `stop_hook_active` belongs to the turn the continuation opened, not to
 /// whichever turn's `Stop` happens to reach the cycle next. A `Stop` for an earlier turn
 /// that exits 2 while a user's turn is open must not make the user's turn report `true`,
@@ -159,8 +328,16 @@ async fn a_late_stop_verdict_belongs_to_the_turn_it_opens() {
     }
 
     async fn wait_for_json(path: &std::path::Path) -> serde_json::Value {
-        wait_for(path).await;
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        // The file is created before its bytes land, so existence alone is not enough.
+        for _ in 0..600 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(value) = serde_json::from_str(&text)
+            {
+                return value;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never held valid JSON", path.display());
     }
 
     /// Releases a blocked `Stop` hook on the failure path (see the unit test's copy).

@@ -1807,4 +1807,27 @@ named test ran with `cargo nextest run -p radian-host --lib --locked --profile s
 | TK0235-M8 | the session-end guard is dropped again: `end_session` sets `async_ended` without taking `deliver_gate`, and `deliver_async` checks the flag without it | ✅ 1 failed (rc=100) | `hooks::tests::the_session_end_waits_for_a_delivery_already_enqueueing` (the end returned while the delivery was still blocked in the journal) |
 | TK0235-M9 | the cap counts registered entries again (`running.len()`), including runs whose process already exited | ✅ 1 failed (rc=100) | `hooks::tests::the_cap_counts_running_processes_not_delivering_results` (the ninth hook was refused with no hook process running) |
 
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-host --lib --test claude_migrate --test command_hooks --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M2 | `ObserveMatcher::Value` matches every value instead of the named kind | ✅ 1 failed (rc=100) | `hooks::tests::stop_failure_selects_the_kind_and_carries_its_stdin` (the `transport` entry ran too) |
+| TK0236-M5 | the import table maps `rate_limit` to `transport` instead of `unavailable` | ✅ 1 failed (rc=100) | `claude_migrate::the_typical_fixtures_map_commands_hooks_and_agents_md` (the imported matcher was `transport`) |
+| TK0236-M8 | `wait_observe` waits for any observe run instead of only `StopFailure` | ✅ 1 failed (rc=100) | `hooks::tests::notification_does_not_delay_the_exit_wait` (the exit wait held for 5 s on a `Notification` hook) |
+
 2/2 caught, no equivalent mutation.
+
+## TK0236 rework: the StopFailure sink must not own the hook chain
+
+`cargo nextest run -p radian-exec --test hooks --locked --profile sandbox -E 'test(jsonl)'`,
+and `cargo nextest run -p radian-tui --test pty --locked -E
+'test(pty_new_releases_the_old_sessions_lock)'` after a build of both binaries (the mutation
+hangs a real `radian exec`, so this check needs them).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M9 | `HookRuntimeEvents` holds the `CommandHooks` strongly again (`Arc::clone`, direct call), recreating the sink → hook chain → inbox → sink cycle | ✅ 5 failed (rc=100) | `hooks::a_jsonl_run_with_no_hooks_exits`, `hooks::a_jsonl_run_with_a_notification_hook_exits`, `hooks::a_jsonl_run_with_a_fast_stop_failure_hook_exits`, `hooks::a_jsonl_run_exits_about_five_seconds_after_a_slow_stop_failure_hook` (each hit the 15 s bound: the leaked journal kept the tee sender and the printer never ended) and `pty::pty_new_releases_the_old_sessions_lock` (the old session's journal lock was never released, so the resume reported "already locked by another writer") |
+
+1/1 caught, no equivalent mutation.

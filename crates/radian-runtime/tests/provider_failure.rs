@@ -255,6 +255,128 @@ async fn resume_after_a_failed_turn_keeps_the_history() {
     assert_eq!(texts, vec!["first", "second", "RESUMED-OK"]);
 }
 
+/// Records the `StopFailure` callback (ADR 0045 §6): the kind and the turn's last assistant
+/// text. The driver must call it only for a `RunError::Model`.
+#[derive(Default)]
+struct StopFailureSink {
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl RuntimeEvents for StopFailureSink {
+    fn on_runtime_event(&self, _event: &RuntimeEvent) {}
+
+    fn on_stop_failure(&self, error: &ModelError, last_assistant_message: &str) {
+        self.calls.lock().unwrap().push((
+            error.kind().as_str().to_owned(),
+            last_assistant_message.to_owned(),
+        ));
+    }
+}
+
+fn calls(sink: &StopFailureSink) -> Vec<(String, String)> {
+    sink.calls.lock().unwrap().clone()
+}
+
+/// Opens one driver with the sink installed and runs one input to its turn end.
+async fn run_one_with_sink(
+    path: &Path,
+    server: &MockServer,
+    input: &str,
+    sink: Arc<StopFailureSink>,
+) {
+    let journal = Arc::new(SessionJournal::create(path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    let agent = Arc::new(Agent::new(model(server), NoTools).with_config(
+        radian_core::AgentConfig {
+            retries: 0,
+            ..Default::default()
+        },
+    ));
+    let mut driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .expect("open the driver");
+    driver.set_runtime_events(Arc::clone(&sink) as Arc<dyn RuntimeEvents>);
+    let handle = tokio::spawn(async move { driver.run().await });
+    inbox.followup(input, InputSource::User).await.unwrap();
+    recorder.wait_finished().await;
+    inbox.close();
+    handle.await.unwrap().unwrap();
+}
+
+/// Edge case 3: a `Completed` turn calls no `StopFailure`; a model error calls it once with
+/// the kind and the last assistant text; `on_model_error` still fires beside it.
+#[tokio::test]
+async fn stop_failure_fires_only_for_a_model_error_turn() {
+    let server = MockServer::start(vec![text_reply("fine")]).await;
+    let dir = TempDir::new("stop-failure-completed");
+    let sink = Arc::new(StopFailureSink::default());
+    run_one_with_sink(&dir.file("s.jsonl"), &server, "hi", Arc::clone(&sink)).await;
+    assert!(calls(&sink).is_empty(), "a completed turn fires nothing");
+
+    let server = MockServer::start(vec![Reply::status(429, "the plan window is used up")]).await;
+    let dir = TempDir::new("stop-failure-model");
+    let sink = Arc::new(StopFailureSink::default());
+    run_one_with_sink(&dir.file("s.jsonl"), &server, "hi", Arc::clone(&sink)).await;
+    let calls = calls(&sink);
+    assert_eq!(calls.len(), 1, "once per failed turn: {calls:?}");
+    assert_eq!(calls[0].0, "unavailable", "{calls:?}");
+    assert_eq!(calls[0].1, "", "no assistant message before the failure");
+}
+
+/// Edge case 3: a cancelled turn calls no `StopFailure`. The model streams and never ends,
+/// the inbox cancels it, and the turn finishes `Cancelled`.
+#[tokio::test]
+async fn a_cancelled_turn_calls_no_stop_failure() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("stop-failure-cancelled");
+    let path = dir.file("s.jsonl");
+    let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
+    let inbox = Inbox::durable(16, Arc::clone(&journal));
+    let recorder = Arc::new(Recorder::default());
+    let agent = Arc::new(Agent::new(model(&server), NoTools).with_config(
+        radian_core::AgentConfig {
+            retries: 0,
+            ..Default::default()
+        },
+    ));
+    let sink = Arc::new(StopFailureSink::default());
+    let mut driver = Driver::open(
+        &agent,
+        journal,
+        Arc::clone(&inbox),
+        Arc::clone(&recorder) as Arc<dyn EventSink>,
+        TurnOptions::default(),
+    )
+    .await
+    .expect("open the driver");
+    driver.set_runtime_events(Arc::clone(&sink) as Arc<dyn RuntimeEvents>);
+    let handle = tokio::spawn(async move { driver.run().await });
+    inbox.followup("hi", InputSource::User).await.unwrap();
+    // Wait until the request is in flight, then cancel the turn.
+    while server.requests().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    inbox.cancel(radian_runtime::CancelCause::Requested);
+    tokio::time::timeout(std::time::Duration::from_secs(5), recorder.wait_finished())
+        .await
+        .expect("the cancelled turn must finish");
+    assert!(
+        matches!(last_status(&recorder), Some(RunStatus::Cancelled(_))),
+        "the turn was cancelled: {:?}",
+        last_status(&recorder)
+    );
+    inbox.close();
+    handle.await.unwrap().unwrap();
+    assert!(calls(&sink).is_empty(), "a cancel is not a model error");
+}
+
 /// The `TurnFailed` message is durable, so the key must never reach the session file (the
 /// adapter masks it first; this pins the durable record, not just the live text).
 #[tokio::test]

@@ -3352,3 +3352,12 @@ identical). The named test ran with `cargo nextest run -p radian-tui --test rend
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0231-M12 | `Inspector::len` counts only the configured hooks, so the selection never enters the run rows (the old clipped shape) | ✅ 1 failed (rc=100) | `the_hooks_page_scrolls_to_every_retained_run` (Down stayed on the configured hook, so the newest run was never selected) |
+
+## TK0236: StopFailure and Notification
+
+`cargo nextest run -p radian-tui --lib --locked --profile sandbox`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0236-M4 | `idle_deadline_fired` never sets `idle_notified` | ✅ 1 failed (rc=100) | `app::idle_prompt::tests::idle_prompt_fires_once_and_input_restarts_the_timer` (a second 60 s window fired again) |
+| TK0236-M7 | `idle_deadline` drops the `/loop` suppression | ✅ 1 failed (rc=100) | `app::idle_prompt::tests::loop_active_suppresses_idle_prompt` (the loop-owned turn end armed the timer) |
