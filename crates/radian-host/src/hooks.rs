@@ -381,6 +381,14 @@ struct AsyncRun {
     handle: Arc<AsyncRunHandle>,
 }
 
+/// One observe-only run in flight: its process handle, and whether `exec -p` waits for it
+/// (only `StopFailure`; a `Notification` hook never postpones an exit).
+#[derive(Debug)]
+struct ObserveRun {
+    handle: Arc<AsyncRunHandle>,
+    waits_on_exit: bool,
+}
+
 /// The user-level command hooks: one [`Hooks`] implementation for every event, plus the
 /// `PermissionRequest` chain the permission layer calls through
 /// [`radian_permissions::PermissionRequestHooks`].
@@ -461,8 +469,9 @@ pub struct CommandHooks {
     async_running: Arc<std::sync::Mutex<Vec<AsyncRun>>>,
     /// The observe-only runs (`StopFailure`, `Notification`) in flight (ADR 0045 §6). They
     /// are not async hooks: they never enter the jobs registry, `Stop`'s `background_tasks`,
-    /// or supersede one another. `exec -p` waits on this list for at most 5 s.
-    observe_running: Arc<std::sync::Mutex<Vec<Arc<AsyncRunHandle>>>>,
+    /// or supersede one another. `exec -p` waits only for the `StopFailure` runs (at most
+    /// 5 s); a `Notification` run never delays an exit.
+    observe_running: Arc<std::sync::Mutex<Vec<ObserveRun>>>,
     /// Bumped whenever one observe run finishes or is killed, so a waiter re-checks.
     observe_signal: Arc<Notify>,
     /// Bumped whenever one async hook finishes (or fails to start), so a waiter re-checks.
@@ -820,7 +829,7 @@ impl CommandHooks {
                 if !seen.insert(dedup_key(hook)) {
                     continue;
                 }
-                self.spawn_observe(hook, stdin.clone(), event);
+                self.spawn_observe(hook, stdin.clone(), event, event == "StopFailure");
             }
         }
     }
@@ -828,7 +837,13 @@ impl CommandHooks {
     /// Starts one observe-only run and returns at once (ADR 0045 §6). The run is registered
     /// so [`CommandHooks::wait_observe`] can wait on it and kill it, and so the session end
     /// kills it. Its result is discarded: these events observe, never decide.
-    fn spawn_observe(&self, hook: &HookCommand, stdin_json: serde_json::Value, event: &str) {
+    fn spawn_observe(
+        &self,
+        hook: &HookCommand,
+        stdin_json: serde_json::Value,
+        event: &str,
+        waits_on_exit: bool,
+    ) {
         if self.async_ended.load(Ordering::SeqCst) {
             return;
         }
@@ -843,7 +858,10 @@ impl CommandHooks {
             if self.async_ended.load(Ordering::SeqCst) {
                 return;
             }
-            running.push(Arc::clone(&handle));
+            running.push(ObserveRun {
+                handle: Arc::clone(&handle),
+                waits_on_exit,
+            });
         }
         let this = self.clone();
         let hook = hook.clone();
@@ -865,43 +883,69 @@ impl CommandHooks {
         });
     }
 
-    /// Waits at most `timeout` for the observe-only runs to finish, then kills the ones still
+    /// Waits at most `timeout` for the `StopFailure` runs to finish, then kills the ones still
     /// running (ADR 0045 §6). `exec -p` calls it before its session end, so a slow
     /// `StopFailure` hook costs at most 5 s and leaves no process group behind; the run's
-    /// exit code and output are unchanged.
+    /// exit code and output are unchanged. A `Notification` run is never waited for (the
+    /// session end kills it).
     pub async fn wait_observe(&self, timeout: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.observe_signal.notified();
             tokio::pin!(notified);
-            if self
+            let waiting = self
                 .observe_running
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .is_empty()
-            {
+                .iter()
+                .any(|run| run.waits_on_exit);
+            if !waiting {
                 return;
             }
             tokio::select! {
                 () = &mut notified => {}
                 () = tokio::time::sleep_until(deadline) => {
-                    self.kill_observe();
+                    self.kill_waited_observe();
                     return;
                 }
             }
         }
     }
 
-    /// Kills every observe-only run still in flight (the 5 s `exec -p` deadline, or the
-    /// session end). Each run delivers nothing and its recent-runs entry says `cancelled`.
+    /// Kills the `StopFailure` runs still in flight at the 5 s `exec -p` deadline. Each run
+    /// delivers nothing and its recent-runs entry says `cancelled`.
+    fn kill_waited_observe(&self) {
+        let mut running = self
+            .observe_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut keep = Vec::new();
+        for run in running.drain(..) {
+            if !run.waits_on_exit {
+                keep.push(run);
+                continue;
+            }
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            let pid = run.handle.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_group(pid);
+            }
+        }
+        *running = keep;
+        drop(running);
+        self.observe_signal.notify_waiters();
+    }
+
+    /// Kills every observe-only run still in flight (the session end). Each run delivers
+    /// nothing and its recent-runs entry says `cancelled`.
     fn kill_observe(&self) {
         let mut running = self
             .observe_running
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         for run in running.drain(..) {
-            run.cancelled.store(true, Ordering::SeqCst);
-            let pid = run.pid.load(Ordering::SeqCst);
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            let pid = run.handle.pid.load(Ordering::SeqCst);
             if pid != 0 {
                 kill_group(pid);
             }
@@ -915,7 +959,7 @@ impl CommandHooks {
         self.observe_running
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .retain(|run| !Arc::ptr_eq(run, handle));
+            .retain(|run| !Arc::ptr_eq(&run.handle, handle));
         self.observe_signal.notify_waiters();
     }
 
@@ -3016,7 +3060,8 @@ mod tests {
 
     /// Both observe-only events are always background: `async` is accepted and inert, and
     /// the default timeout stays the synchronous 60 s. A `wait_observe` deadline kills the
-    /// run's process group (the `exec -p` 5 s rule).
+    /// `StopFailure` run's process group (the `exec -p` 5 s rule); a `Notification` run is
+    /// never waited for.
     #[tokio::test]
     async fn observe_hooks_are_async_and_a_wait_deadline_kills_them() {
         let root = TempRoot::new("observe-async");
@@ -3024,14 +3069,20 @@ mod tests {
         let mut sleeping = hook(&format!("echo $$ > '{}'; sleep 30", pidfile.display()));
         sleeping.async_hook = true;
         let config = HooksConfig {
-            notification: vec![entry("idle_prompt", vec![sleeping])],
+            stop_failure: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![sleeping],
+            }],
             ..HooksConfig::default()
         };
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
-        fixture.hooks.notify_idle();
-        // The run is registered before `notify_idle` returns, so the pid appears while the
-        // wait below is still running.
+        fixture.hooks.run_stop_failure(
+            &radian_core::ModelError::Transport("stream ended".into()),
+            "",
+        );
+        // The run is registered before `run_stop_failure` returns, so the pid appears while
+        // the wait below is still running.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let pid = loop {
             if let Ok(text) = std::fs::read_to_string(&pidfile)
@@ -3067,6 +3118,31 @@ mod tests {
             gone,
             "the observe run's process group survived the deadline"
         );
+    }
+
+    /// A `Notification` hook never postpones an exit: `wait_observe` returns without waiting
+    /// for it (the session end kills it). Only `StopFailure` is waited for (ADR 0045 §6).
+    #[tokio::test]
+    async fn notification_does_not_delay_the_exit_wait() {
+        let root = TempRoot::new("notification-no-wait");
+        let config = HooksConfig {
+            notification: vec![entry("idle_prompt", vec![hook("sleep 5")])],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.notify_idle();
+        let started = std::time::Instant::now();
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a Notification hook held the exit wait: {:?}",
+            started.elapsed()
+        );
+        fixture.hooks.end_session().await;
     }
 
     /// Exit 2 denies the call with the hook's stderr as the reason.

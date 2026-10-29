@@ -1815,5 +1815,6 @@ named test ran with `cargo nextest run -p radian-host --lib --locked --profile s
 |---|---|---|---|
 | TK0236-M2 | `ObserveMatcher::Value` matches every value instead of the named kind | ✅ 1 failed (rc=100) | `hooks::tests::stop_failure_selects_the_kind_and_carries_its_stdin` (the `transport` entry ran too) |
 | TK0236-M5 | the import table maps `rate_limit` to `transport` instead of `unavailable` | ✅ 1 failed (rc=100) | `claude_migrate::the_typical_fixtures_map_commands_hooks_and_agents_md` (the imported matcher was `transport`) |
+| TK0236-M8 | `wait_observe` waits for any observe run instead of only `StopFailure` | ✅ 1 failed (rc=100) | `hooks::tests::notification_does_not_delay_the_exit_wait` (the exit wait held for 5 s on a `Notification` hook) |
 
 2/2 caught, no equivalent mutation.
