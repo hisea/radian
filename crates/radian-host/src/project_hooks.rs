@@ -194,7 +194,11 @@ fn parse_command(hook: &serde_json::Value) -> CommandParse {
         Some(_) => return CommandParse::Skip,
     };
     let args = match table.get("args") {
-        None | Some(serde_json::Value::Null) => None,
+        // A present `args` decides how the command runs (exec form or `/bin/sh -c`), so
+        // `null` is not "absent" here, unlike `matcher`/`timeout`: it is not an array of
+        // strings and the hook is dropped (ADR 0045 §4). Reading it as absent would quietly
+        // switch the hook to the shell form.
+        None => None,
         Some(serde_json::Value::Array(items)) => {
             let mut args = Vec::with_capacity(items.len());
             for item in items {
@@ -385,16 +389,14 @@ pub fn preview_project(workspace: &Path) -> Option<ProjectHooksPreview> {
 mod args_tests {
     use super::*;
 
-    /// `args` is the exec-form list (ADR 0045 §4), carried verbatim; `null` reads as absent,
-    /// like the other optional fields here.
+    /// `args` is the exec-form list (ADR 0045 §4), carried verbatim.
     #[test]
     fn args_parses_as_the_exec_form_argument_list() {
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "PreToolUse": [{"matcher": "shell", "hooks": [
                     {"type": "command", "command": "/hooks/check", "args": ["a b", "$(touch /tmp/x)", ";", "*"]},
-                    {"type": "command", "command": "/hooks/empty", "args": []},
-                    {"type": "command", "command": "/hooks/null", "args": null}
+                    {"type": "command", "command": "/hooks/empty", "args": []}
                 ]}]
             }"#,
         )
@@ -413,15 +415,17 @@ mod args_tests {
             ])
         );
         assert_eq!(hooks[1].args, Some(Vec::new()));
-        assert_eq!(hooks[2].args, None);
     }
 
-    /// Edge case: `args: "x"` and `args: [1]` drop that hook only, one warning line each,
+    /// Edge case: `args: "x"`, `args: [1]` and `args: null` drop that hook only, one warning
+    /// line each,
     /// and the entry's other hooks still load (ADR 0045 §4). Dropping the whole entry, or
     /// silently accepting the value, fails this.
     #[test]
     fn a_bad_args_skips_only_that_hook() {
-        for bad in ["\"x\"", "[1]"] {
+        // `null` is not an array of strings: it must skip the hook, never read as "absent"
+        // and fall back to `/bin/sh -c` (the shell form that can run the command).
+        for bad in ["\"x\"", "[1]", "null"] {
             let source = format!(
                 r#"{{"PreToolUse": [{{"matcher": "shell", "hooks": [
                     {{"type": "command", "command": "/hooks/good"}},

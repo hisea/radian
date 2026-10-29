@@ -1686,3 +1686,18 @@ empty).
 | TK0231-M6 | the run ring is returned oldest first (`hook_runs` drops `.rev()`) | ✅ 1 failed (rc=100) | `hooks::tests::the_run_ring_keeps_the_last_50_newest_first` |
 | TK0231-M7 | import-claude drops `args` again (`HookCommandDraft.args = None` in `hook_command`) | ✅ 1 failed (rc=100) | `claude_migrate::a_hook_args_array_is_carried_over_unchanged` |
 | TK0231-M8 | a bad `args` drops the whole project-level entry (the user-level twin, in `project_hooks.rs`) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_skips_only_that_hook` |
+
+## TK0231 (rework): a JSON `null` `args` is not "absent" (2026-10-29, branch `work/TK0231-hook-args-and-run-records`)
+
+ADR 0045 §4 / ADR 0046: a `null` `args` is not an array of strings, so the project reader
+drops that hook with one warning line and import-claude drops it with one report line.
+Reading it as absent would switch the hook to `/bin/sh -c`. Each mutation was applied in
+place to `crates/radian-host/src/project_hooks.rs` and
+`crates/radian-host/src/config/migrate_claude.rs`, the named tests ran with `cargo nextest
+run -p radian-host --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`, and the
+source was restored from `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0231-M10 | the project reader accepts a `null` `args` as absent again (the `None` arm also matches `Some(Value::Null)`) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_skips_only_that_hook` |
+| TK0231-M11 | import-claude accepts a `null` `args` as absent again (the `None` arm also matches `Some(Json::Null)`) | ✅ 1 failed (rc=100) | `claude_migrate::a_hook_args_that_is_null_is_dropped_with_one_report_line` |

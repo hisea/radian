@@ -1819,7 +1819,9 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft
         return Err("a hook with an empty `command` is not supported".into());
     }
     let args = match hook.get("args") {
-        None | Some(Json::Null) => None,
+        // `null` is not an array of strings: the hook drops with one report line (ADR 0046),
+        // never imports as shell form.
+        None => None,
         Some(Json::Array(items)) => {
             let mut args = Vec::with_capacity(items.len());
             for item in items {
@@ -1832,7 +1834,9 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft
             }
             Some(args)
         }
-        Some(_) => return Err("a hook whose `args` is not an array is not supported".into()),
+        Some(_) => {
+            return Err("a hook whose `args` is not an array of strings is not supported".into());
+        }
     };
     let timeout = match hook.get("timeout") {
         None => None,

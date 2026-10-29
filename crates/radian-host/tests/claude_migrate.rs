@@ -1326,3 +1326,71 @@ fn a_hook_args_array_is_carried_over_unchanged() {
     );
     readable(home.path());
 }
+
+/// ADR 0046: any `args` that is not an array of strings drops that hook with one report
+/// line. `null` counts — in user and in project settings, which share `hook_command` — so
+/// a `null` hook never imports as shell form; its good sibling still imports.
+#[test]
+fn a_hook_args_that_is_null_is_dropped_with_one_report_line() {
+    let home = Temp::new("args-null-home");
+    let proj = Temp::new("args-null-proj");
+    write(
+        home.path(),
+        "settings.json",
+        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "/hooks/good"},
+            {"type": "command", "command": "/hooks/null", "args": null}
+        ]}]}}"#,
+    );
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "/hooks/stop-good"},
+            {"type": "command", "command": "/hooks/stop-null", "args": null}
+        ]}]}}"#,
+    );
+
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
+        .expect("the draft is a valid Radian configuration");
+    let commands: Vec<&str> = config.hooks.pre_tool_use[0]
+        .hooks
+        .iter()
+        .map(|hook| hook.command.as_str())
+        .collect();
+    assert_eq!(
+        commands,
+        vec!["/hooks/good"],
+        "the null hook never imports: {commands:?}"
+    );
+    assert_eq!(
+        config.hooks.pre_tool_use[0].hooks[0].args, None,
+        "the imported sibling stays shell form"
+    );
+
+    let project: serde_json::Value =
+        serde_json::from_str(draft.project_hooks_json.as_deref().expect("project hooks")).unwrap();
+    let project_hooks = project["Stop"][0]["hooks"].as_array().unwrap();
+    assert_eq!(project_hooks.len(), 1, "{project}");
+    assert_eq!(project_hooks[0]["command"], "/hooks/stop-good");
+
+    let drops: Vec<&String> = draft
+        .notes
+        .iter()
+        .filter(|line| line.contains("a hook was not imported"))
+        .collect();
+    assert_eq!(drops.len(), 2, "one line per null hook: {:?}", draft.notes);
+    assert!(
+        drops.iter().all(|line| line.contains("args")),
+        "each line names the bad `args`: {drops:?}"
+    );
+    assert!(
+        drops.iter().any(|line| line.contains("`settings.json`"))
+            && drops
+                .iter()
+                .any(|line| line.contains("`.claude/settings.json`")),
+        "one for the user file, one for the project file: {drops:?}"
+    );
+    readable(home.path());
+}
