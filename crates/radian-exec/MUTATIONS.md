@@ -699,4 +699,19 @@ Unmutated, the `acp` binary passed 32/32 and the lib's eight `acp::` tests passe
 async prompt/bridge paths); M6 is the shutdown that must release them before it waits for the
 driver.
 
+## `radian acp`: a send with room survives close (TK0227 rework, 2026-10-28)
 
+Branch `work/TK0227-fix-bugs-muse-review-missed-followups`. This fixes the review's minor item:
+the async producer now tries the queue first and only races the close when the queue is full, so
+a message that never waited is never dropped at random. Each mutation was applied in place to
+`crates/radian-exec/src/acp/wire.rs` and the source was restored from `.radian/mut/`
+(`cmp` identical). The row ran
+`cargo nextest run -p radian-exec --locked --profile sandbox --lib -E 'test(<name>)'`.
+Unmutated, the lib's nine `acp::` tests pass.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0227-M1 | the async producer races `tx.send` against the close without trying the queue first | ✅ 1 failed | `acp::wire::tests::closing_the_outbox_does_not_drop_a_message_that_had_room` (32 of the 64 messages with room were dropped) |
+
+1/1 caught. The mutation is the pre-fix `send`: `tokio::select!` with both branches ready picks
+at random, so a deliverable message disappeared once `close` had run.
