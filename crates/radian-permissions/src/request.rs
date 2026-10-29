@@ -17,8 +17,11 @@ pub enum PermissionRequestDecision {
     /// turn, the denial on a non-human turn or a terminal-less `radian exec`).
     NoDecision,
     /// A hook said `allow`: the call runs without asking anyone. It answers only this
-    /// question; `deny` rules and the sandbox are untouched.
-    Allow,
+    /// question; `deny` rules and the sandbox are untouched. `session_grant` is a hook's
+    /// `updatedPermissions` `addRules`/`session`/`allow` item: this call also records the
+    /// same session grant "allow for this session" would (exact key, or a shell prefix),
+    /// so later identical calls never ask or run the hook again (ADR 0045 §4).
+    Allow { session_grant: bool },
     /// A hook said `deny` (or exited 2). `reason` is the text of the denied tool result;
     /// `None` means the hook gave no message and the layer supplies the default.
     Deny { reason: Option<String> },

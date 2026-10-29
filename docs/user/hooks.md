@@ -319,7 +319,7 @@ one object with a `decision`:
 |---|---|---|---|
 | `decision.behavior` | string | none | `allow` or `deny`. Any other value, or a missing value, warns once and means no decision. |
 | `decision.message` | string | none | On `deny`, the text of the denied tool result (its error code is `denied`); at most 2000 characters. On `allow` it is ignored. Without it the denial carries a default message. |
-| `decision.updatedPermissions` | array | none | Ignored in this version. |
+| `decision.updatedPermissions` | array | none | The one item `{"type": "addRules", "destination": "session", "behavior": "allow"}` records the same session grant as the approval prompt's `a` ("allow for this session", `keybindings.md`): the next identical call — or, for a `shell` call, one with the same command prefix — neither asks nor runs the hook again, for this session only. The item's `rules` are not read: radian has no text rule syntax. Any other `type`, `destination` or `behavior` warns once and records nothing, and a value that is not an array warns once; the call is still allowed once. |
 | `decision.updatedInput` | object | none | Ignored with one warning line. |
 | `decision.interrupt` | boolean | none | Ignored with one warning line. |
 
@@ -329,6 +329,10 @@ the ordinary path follows: the approval prompt on a turn from you, or a denial
 when nobody can be asked (a `Stop` continuation turn, a job-notice turn, or
 `radian exec` without a terminal). `allow` here answers a question the rules
 already asked. It does not lift a `deny` rule, and does not skip the sandbox.
+
+`updatedPermissions` items count only from a layer whose decision is `allow`, and
+only when the final decision is `allow`: a later layer's `deny` discards them,
+and a layer that gives no decision contributes nothing.
 
 `permissionDecision` applies only to `PreToolUse`; on `PostToolUse` and
 `Stop` it is ignored with one warning line, and on `PermissionRequest` it has
