@@ -308,6 +308,10 @@ pub(super) fn ui_loop(
                             app.quit = true;
                             break;
                         }
+                        // The wall clock is read here for the deadline checks below: the app
+                        // only sees it through `set_now`, and a deadline branch takes no
+                        // event that would set it.
+                        app.set_now(std::time::Instant::now());
                         // A `/fork` waiting for the journaled turn boundary: give up at its
                         // deadline with a notice, never an empty child session.
                         if app
