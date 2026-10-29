@@ -356,54 +356,39 @@ impl Default for Integration {
     }
 }
 
-/// `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13). Only
-/// `after_merge` is built; a file that sets any other point is refused as not built yet, and
-/// an unknown name is refused as an unknown key.
+/// `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13). Each key
+/// is a list of shell command lines; an unknown name is refused as an unknown key.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Hooks {
     /// Shell command lines run in the repository root after a task reaches `done.merged`, in
     /// order. Empty runs nothing.
     pub after_merge: Vec<String>,
-    /// Decided but not built yet; a file that sets it is refused when the file is read.
-    pub after_fail: Option<Vec<String>>,
-    /// Decided but not built yet; a file that sets it is refused when the file is read.
-    pub after_rework: Option<Vec<String>>,
-    /// Decided but not built yet; a file that sets it is refused when the file is read.
-    pub after_awaiting_human: Option<Vec<String>>,
-    /// Decided but not built yet; a file that sets it is refused when the file is read.
-    pub after_proposed: Option<Vec<String>>,
+    /// Shell command lines run after a task enters any `failed.*` phase, in order.
+    pub after_fail: Vec<String>,
+    /// Shell command lines run after a task enters `review.rework_pending`, in order.
+    pub after_rework: Vec<String>,
+    /// Shell command lines run after a task enters `review.awaiting_human`, in order.
+    pub after_awaiting_human: Vec<String>,
+    /// Shell command lines run after a new task enters `todo.proposed`, in order.
+    pub after_proposed: Vec<String>,
 }
 
 impl Hooks {
-    /// The command lines of `point`, in order. A point this build does not run has none.
+    /// The command lines of `point`, in order. An unknown point has none.
     #[must_use]
     pub fn commands(&self, point: &str) -> &[String] {
-        if crate::hooks::BUILT_HOOK_POINTS.contains(&point) {
-            self.value(point).unwrap_or(&[])
-        } else {
-            &[]
-        }
-    }
-
-    /// The first point this file sets whose value this build does not run, with its name. The
-    /// points come from the one list the manual's drift test reads.
-    fn unbuilt(&self) -> Option<&'static str> {
-        crate::hooks::HOOK_POINTS
-            .iter()
-            .copied()
-            .filter(|point| !crate::hooks::BUILT_HOOK_POINTS.contains(point))
-            .find(|point| self.value(point).is_some())
+        self.value(point).unwrap_or(&[])
     }
 
     /// The value this file holds for `point`, when it holds one.
     fn value(&self, point: &str) -> Option<&[String]> {
         match point {
             "after_merge" => Some(&self.after_merge),
-            "after_fail" => self.after_fail.as_deref(),
-            "after_rework" => self.after_rework.as_deref(),
-            "after_awaiting_human" => self.after_awaiting_human.as_deref(),
-            "after_proposed" => self.after_proposed.as_deref(),
+            "after_fail" => Some(&self.after_fail),
+            "after_rework" => Some(&self.after_rework),
+            "after_awaiting_human" => Some(&self.after_awaiting_human),
+            "after_proposed" => Some(&self.after_proposed),
             _ => None,
         }
     }
@@ -795,12 +780,6 @@ pub fn parse(text: &str) -> Result<Config, String> {
     let flows_configured = check_flows_shape(text)?;
     let mut config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     config.flows_configured = flows_configured;
-    if let Some(point) = config.hooks.unbuilt() {
-        return Err(format!(
-            "`hooks.{point}` is set; it is not built yet (this build runs `{}`)",
-            crate::hooks::AFTER_MERGE
-        ));
-    }
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",
@@ -1197,12 +1176,33 @@ mod tests {
         assert_eq!(parsed, expected);
     }
 
-    /// `[hooks]`: `after_merge` defaults to `[]`; `init` writes three lines that name the
-    /// configured remote; another point is refused as not built yet, and its value must be an
-    /// array of strings.
+    /// `[hooks]`: every point defaults to `[]`, each parses a list of strings, `init` writes
+    /// three `after_merge` lines that name the configured remote, and a value that is not an
+    /// array of strings is refused by name.
     #[test]
-    fn the_hooks_section_defaults_to_an_empty_after_merge_and_refuses_unbuilt_points() {
-        assert!(Hooks::default().after_merge.is_empty());
+    fn the_hooks_section_defaults_to_empty_lists_and_parses_every_point() {
+        let defaults = Hooks::default();
+        for point in crate::hooks::HOOK_POINTS {
+            assert!(
+                defaults.commands(point).is_empty(),
+                "`hooks.{point}` defaults to []"
+            );
+            let text = format!("schema_version = 1\n[hooks]\n{point} = [\"true\"]\n");
+            let configured = parse(&text).expect("a built point parses");
+            assert_eq!(
+                configured.hooks.commands(point),
+                ["true".to_owned()],
+                "`hooks.{point}` reads its list"
+            );
+            let empty = format!("schema_version = 1\n[hooks]\n{point} = []\n");
+            assert!(
+                parse(&empty)
+                    .expect("an empty list parses")
+                    .hooks
+                    .commands(point)
+                    .is_empty()
+            );
+        }
         assert!(
             parse("schema_version = 1\n")
                 .expect("the minimum file")
@@ -1223,29 +1223,19 @@ mod tests {
             configured.hooks.after_merge.as_slice()
         );
 
-        for point in crate::hooks::HOOK_POINTS
-            .iter()
-            .filter(|point| !crate::hooks::BUILT_HOOK_POINTS.contains(point))
-        {
-            let text = format!("schema_version = 1\n[hooks]\n{point} = [\"true\"]\n");
-            let error = parse(&text).expect_err("an unbuilt point is refused");
-            assert!(
-                error.contains(&format!("hooks.{point}")),
-                "the error names the point: {error}"
-            );
-            assert!(error.contains("not built yet"), "{error}");
-            let empty = format!("schema_version = 1\n[hooks]\n{point} = []\n");
-            assert!(
-                parse(&empty)
-                    .expect_err("an empty unbuilt point is still set")
-                    .contains("not built yet")
-            );
-        }
-
         let shape = parse("schema_version = 1\n[hooks]\nafter_merge = \"git status\"\n")
             .expect_err("a string is not an array");
         assert!(shape.contains("hooks.after_merge"), "{shape}");
         assert!(shape.contains("array of strings"), "{shape}");
+        for point in crate::hooks::HOOK_POINTS {
+            let text = format!("schema_version = 1\n[hooks]\n{point} = \"git status\"\n");
+            let error = parse(&text).expect_err("a string is not an array");
+            assert!(
+                error.contains(&format!("hooks.{point}")),
+                "the error names the point: {error}"
+            );
+            assert!(error.contains("array of strings"), "{error}");
+        }
         assert!(
             parse("schema_version = 1\n[hooks]\nafter_nothing = []\n").is_err(),
             "an unknown point is an unknown key"

@@ -985,8 +985,7 @@ pub fn finish_verification(store: &Store, plan: &Verification) -> Result<Verifie
         },
     )?;
     store.change_task(&task.id, |task| {
-        task.state = model::TaskState::Review;
-        task.phase = "awaiting_human".to_owned();
+        task.enter(model::TaskState::Review, "awaiting_human");
         task.verified_sha = Some(plan.head.clone());
         task.verdict_set_digest = Some(digest.clone());
         task.retry_at = None;
@@ -1591,8 +1590,7 @@ fn failed_stage(
         reason.record(store, &task.id, label);
         reset_conflict_rework(store, &task.id)?;
         store.change_task(&task.id, |task| {
-            task.state = model::TaskState::Review;
-            task.phase = "rework_pending".to_owned();
+            task.enter(model::TaskState::Review, "rework_pending");
             task.verified_sha = Some(head.to_owned());
             task.verdict_set_digest = None;
             task.retry_at = Some(retry_at.clone());
@@ -1674,8 +1672,7 @@ fn failed_stage(
         });
     }
     store.change_task(&task.id, |task| {
-        task.state = model::TaskState::Review;
-        task.phase = "rework_pending".to_owned();
+        task.enter(model::TaskState::Review, "rework_pending");
         task.verified_sha = Some(head.to_owned());
         task.verdict_set_digest = None;
         task.retry_at = None;
@@ -1810,7 +1807,7 @@ fn conflict_auto_rework(
         };
         store.change_task(&task.id, |task| {
             if task.state == model::TaskState::Review {
-                task.phase = "rework_pending".to_owned();
+                task.enter_phase("rework_pending");
                 task.retry_at = None;
             }
             Ok(())
@@ -2529,7 +2526,7 @@ fn prepare_merge(
         approve(store, task_id, &label, &head, approver, &profile_name)?;
         store.change_task(task_id, |task| {
             if task.state == model::TaskState::Review && task.phase == "awaiting_human" {
-                task.phase = "integrating".to_owned();
+                task.enter_phase("integrating");
             }
             Ok(())
         })?;
@@ -2696,7 +2693,7 @@ fn finish_integration(
     };
     store.change_task(task_id, |task| {
         if task.state == model::TaskState::Review {
-            task.phase = "ready_to_merge".to_owned();
+            task.enter_phase("ready_to_merge");
         }
         Ok(())
     })?;
@@ -2746,14 +2743,11 @@ fn finish_integration(
         )));
     }
     store.change_task(task_id, |task| {
-        task.state = model::TaskState::Done;
-        task.phase = "merged".to_owned();
-        task.retry_at = None;
         // The pending hook and the sha it reads are recorded in this same write, so a crash
         // after the merge cannot lose the hook: the holder of `runner.lock` runs it, at least
         // once, until the point is cleared (ADR 0048 decisions 10 and 13).
-        task.pending_hooks
-            .push(crate::hooks::AFTER_MERGE.to_owned());
+        task.enter(model::TaskState::Done, "merged");
+        task.retry_at = None;
         task.merged_sha = Some(candidate.clone());
         // The switch is read here, with the merged-state write, not when the merge started:
         // an auto merge can run its integration while the owner changes the setting, and the
@@ -3186,7 +3180,7 @@ fn integration_verdict(store: &Store, task: &str, label: &str) -> Result<PathBuf
 fn to_rework(store: &Store, task_id: &str) -> Result<(), Error> {
     store.change_task(task_id, |task| {
         if task.state == model::TaskState::Review {
-            task.phase = "rework_pending".to_owned();
+            task.enter_phase("rework_pending");
         }
         Ok(())
     })?;
@@ -3196,7 +3190,7 @@ fn to_rework(store: &Store, task_id: &str) -> Result<(), Error> {
 fn back_to_integrating(store: &Store, task_id: &str) -> Result<(), Error> {
     store.change_task(task_id, |task| {
         if task.state == model::TaskState::Review {
-            task.phase = "integrating".to_owned();
+            task.enter_phase("integrating");
         }
         Ok(())
     })?;
@@ -3209,7 +3203,7 @@ fn back_to_integrating(store: &Store, task_id: &str) -> Result<(), Error> {
 fn return_to_verifying(store: &Store, task_id: &str) -> Result<(), Error> {
     store.change_task(task_id, |task| {
         if task.state == model::TaskState::Review {
-            task.phase = "verifying".to_owned();
+            task.enter_phase("verifying");
             task.verified_sha = None;
             task.verdict_set_digest = None;
         }
@@ -3285,7 +3279,7 @@ pub fn reject(store: &Store, task_id: &str, note: &str) -> Result<Rejected, Erro
                 task.phase
             )));
         }
-        task.phase = "rework_pending".to_owned();
+        task.enter_phase("rework_pending");
         Ok(())
     })?;
     Ok(Rejected {

@@ -1126,12 +1126,28 @@ fn pause(plan: &str) -> Result<String, Error> {
     Ok(format!("{plan} auto off\n"))
 }
 
+/// Runs the pending hooks this owner action left, when `runner.lock` is free (ADR 0048
+/// decisions 10 and 13). A loop that holds the lock runs them on its next pass, so the
+/// command leaves them for it. Returns the warning lines to print after the action's own.
+fn run_own_hooks(store: &Store) -> Result<Vec<String>, Error> {
+    if let Ok(Some(_lock)) = store.try_runner_lock() {
+        return crate::hooks::run_pending(store);
+    }
+    Ok(Vec::new())
+}
+
 /// `radian arc start <task>`: claim the task, run one attempt, apply the result, and
 /// continue into the gate when the attempt was pushed.
 fn start(task: &str) -> Result<u8, Error> {
     let store = open()?;
     let started = crate::attempt::start(&store, task)?;
-    let text = format!("{}\n", crate::attempt::lines(&started).join("\n"));
+    let mut text = format!("{}\n", crate::attempt::lines(&started).join("\n"));
+    // This owner action runs the hooks it left pending when it can take `runner.lock` without
+    // waiting; a loop that holds the lock already runs them on its next pass (ADR 0048
+    // decisions 10 and 13).
+    for warning in run_own_hooks(&store)? {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
     let code = emit(text);
     if code != Exit::Ok.code() {
         return Ok(code);
@@ -1161,7 +1177,13 @@ fn start(task: &str) -> Result<u8, Error> {
 fn reverify(task: &str) -> Result<u8, Error> {
     let store = open()?;
     let reverified = crate::review::reverify(&store, task)?;
-    let text = format!("{}\n", reverified.lines().join("\n"));
+    let mut text = format!("{}\n", reverified.lines().join("\n"));
+    // This owner action runs the hooks it left pending when it can take `runner.lock` without
+    // waiting; a loop that holds the lock already runs them on its next pass (ADR 0048
+    // decisions 10 and 13).
+    for warning in run_own_hooks(&store)? {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
     let code = emit(text);
     if code != Exit::Ok.code() {
         return Ok(code);
@@ -1178,7 +1200,13 @@ fn reverify(task: &str) -> Result<u8, Error> {
 fn cancel(id: &str) -> Result<u8, Error> {
     let store = open()?;
     let canceled = crate::attempt::cancel_any(&store, id)?;
-    Ok(emit(format!("{}\n", canceled.lines().join("\n"))))
+    let mut text = format!("{}\n", canceled.lines().join("\n"));
+    // A plan cancel records one `after_fail` per task it ended; this action runs them all when
+    // it can take `runner.lock` without waiting (ADR 0048 decisions 10 and 13).
+    for warning in run_own_hooks(&store)? {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
+    Ok(emit(text))
 }
 
 /// `radian arc reset-budget <id>`: a paused task, or every paused task of a plan, back to
@@ -1200,10 +1228,8 @@ fn merge(task: &str) -> Result<u8, Error> {
     // This owner action runs the hooks it left pending when it can take `runner.lock` without
     // waiting; a loop that holds the lock already runs them on its next pass, so the command
     // leaves them for it (ADR 0048 decisions 10 and 13).
-    if let Ok(Some(_lock)) = store.try_runner_lock() {
-        for warning in crate::hooks::run_pending(&store)? {
-            text.push_str(&format!("warning: {warning}\n"));
-        }
+    for warning in run_own_hooks(&store)? {
+        text.push_str(&format!("warning: {warning}\n"));
     }
     Ok(emit(text))
 }
@@ -1212,7 +1238,14 @@ fn merge(task: &str) -> Result<u8, Error> {
 fn reject(task: &str, note: &str) -> Result<u8, Error> {
     let store = open()?;
     let rejected = crate::review::reject(&store, task, note)?;
-    Ok(emit(format!("{}\n", rejected.line())))
+    let mut text = format!("{}\n", rejected.line());
+    // This owner action runs the hooks it left pending when it can take `runner.lock` without
+    // waiting; a loop that holds the lock already runs them on its next pass (ADR 0048
+    // decisions 10 and 13).
+    for warning in run_own_hooks(&store)? {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
+    Ok(emit(text))
 }
 
 /// `radian arc run`: one pass of the scheduling loop. A pass makes every transition it can

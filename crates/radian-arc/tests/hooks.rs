@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::*;
+use radian_arc::mcp::ArcServer;
 use radian_arc::review;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
@@ -77,30 +78,60 @@ fn prepare_task(repo: &Repo, store: &Store, plan: &str, slug: &str) -> (String, 
     (task, head, worktree)
 }
 
-/// Replaces the `[hooks]` section `init` wrote. The section sits between `[integration]` and
-/// `[gate]`.
-fn set_after_merge(repo: &Repo, lines: &[&str]) {
+/// Replaces the `[hooks]` section `init` wrote with `points`, each a point name and its
+/// command lines. The section sits between `[integration]` and `[gate]`.
+fn set_hooks(repo: &Repo, points: &[(&str, &[&str])]) {
     let path = repo.arc().join("config.toml");
     let text = fs::read_to_string(&path).expect("config.toml");
     let start = text.find("[hooks]\n").expect("init writes [hooks]");
     let rest = &text[start..];
     let end = rest.find("\n[gate]").expect("[hooks] precedes [gate]");
-    let block = if lines.is_empty() {
-        "[hooks]\nafter_merge = []\n".to_owned()
-    } else {
-        let mut block = String::from("[hooks]\nafter_merge = [\n");
-        for line in lines {
+    let mut block = String::from("[hooks]\n");
+    for (point, lines) in points {
+        if lines.is_empty() {
+            block.push_str(&format!("{point} = []\n"));
+            continue;
+        }
+        block.push_str(&format!("{point} = [\n"));
+        for line in *lines {
             let escaped = line.replace('\\', "\\\\").replace('"', "\\\"");
             block.push_str(&format!("  \"{escaped}\",\n"));
         }
         block.push_str("]\n");
-        block
-    };
+    }
     fs::write(
         &path,
         format!("{}{}{}", &text[..start], block, &rest[end..]),
     )
     .expect("write config.toml");
+}
+
+/// [`set_hooks`] for the one `after_merge` point.
+fn set_after_merge(repo: &Repo, lines: &[&str]) {
+    set_hooks(repo, &[("after_merge", lines)]);
+}
+
+/// Adds a task in `todo.ready` and returns its id.
+fn add_ready_task(store: &Store, plan: &str, slug: &str) -> String {
+    store
+        .add_task(
+            plan,
+            slug,
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("add a task")
+}
+
+/// Replaces one line of `config.toml` with another, asserting the old line is there.
+fn set_config_line(repo: &Repo, old: &str, new: &str) {
+    let path = repo.arc().join("config.toml");
+    let text = fs::read_to_string(&path).expect("config.toml");
+    assert!(text.contains(old), "config.toml has `{old}`:\n{text}");
+    fs::write(&path, text.replacen(old, new, 1)).expect("write config.toml");
 }
 
 /// Sets `[gate] command_timeout_secs` to `seconds`.
@@ -344,6 +375,11 @@ fn the_cli_leaves_the_hook_pending_while_a_loop_holds_runner_lock() {
     let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
     plan_ops::confirm(&store, &plan).expect("confirm the plan");
     set_after_merge(&repo, &["echo ran >> hook-runs.txt"]);
+    // The verification that prepared the task owes `after_awaiting_human`; run it (it has no
+    // command here) so this test sees only the merge's point.
+    let cleared = repo.radian(&["arc", "run"]);
+    assert_eq!(cleared.code, 0, "run: {}", cleared.stderr);
+    assert!(pending(&store, &task).is_empty());
 
     let lock = store
         .try_runner_lock()
@@ -471,6 +507,12 @@ fn two_pending_hooks_run_once_each_with_their_own_variables() {
         &repo,
         &["printf '%s %s %s\\n' \"$ARC_TASK\" \"$ARC_MERGED_SHA\" \"$ARC_BRANCH\" >> hooks.txt"],
     );
+    // Each verification owes `after_awaiting_human`; run it (it has no command here) so the
+    // pending lists hold only the merge's point.
+    let cleared = repo.radian(&["arc", "run"]);
+    assert_eq!(cleared.code, 0, "run: {}", cleared.stderr);
+    assert!(pending(&store, &first).is_empty());
+    assert!(pending(&store, &second).is_empty());
     review::merge(&store, &first).expect("the first merge runs");
     review::merge(&store, &second).expect("the second merge runs");
     // Main moved under the second merge, so its candidate is a merge commit, not its head.
@@ -518,4 +560,373 @@ fn the_manual_names_every_hook_variable_and_point() {
             "docs/user/arc/index.md does not name the point `{point}`"
         );
     }
+}
+
+/// The line every new point test writes: the point and the state it saw, one per run.
+const HOOK_LINE: &str = "printf '%s %s\\n' \"$ARC_HOOK\" \"$ARC_STATE\" >> hooks.txt";
+
+fn hook_lines(repo: &Repo) -> Vec<String> {
+    fs::read_to_string(repo.clone.join("hooks.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `after_fail` fires once after a task enters `failed.cancelled`, with `ARC_HOOK` and
+/// `ARC_STATE` naming the point and the phase. The owner's `cancel` runs it itself, since no
+/// loop holds `runner.lock`.
+#[test]
+fn after_fail_fires_once_with_its_point_and_state() {
+    let (repo, store, plan) = setup("hooks-after-fail");
+    let task = add_ready_task(&store, &plan, "fail");
+    set_hooks(&repo, &[("after_fail", &[HOOK_LINE])]);
+
+    let run = repo.radian(&["arc", "cancel", &task]);
+    assert_eq!(run.code, 0, "cancel: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        state(&store, &task),
+        ("failed".to_owned(), "cancelled".to_owned())
+    );
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+    assert_eq!(hook_lines(&repo), vec!["after_fail failed.cancelled"]);
+}
+
+/// `after_rework` fires once after a failed verification enters `review.rework_pending`, with
+/// the point and the phase. The library writes the record; the next pass runs it.
+#[test]
+fn after_rework_fires_once_with_its_point_and_state() {
+    let (repo, store, plan) = setup("hooks-after-rework");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    set_hooks(&repo, &[("after_rework", &[HOOK_LINE])]);
+
+    review::reject(&store, &task, "the diff does not match the brief").expect("reject runs");
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert!(
+        pending(&store, &task).contains(&"after_rework".to_owned()),
+        "the transition owes the point: {:?}",
+        pending(&store, &task)
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_rework review.rework_pending"]
+    );
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+}
+
+/// `after_awaiting_human` fires once after verification enters `review.awaiting_human`, with
+/// the point and the phase.
+#[test]
+fn after_awaiting_human_fires_once_with_its_point_and_state() {
+    let (repo, store, plan) = setup("hooks-after-awaiting");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    set_hooks(&repo, &[("after_awaiting_human", &[HOOK_LINE])]);
+    assert_eq!(
+        pending(&store, &task),
+        vec!["after_awaiting_human".to_owned()]
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_awaiting_human review.awaiting_human"]
+    );
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+}
+
+/// A task added through the MCP `add_task` tool records `after_proposed` but runs nothing; the
+/// next serve pass runs it once, with `todo.proposed`.
+#[test]
+fn after_proposed_runs_on_the_next_pass_not_in_the_mcp_call() {
+    let (repo, store, plan) = setup("hooks-after-proposed");
+    add_ready_task(&store, &plan, "first");
+    plan_ops::confirm(&store, &plan).expect("confirm the plan");
+    set_hooks(&repo, &[("after_proposed", &[HOOK_LINE])]);
+    let server = ArcServer::new(store.clone());
+
+    let result = server.call(
+        "add_task",
+        serde_json::json!({
+            "plan": plan,
+            "slug": "second",
+            "title": "A proposed task",
+            "brief": "the brief\n",
+        })
+        .as_object()
+        .cloned(),
+    );
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "add_task succeeds: {result:?}"
+    );
+    let task = store
+        .task_ids()
+        .expect("the task ids")
+        .into_iter()
+        .find(|id| id.ends_with("-second"))
+        .expect("the new task");
+    assert_eq!(
+        state(&store, &task),
+        ("todo".to_owned(), "proposed".to_owned())
+    );
+    assert_eq!(pending(&store, &task), vec!["after_proposed".to_owned()]);
+    assert!(
+        !repo.clone.join("hooks.txt").exists(),
+        "the MCP call ran a hook"
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(hook_lines(&repo), vec!["after_proposed todo.proposed"]);
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+}
+
+/// `radian arc cancel <plan>` ends three open tasks and records one `after_fail` per task, so
+/// the commands run three times, each with its own task.
+#[test]
+fn a_plan_cancel_runs_after_fail_once_for_each_open_task() {
+    let (repo, store, plan) = setup("hooks-plan-cancel");
+    let tasks = [
+        add_ready_task(&store, &plan, "one"),
+        add_ready_task(&store, &plan, "two"),
+        add_ready_task(&store, &plan, "three"),
+    ];
+    set_hooks(
+        &repo,
+        &[(
+            "after_fail",
+            &["printf '%s %s %s\\n' \"$ARC_HOOK\" \"$ARC_STATE\" \"$ARC_TASK\" >> hooks.txt"],
+        )],
+    );
+
+    let run = repo.radian(&["arc", "cancel", &plan]);
+    assert_eq!(run.code, 0, "cancel: {}\n{}", run.stderr, run.stdout);
+    for task in &tasks {
+        assert_eq!(
+            state(&store, task),
+            ("failed".to_owned(), "cancelled".to_owned())
+        );
+        assert!(pending(&store, task).is_empty(), "the record is cleared");
+    }
+    let lines = hook_lines(&repo);
+    assert_eq!(lines.len(), 3, "one run per task: {lines:?}");
+    for task in &tasks {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("after_fail failed.cancelled {task}")),
+            "no hook ran for `{task}`: {lines:?}"
+        );
+    }
+}
+
+/// A conflict rework arc writes itself returns the task to `todo.ready` and owes no
+/// `after_rework`; one that stops in `review.rework_pending` owes exactly one.
+#[test]
+fn a_conflict_to_ready_owes_no_rework_hook_and_one_to_rework_pending_owes_one() {
+    let (repo, store, plan) = setup("hooks-conflict");
+    let (ready, ready_phase) = prepare_conflict(&repo, &store, &plan, "auto");
+    assert_eq!(
+        ready_phase, "ready",
+        "the conflict rework returns to todo.ready"
+    );
+    assert!(
+        !pending(&store, &ready).contains(&"after_rework".to_owned()),
+        "todo.ready owes no after_rework: {:?}",
+        pending(&store, &ready)
+    );
+
+    // The same conflict with the limit at 0 stops in `review.rework_pending` for the owner.
+    set_config_line(&repo, "max_conflict_rework = 3", "max_conflict_rework = 0");
+    let (stopped, stopped_phase) = prepare_conflict(&repo, &store, &plan, "stopped");
+    assert_eq!(stopped_phase, "rework_pending");
+    assert_eq!(pending(&store, &stopped), vec!["after_rework".to_owned()]);
+
+    set_hooks(&repo, &[("after_rework", &[HOOK_LINE])]);
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_rework review.rework_pending"]
+    );
+    assert!(pending(&store, &ready).is_empty());
+    assert!(pending(&store, &stopped).is_empty());
+}
+
+/// A second write of the phase the task is already in is not a new entry: it records no
+/// point, so the hook runs once for the entry that moved the task there. A second `reject` is
+/// refused by the state rule, so the direct write is the case the helper guards.
+#[test]
+fn a_second_write_of_the_same_phase_does_not_owe_a_second_hook() {
+    let (repo, store, plan) = setup("hooks-same-phase");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    set_hooks(&repo, &[("after_rework", &[HOOK_LINE])]);
+    review::reject(&store, &task, "fix it").expect("the first reject runs");
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_rework review.rework_pending"]
+    );
+
+    let again = review::reject(&store, &task, "fix it again");
+    assert!(again.is_err(), "a second reject is refused: {again:?}");
+    store
+        .change_task(&task, |task| {
+            task.enter(TaskState::Review, "rework_pending");
+            Ok(())
+        })
+        .expect("the same phase is written again");
+    assert!(
+        pending(&store, &task).is_empty(),
+        "a repeated write of the same phase owes nothing: {:?}",
+        pending(&store, &task)
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_rework review.rework_pending"],
+        "the hook did not run a second time"
+    );
+}
+
+/// With no loop running, `radian arc reject` runs the `after_rework` hook in its own process,
+/// before it prints.
+#[test]
+fn the_cli_reject_runs_its_hook_when_no_loop_holds_runner_lock() {
+    let (repo, store, plan) = setup("hooks-cli-reject");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    set_hooks(&repo, &[("after_rework", &[HOOK_LINE])]);
+
+    let run = repo.radian(&["arc", "reject", &task, "--note", "fix the diff"]);
+    assert_eq!(run.code, 0, "reject: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_rework review.rework_pending"]
+    );
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+    assert!(
+        !run.stdout.contains("warning:"),
+        "the hook failed: {}",
+        run.stdout
+    );
+}
+
+/// The manual's phone notification sends only the repository name, the task id and the phase.
+/// A fake HTTP server receives the payload; nothing else from the task reaches it.
+#[test]
+fn the_phone_notification_example_sends_only_the_repo_task_and_phase() {
+    let (repo, store, plan) = setup("hooks-notify");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    let (url, received) = fake_notify_server();
+    let line = format!(
+        "curl -s -m 5 -X POST {url} -H 'Content-Type: application/json' -d \
+         \"{{\\\"repo\\\":\\\"\"$(basename \"$PWD\")\"\\\",\\\"task\\\":\\\"$ARC_TASK\\\",\
+         \\\"phase\\\":\\\"$ARC_STATE\\\"}}\""
+    );
+    set_hooks(&repo, &[("after_awaiting_human", &[line.as_str()])]);
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    let body = received
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the fake server received the notification");
+    let value: serde_json::Value = serde_json::from_str(&body).expect("the payload is JSON");
+    let object = value.as_object().expect("the payload is an object");
+    assert_eq!(
+        object.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["phase", "repo", "task"],
+        "the payload carries only the three fields: {body}"
+    );
+    assert_eq!(value["repo"], "clone");
+    assert_eq!(value["task"], task.as_str());
+    assert_eq!(value["phase"], "review.awaiting_human");
+}
+
+/// A fake HTTP server for one POST: it returns its address and a channel that carries the
+/// request body. The thread ends after one request; a test that never receives fails on its
+/// own timeout instead of hanging the process.
+fn fake_notify_server() -> (String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the fake server");
+    let addr = listener.local_addr().expect("the fake server's address");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut body = String::new();
+        loop {
+            let read = match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            buffer.extend_from_slice(&chunk[..read]);
+            let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let start = end + 4;
+            if buffer.len() >= start + length {
+                body = String::from_utf8_lossy(&buffer[start..start + length]).into_owned();
+                break;
+            }
+        }
+        let _ =
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = sender.send(body);
+    });
+    (format!("http://{addr}/notify"), receiver)
+}
+
+/// Publishes a task branch that conflicts with a moved main, puts it in `review.verifying`,
+/// and verifies it. Returns the task id and the phase verification left it in.
+fn prepare_conflict(repo: &Repo, store: &Store, plan: &str, slug: &str) -> (String, String) {
+    let task = add_ready_task(store, plan, slug);
+    let base = repo.main_sha();
+    let branch = format!("work/{task}");
+    repo.git(&["checkout", "-B", &branch, &base]);
+    let file = format!("{slug}.txt");
+    fs::write(repo.clone.join(&file), "work side\n").expect("the task's file");
+    repo.git(&["add", &file]);
+    repo.git(&["commit", "-m", &file]);
+    let head = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["push", &repo.remote, &branch]);
+    // Main moves on the same file, so merging it into the task's branch conflicts.
+    repo.git(&["checkout", &repo.main_branch]);
+    fs::write(repo.clone.join(&file), "main side\n").expect("main's file");
+    repo.git(&["add", &file]);
+    repo.git(&["commit", "-m", "main side"]);
+    repo.git(&["push", &repo.remote, &repo.main_branch]);
+    store
+        .change_task(&task, |task| {
+            task.enter(TaskState::Review, "verifying");
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{}-1", task.id));
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .expect("the task is in review.verifying");
+    let verified = review::verify(store, &task).expect("verification runs");
+    (task, verified.phase)
 }

@@ -616,7 +616,15 @@ The exit codes are the command's own:
 
 `[hooks]` runs configured shell commands at fixed points in a task's life.
 The point names and their variables are fixed by the binary; only the command lines come from `config.toml`.
-This build runs one point, `after_merge`, a task reaching `done.merged`; the other points (`after_fail`, `after_rework`, `after_awaiting_human`, `after_proposed`) are not built yet, and a file that sets one is refused with a message naming it.
+There are five points, each an array of shell command lines, default `[]`:
+
+| Point | Fires after |
+|---|---|
+| `after_merge` | A task enters `done.merged`. |
+| `after_fail` | A task enters any `failed.*` phase (`failed.exhausted`, `failed.cancelled`, `failed.irrecoverable`). A plan cancel that ends several tasks records one point per task. |
+| `after_rework` | A task enters `review.rework_pending`. A conflict rework arc writes itself that returns the task to `todo.ready` is not this point. |
+| `after_awaiting_human` | A task enters `review.awaiting_human`. |
+| `after_proposed` | A new task enters `todo.proposed`, including the lead's MCP `add_task` and the plan's review follow-up. The MCP process only records the point; the next scheduling pass or owner action runs it. |
 
 `hooks.after_merge` is an array of shell command lines, run in the repository root, in order. Its default is `[]`, but [`radian arc init`](#radian-arc-init-track) writes these three lines, naming the remote it uses: a `config.toml` that already exists keeps and uses its `[repository] remote`, and a repository without one gets `origin` or its only remote (see [the init section](#radian-arc-init-track)):
 
@@ -632,7 +640,7 @@ after_merge = [
 Delete a line to keep that branch or the worktree; arc itself removes nothing.
 The commands read `[hooks]` when they run, not when the task merged.
 
-**At least once.** The write that moves the task to `done.merged` records `after_merge` in the task's [`pending_hooks`](files.md#task-fields) field. Only the process that holds `runner.lock` runs hooks: `radian arc run` and `radian arc serve` run every pending hook at the start of each pass, and `radian arc merge` runs it after its own transition when it can take `runner.lock` without waiting (with a loop running, it leaves the hook for that loop). A point is cleared only after its commands ran, success or failure. A process killed while a hook runs therefore runs the whole point again on the next pass: **a hook command must be safe to run twice**, and it must not assume a clean first run.
+**At least once.** The write that moves a task into one of those phases records the point in the task's [`pending_hooks`](files.md#task-fields) field, in the same transaction. A write that leaves the task in the phase it is already in records nothing, so a repeated write of the same phase is not a second entry. Only the process that holds `runner.lock` runs hooks: `radian arc run` and `radian arc serve` run every pending hook at the start of each pass, and the owner's `merge`, `reject`, `cancel`, `start` and `reverify` run them after their own transition when they can take `runner.lock` without waiting (with a loop running, they leave the hook for that loop). The MCP server never runs a hook: `add_task` and the review follow-up only record the point. A point is cleared only after its commands ran, success or failure. A process killed while a hook runs therefore runs the whole point again on the next pass: **a hook command must be safe to run twice**, and it must not assume a clean first run.
 
 **Failure and timeout.** Each command runs with [`gate.command_timeout_secs`](files.md#configtoml) as its limit (`0` waits forever); a timeout kills the command's whole process group. A command that exits non-zero, times out, or cannot start logs one `warning:` line, and the next command still runs. Hooks never undo a merge, change a task's state, or make the command exit non-zero.
 
@@ -649,8 +657,19 @@ The commands read `[hooks]` when they run, not when the task merged.
 | `ARC_WORKTREE` | The task's worktree, absolute: `.radian/arc/worktrees/<task>` (the path as it is when it exists). |
 | `ARC_TARGET_BRANCH` | The branch the merge targeted: [`integration.target_branch`](files.md#configtoml), else [`repository.main_branch`](files.md#configtoml). |
 | `ARC_MERGED_SHA` | The sha the merge pushed to the target branch. `after_merge` only. |
-| `ARC_STATE` | The task's state and phase as `<state>.<phase>`; for `after_merge`, `done.merged`. |
-| `ARC_HOOK` | The point name, `after_merge`. |
+| `ARC_STATE` | The task's state and phase as `<state>.<phase>` when the command runs; the phase the point fired for, unless the task moved on before the hook ran. |
+| `ARC_HOOK` | The point name: `after_merge`, `after_fail`, `after_rework`, `after_awaiting_human` or `after_proposed`. |
+
+**A phone notification.** An `after_awaiting_human` command can tell you a task needs you. This one sends only the repository name, the task id and the phase; it carries no transcript, command text, model, usage or cost (ADR 0034's privacy rule):
+
+```toml
+[hooks]
+after_awaiting_human = [
+  "curl -s -X POST https://example.com/arc -H 'Content-Type: application/json' -d \"{\\\"repo\\\":\\\"\"$(basename \"$PWD\")\"\\\",\\\"task\\\":\\\"$ARC_TASK\\\",\\\"phase\\\":\\\"$ARC_STATE\\\"}\"",
+]
+```
+
+The hook runs in the repository root, so `$(basename "$PWD")` is the repository's directory name; use any fixed name you like. `after_fail` and `after_proposed` are the other points a phone notification usually watches.
 
 ## `radian arc reject <TASK> --note <TEXT>`
 

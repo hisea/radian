@@ -158,6 +158,20 @@ pub fn id_prefix(id: &str) -> Option<&str> {
     split_id(id).map(|(prefix, _, _)| prefix)
 }
 
+/// The hook point entering `state.phase` owes (ADR 0048 decisions 10 and 13), or `None` when
+/// the phase owes no point. The one place the point names are chosen; [`TaskFile::enter`]
+/// records what this returns.
+fn hook_point(state: TaskState, phase: &str) -> Option<&'static str> {
+    match state {
+        TaskState::Done if phase == "merged" => Some(crate::hooks::AFTER_MERGE),
+        TaskState::Failed => Some(crate::hooks::AFTER_FAIL),
+        TaskState::Review if phase == "rework_pending" => Some(crate::hooks::AFTER_REWORK),
+        TaskState::Review if phase == "awaiting_human" => Some(crate::hooks::AFTER_AWAITING_HUMAN),
+        TaskState::Todo if phase == PROPOSED_PHASE => Some(crate::hooks::AFTER_PROPOSED),
+        _ => None,
+    }
+}
+
 /// A task's state, as a value rather than a string (the file keeps the string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -396,9 +410,10 @@ pub struct TaskFile {
     /// collected by the plan's follow-up. Absent reads `false`, so a task merged before the
     /// field existed is never collected.
     pub followup_pending: bool,
-    /// The hook points a transition owes (ADR 0048 decisions 10 and 13). A point is added in
-    /// the same write that moves the task, and removed only after its commands ran, success
-    /// or failure. Absent reads empty, so a task written before hooks existed runs none.
+    /// The hook points a transition owes (ADR 0048 decisions 10 and 13). A point is added by
+    /// [`TaskFile::enter`] in the same write that moves the task, and removed only after its
+    /// commands ran, success or failure. Absent reads empty, so a task written before hooks
+    /// existed runs none.
     pub pending_hooks: Vec<String>,
     /// The sha the last merge pushed to the target branch, which the `after_merge` hook reads
     /// as `ARC_MERGED_SHA`. Absent reads none.
@@ -504,6 +519,34 @@ impl TaskFile {
         let total = self.running_total();
         self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
         self.total_cost_usd = Some(total + cost);
+    }
+
+    /// Moves the task to `state` / `phase` and records the hook point that transition owes
+    /// (ADR 0048 decisions 10 and 13). Every write that moves a task calls this inside its own
+    /// transaction, so the point is recorded by the same write as the move. A write that leaves
+    /// the state and phase as they are records nothing: a second write of the phase the task is
+    /// already in is not a new entry, so its hook does not run twice for one entry. A point that
+    /// is already pending is not recorded twice, so a task owes each point at most once at a
+    /// time.
+    pub fn enter(&mut self, state: TaskState, phase: &str) {
+        let entered = state != self.state || phase != self.phase.as_str();
+        self.state = state;
+        self.phase = phase.to_owned();
+        if !entered {
+            return;
+        }
+        let Some(point) = hook_point(self.state, &self.phase) else {
+            return;
+        };
+        if !self.pending_hooks.iter().any(|pending| pending == point) {
+            self.pending_hooks.push(point.to_owned());
+        }
+    }
+
+    /// [`TaskFile::enter`] for a move within the task's current state.
+    pub fn enter_phase(&mut self, phase: &str) {
+        let state = self.state;
+        self.enter(state, phase);
     }
 
     /// A new `todo`/`ready` task with no attempt yet.

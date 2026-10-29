@@ -22,18 +22,27 @@ use crate::store::{Error, Store};
 /// The point a task reaching `done.merged` owes.
 pub const AFTER_MERGE: &str = "after_merge";
 
-/// Every hook point, built or not, in the order the manual lists them. A task file's
-/// `pending_hooks` list may name any of them; the parser accepts the set and refuses another.
+/// The point a task entering any `failed.*` phase owes.
+pub const AFTER_FAIL: &str = "after_fail";
+
+/// The point a task entering `review.rework_pending` owes.
+pub const AFTER_REWORK: &str = "after_rework";
+
+/// The point a task entering `review.awaiting_human` owes.
+pub const AFTER_AWAITING_HUMAN: &str = "after_awaiting_human";
+
+/// The point a new task entering `todo.proposed` owes.
+pub const AFTER_PROPOSED: &str = "after_proposed";
+
+/// Every hook point, in the order the manual lists them. A task file's `pending_hooks` list may
+/// name any of them; the parser accepts the set and refuses another.
 pub const HOOK_POINTS: &[&str] = &[
     AFTER_MERGE,
-    "after_fail",
-    "after_rework",
-    "after_awaiting_human",
-    "after_proposed",
+    AFTER_FAIL,
+    AFTER_REWORK,
+    AFTER_AWAITING_HUMAN,
+    AFTER_PROPOSED,
 ];
-
-/// The points this build runs. `Config::parse` refuses a section that sets any other one.
-pub const BUILT_HOOK_POINTS: &[&str] = &[AFTER_MERGE];
 
 /// The environment every hook command receives, in the order the manual lists it. One list for
 /// the code and the manual's drift test. They are set with `Command::env` by name, so the source
@@ -84,56 +93,46 @@ fn run_point(
     task: &TaskFile,
     point: &str,
 ) -> Result<Vec<String>, Error> {
-    let built = BUILT_HOOK_POINTS.contains(&point);
-    let commands = if built {
-        config.hooks.commands(point)
-    } else {
-        &[]
-    };
+    let commands = config.hooks.commands(point);
     let mut warnings = Vec::new();
-    if !built {
-        warnings.push(format!(
-            "{} hook `{point}` is not built yet; it ran no command",
-            task.id
-        ));
-    } else {
-        let log_dir = store.root().join("runs").join(&task.id).join("hooks");
-        if let Err(error) = std::fs::create_dir_all(&log_dir) {
-            return Err(Error::Failed(format!(
-                "cannot create {}: {error}",
-                log_dir.display()
-            )));
-        }
-        let env = env_for(store, config, task, point);
-        let timeout = Duration::from_secs(config.gate.command_timeout_secs);
-        for (index, line) in commands.iter().enumerate() {
-            let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
-            match run_shell(store.repo(), line, timeout, &log, &env, None) {
-                Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
-                Ok(outcome) => {
-                    let reason = if outcome.outcome == SeriesOutcome::TimedOut {
-                        format!("timed out after {} s", config.gate.command_timeout_secs)
-                    } else {
-                        format!(
-                            "exited {}",
-                            outcome
-                                .exit_code
-                                .map(|code| code.to_string())
-                                .unwrap_or_else(|| "on a signal".to_owned())
-                        )
-                    };
-                    warnings.push(format!(
-                        "{} hook `{point}` command {} {reason}: {line}",
-                        task.id,
-                        index + 1
-                    ));
-                }
-                Err(error) => warnings.push(format!(
-                    "{} hook `{point}` command {} could not run: {error}",
+    let log_dir = store.root().join("runs").join(&task.id).join("hooks");
+    if !commands.is_empty()
+        && let Err(error) = std::fs::create_dir_all(&log_dir)
+    {
+        return Err(Error::Failed(format!(
+            "cannot create {}: {error}",
+            log_dir.display()
+        )));
+    }
+    let env = env_for(store, config, task, point);
+    let timeout = Duration::from_secs(config.gate.command_timeout_secs);
+    for (index, line) in commands.iter().enumerate() {
+        let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
+        match run_shell(store.repo(), line, timeout, &log, &env, None) {
+            Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
+            Ok(outcome) => {
+                let reason = if outcome.outcome == SeriesOutcome::TimedOut {
+                    format!("timed out after {} s", config.gate.command_timeout_secs)
+                } else {
+                    format!(
+                        "exited {}",
+                        outcome
+                            .exit_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "on a signal".to_owned())
+                    )
+                };
+                warnings.push(format!(
+                    "{} hook `{point}` command {} {reason}: {line}",
                     task.id,
                     index + 1
-                )),
+                ));
             }
+            Err(error) => warnings.push(format!(
+                "{} hook `{point}` command {} could not run: {error}",
+                task.id,
+                index + 1
+            )),
         }
     }
     let point = point.to_owned();

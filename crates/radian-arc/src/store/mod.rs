@@ -994,7 +994,7 @@ impl Store {
         );
         task.flow = flow;
         if proposed {
-            task.phase = model::PROPOSED_PHASE.to_owned();
+            task.enter(model::TaskState::Todo, model::PROPOSED_PHASE);
         }
         // The task file comes first: a crash between the two writes leaves an unlisted task
         // file, which is visible, instead of a plan that names a file that does not exist.

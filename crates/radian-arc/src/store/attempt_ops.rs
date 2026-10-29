@@ -577,8 +577,7 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     task.attempt = number;
     task.attempt_id = Some(attempt_id.clone());
     task.token = Some(token.clone());
-    task.state = TaskState::Doing;
-    task.phase = "starting".to_owned();
+    task.enter(TaskState::Doing, "starting");
     task.retry_at = None;
     let version = store.next_version(Kind::Task, task_id);
     store.write_item(Kind::Task, task_id, &task.to_text(), version)?;
@@ -702,8 +701,7 @@ pub fn claim_reverify_by(
     task.attempt = number;
     task.attempt_id = Some(attempt_id.clone());
     task.token = Some(token.clone());
-    task.state = TaskState::Review;
-    task.phase = "verifying".to_owned();
+    task.enter(TaskState::Review, "verifying");
     // The new attempt's verdicts are its own: an old approval never carries over.
     task.verified_sha = None;
     task.verdict_set_digest = None;
@@ -989,25 +987,24 @@ pub fn apply(
         let mut pause_plan = false;
         match next {
             Next::Verifying | Next::Rework => {
-                task.state = TaskState::Review;
-                task.phase = if matches!(next, Next::Verifying) {
-                    "verifying"
-                } else {
-                    "rework_pending"
-                }
-                .to_owned();
+                task.enter(
+                    TaskState::Review,
+                    if matches!(next, Next::Verifying) {
+                        "verifying"
+                    } else {
+                        "rework_pending"
+                    },
+                );
                 task.base_sha = finish.and_then(|finish| finish.base_sha.clone());
                 task.head_sha = finish.and_then(|finish| finish.head_sha.clone());
                 task.retry_at = None;
             }
             Next::Irrecoverable => {
-                task.state = TaskState::Failed;
-                task.phase = "irrecoverable".to_owned();
+                task.enter(TaskState::Failed, "irrecoverable");
                 task.retry_at = None;
             }
             Next::Cancelled => {
-                task.state = TaskState::Failed;
-                task.phase = "cancelled".to_owned();
+                task.enter(TaskState::Failed, "cancelled");
                 task.retry_at = None;
             }
             Next::Retry => {
@@ -1016,8 +1013,7 @@ pub fn apply(
                     .unwrap_or(budget.config.limits.max_attempts);
                 let plan_reached = cost.known && budget.plan_reached(cost.cost_usd);
                 if (cost.known && budget.task_reached(&task)) || plan_reached {
-                    task.state = TaskState::Todo;
-                    task.phase = "paused_budget".to_owned();
+                    task.enter(TaskState::Todo, "paused_budget");
                     task.retry_at = None;
                     model_wait = false;
                     pause_plan = plan_reached;
@@ -1025,8 +1021,7 @@ pub fn apply(
                     let error = model_error
                         .as_ref()
                         .expect("a model wait read its model error");
-                    task.state = TaskState::Todo;
-                    task.phase = "retry_wait".to_owned();
+                    task.enter(TaskState::Todo, "retry_wait");
                     // The count of waits is not the retry count: a run of model waits does
                     // not use up `max_attempts`, and the next attempt that is not one ends
                     // the run (ADR 0048 decision 9).
@@ -1037,15 +1032,13 @@ pub fn apply(
                     task.retry_at = Some(at.clone());
                     retry_at = Some(at);
                 } else if task.retry_count < max_attempts {
-                    task.state = TaskState::Todo;
-                    task.phase = "retry_wait".to_owned();
+                    task.enter(TaskState::Todo, "retry_wait");
                     task.retry_count += 1;
                     let at = retry_at_after(task.retry_count);
                     task.retry_at = Some(at.clone());
                     retry_at = Some(at);
                 } else {
-                    task.state = TaskState::Failed;
-                    task.phase = "exhausted".to_owned();
+                    task.enter(TaskState::Failed, "exhausted");
                     task.retry_at = None;
                 }
             }
@@ -1589,8 +1582,7 @@ fn review_budget_reached(
 }
 
 fn pause_for_budget(task: &mut model::TaskFile) {
-    task.state = TaskState::Todo;
-    task.phase = "paused_budget".to_owned();
+    task.enter(TaskState::Todo, "paused_budget");
     task.retry_at = None;
 }
 
@@ -1673,8 +1665,7 @@ pub fn release_retries(store: &Store, now: &str) -> Result<Vec<String>, Error> {
             continue;
         }
         store.change_task(&id, |task| {
-            task.state = TaskState::Todo;
-            task.phase = "ready".to_owned();
+            task.enter(TaskState::Todo, "ready");
             task.retry_at = None;
             Ok(())
         })?;
@@ -1725,8 +1716,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 store.change_task(task_id, |task| {
                     reset_counted_cost(task);
                     if paused {
-                        task.state = TaskState::Todo;
-                        task.phase = "ready".to_owned();
+                        task.enter(TaskState::Todo, "ready");
                         task.retry_at = None;
                     }
                     Ok(())
@@ -1752,8 +1742,7 @@ pub fn reset_budget(store: &Store, id: &str) -> Result<BudgetReset, Error> {
                 )));
             }
             store.change_task(id, |task| {
-                task.state = TaskState::Todo;
-                task.phase = "ready".to_owned();
+                task.enter(TaskState::Todo, "ready");
                 task.retry_at = None;
                 reset_counted_cost(task);
                 Ok(())
