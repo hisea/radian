@@ -166,6 +166,14 @@ fn pending(store: &Store, task: &str) -> Vec<String> {
         .pending_hooks
 }
 
+fn pending_states(store: &Store, task: &str) -> Vec<String> {
+    store
+        .load_task(task)
+        .expect("the task reads")
+        .item
+        .pending_hook_states
+}
+
 /// `ARC_*` values from an `env` dump: `name=value`.
 fn env_map(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(path)
@@ -474,6 +482,7 @@ fn a_task_record_without_the_pending_hook_field_loads_and_runs_nothing() {
             task.state = TaskState::Done;
             task.phase = "merged".to_owned();
             task.pending_hooks.clear();
+            task.pending_hook_states.clear();
             task.merged_sha = None;
             Ok(())
         })
@@ -481,6 +490,7 @@ fn a_task_record_without_the_pending_hook_field_loads_and_runs_nothing() {
     let path = store.root().join("tasks").join(format!("{task}.md"));
     let text = fs::read_to_string(&path).expect("the task file");
     assert!(!text.contains("pending_hooks:"), "{text}");
+    assert!(!text.contains("pending_hook_states:"), "{text}");
     assert!(!text.contains("merged_sha:"), "{text}");
 
     let run = repo.radian(&["arc", "run"]);
@@ -600,6 +610,44 @@ fn after_fail_fires_once_with_its_point_and_state() {
     );
 }
 
+/// A task that entered `failed.exhausted`, then was cancelled before a pass ran its hook, still
+/// reports `failed.exhausted`: the record keeps the phase the transition entered with the point,
+/// not the later `failed.cancelled`.
+#[test]
+fn after_fail_reports_the_failed_phase_it_entered_when_the_owner_cancels_it_later() {
+    let (repo, store, plan) = setup("hooks-after-fail-cancelled");
+    let task = add_ready_task(&store, &plan, "exhausted");
+    store
+        .change_task(&task, |task| {
+            task.enter(TaskState::Failed, "exhausted");
+            Ok(())
+        })
+        .expect("the task is failed.exhausted");
+    assert_eq!(
+        state(&store, &task),
+        ("failed".to_owned(), "exhausted".to_owned())
+    );
+    assert!(
+        pending(&store, &task).contains(&"after_fail".to_owned()),
+        "the failed phase owes the point: {:?}",
+        pending(&store, &task)
+    );
+    set_hooks(&repo, &[("after_fail", &[HOOK_LINE])]);
+
+    let run = repo.radian(&["arc", "cancel", &task]);
+    assert_eq!(run.code, 0, "cancel: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        state(&store, &task),
+        ("failed".to_owned(), "cancelled".to_owned())
+    );
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_fail failed.exhausted"],
+        "ARC_STATE is the phase the transition entered, not the later cancel"
+    );
+    assert!(pending(&store, &task).is_empty(), "the record is cleared");
+}
+
 /// `after_rework` fires once after a failed verification enters `review.rework_pending`, with
 /// the point and the phase. The library writes the record; the next pass runs it.
 #[test]
@@ -639,6 +687,11 @@ fn after_awaiting_human_fires_once_with_its_point_and_state() {
         pending(&store, &task),
         vec!["after_awaiting_human".to_owned()]
     );
+    assert_eq!(
+        pending_states(&store, &task),
+        vec!["after_awaiting_human=review.awaiting_human".to_owned()],
+        "the write records the phase the point fires for with it"
+    );
 
     let run = repo.radian(&["arc", "run"]);
     assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
@@ -647,6 +700,10 @@ fn after_awaiting_human_fires_once_with_its_point_and_state() {
         vec!["after_awaiting_human review.awaiting_human"]
     );
     assert!(pending(&store, &task).is_empty(), "the record is cleared");
+    assert!(
+        pending_states(&store, &task).is_empty(),
+        "the state record is cleared with the point"
+    );
 }
 
 /// A point that runs after the task moved on still reports the phase it fired for: the

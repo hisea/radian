@@ -226,6 +226,40 @@ pub fn valid_phase(state: TaskState, phase: &str) -> bool {
     state.phases().contains(&phase)
 }
 
+/// Checks one `pending_hook_states` entry: `<point>=<state>.<phase>`.
+fn valid_pending_hook_state(entry: &str) -> Result<(), String> {
+    let Some((point, state)) = entry.split_once('=') else {
+        return Err(format!(
+            "`pending_hook_states` entry `{entry}` is not `<point>=<state>.<phase>`"
+        ));
+    };
+    if !crate::hooks::valid_point(point) {
+        return Err(format!(
+            "`pending_hook_states` names `{point}`; points are {}",
+            crate::hooks::HOOK_POINTS.join(", ")
+        ));
+    }
+    let Some((state_name, phase)) = state.split_once('.') else {
+        return Err(format!(
+            "`pending_hook_states` entry `{entry}` does not name `<state>.<phase>`"
+        ));
+    };
+    let Some(parsed) = TaskState::parse(state_name) else {
+        return Err(format!(
+            "`pending_hook_states` entry `{entry}` names `{state_name}`; states are {}",
+            TASK_STATES.join(", ")
+        ));
+    };
+    if !valid_phase(parsed, phase) {
+        return Err(format!(
+            "`pending_hook_states` entry `{entry}` names `{phase}`, not one of the {} phases: {}",
+            parsed.as_str(),
+            parsed.phases().join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// One plan file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanFile {
@@ -415,6 +449,12 @@ pub struct TaskFile {
     /// commands ran, success or failure. Absent reads empty, so a task written before hooks
     /// existed runs none.
     pub pending_hooks: Vec<String>,
+    /// The `<state>.<phase>` each pending point fires for, as one `<point>=<state>.<phase>`
+    /// entry per pending point (ADR 0048 decisions 10 and 13). [`TaskFile::enter`] records the
+    /// state it entered with the point, so a hook that runs after another move still reports
+    /// the phase its own transition entered. Absent reads empty, and a point without an entry
+    /// reports its own phase.
+    pub pending_hook_states: Vec<String>,
     /// The sha the last merge pushed to the target branch, which the `after_merge` hook reads
     /// as `ARC_MERGED_SHA`. Absent reads none.
     pub merged_sha: Option<String>,
@@ -540,7 +580,21 @@ impl TaskFile {
         };
         if !self.pending_hooks.iter().any(|pending| pending == point) {
             self.pending_hooks.push(point.to_owned());
+            self.pending_hook_states.push(format!(
+                "{point}={}.{}",
+                self.state.as_str(),
+                self.phase
+            ));
         }
+    }
+
+    /// The `<state>.<phase>` recorded with a pending point, when the file carries one. It is
+    /// the phase the point fired for, even if the task moved again before the hook ran.
+    pub fn pending_hook_state(&self, point: &str) -> Option<&str> {
+        self.pending_hook_states.iter().find_map(|entry| {
+            let (recorded, state) = entry.split_once('=')?;
+            (recorded == point).then_some(state)
+        })
     }
 
     /// [`TaskFile::enter`] for a move within the task's current state.
@@ -581,6 +635,7 @@ impl TaskFile {
             allow_noop,
             followup_pending: false,
             pending_hooks: Vec::new(),
+            pending_hook_states: Vec::new(),
             merged_sha: None,
             extra_stages,
             max_attempts: None,
@@ -644,6 +699,12 @@ impl TaskFile {
             out.push_str(&frontmatter::list_field(
                 "pending_hooks",
                 &self.pending_hooks,
+            ));
+        }
+        if !self.pending_hook_states.is_empty() {
+            out.push_str(&frontmatter::list_field(
+                "pending_hook_states",
+                &self.pending_hook_states,
             ));
         }
         if let Some(sha) = &self.merged_sha {
@@ -747,6 +808,10 @@ impl TaskFile {
                 ));
             }
         }
+        let pending_hook_states = fields.optional_list("pending_hook_states")?;
+        for entry in &pending_hook_states {
+            valid_pending_hook_state(entry)?;
+        }
         let merged_sha = fields.optional_string("merged_sha")?;
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
@@ -795,6 +860,7 @@ impl TaskFile {
             allow_noop,
             followup_pending,
             pending_hooks,
+            pending_hook_states,
             merged_sha,
             extra_stages,
             max_attempts,
@@ -989,6 +1055,7 @@ mod tests {
             allow_noop: Some(true),
             followup_pending: true,
             pending_hooks: vec!["after_merge".to_owned()],
+            pending_hook_states: vec!["after_merge=done.merged".to_owned()],
             merged_sha: Some("e".repeat(40)),
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),
@@ -1070,14 +1137,42 @@ mod tests {
     fn an_absent_pending_hook_record_reads_empty_and_stays_out_of_the_file() {
         let mut task = sample_task();
         task.pending_hooks = Vec::new();
+        task.pending_hook_states = Vec::new();
         task.merged_sha = None;
         let text = task.to_text();
         assert!(!text.contains("pending_hooks:"), "{text}");
+        assert!(!text.contains("pending_hook_states:"), "{text}");
         assert!(!text.contains("merged_sha:"), "{text}");
         let read = TaskFile::from_text(&text).expect("an older file reads");
         assert!(read.pending_hooks.is_empty());
+        assert!(read.pending_hook_states.is_empty());
+        assert_eq!(read.pending_hook_state("after_merge"), None);
         assert_eq!(read.merged_sha, None);
         assert!(!read.to_text().contains("pending_hooks:"));
+    }
+
+    /// A hand-edited state record outside the shape or value sets is refused by name.
+    #[test]
+    fn a_bad_pending_hook_state_is_refused_by_name() {
+        for (written, named) in [
+            ("after_merge", "<point>=<state>.<phase>"),
+            ("after_nothing=done.merged", "after_nothing"),
+            ("after_merge=done", "<state>.<phase>"),
+            ("after_merge=finish.merged", "finish"),
+            ("after_merge=done.ready", "ready"),
+        ] {
+            let text = sample_task().to_text().replace(
+                "pending_hook_states:\n  - after_merge=done.merged",
+                &format!("pending_hook_states:\n  - {written}"),
+            );
+            let error = TaskFile::from_text(&text).expect_err(&format!("`{written}` must fail"));
+            assert!(
+                error.contains(named),
+                "`{written}` names `{named}` in the error: {error}"
+            );
+        }
+        let task = sample_task();
+        assert_eq!(task.pending_hook_state("after_merge"), Some("done.merged"));
     }
 
     /// A hand-edited point outside the one list is refused by name.

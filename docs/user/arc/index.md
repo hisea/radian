@@ -151,7 +151,7 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
 The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `followup_pending`, `pending_hooks`, `merged_sha`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `followup_pending`, `pending_hooks`, `pending_hook_states`, `merged_sha`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 `allow_noop` is the effective value: the task's own when its file carries the field, else its flow's. `allow_noop_source` is `task` or `flow`, the one it came from.
 `flow` is the task's flow name, and `default` when its file has no `flow` field.
 `queue_reason` is the slot reason the task line prints (`waiting for a free <flow> slot` or `waiting for a free concurrency slot`), or `null` when no limit holds the task.
@@ -222,7 +222,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `pending_hooks`, `merged_sha`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `pending_hooks`, `pending_hook_states`, `merged_sha`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -628,7 +628,7 @@ Each point is an array of shell command lines, default `[]`:
 
 [`radian arc init`](#radian-arc-init-track) writes three `after_merge` lines that delete the task's remote branch, worktree and local branch, naming the configured remote; a repository that wants to keep one removes its line. The commands read `[hooks]` when they run, not when the task moved. See [the config keys](files.md#configtoml) for the default.
 
-**Rules.** The write that moves a task into one of those phases records the point in [`pending_hooks`](files.md#task-fields) in the same transaction; a write that leaves the phase as it is records nothing. Only the holder of `runner.lock` runs hooks: every `run`/`serve` pass runs them first, and the owner's `merge`, `reject`, `cancel`, `start` and `reverify` run them after their transition when they can take the lock without waiting; the MCP server never runs one. A point is cleared only after its commands ran, so a killed pass runs it again: **a hook command must be safe to run twice**. A failing or timed-out command logs one `warning:` line and the next still runs; hooks never change a task's state or make a command fail. Each command's timeout is [`gate.command_timeout_secs`](files.md#configtoml), and its output goes to `runs/<task>/hooks/<point>-NN.log` (see [the layout](files.md#the-radianarc-layout)).
+**Rules.** The write that moves a task into one of those phases records the point in [`pending_hooks`](files.md#task-fields) and the `<state>.<phase>` it fires for in [`pending_hook_states`](files.md#task-fields) in the same transaction; a write that leaves the phase as it is records nothing. Only the holder of `runner.lock` runs hooks: every `run`/`serve` pass runs them first, and the owner's `merge`, `reject`, `cancel`, `start` and `reverify` run them after their transition when they can take the lock without waiting; the MCP server never runs one. A point is cleared only after its commands ran, so a killed pass runs it again: **a hook command must be safe to run twice**. A failing or timed-out command logs one `warning:` line and the next still runs; hooks never change a task's state or make a command fail. Each command's timeout is [`gate.command_timeout_secs`](files.md#configtoml), and its output goes to `runs/<task>/hooks/<point>-NN.log` (see [the layout](files.md#the-radianarc-layout)).
 
 **Environment.** Every command receives these variables on top of arc's own environment:
 
@@ -641,7 +641,7 @@ Each point is an array of shell command lines, default `[]`:
 | `ARC_WORKTREE` | The task's worktree, absolute: `.radian/arc/worktrees/<task>`. |
 | `ARC_TARGET_BRANCH` | The branch the merge targeted: [`integration.target_branch`](files.md#configtoml), else [`repository.main_branch`](files.md#configtoml). |
 | `ARC_MERGED_SHA` | The sha the merge pushed to the target branch. `after_merge` only. |
-| `ARC_STATE` | The state and phase the point fires for: `done.merged`, a `failed.*` phase, `review.rework_pending`, `review.awaiting_human`, or `todo.proposed`. |
+| `ARC_STATE` | The state and phase the point fires for: `done.merged`, a `failed.*` phase, `review.rework_pending`, `review.awaiting_human`, or `todo.proposed`. It is the phase the point's own write entered, even if the task moved again before the hook ran. |
 | `ARC_HOOK` | The point name. |
 
 **A phone notification.** This `after_awaiting_human` command sends only the repository name, task id and phase; it carries no transcript, command text, model, usage or cost:

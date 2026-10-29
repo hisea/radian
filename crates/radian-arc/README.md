@@ -615,7 +615,9 @@ force. A target branch that moved after integration, or a rejected push, makes i
 success the task is `done.merged`; the same write records the `after_merge` hook and the merged
 sha, and arc itself removes nothing. `TaskFile::enter` records the point of every move that
 reaches one of the five hook phases (`after_merge`, `after_fail`, `after_rework`,
-`after_awaiting_human`, `after_proposed`) in `pending_hooks`. A process that holds
+`after_awaiting_human`, `after_proposed`) in `pending_hooks`, and the `<state>.<phase>` it
+fires for in `pending_hook_states`, so `ARC_STATE` keeps the phase that transition entered
+even if the task moves again before the hook runs. A process that holds
 `runner.lock` runs the pending hooks: every pass runs them first, and the owner's `merge`,
 `reject`, `cancel`, `start` and `reverify` run them when they can take the lock without
 waiting (ADR 0048 decisions 10 and 13).

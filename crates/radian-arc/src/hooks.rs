@@ -1,7 +1,8 @@
 //! `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13).
 //!
-//! A transition that owes a hook records its point in the task's `pending_hooks` field in the
-//! same transaction that moves the task. The process that holds `runner.lock` runs the pending
+//! A transition that owes a hook records its point in the task's `pending_hooks` field and the
+//! `<state>.<phase>` it fires for in `pending_hook_states`, in the same transaction that moves
+//! the task. The process that holds `runner.lock` runs the pending
 //! points: every scheduling pass runs them before its steps, and the owner's `merge` command
 //! runs them when it can take the lock without waiting. A point is cleared only after its
 //! commands have run, success or failure, so a process killed mid-hook runs it again on the
@@ -138,14 +139,17 @@ fn run_point(
     let point = point.to_owned();
     store.change_task(&task.id, move |task| {
         task.pending_hooks.retain(|pending| pending != &point);
+        let recorded = format!("{point}=");
+        task.pending_hook_states
+            .retain(|entry| !entry.starts_with(&recorded));
         Ok(())
     })?;
     Ok(warnings)
 }
 
 /// The environment one point receives (decision 10). `ARC_MERGED_SHA` belongs to
-/// [`AFTER_MERGE`] only, and `ARC_STATE` is the state and phase the point fires for, not the
-/// task's later state when a pending point runs after another move.
+/// [`AFTER_MERGE`] only, and `ARC_STATE` is the state and phase the point fires for, which the
+/// write that recorded the point stored with it, not the task's later state.
 fn env_for(
     store: &Store,
     config: &Config,
@@ -161,7 +165,11 @@ fn env_for(
         ("ARC_BRANCH", format!("work/{}", task.id)),
         ("ARC_WORKTREE", worktree.display().to_string()),
         ("ARC_TARGET_BRANCH", config.target_branch().to_owned()),
-        ("ARC_STATE", point_state(task, point)),
+        (
+            "ARC_STATE",
+            task.pending_hook_state(point)
+                .map_or_else(|| point_state(task, point), str::to_owned),
+        ),
         ("ARC_HOOK", point.to_owned()),
     ];
     if point == AFTER_MERGE
@@ -172,9 +180,9 @@ fn env_for(
     env
 }
 
-/// The `<state>.<phase>` the point fires for. `after_fail` keeps the failed phase the task is
-/// in (a task that moved `failed.exhausted` → `failed.cancelled` before the hook ran reports
-/// the latter); the other points name their own phase.
+/// The `<state>.<phase>` a point fires for when the task file records none with it. A file from
+/// before `pending_hook_states` reports the phase its point names; `after_fail` reports the
+/// failed phase the task is in.
 fn point_state(task: &TaskFile, point: &str) -> String {
     match point {
         AFTER_MERGE => "done.merged".to_owned(),

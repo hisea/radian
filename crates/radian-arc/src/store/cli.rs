@@ -691,6 +691,11 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             field(&mut out, "pending_hooks", &joined(&item.pending_hooks));
             field(
                 &mut out,
+                "pending_hook_states",
+                &joined(&item.pending_hook_states),
+            );
+            field(
+                &mut out,
                 "merged_sha",
                 &optional_text(item.merged_sha.as_deref()),
             );
@@ -928,6 +933,7 @@ fn task_json(
         "allow_noop_source": item.allow_noop_source(),
         "followup_pending": item.followup_pending,
         "pending_hooks": item.pending_hooks,
+        "pending_hook_states": item.pending_hook_states,
         "merged_sha": item.merged_sha,
         "extra_stages": item.extra_stages,
         "max_attempts": item.max_attempts,
