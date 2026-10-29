@@ -2908,6 +2908,21 @@ mod tests {
         warnings.lock().unwrap().clone()
     }
 
+    /// Waits for one observe-only hook's stdin file to hold a complete JSON object. A
+    /// `Notification` run is not waited for by `wait_observe` (by design), so its file is
+    /// the only completion signal.
+    async fn wait_notification(path: &Path) -> String {
+        for _ in 0..600 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && serde_json::from_str::<serde_json::Value>(&text).is_ok()
+            {
+                return text;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never held valid JSON", path.display());
+    }
+
     /// `StopFailure` runs only the entry whose matcher names the failed turn's kind (or `*`),
     /// and its stdin carries the kind, the details and the last assistant text (ADR 0045 §6).
     #[tokio::test]
@@ -3019,11 +3034,7 @@ mod tests {
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
         NotificationHooks::notification(&fixture.hooks, "permission_prompt", Some("shell"));
-        fixture
-            .hooks
-            .wait_observe(std::time::Duration::from_secs(10))
-            .await;
-        let text = std::fs::read_to_string(&permission).expect("the permission hook ran");
+        let text = wait_notification(&permission).await;
         assert!(
             text.contains("\"notification_type\":\"permission_prompt\""),
             "{text}"
@@ -3043,11 +3054,7 @@ mod tests {
         );
 
         fixture.hooks.notify_idle();
-        fixture
-            .hooks
-            .wait_observe(std::time::Duration::from_secs(10))
-            .await;
-        let text = std::fs::read_to_string(&idle).expect("the idle hook ran");
+        let text = wait_notification(&idle).await;
         assert!(
             text.contains("\"notification_type\":\"idle_prompt\""),
             "{text}"
