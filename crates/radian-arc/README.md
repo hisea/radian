@@ -613,8 +613,13 @@ path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<target
 force. A target branch that moved after integration, or a rejected push, makes it integrate again
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged`; the same write records the `after_merge` hook and the merged
-sha, and arc itself removes nothing. A process that holds `runner.lock` runs the pending hook:
-every pass runs it first, and `radian arc merge` runs it when it can take the lock without
+sha, and arc itself removes nothing. `TaskFile::enter` records the point of every move that
+reaches one of the five hook phases (`after_merge`, `after_fail`, `after_rework`,
+`after_awaiting_human`, `after_proposed`) in `pending_hooks`, and the `<state>.<phase>` it
+fires for in `pending_hook_states`, so `ARC_STATE` keeps the phase that transition entered
+even if the task moves again before the hook runs. A process that holds
+`runner.lock` runs the pending hooks: every pass runs them first, and the owner's `merge`,
+`reject`, `cancel`, `start` and `reverify` run them when they can take the lock without
 waiting (ADR 0048 decisions 10 and 13).
 
 `finish_integration` then asks `review::propose_followup` for the plan's review follow-up (ADR
@@ -661,7 +666,10 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   writes `git push <remote> --delete work/$ARC_TASK`, `git worktree remove --force
   $ARC_WORKTREE` and `git branch -D work/$ARC_TASK`. arc itself removes nothing, a failing
   command is one `warning:` line, and a point is cleared only after its commands ran, so a
-  hook runs at least once.
+  hook runs at least once. The other four points are `after_fail` (any `failed.*` phase),
+  `after_rework` (`review.rework_pending`), `after_awaiting_human` (`review.awaiting_human`)
+  and `after_proposed` (a new `todo.proposed` task; the MCP server records it and runs no
+  hook).
 - The follow-up's slug is `<plan slug>-followups` cut to `SLUG_MAX_CHARS`, then a trailing `-`
   from the cut is removed so it stays a valid slug; a plan that already holds that slug gets
   `-2`, `-3`, … within the limit. A follow-up task gets none of its own: `is_followup` reads

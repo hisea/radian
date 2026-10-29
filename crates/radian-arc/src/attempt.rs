@@ -279,7 +279,7 @@ fn spawn_claim_with(
             && task.phase == "starting"
             && task.attempt == claim.attempt
         {
-            task.phase = "running".to_owned();
+            task.enter_phase("running");
         }
         Ok(())
     }) {
@@ -582,8 +582,7 @@ fn cancel_task_once(store: &Store, task_id: &str, again: bool) -> Result<Cancele
             stop_attempt_process(store, task_id, task.attempt, grace)?;
             store.change_task(task_id, |task| {
                 if task.state == model::TaskState::Doing && task.phase == "reconciling" {
-                    task.state = model::TaskState::Failed;
-                    task.phase = "cancelled".to_owned();
+                    task.enter(model::TaskState::Failed, "cancelled");
                 }
                 Ok(())
             })?;
@@ -607,8 +606,7 @@ fn cancel_task_once(store: &Store, task_id: &str, again: bool) -> Result<Cancele
                 if task.state != model::TaskState::Review {
                     return Err(cancel_refusal(task));
                 }
-                task.state = model::TaskState::Failed;
-                task.phase = "cancelled".to_owned();
+                task.enter(model::TaskState::Failed, "cancelled");
                 task.retry_at = None;
                 Ok(())
             })?;
@@ -637,7 +635,7 @@ fn cancel_failed(store: &Store, task_id: &str) -> Result<Canceled, Error> {
         if task.state != model::TaskState::Failed || !task.is_cancellable() {
             return Err(cancel_refusal(task));
         }
-        task.phase = "cancelled".to_owned();
+        task.enter_phase("cancelled");
         task.retry_at = None;
         Ok(())
     })?;
@@ -675,8 +673,7 @@ fn cancel_todo(store: &Store, task_id: &str, again: bool) -> Result<Canceled, Er
                 task.phase
             )));
         }
-        task.state = model::TaskState::Failed;
-        task.phase = "cancelled".to_owned();
+        task.enter(model::TaskState::Failed, "cancelled");
         task.retry_at = None;
         Ok(())
     });
@@ -746,8 +743,7 @@ pub fn end_reconciling_of_cancelled_plans(store: &Store) -> Result<Vec<String>, 
         let mut changed = false;
         store.change_task(&id, |task| {
             if task.state == model::TaskState::Doing && task.phase == "reconciling" {
-                task.state = model::TaskState::Failed;
-                task.phase = "cancelled".to_owned();
+                task.enter(model::TaskState::Failed, "cancelled");
                 task.retry_at = None;
                 changed = true;
             }
@@ -832,7 +828,7 @@ fn cancel_running(store: &Store, task_id: &str, task: &model::TaskFile) -> Resul
             && task.phase != "reconciling"
             && task.attempt == attempt
         {
-            task.phase = "reconciling".to_owned();
+            task.enter_phase("reconciling");
         }
         Ok(())
     })?;

@@ -1698,3 +1698,48 @@ the same `run` call can already reconcile a wrapper that exits at once. It ran w
 (`cmp` identical). After the settle change the whole `run` binary passed 79/79 in each of three
 runs and in one run under load (alongside `cargo nextest run -p radian-arc -E 'not binary(run)'`,
 which passed 625/625), the same `--profile sandbox`, the `radian` binary rebuilt first.
+
+## TK0239: the four more hook points (2026-10-29, branch `work/TK0239-hooks-four-more-points`)
+
+`TaskFile::enter` records the point a move into `done.merged`, any `failed.*` phase,
+`review.rework_pending`, `review.awaiting_human` or `todo.proposed` owes, and every write that
+moves a task calls it inside its own transaction. The owner's `merge`, `reject`, `cancel`,
+`start` and `reverify` run the pending points when they can take `runner.lock`; the MCP server
+records and never runs them. Each mutation was applied by hand, the `radian` binary was rebuilt
+with `cargo build -p radian-tui --bin radian` because every test drives the CLI, the tests ran
+with `cargo nextest run -p radian-arc --locked --profile sandbox --test hooks -E
+'test(<name>)'`, and the file was restored from `.radian/backup/` with `cp` (`git diff` empty).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0239-M1 | `TaskFile::enter` records no point (the `pending_hooks.push` dropped) | `hooks::after_fail_fires_once_with_its_point_and_state` (the hook ran no command: the log was empty) | ✅ 1 failed |
+| TK0239-M2 | `hook_point` returns `None` for `TaskState::Failed` | `hooks::after_fail_fires_once_with_its_point_and_state` (no `after_fail` was recorded) | ✅ 1 failed |
+| TK0239-M3 | `hook_point` returns `None` for `review.rework_pending` | `hooks::after_rework_fires_once_with_its_point_and_state` (the reject left no pending point) | ✅ 1 failed |
+| TK0239-M4 | `hook_point` returns `None` for `review.awaiting_human` | `hooks::after_awaiting_human_fires_once_with_its_point_and_state` (verification left no pending point) | ✅ 1 failed |
+| TK0239-M5 | `hook_point` returns `None` for `todo.proposed` | `hooks::after_proposed_runs_on_the_next_pass_not_in_the_mcp_call` (the new task owed nothing) | ✅ 1 failed |
+| TK0239-M6 | `TaskFile::enter` records a point even when the state and phase did not change (the `entered` guard dropped) | `hooks::a_second_write_of_the_same_phase_does_not_owe_a_second_hook` (the repeated write left the point pending) | ✅ 1 failed |
+| TK0239-M7 | the CLI `reject` runs no hook of its own | `hooks::the_cli_reject_runs_its_hook_when_no_loop_holds_runner_lock` (the log was empty) | ✅ 1 failed |
+| TK0239-M8 | the CLI `cancel` runs no hook of its own | `hooks::after_fail_fires_once_with_its_point_and_state` (the point stayed pending after the command) | ✅ 1 failed |
+| TK0239-M9 | `append_task_locked` writes the proposed phase without `TaskFile::enter` | `hooks::after_proposed_runs_on_the_next_pass_not_in_the_mcp_call` (the new task owed nothing) | ✅ 1 failed |
+| TK0239-M10 | `env_for` sets `ARC_STATE` to the literal `done.merged` | `hooks::after_fail_fires_once_with_its_point_and_state` (`after_fail done.merged` instead of `after_fail failed.cancelled`) | ✅ 1 failed |
+| TK0239-M11 | `point_state` reports the task's current state and phase for every point | `hooks::a_hook_that_runs_after_the_task_moved_reports_the_phase_it_fired_for` (`after_awaiting_human review.rework_pending` instead of `review.awaiting_human`) | ✅ 1 failed |
+
+## TK0239 rework 2: a pending point keeps the phase it entered (2026-10-29, branch `work/TK0239-hooks-four-more-points`)
+
+The review found that a task which entered `failed.exhausted`, then was cancelled before a pass ran
+its `after_fail`, reported `failed.cancelled`: `point_state` read the later task phase. The fix
+records the `<state>.<phase>` with the point, in the task's new optional `pending_hook_states`
+field, and `env_for` reads it (falling back to `point_state` for a file without the field). Each
+mutation was applied by hand, the `radian` binary was rebuilt with `cargo build -p radian-tui --bin
+radian` because the tests drive the CLI, the tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test hooks -E 'test(<name>)'` (the model one with `--lib`), and the
+file was restored from `.radian/backup/` with `cp` (`cmp` identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0239-M12 | `env_for` ignores the recorded state and always calls `point_state` | `hooks::after_fail_reports_the_failed_phase_it_entered_when_the_owner_cancels_it_later` (`after_fail failed.cancelled` instead of `failed.exhausted`) | ✅ 1 failed |
+| TK0239-M13 | `TaskFile::enter` records the point without its `pending_hook_states` entry | `hooks::after_fail_reports_the_failed_phase_it_entered_when_the_owner_cancels_it_later` (the fallback reported `failed.cancelled`) | ✅ 1 failed |
+| TK0239-M14 | `TaskFile::from_text` skips `valid_pending_hook_state` for `pending_hook_states` | `store::model::tests::a_bad_pending_hook_state_is_refused_by_name` (a malformed entry loaded) | ✅ 1 failed |
+| TK0239-M15 | `run_point` clears the point but not its recorded state entry | `hooks::after_awaiting_human_fires_once_with_its_point_and_state` (the file kept the state after the point was cleared) | ✅ 1 failed |
+
+
