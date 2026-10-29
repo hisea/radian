@@ -23,8 +23,8 @@
 //! `async` (default `false`) and `asyncRewake` (default `false`; `true` implies `async`)
 //! are accepted on `PostToolUse` and `Stop` only (ADR 0045 §1/§5): the hook starts like a
 //! synchronous one and the tool result or the `Stop` chain continues at once. On the
-//! observe-only `StopFailure` and `Notification` events `async` is accepted and inert: those
-//! hooks always run in the background (§6).
+//! observe-only `StopFailure` and `Notification` events `async`/`asyncRewake` are accepted
+//! and inert: those hooks always run in the background (§6).
 
 use toml::Value;
 

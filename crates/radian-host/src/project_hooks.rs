@@ -10,7 +10,8 @@
 //! Anything outside the subset — an unknown event name, a malformed entry, a hook whose `type`
 //! is not `"command"`, or an entry carrying one of the non-command handler keys (`if`,
 //! `http`, `prompt`, `agent`) — is skipped with one warning line, never refusing the file.
-//! `async`/`asyncRewake` are fields of their own, accepted on `PostToolUse` and `Stop` only;
+//! `async`/`asyncRewake` are fields of their own, accepted on `PostToolUse` and `Stop` only
+//! and accepted as inert on `StopFailure`/`Notification`;
 //! on `PreToolUse` and `PermissionRequest` that hook is dropped with one warning line and the
 //! entry's other hooks still load.
 //!

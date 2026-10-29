@@ -45,8 +45,8 @@
 //!   (`permission_prompt` when a human is about to be asked, `idle_prompt` from the TUI's
 //!   60 s timer) only observe (ADR 0045 §6): they start in the background, their stdout is
 //!   not read, and their exit code or timeout only adds a recent-runs entry. Their matchers
-//!   are closed sets, not regexes; `async` on them is accepted and inert. `exec -p` waits at
-//!   most 5 s for a `StopFailure` run, then kills its process group.
+//!   are closed sets, not regexes; `async`/`asyncRewake` on them are accepted and inert.
+//!   `exec -p` waits at most 5 s for a `StopFailure` run, then kills its process group.
 //!
 //! Async hooks are not jobs: they never enter the [`Jobs`] registry, `/jobs` or the `job`
 //! tool. The `/hooks` page shows them under "Running", `Stop` lists each one in
