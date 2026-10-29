@@ -2,7 +2,9 @@
 //!
 //! The same Claude/Codex command-hook subset as the user-level `[hooks]` section, spelled in
 //! JSON: event names (`PreToolUse`, `PostToolUse`, `Stop`) map to lists of `{ matcher, hooks }`
-//! entries, each hook a `{ type = "command", command, timeout }` object. `matcher` is Claude's
+//! entries, each hook a `{ type = "command", command, args, timeout }` object. `args` is
+//! optional: with it `command` is the program and the hook starts without a shell; without it
+//! `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's
 //! case-sensitive pattern over **Radian** tool names, exactly like slice A; `Stop` ignores it.
 //! Anything outside the subset — an unknown event name, a malformed entry, a hook whose `type`
 //! is not `"command"`, or an entry carrying one of the non-command handler keys (`async`, `if`,
@@ -69,74 +71,145 @@ pub fn parse_project_value(
             continue;
         };
         for (index, item) in items.iter().enumerate() {
-            match parse_entry(item) {
+            let parsed = parse_entry(item);
+            // A bad `args` drops that hook only: the entry's other hooks still load (ADR
+            // 0045 §4). Each dropped hook is one line, named down to the hook.
+            for hook_index in &parsed.bad_args {
+                warnings.push(format!(
+                    "{origin}: skipped hooks.{event}[{index}].hooks[{hook_index}] (args is not \
+                     an array of strings)"
+                ));
+            }
+            match parsed.entry {
                 Some(entry) => match event.as_str() {
                     "PreToolUse" => config.pre_tool_use.push(entry),
                     "PostToolUse" => config.post_tool_use.push(entry),
                     "Stop" => config.stop.push(entry),
                     _ => unreachable!("the event list is checked above"),
                 },
-                None => warnings.push(format!(
+                None if parsed.bad_args.is_empty() => warnings.push(format!(
                     "{origin}: skipped hooks.{event}[{index}] (outside the command subset)"
                 )),
+                // Every hook was dropped for a bad `args`; the per-hook lines said so.
+                None => {}
             }
         }
     }
     config
 }
 
-/// Reads one `{ matcher, hooks }` entry. `None` means the whole entry is skipped (one line):
-/// a hook whose `type` is not `"command"`, a hook carrying a non-command handler key, a
-/// missing or empty `command`, or a bad `timeout`.
-fn parse_entry(item: &serde_json::Value) -> Option<HookMatcher> {
-    let table = item.as_object()?;
+/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped only for a bad `args`.
+struct ParsedEntry {
+    /// The entry, `None` when it is skipped as a whole (then `bad_args` is empty) or when
+    /// every hook was dropped for a bad `args` (then `bad_args` names them).
+    entry: Option<HookMatcher>,
+    /// Indexes of hooks dropped because `args` is not an array of strings. The rest of the
+    /// entry still loads; each index is one warning line.
+    bad_args: Vec<usize>,
+}
+
+impl ParsedEntry {
+    /// The whole entry is outside the subset. One line names the entry.
+    fn skipped() -> Self {
+        Self {
+            entry: None,
+            bad_args: Vec::new(),
+        }
+    }
+}
+
+/// Reads one `{ matcher, hooks }` entry. A structural defect skips the whole entry (one
+/// line): a hook whose `type` is not `"command"`, a hook carrying a non-command handler key,
+/// a missing or empty `command`, or a bad `timeout`. A bad `args` drops only that hook.
+fn parse_entry(item: &serde_json::Value) -> ParsedEntry {
+    let Some(table) = item.as_object() else {
+        return ParsedEntry::skipped();
+    };
     let matcher = match table.get("matcher") {
         None => None,
         Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(matcher)) => Some(matcher.clone()),
-        Some(_) => return None,
+        Some(_) => return ParsedEntry::skipped(),
     };
     // An empty-string matcher matches everything (like slice A); keep it as written.
-    let hooks = table.get("hooks")?.as_array()?;
+    let Some(hooks) = table.get("hooks").and_then(serde_json::Value::as_array) else {
+        return ParsedEntry::skipped();
+    };
     if hooks.is_empty() {
-        return None;
+        return ParsedEntry::skipped();
     }
     let mut commands = Vec::new();
-    for hook in hooks {
-        commands.push(parse_command(hook)?);
+    let mut bad_args = Vec::new();
+    for (index, hook) in hooks.iter().enumerate() {
+        match parse_command(hook) {
+            CommandParse::Ok(command) => commands.push(command),
+            CommandParse::BadArgs => bad_args.push(index),
+            CommandParse::Skip => return ParsedEntry::skipped(),
+        }
     }
-    Some(HookMatcher {
-        matcher,
-        hooks: commands,
-    })
+    ParsedEntry {
+        entry: (!commands.is_empty()).then_some(HookMatcher {
+            matcher,
+            hooks: commands,
+        }),
+        bad_args,
+    }
 }
 
-/// Reads one `{ type, command, timeout }` hook. `None` means the entry is skipped.
-fn parse_command(hook: &serde_json::Value) -> Option<HookCommand> {
-    let table = hook.as_object()?;
+/// One hook row's parse result.
+enum CommandParse {
+    Ok(HookCommand),
+    /// `args` is present but is not an array of strings: drop this hook only.
+    BadArgs,
+    /// Outside the command subset: drop the whole entry.
+    Skip,
+}
+
+/// Reads one `{ type, command, args, timeout }` hook.
+fn parse_command(hook: &serde_json::Value) -> CommandParse {
+    let Some(table) = hook.as_object() else {
+        return CommandParse::Skip;
+    };
     if table.get("type").and_then(serde_json::Value::as_str) != Some("command") {
-        return None;
+        return CommandParse::Skip;
     }
     if NON_COMMAND_HANDLER_KEYS
         .iter()
         .any(|key| table.contains_key(*key))
     {
-        return None;
+        return CommandParse::Skip;
     }
-    let command = table.get("command").and_then(serde_json::Value::as_str)?;
+    let Some(command) = table.get("command").and_then(serde_json::Value::as_str) else {
+        return CommandParse::Skip;
+    };
     if command.is_empty() {
-        return None;
+        return CommandParse::Skip;
     }
     let timeout_secs = match table.get("timeout") {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::Number(timeout)) => {
-            let secs = timeout.as_u64()?;
-            Some(secs)
-        }
-        Some(_) => return None,
+        Some(serde_json::Value::Number(timeout)) => match timeout.as_u64() {
+            Some(secs) => Some(secs),
+            None => return CommandParse::Skip,
+        },
+        Some(_) => return CommandParse::Skip,
     };
-    Some(HookCommand {
+    let args = match table.get("args") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(items)) => {
+            let mut args = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(arg) = item.as_str() else {
+                    return CommandParse::BadArgs;
+                };
+                args.push(arg.to_owned());
+            }
+            Some(args)
+        }
+        Some(_) => return CommandParse::BadArgs,
+    };
+    CommandParse::Ok(HookCommand {
         command: command.to_owned(),
+        args,
         timeout_secs,
     })
 }
@@ -306,6 +379,74 @@ pub fn preview_project(workspace: &Path) -> Option<ProjectHooksPreview> {
         entries,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+
+    /// `args` is the exec-form list (ADR 0045 §4), carried verbatim; `null` reads as absent,
+    /// like the other optional fields here.
+    #[test]
+    fn args_parses_as_the_exec_form_argument_list() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "PreToolUse": [{"matcher": "shell", "hooks": [
+                    {"type": "command", "command": "/hooks/check", "args": ["a b", "$(touch /tmp/x)", ";", "*"]},
+                    {"type": "command", "command": "/hooks/empty", "args": []},
+                    {"type": "command", "command": "/hooks/null", "args": null}
+                ]}]
+            }"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let config = parse_project_value(&parsed, "test", &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let hooks = &config.pre_tool_use[0].hooks;
+        assert_eq!(
+            hooks[0].args,
+            Some(vec![
+                "a b".to_owned(),
+                "$(touch /tmp/x)".to_owned(),
+                ";".to_owned(),
+                "*".to_owned(),
+            ])
+        );
+        assert_eq!(hooks[1].args, Some(Vec::new()));
+        assert_eq!(hooks[2].args, None);
+    }
+
+    /// Edge case: `args: "x"` and `args: [1]` drop that hook only, one warning line each,
+    /// and the entry's other hooks still load (ADR 0045 §4). Dropping the whole entry, or
+    /// silently accepting the value, fails this.
+    #[test]
+    fn a_bad_args_skips_only_that_hook() {
+        for bad in ["\"x\"", "[1]"] {
+            let source = format!(
+                r#"{{"PreToolUse": [{{"matcher": "shell", "hooks": [
+                    {{"type": "command", "command": "/hooks/good"}},
+                    {{"type": "command", "command": "/hooks/bad", "args": {bad}}}
+                ]}}]}}"#
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&source).unwrap();
+            let mut warnings = Vec::new();
+            let config = parse_project_value(&parsed, "test", &mut warnings);
+            assert_eq!(config.pre_tool_use.len(), 1, "{config:?}");
+            assert_eq!(
+                config.pre_tool_use[0].hooks.len(),
+                1,
+                "only the bad hook drops: {:?}",
+                config.pre_tool_use[0]
+            );
+            assert_eq!(config.pre_tool_use[0].hooks[0].command, "/hooks/good");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("hooks.PreToolUse[0].hooks[1]")
+                    && warnings[0].contains("args"),
+                "one line names the dropped hook: {warnings:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

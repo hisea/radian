@@ -2,8 +2,9 @@
 //! `config.toml`.
 //!
 //! Only three events exist — `PreToolUse`, `PostToolUse`, `Stop` — each a list of
-//! `{ matcher, hooks }` entries, each hook a `{ type = "command", command, timeout }`
-//! table. `matcher` is Claude's case-sensitive pattern over **Radian** tool names
+//! `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args, timeout }`
+//! table. `args` is optional: with it `command` is the program and the hook starts without a
+//! shell; without it `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's case-sensitive pattern over **Radian** tool names
 //! (`shell`, `write`, `patch`, `read`, …): `*` or a missing/empty matcher matches every
 //! tool, otherwise the pattern is a regular expression anchored to the whole tool name
 //! (`^(?:<matcher>)$`). There is no runtime aliasing of Claude's tool names: an import
@@ -12,7 +13,9 @@
 //! Anything outside the subset never refuses the file. An unknown event name, a malformed
 //! entry, a hook whose `type` is not `"command"`, or an entry carrying one of the
 //! non-command handler keys (`async`, `if`, `http`, `prompt`, `agent`) is skipped with one
-//! line in [`Config::skipped`], so the startup line says it once.
+//! line in [`Config::skipped`], so the startup line says it once. An `args` that is not an
+//! array of strings is not a structural defect: it drops that hook only, one line named down
+//! to the hook, and the entry's other hooks still load.
 
 use toml::Value;
 
@@ -36,11 +39,16 @@ pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 60;
 /// The `[hooks] intent_stop` default: the built-in validator runs unless turned off.
 pub const DEFAULT_INTENT_STOP: bool = true;
 
-/// One `{ type = "command", command, timeout }` hook.
+/// One `{ type = "command", command, args, timeout }` hook.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookCommand {
-    /// The shell command to run (`/bin/sh -c`), inside the session sandbox when enforced.
+    /// The shell command to run (`/bin/sh -c`), or — when `args` is `Some` — the program to
+    /// start directly, inside the session sandbox when enforced.
     pub command: String,
+    /// The exec-form arguments (ADR 0045 §4). `None` runs `command` through `/bin/sh -c`;
+    /// `Some` starts `command` directly with exactly these arguments, never through a shell.
+    /// An empty list is a run with no arguments.
+    pub args: Option<Vec<String>>,
     /// Seconds before the run counts as a hook error. `None` means the default.
     pub timeout_secs: Option<u64>,
 }
@@ -133,66 +141,235 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             continue;
         };
         for (index, item) in items.iter().enumerate() {
-            match parse_entry(item) {
+            let parsed = parse_entry(item);
+            // A bad `args` drops that hook only: the entry's other hooks still load (ADR
+            // 0045 §4). Each dropped hook is one line, named down to the hook.
+            for hook_index in &parsed.bad_args {
+                config
+                    .skipped
+                    .push(format!("hooks.{event}[{index}].hooks[{hook_index}]"));
+            }
+            match parsed.entry {
                 Some(entry) => list.push(entry),
                 // One entry, one line: a bad hook drops its whole entry, never a sibling
-                // entry, and never the file.
-                None => config.skipped.push(format!("hooks.{event}[{index}]")),
+                // entry, and never the file. When every hook was dropped for a bad `args`,
+                // the per-hook lines above already say it.
+                None if parsed.bad_args.is_empty() => {
+                    config.skipped.push(format!("hooks.{event}[{index}]"));
+                }
+                None => {}
             }
         }
     }
     Ok(())
 }
 
-/// Reads one `{ matcher, hooks }` entry. `None` means the whole entry is skipped (one
+/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped only for a bad `args`.
+struct ParsedEntry {
+    /// The entry, `None` when it is skipped as a whole (then `bad_args` is empty) or when
+    /// every hook was dropped for a bad `args` (then `bad_args` names them).
+    entry: Option<HookMatcher>,
+    /// Indexes of hooks dropped because `args` is not an array of strings. The rest of the
+    /// entry still loads; each index is one warning line.
+    bad_args: Vec<usize>,
+}
+
+impl ParsedEntry {
+    /// The whole entry is outside the subset. One line names the entry.
+    fn skipped() -> Self {
+        Self {
+            entry: None,
+            bad_args: Vec::new(),
+        }
+    }
+}
+
+/// Reads one `{ matcher, hooks }` entry. A structural defect skips the whole entry (one
 /// line): a hook whose `type` is not `"command"`, a hook carrying a non-command handler
-/// key, a missing or empty `command`, or a bad `timeout`.
-fn parse_entry(item: &Value) -> Option<HookMatcher> {
-    let table = item.as_table()?;
+/// key, a missing or empty `command`, or a bad `timeout`. A bad `args` drops only that hook.
+fn parse_entry(item: &Value) -> ParsedEntry {
+    let Some(table) = item.as_table() else {
+        return ParsedEntry::skipped();
+    };
     let matcher = match table.get("matcher") {
         None => None,
         Some(Value::String(matcher)) => Some(matcher.clone()),
-        Some(_) => return None,
+        Some(_) => return ParsedEntry::skipped(),
     };
-    let hooks = table.get("hooks")?.as_array()?;
+    let Some(hooks) = table.get("hooks").and_then(Value::as_array) else {
+        return ParsedEntry::skipped();
+    };
     if hooks.is_empty() {
-        return None;
+        return ParsedEntry::skipped();
     }
     let mut commands = Vec::new();
-    for hook in hooks {
-        commands.push(parse_command(hook)?);
+    let mut bad_args = Vec::new();
+    for (index, hook) in hooks.iter().enumerate() {
+        match parse_command(hook) {
+            CommandParse::Ok(command) => commands.push(command),
+            CommandParse::BadArgs => bad_args.push(index),
+            CommandParse::Skip => return ParsedEntry::skipped(),
+        }
     }
-    Some(HookMatcher {
-        matcher,
-        hooks: commands,
-    })
+    ParsedEntry {
+        entry: (!commands.is_empty()).then_some(HookMatcher {
+            matcher,
+            hooks: commands,
+        }),
+        bad_args,
+    }
 }
 
-/// Reads one `{ type, command, timeout }` hook. `None` means the entry is skipped.
-fn parse_command(hook: &Value) -> Option<HookCommand> {
-    let table = hook.as_table()?;
+/// One hook row's parse result.
+enum CommandParse {
+    Ok(HookCommand),
+    /// `args` is present but is not an array of strings: drop this hook only.
+    BadArgs,
+    /// Outside the command subset: drop the whole entry.
+    Skip,
+}
+
+/// Reads one `{ type, command, args, timeout }` hook.
+fn parse_command(hook: &Value) -> CommandParse {
+    let Some(table) = hook.as_table() else {
+        return CommandParse::Skip;
+    };
     if table.get("type").and_then(Value::as_str) != Some("command") {
-        return None;
+        return CommandParse::Skip;
     }
     if NON_COMMAND_HANDLER_KEYS
         .iter()
         .any(|key| table.contains_key(*key))
     {
-        return None;
+        return CommandParse::Skip;
     }
-    let command = table.get("command").and_then(Value::as_str)?;
+    let Some(command) = table.get("command").and_then(Value::as_str) else {
+        return CommandParse::Skip;
+    };
     if command.is_empty() {
-        return None;
+        return CommandParse::Skip;
     }
     let timeout_secs = match table.get("timeout") {
         None => None,
         Some(Value::Integer(secs)) if *secs >= 0 => Some(*secs as u64),
-        Some(_) => return None,
+        Some(_) => return CommandParse::Skip,
     };
-    Some(HookCommand {
+    let args = match table.get("args") {
+        None => None,
+        Some(Value::Array(items)) => {
+            let mut args = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(arg) = item.as_str() else {
+                    return CommandParse::BadArgs;
+                };
+                args.push(arg.to_owned());
+            }
+            Some(args)
+        }
+        Some(_) => return CommandParse::BadArgs,
+    };
+    CommandParse::Ok(HookCommand {
         command: command.to_owned(),
+        args,
         timeout_secs,
     })
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn parse_str(text: &str) -> Config {
+        super::super::parse(Path::new("/tmp/test/config.toml"), text).unwrap()
+    }
+
+    /// `args` is the exec-form list (ADR 0045 §4): strings are carried verbatim, an empty
+    /// list means "no arguments" (still no shell), and a missing `args` means `/bin/sh -c`.
+    #[test]
+    fn args_parses_as_the_exec_form_argument_list() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.PreToolUse]]\n",
+            "matcher = \"shell\"\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"/work/example/hooks/check\"\n",
+            "args = [\"a b\", \"$(touch /tmp/x)\", \";\", \"*\"]\n",
+            "[[hooks.PostToolUse]]\n",
+            "matcher = \"patch\"\n",
+            "[[hooks.PostToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"/work/example/hooks/empty\"\n",
+            "args = []\n",
+            "[[hooks.Stop]]\n",
+            "[[hooks.Stop.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"make check\"\n",
+        ));
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+        assert_eq!(
+            config.hooks.pre_tool_use[0].hooks[0].args,
+            Some(vec![
+                "a b".to_owned(),
+                "$(touch /tmp/x)".to_owned(),
+                ";".to_owned(),
+                "*".to_owned(),
+            ]),
+            "arguments stay verbatim, with no shell expansion"
+        );
+        assert_eq!(
+            config.hooks.post_tool_use[0].hooks[0].args,
+            Some(Vec::new()),
+            "an empty list is exec form with no arguments"
+        );
+        assert_eq!(config.hooks.stop[0].hooks[0].args, None);
+    }
+
+    /// Edge case: `args = "x"` and `args = [1]` drop that hook only, one warning line each,
+    /// and the entry's other hooks still load (ADR 0045 §4). Dropping the whole entry, or
+    /// silently accepting the value, fails this.
+    #[test]
+    fn a_bad_args_skips_only_that_hook() {
+        for bad in ["args = \"x\"", "args = [1]"] {
+            let config = parse_str(&format!(
+                concat!(
+                    "schema_version = 1\n",
+                    "[[hooks.PreToolUse]]\n",
+                    "matcher = \"shell\"\n",
+                    "[[hooks.PreToolUse.hooks]]\n",
+                    "type = \"command\"\n",
+                    "command = \"/work/example/hooks/good\"\n",
+                    "[[hooks.PreToolUse.hooks]]\n",
+                    "type = \"command\"\n",
+                    "command = \"/work/example/hooks/bad\"\n",
+                    "{}\n",
+                ),
+                bad
+            ));
+            assert_eq!(
+                config.hooks.pre_tool_use.len(),
+                1,
+                "the entry still loads: {:?}",
+                config.hooks
+            );
+            assert_eq!(
+                config.hooks.pre_tool_use[0].hooks.len(),
+                1,
+                "only the bad hook drops: {:?}",
+                config.hooks.pre_tool_use[0]
+            );
+            assert_eq!(
+                config.hooks.pre_tool_use[0].hooks[0].command,
+                "/work/example/hooks/good"
+            );
+            assert_eq!(
+                config.skipped,
+                vec!["hooks.PreToolUse[0].hooks[1]".to_owned()],
+                "one line names the dropped hook: {bad}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

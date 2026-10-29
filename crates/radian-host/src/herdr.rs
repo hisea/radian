@@ -128,7 +128,7 @@ pub enum Blocked {
     /// the category.
     IntentStop,
     /// The idle hook-continuation cap stopped after 8 hook continuations in a row ended
-    /// with no tool call (backlog `hooks-stop-and-feedback.md` §3); the session is idle
+    /// with no tool call (ADR 0045 §3); the session is idle
     /// until a user message wakes it. The hook's stderr, additional context, and the
     /// previous message's text never leave the process — only the category.
     HookStop,

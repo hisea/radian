@@ -289,7 +289,7 @@ impl App {
         result
     }
 
-    /// The idle hook-continuation cap fired (backlog `hooks-stop-and-feedback.md` §3): the
+    /// The idle hook-continuation cap fired (ADR 0045 §3): the
     /// visible stop on the same notice slot. The first cap pushes the line; a later one
     /// rewrites it, so repeated caps still show one line. The next turn start clears the
     /// stop (the line stays as plain history) and herdr reports normal again.
@@ -379,8 +379,7 @@ impl App {
                 // The intent-stop cap ends the same way: the next turn is running, so
                 // herdr reports normal again (backlog `turn-end-continuation.md` §B.3).
                 self.session.intent_stop_waiting = false;
-                // The idle hook-continuation cap clears the same way (backlog
-                // `hooks-stop-and-feedback.md` §3).
+                // The idle hook-continuation cap clears the same way (ADR 0045 §3).
                 self.session.hook_stop_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and

@@ -212,6 +212,7 @@ async fn a_late_stop_verdict_belongs_to_the_turn_it_opens() {
             matcher: None,
             hooks: vec![radian_host::config::HookCommand {
                 command: script,
+                args: None,
                 timeout_secs: None,
             }],
         }],
@@ -314,6 +315,7 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
             matcher: Some("shell".into()),
             hooks: vec![radian_host::config::HookCommand {
                 command: format!("touch {}", marker.display()),
+                args: None,
                 timeout_secs: None,
             }],
         }],
@@ -410,6 +412,7 @@ async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journ
                 command:
                     r#"printf '%s' '{"hookSpecificOutput":{"updatedToolOutput":"from-project"}}'"#
                         .into(),
+                args: None,
                 timeout_secs: None,
             }],
         }],
@@ -424,6 +427,7 @@ async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journ
                      printf '%s' '{{\"hookSpecificOutput\":{{\"updatedToolOutput\":\"from-user\"}}}}'",
                     user_stdin.display()
                 ),
+                args: None,
                 timeout_secs: None,
             }],
         }],
@@ -555,6 +559,7 @@ async fn allow_output_does_not_bypass_the_permission_rules() {
             matcher: Some("shell".into()),
             hooks: vec![radian_host::config::HookCommand {
                 command: script.into(),
+                args: None,
                 timeout_secs: None,
             }],
         }],

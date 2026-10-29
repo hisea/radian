@@ -170,8 +170,8 @@ allow_env = ["MY_TOKEN_NAME"]
 
 User-level command hooks: three events, each a list of `{ matcher, hooks }` entries.
 A matcher is a regular expression over Radian tool names, anchored to the whole name (`shell|write` names two tools); `*`, an empty matcher, or a missing matcher matches every tool.
-Each hook is `{ type = "command", command, timeout }`.
-The command runs as `/bin/sh -c` inside the session sandbox when one is enforced; `timeout` is seconds (`60` when unset or `0`).
+Each hook is `{ type = "command", command, args, timeout }`.
+Without `args`, the command runs as `/bin/sh -c` inside the session sandbox when one is enforced; with `args` (an array of strings), `command` is an executable started directly with exactly those arguments and no shell. `timeout` is seconds (`60` when unset or `0`).
 `PreToolUse` exit `2` denies the call; other failures fail closed.
 
 | Key | Type | Default | What it does |
@@ -181,7 +181,7 @@ The command runs as `/bin/sh -c` inside the session sandbox when one is enforced
 | `hooks.Stop` | array of entries | none | React at stop. The matcher is ignored. |
 | `hooks.intent_stop` | boolean | `true` | The built-in stop validator. `false` turns it off; user `Stop` hooks still run. |
 
-Anything outside this shape is skipped with one line, never refused: unknown event names, a `type` other than `"command"`, non-command handler keys, an empty command, a bad timeout.
+Anything outside this shape is skipped with one line, never refused: unknown event names, a `type` other than `"command"`, non-command handler keys, an empty command, a bad timeout. An `args` that is not an array of strings skips only that hook (one line), not the entry or the file.
 
 ```toml
 [[hooks.PreToolUse]]
@@ -190,6 +190,13 @@ matcher = "shell|write"
 type = "command"
 command = "make lint"
 timeout = 30
+
+[[hooks.PostToolUse]]
+matcher = "patch"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/format"
+args = ["--check"]
 
 [hooks]
 intent_stop = true

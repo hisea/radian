@@ -1663,3 +1663,26 @@ empty).
 | TK0230-M3 | the cap fires no notice line (`hook_stop_warn` gets an empty string) | ✅ 1 failed (rc=100) | `hooks::tests::eight_idle_hook_continuations_degrade_the_eighth_continuation` (the notice list was not the cap line) |
 | TK0230-M4 | `on_turn_end` keeps the idle streak through a non-completed turn | ✅ 1 failed (rc=100) | `hooks::tests::a_cancelled_turn_resets_the_idle_streak` |
 | TK0230-M5 | the cap's degraded `inject` is not counted (its `degraded` increment removed), so `exec -p` never sees an unhandled Stop verdict | ✅ 2 failed | `hooks::tests::eight_idle_hook_continuations_degrade_the_eighth_continuation` (the degraded count was 0) and, on the default profile outside the workspace sandbox, `exec_jobs::p_ends_on_the_idle_hook_continuation_cap` (exit 0 instead of 3) |
+
+## TK0231: hook exec-form `args` and per-run records (2026-10-29, branch `work/TK0231-hook-args-and-run-records`)
+
+ADR 0045 §1/§4: a hook with `args` starts `command` directly with exactly those arguments
+(no shell; the sandbox in a sandboxed slot), dedup keys on `command` plus `args`, and a bad
+`args` drops only its hook. Every run leaves one in-memory record
+(`<event>:<tool> [<command first line>] <end> (<n>ms)`), newest kept, and import-claude
+carries `args` unchanged. Each mutation was applied in place to
+`crates/radian-host/src/{hooks,config/hooks,project_hooks,config/migrate_claude}.rs`, the
+named tests ran with `cargo nextest run -p radian-host --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and the source was restored from `.radian/mut/` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0231-M1 | an exec-form hook goes through the shell anyway (`spawn_piped` forces `args: None`) | ✅ 1 failed (rc=100) | `hooks::tests::exec_args_reach_the_program_verbatim_without_a_shell` |
+| TK0231-M2 | dedup keys on the command alone (`dedup_key` returns `(command, None)`) | ✅ 1 failed (rc=100) | `hooks::tests::the_dedup_key_is_command_plus_args` |
+| TK0231-M3 | a bad `args` drops the whole user-level entry (`BadArgs => ParsedEntry::skipped()`) | ✅ 1 failed (rc=100) | `config::hooks::args_tests::a_bad_args_skips_only_that_hook` |
+| TK0231-M4 | no run is recorded (`record_run` returns at its start) | ✅ 1 failed (rc=100) | `hooks::tests::every_run_records_the_agreed_line` |
+| TK0231-M5 | a timeout is recorded as `status 0` instead of `timed out` | ✅ 1 failed (rc=100) | `hooks::tests::a_timed_out_hook_is_recorded_as_timed_out` |
+| TK0231-M6 | the run ring is returned oldest first (`hook_runs` drops `.rev()`) | ✅ 1 failed (rc=100) | `hooks::tests::the_run_ring_keeps_the_last_50_newest_first` |
+| TK0231-M7 | import-claude drops `args` again (`HookCommandDraft.args = None` in `hook_command`) | ✅ 1 failed (rc=100) | `claude_migrate::a_hook_args_array_is_carried_over_unchanged` |
+| TK0231-M8 | a bad `args` drops the whole project-level entry (the user-level twin, in `project_hooks.rs`) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_skips_only_that_hook` |

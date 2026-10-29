@@ -35,15 +35,18 @@ the wrapped settings shape with a top-level `hooks` object. When both are
 present the wrapped object wins.
 
 At runtime the project entries run first, then the user entries, so user
-hooks see the final arguments. An identical command string runs once per
-event.
+hooks see the final arguments. An identical hook — the same `command` and the
+same `args` — runs once per event. The same program with different `args` is
+two hooks and both run.
 
 A missing file is empty, never an error. An unreadable project file warns
 once and loads nothing. A hook whose `type` is not `"command"`, an entry
 with handler keys outside the command subset (`async`, `if`, `http`,
 `prompt`, `agent`), a missing or empty `command`, a bad `timeout`, a
 non-string matcher, or a missing or empty `hooks` list is
-skipped with one warning each. Nothing outside the subset ever refuses
+skipped with one warning each. A hook whose `args` is not an array of strings
+is the one exception: only that hook is skipped, the warning names it, and the
+entry's other hooks still load. Nothing outside the subset ever refuses
 startup.
 
 ## The user config shape
@@ -60,7 +63,9 @@ timeout = 10
 matcher = "patch"
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "make fmt"
+command = "/work/example/hooks/lint"
+args = ["--check", "src/lib.rs"]
+timeout = 30
 
 [[hooks.Stop]]
 [[hooks.Stop.hooks]]
@@ -70,17 +75,28 @@ timeout = 30
 ```
 
 Each event holds a list of entries. Each entry holds a `matcher` and a list
-of `hooks`. Each hook holds `type = "command"`, a `command`, and an optional
-`timeout` in seconds. The default timeout is 60 seconds; zero means the
-default. A second `[[...hooks]]` table under one entry runs a second
-command.
+of `hooks`. Each hook holds `type = "command"`, a `command`, an optional
+`args`, and an optional `timeout` in seconds.
+
+Without `args`, `command` is a shell command string and runs through
+`/bin/sh -c`. With `args`, `command` names an executable — an absolute or
+relative path, or a name found on `PATH` — and radian starts it directly with
+exactly those arguments, never through a shell. Nothing splits on spaces and
+`$`, `;`, `*` and quotes stay literal, so each argument arrives as written.
+`args` must be an array of strings; an empty array runs the executable with no
+arguments. A hook whose `args` is not an array of strings is skipped with one
+warning, and the entry's other hooks still load.
+
+The default timeout is 60 seconds; zero means the default. A second
+`[[...hooks]]` table under one entry runs a second command.
 
 The project file spells the same shape in JSON:
 
 ```json
 {
   "PreToolUse": [
-    {"matcher": "shell", "hooks": [{"type": "command", "command": "make lint", "timeout": 10}]}
+    {"matcher": "shell", "hooks": [{"type": "command", "command": "make lint", "timeout": 10}]},
+    {"matcher": "patch", "hooks": [{"type": "command", "command": "/work/example/hooks/lint", "args": ["--check", "src/lib.rs"]}]}
   ],
   "Stop": [
     {"hooks": [{"type": "command", "command": "notify-send radian stopped"}]}
@@ -122,14 +138,16 @@ not match `shell`. A pattern that does not compile matches nothing. `Stop`
 ignores the matcher.
 
 Type `/hooks` to open the inspector's hooks page. It shows each configured
-entry and whether its matcher compiles.
+entry and whether its matcher compiles, and a Recent runs section (see
+[Recent runs](#recent-runs)).
 
 ## What a hook receives
 
-The hook command runs as `/bin/sh -c` with the workspace as its working
-directory, inside the session sandbox when one is enforced. Outside the
-sandbox it inherits radian's environment; inside it sees only the sandbox's
-allowed variables. Its stdin is one
+The hook command runs with the workspace as its working directory, inside the
+session sandbox when one is enforced. Without `args` it runs as `/bin/sh -c`;
+with `args` radian starts `command` directly with those arguments and no shell.
+Outside the sandbox it inherits radian's environment; inside it sees only the
+sandbox's allowed variables. Its stdin is one
 JSON object. The fields depend on the event.
 
 `PreToolUse` receives the event name, the tool name, the tool input, the
@@ -263,6 +281,34 @@ ends with `…[truncated]`.
 `Stop` it is ignored with one warning line. `updatedInput` on `Stop` is
 ignored with one warning line too.
 
+## Recent runs
+
+Every hook run records one entry when it finishes:
+
+```
+<event>:<tool name> [<first line of the command>] <end> (<n>ms)
+```
+
+`Stop` has no tool name. The command is the `command` as written, cut to its
+first line; with `args` it is the program only. `<end>` is exactly one of:
+
+| End | Meaning |
+|---|---|
+| `status <code>` | The process exited with that code. |
+| `timed out` | The run passed its `timeout` and its process group was killed. Its milliseconds are at least the timeout. |
+| `cancelled` | The run was cancelled: the process ended on a signal (for example `kill`), or radian could not finish waiting on it. |
+| `failed to start` | The process never started: the command was not found, or the sandbox could not build it. |
+
+Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
+least `1ms`.
+
+The session keeps the last 50 runs in memory, newest first, and the `/hooks`
+page shows them in its Recent runs section below the configured entries. The
+configured list above stays the selectable one; the run section is read-only.
+Each run is also logged with `tracing` at info as it finishes. Runs are not
+journaled: they never enter the transcript or the session journal. `radian
+exec` has no `/hooks` page, so there it is only the log line.
+
 ## Worked examples
 
 Block a command. Deny every `shell` call whose input mentions a protected
@@ -308,8 +354,11 @@ command = "notify-send radian stopped"
 
 ## Debugging
 
-Type `/hooks` to see what loaded. The startup line names every skipped entry
-and every failed run. A hook that never fires usually has a matcher that
+Type `/hooks` to see what loaded and the session's recent runs. The startup
+line names every skipped entry and every failed run. The Recent runs section
+names the command's first line and how each run ended, with its duration, so a
+slow or failing hook is visible without guessing. A hook that never fires
+usually has a matcher that
 does not compile (the hooks page says so) or a tool name that is not a
 Radian tool name (MCP tools carry their `server__` prefix). A hook that
 denies everything usually exits non-zero by accident: check the timeout

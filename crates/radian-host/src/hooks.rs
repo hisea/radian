@@ -29,8 +29,9 @@
 //! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
 //! own `[hooks]` — so the user's hooks see the final arguments a project `updatedInput`
 //! may have rewritten (Core re-validates a rewrite but never re-runs hooks, ADR 0012 P3).
-//! The project layer can never turn a user hook off. Within one event a command string
-//! identical to one already run is skipped (one run even when both layers name it); a deny
+//! The project layer can never turn a user hook off. Within one event a hook identical to
+//! one already run — the same `command` plus the same `args` — is skipped (one run even when
+//! both layers name it); a deny
 //! from any layer stops the rest; two `Stop` exit-2 verdicts open a single continuation
 //! with the reasons joined in one message, counted as one wake.
 //!
@@ -43,7 +44,10 @@
 //!
 //! Hook commands run inside the same OS sandbox the `shell` tool uses when the session has
 //! one (enforced or not, with the same environment rules as `shell`); with no sandbox in
-//! the slot they run as plain `/bin/sh -c` with the host environment.
+//! the slot they run as plain `/bin/sh -c` with the host environment. A hook with `args`
+//! starts `command` directly with exactly those arguments and never through a shell
+//! (ADR 0045 §4). Every run leaves one in-memory record, newest kept (the manual's "Recent
+//! runs"), shown on the `/hooks` page and logged at info.
 
 use radian_coding::Jobs;
 use radian_core::{
@@ -53,11 +57,12 @@ use radian_core::{
 use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::Notify;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
@@ -79,9 +84,9 @@ pub const MAX_INTENT_STOP_CONSECUTIVE: u32 = 2;
 
 /// How many hook-opened continuations may follow each other while their turns do no work:
 /// the continuation that would be the 8th in a row (a hook exit 2, `decision: "block"`,
-/// or `additionalContext`) degrades instead of opening a turn (backlog
-/// `hooks-stop-and-feedback.md` §3). A continued turn that called a tool resets the
-/// streak, so real work never counts like an idle continuation.
+/// or `additionalContext`) degrades instead of opening a turn (ADR 0045 §3). A continued
+/// turn that called a tool resets the streak, so real work never counts like an idle
+/// continuation.
 pub const MAX_HOOK_IDLE_CONTINUATIONS: u32 = 8;
 
 /// The TUI notice line for the consecutive idle hook-continuation cap: no further hook
@@ -132,6 +137,81 @@ impl Continuation {
 /// The warning channel: the host routes it the way it routes its other startup/runtime
 /// lines (the CLI prints it, the TUI shows it as a notice).
 pub type HooksWarning = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// How many finished hook runs one session keeps in memory, newest kept. The `/hooks` page
+/// shows them; they are never journaled (ADR 0001 records transcript events only).
+pub const HOOK_RUN_HISTORY: usize = 50;
+
+/// The closed set of ways one hook run ends, as the record, the `/hooks` page and the docs
+/// drift test spell them (the manual's "Recent runs"). `status` carries the exit code; the
+/// other three stand alone.
+pub const HOOK_RUN_END_STATUS: &str = "status";
+pub const HOOK_RUN_END_TIMED_OUT: &str = "timed out";
+pub const HOOK_RUN_END_CANCELLED: &str = "cancelled";
+pub const HOOK_RUN_END_FAILED_TO_START: &str = "failed to start";
+pub const HOOK_RUN_ENDS: &[&str] = &[
+    HOOK_RUN_END_STATUS,
+    HOOK_RUN_END_TIMED_OUT,
+    HOOK_RUN_END_CANCELLED,
+    HOOK_RUN_END_FAILED_TO_START,
+];
+
+/// How one hook run ended: the exit code, the timeout, a cancellation (the process was
+/// killed by a signal, or the run could not be reaped), or a command that never started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookRunEnd {
+    /// The process exited with this code.
+    Status(i32),
+    /// The run passed its timeout and its process group was killed.
+    TimedOut,
+    /// The run was cancelled: it ended on a signal, or waiting on it failed.
+    Cancelled,
+    /// The process never started (a missing command, a sandbox construction error).
+    FailedToStart,
+}
+
+impl HookRunEnd {
+    /// The record's end text, from the one closed set.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Status(code) => format!("{HOOK_RUN_END_STATUS} {code}"),
+            Self::TimedOut => HOOK_RUN_END_TIMED_OUT.to_owned(),
+            Self::Cancelled => HOOK_RUN_END_CANCELLED.to_owned(),
+            Self::FailedToStart => HOOK_RUN_END_FAILED_TO_START.to_owned(),
+        }
+    }
+}
+
+/// One finished hook run, in memory only. `line()` is the one record format the `/hooks`
+/// page, the log and the tests read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookRunRecord {
+    /// `PreToolUse`, `PostToolUse` or `Stop`.
+    pub event: String,
+    /// The tool name for a tool event; `None` for `Stop`.
+    pub tool: Option<String>,
+    /// The command's first line.
+    pub command: String,
+    pub end: HookRunEnd,
+    /// The run's duration in milliseconds, rounded up so a fast run never reads `0`.
+    pub millis: u64,
+}
+
+impl HookRunRecord {
+    /// `<event>:<tool> [<command first line>] <end> (<n>ms)`; `Stop` has no tool name.
+    pub fn line(&self) -> String {
+        let event = match &self.tool {
+            Some(tool) => format!("{}:{tool}", self.event),
+            None => self.event.clone(),
+        };
+        format!(
+            "{event} [{}] {} ({}ms)",
+            self.command,
+            self.end.label(),
+            self.millis
+        )
+    }
+}
 
 /// One compiled `{ matcher, hooks }` entry: the regex is built once at load time, so an
 /// invalid pattern warns once there and never runs (never per call).
@@ -213,6 +293,9 @@ pub struct CommandHooks {
     /// instead of continuing. A rule miss, a non-completed turn, or a user message
     /// ([`CommandHooks::reset_wakes`]) clears it.
     consecutive: Arc<AtomicU32>,
+    /// The last [`HOOK_RUN_HISTORY`] finished runs, oldest first (newest at the back); shared
+    /// across clones, one ring per session. Never journaled.
+    runs: Arc<std::sync::Mutex<VecDeque<HookRunRecord>>>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
@@ -342,6 +425,7 @@ impl CommandHooks {
             turn_continuation,
             hook_idle: Arc::new(AtomicU32::new(0)),
             consecutive: Arc::new(AtomicU32::new(0)),
+            runs: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             warn,
             wake,
             intent_stop_warn,
@@ -435,6 +519,48 @@ impl CommandHooks {
     /// `Stop` continuations inside the window right now (tests).
     pub fn stop_wakes(&self) -> u32 {
         self.gate.wakes()
+    }
+
+    /// The last [`HOOK_RUN_HISTORY`] hook runs, newest first (the `/hooks` page's Recent
+    /// runs section). In memory only: `radian exec` has no page and reads only the log line.
+    pub fn hook_runs(&self) -> Vec<HookRunRecord> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
+    }
+
+    /// Records one finished run: one `tracing` info line, then the in-memory ring (the
+    /// oldest entry drops when it is full). Milliseconds are rounded up, so a fast hook
+    /// never reads `0ms`.
+    fn record_run(
+        &self,
+        event: &str,
+        tool: Option<&str>,
+        command: &str,
+        end: HookRunEnd,
+        started: Instant,
+    ) {
+        let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let record = HookRunRecord {
+            event: event.to_owned(),
+            tool: tool.map(str::to_owned),
+            command: first_line(command),
+            end,
+            millis: micros.div_ceil(1000).max(1),
+        };
+        tracing::info!(target: "radian_host::hooks", "{}", record.line());
+        let mut runs = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while runs.len() >= HOOK_RUN_HISTORY {
+            runs.pop_front();
+        }
+        runs.push_back(record);
     }
 
     /// How many continuations were degraded since the last wake (tests). A woken turn
@@ -555,10 +681,10 @@ impl CommandHooks {
         let mut seen = std::collections::HashSet::new();
         for entry in &self.stop {
             for hook in &entry.hooks {
-                if !seen.insert(hook.command.clone()) {
+                if !seen.insert(dedup_key(hook)) {
                     continue;
                 }
-                match self.execute(hook, &stdin, "Stop").await {
+                match self.execute(hook, &stdin, "Stop", None).await {
                     Ok(output) if output.code == Some(0) => {
                         if let Some(parsed) = self.parsed_output(&output.stdout, "Stop") {
                             reasons.extend(self.stop_output_reasons(parsed));
@@ -617,7 +743,7 @@ impl CommandHooks {
                 }
             }
         }
-        // THE IDLE-CONTINUATION CAP (backlog `hooks-stop-and-feedback.md` §3): the
+        // THE IDLE-CONTINUATION CAP (ADR 0045 §3): the
         // continuation that would be the 8th hook continuation in a row of no-work turns
         // does not open one. It takes the validator's two-in-a-row treatment: a marked
         // `inject` (journal-visible, no wake), one notice line through the host's
@@ -800,7 +926,9 @@ impl CommandHooks {
 
     /// Runs one hook command with `stdin_json` on its stdin, inside the session sandbox
     /// when the slot holds one. A spawn failure or a timeout is a hook error (fail closed);
-    /// exit codes are the caller's to interpret.
+    /// exit codes are the caller's to interpret. Every run records one [`HookRunRecord`]
+    /// (ADR 0045 §4): `tool` is the Radian tool name for the tool events, `None` for
+    /// `Stop`.
     ///
     /// The child is a plain `std` process (`SandboxCommand` cannot become a Tokio command):
     /// stdin is written and the output waited on a blocking thread, and a timeout kills the
@@ -810,12 +938,26 @@ impl CommandHooks {
         hook: &HookCommand,
         stdin_json: &serde_json::Value,
         event: &str,
+        tool: Option<&str>,
     ) -> Result<ProcOutput, HookError> {
+        let started = Instant::now();
         let input = serde_json::to_string(stdin_json)
             .map_err(|error| HookError::new(format!("could not encode the hook input: {error}")))?;
-        let mut std_child = self.spawn_piped(hook).map_err(|error| {
-            HookError::new(format!("could not start the {event} hook: {error}"))
-        })?;
+        let mut std_child = match self.spawn_piped(hook) {
+            Ok(child) => child,
+            Err(error) => {
+                self.record_run(
+                    event,
+                    tool,
+                    &hook.command,
+                    HookRunEnd::FailedToStart,
+                    started,
+                );
+                return Err(HookError::new(format!(
+                    "could not start the {event} hook: {error}"
+                )));
+            }
+        };
         let pid = std_child.id();
         let stdin = std_child.stdin.take();
         // `select!` (not `tokio::time::timeout`) keeps the join handle, so a timeout can
@@ -838,22 +980,38 @@ impl CommandHooks {
             () = tokio::time::sleep(hook.timeout()) => None,
         };
         match finished {
-            Some(Ok(Ok(output))) => Ok(ProcOutput {
-                code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            }),
-            Some(Ok(Err(error))) => Err(HookError::new(format!(
-                "the {event} hook could not finish: {error}"
-            ))),
-            Some(Err(join)) => Err(HookError::new(format!(
-                "the {event} hook task failed: {join}"
-            ))),
+            Some(Ok(Ok(output))) => {
+                // A process killed by a signal has no exit code; that run was cancelled
+                // (the timeout path below is the timed-out end).
+                let end = output
+                    .status
+                    .code()
+                    .map_or(HookRunEnd::Cancelled, HookRunEnd::Status);
+                self.record_run(event, tool, &hook.command, end, started);
+                Ok(ProcOutput {
+                    code: output.status.code(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+            }
+            Some(Ok(Err(error))) => {
+                self.record_run(event, tool, &hook.command, HookRunEnd::Cancelled, started);
+                Err(HookError::new(format!(
+                    "the {event} hook could not finish: {error}"
+                )))
+            }
+            Some(Err(join)) => {
+                self.record_run(event, tool, &hook.command, HookRunEnd::Cancelled, started);
+                Err(HookError::new(format!(
+                    "the {event} hook task failed: {join}"
+                )))
+            }
             None => {
                 kill_tree(pid);
                 // The kill ends the child, so the waiter returns and reaps it; the
                 // result no longer matters.
                 let _ = waiter.await;
+                self.record_run(event, tool, &hook.command, HookRunEnd::TimedOut, started);
                 Err(HookError::new(format!(
                     "the {event} hook timed out after {timeout_secs}s"
                 )))
@@ -889,9 +1047,19 @@ impl CommandHooks {
         }
         match self.sandbox.get() {
             Some(sandbox) => {
-                let mut command = sandbox
-                    .command_str("/bin/sh", &["-c", &hook.command])
-                    .map_err(std::io::Error::other)?;
+                let mut command = match &hook.args {
+                    // Exec form (ADR 0045 §4): the program, with its arguments, never
+                    // through a shell. The sandbox builds it exactly like `shell`.
+                    Some(args) => {
+                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                        sandbox
+                            .command_str(&hook.command, &args)
+                            .map_err(std::io::Error::other)?
+                    }
+                    None => sandbox
+                        .command_str("/bin/sh", &["-c", &hook.command])
+                        .map_err(std::io::Error::other)?,
+                };
                 command.current_dir(&self.workspace);
                 if !sandbox.mode().is_enforced() {
                     // The transparent backend does not filter the environment. A hook's
@@ -912,11 +1080,22 @@ impl CommandHooks {
                     .spawn()
             }
             None => {
-                let mut command = std::process::Command::new("/bin/sh");
+                let mut command = match &hook.args {
+                    // Exec form (ADR 0045 §4): the program starts directly, inheriting the
+                    // host environment like the `/bin/sh -c` path does.
+                    Some(args) => {
+                        let mut command = std::process::Command::new(&hook.command);
+                        command.args(args);
+                        command
+                    }
+                    None => {
+                        let mut command = std::process::Command::new("/bin/sh");
+                        command.arg("-c").arg(&hook.command);
+                        command
+                    }
+                };
                 own_session(&mut command);
                 command
-                    .arg("-c")
-                    .arg(&hook.command)
                     .current_dir(&self.workspace)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -941,7 +1120,7 @@ impl CommandHooks {
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
         });
-        let output = self.execute(hook, &stdin, "PreToolUse").await?;
+        let output = self.execute(hook, &stdin, "PreToolUse", Some(tool)).await?;
         match output.code {
             Some(2) => {
                 let reason = short(&output.stderr);
@@ -1230,6 +1409,18 @@ fn compile_entry(
     }
 }
 
+/// The dedup key of one hook (ADR 0045 §1 item 3): the command plus its whole `args` list,
+/// so the same program with different arguments is two hooks, and two layers writing the
+/// same command and arguments (or both without arguments) run once.
+fn dedup_key(hook: &HookCommand) -> (String, Option<Vec<String>>) {
+    (hook.command.clone(), hook.args.clone())
+}
+
+/// The command's first line, for a run record.
+fn first_line(command: &str) -> String {
+    command.lines().next().unwrap_or_default().to_owned()
+}
+
 /// Bounds hook stderr before it enters the transcript.
 fn short(text: &str) -> String {
     let kept: String = text.chars().take(REASON_CHAR_LIMIT).collect();
@@ -1259,7 +1450,7 @@ impl Hooks for CommandHooks {
                 continue;
             }
             for hook in &entry.hooks {
-                if !seen.insert(hook.command.clone()) {
+                if !seen.insert(dedup_key(hook)) {
                     continue;
                 }
                 match self.run_pre_hook(hook, &call.name, &input).await? {
@@ -1296,7 +1487,7 @@ impl Hooks for CommandHooks {
                 continue;
             }
             for hook in &entry.hooks {
-                if !seen.insert(hook.command.clone()) {
+                if !seen.insert(dedup_key(hook)) {
                     continue;
                 }
                 let stdin = serde_json::json!({
@@ -1307,7 +1498,9 @@ impl Hooks for CommandHooks {
                     "cwd": self.workspace.to_string_lossy(),
                     "session_id": self.session_id,
                 });
-                let output = self.execute(hook, &stdin, "PostToolUse").await?;
+                let output = self
+                    .execute(hook, &stdin, "PostToolUse", Some(&call.name))
+                    .await?;
                 match output.code {
                     Some(0) => {
                         if let Some(parsed) = self.parsed_output(&output.stdout, "PostToolUse") {
@@ -1450,6 +1643,7 @@ mod tests {
     fn hook(command: &str) -> HookCommand {
         HookCommand {
             command: command.to_owned(),
+            args: None,
             timeout_secs: None,
         }
     }
@@ -1458,6 +1652,23 @@ mod tests {
         HookMatcher {
             matcher: Some(matcher.to_owned()),
             hooks: commands,
+        }
+    }
+
+    /// An executable `/bin/sh` script for the exec-form tests. The shebang is what makes the
+    /// kernel run it directly, with exactly the arguments it was given.
+    #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A `PreToolUse` config with one hook for the `shell` tool.
+    fn pre_hook(hook: HookCommand) -> HooksConfig {
+        HooksConfig {
+            pre_tool_use: vec![entry("shell", vec![hook])],
+            ..HooksConfig::default()
         }
     }
 
@@ -2100,6 +2311,271 @@ mod tests {
         assert_eq!(stdin["tool_input"]["command"], "hi");
         assert_eq!(stdin["session_id"], "sid-9");
         assert_eq!(stdin["cwd"], root.ws.to_string_lossy().as_ref());
+    }
+
+    /// Edge case 1: arguments reach the program exactly as written. `/bin/sh` would split
+    /// `a b`, expand `$(…)` and treat `;`/`*`; the exec form must do none of that, and no
+    /// file may be created by the ``$(touch …)`` argument.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_args_reach_the_program_verbatim_without_a_shell() {
+        let root = TempRoot::new("exec-args");
+        let out = root.ws.join("args.txt");
+        let script = root.ws.join("capture");
+        write_script(
+            &script,
+            &format!("printf '%s\\n' \"$@\" > {}", out.display()),
+        );
+        let marker = root.outside("expanded");
+        let touch = format!("$(touch {})", marker.display());
+        let config = pre_hook(HookCommand {
+            command: script.display().to_string(),
+            args: Some(vec![
+                "a b".to_owned(),
+                touch.clone(),
+                ";".to_owned(),
+                "*".to_owned(),
+            ]),
+            timeout_secs: None,
+        });
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let decision = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+        let seen = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            seen.lines().collect::<Vec<_>>(),
+            vec!["a b", touch.as_str(), ";", "*"],
+            "arguments arrive verbatim, with no word splitting or expansion"
+        );
+        assert!(!marker.exists(), "$(...) must not run");
+    }
+
+    /// Edge case 2: an exec-form hook in the `workspace` tier runs inside the sandbox, so a
+    /// write outside the workspace fails and lands nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_args_run_inside_the_workspace_sandbox() {
+        let root = TempRoot::new("sandbox-exec-args");
+        let outside = root.outside("escaped.txt");
+        let script = root.ws.join("escape");
+        write_script(
+            &script,
+            &format!("echo escaped > {}; exit 1", outside.display()),
+        );
+        let config = pre_hook(HookCommand {
+            command: script.display().to_string(),
+            args: Some(vec!["ignored".to_owned()]),
+            timeout_secs: None,
+        });
+        let sandbox =
+            radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
+                .expect("the workspace sandbox probes clean on this machine");
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
+        let error = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exited with code"),
+            "the sandbox denial is a hook error: {error}"
+        );
+        assert!(
+            !outside.exists(),
+            "the write outside the workspace must not land"
+        );
+    }
+
+    /// Edge case 4: dedup keys on `command` plus `args` (ADR 0045 §1 item 3). The same
+    /// program with different arguments runs twice, and the same program with the same
+    /// arguments written in both layers runs once. A command-only key fails both halves.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_dedup_key_is_command_plus_args() {
+        let root = TempRoot::new("dedup-args");
+        let log = root.ws.join("runs.txt");
+        let script = root.ws.join("log");
+        write_script(&script, &format!("echo \"$1\" >> {}", log.display()));
+        let hook = |arg: &str| HookCommand {
+            command: script.display().to_string(),
+            args: Some(vec![arg.to_owned()]),
+            timeout_secs: None,
+        };
+        let project = pre_hook(hook("one"));
+        let user = HooksConfig {
+            pre_tool_use: vec![entry("shell", vec![hook("one"), hook("two")])],
+            ..HooksConfig::default()
+        };
+        let fixture = layered_with_root(root, &user, &project, SandboxSlot::empty());
+        fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        let seen = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            seen.lines().collect::<Vec<_>>(),
+            vec!["one", "two"],
+            "the duplicate (command, args) runs once; the other args still run"
+        );
+    }
+
+    /// Edge case 5: a command that does not exist is a hook error (fail closed, unchanged)
+    /// and is recorded as `failed to start`.
+    #[tokio::test]
+    async fn a_missing_exec_command_fails_to_start_and_is_recorded() {
+        let root = TempRoot::new("missing-exec");
+        let config = pre_hook(HookCommand {
+            command: root.ws.join("does-not-exist").display().to_string(),
+            args: Some(Vec::new()),
+            timeout_secs: None,
+        });
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let error = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("could not start"),
+            "the spawn failure stays a hook error: {error}"
+        );
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].end, HookRunEnd::FailedToStart);
+        assert_eq!(runs[0].event, "PreToolUse");
+        assert_eq!(runs[0].tool.as_deref(), Some("shell"));
+        assert!(
+            runs[0].line().contains("failed to start"),
+            "{}",
+            runs[0].line()
+        );
+    }
+
+    /// Edge case 6: a timed-out hook is recorded as `timed out`, and its milliseconds are at
+    /// least the timeout.
+    #[tokio::test]
+    async fn a_timed_out_hook_is_recorded_as_timed_out() {
+        let root = TempRoot::new("timed-out-record");
+        let config = pre_hook(HookCommand {
+            command: "/bin/sleep".to_owned(),
+            args: Some(vec!["5".to_owned()]),
+            timeout_secs: Some(1),
+        });
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let error = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].end, HookRunEnd::TimedOut);
+        assert!(
+            runs[0].millis >= 1000,
+            "the timeout's record must be at least 1000ms: {}",
+            runs[0].millis
+        );
+    }
+
+    /// A run that ends on a signal has no exit code; the closed set calls that `cancelled`.
+    #[tokio::test]
+    async fn a_hook_killed_by_a_signal_is_recorded_cancelled() {
+        let root = TempRoot::new("cancelled-record");
+        let config = pre_hook(HookCommand {
+            command: "/bin/sh".to_owned(),
+            args: Some(vec!["-c".to_owned(), "kill -KILL $$".to_owned()]),
+            timeout_secs: None,
+        });
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let error = fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("signal"), "{error}");
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs[0].end, HookRunEnd::Cancelled);
+    }
+
+    /// Edge case 5's record shape, plus `Stop`'s missing tool name: the agreed one-line
+    /// record is `<event>:<tool> [<command first line>] <end> (<n>ms)`. A command shaped
+    /// `echo first` records only `echo first` even when the shell command has more lines.
+    #[tokio::test]
+    async fn every_run_records_the_agreed_line() {
+        let root = TempRoot::new("record-line");
+        let config = pre_config("shell", "true");
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture
+            .hooks
+            .before_tool_call(&cx(), &call("shell", serde_json::json!({})))
+            .await
+            .unwrap();
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].end, HookRunEnd::Status(0));
+        assert!(
+            runs[0]
+                .line()
+                .starts_with("PreToolUse:shell [true] status 0 ("),
+            "{}",
+            runs[0].line()
+        );
+        assert!(runs[0].line().ends_with("ms)"), "{}", runs[0].line());
+        assert!(runs[0].millis >= 1, "a run never reads 0ms");
+
+        let root = TempRoot::new("record-line-stop");
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![hook("true\nexit 0")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(
+            runs[0].line().starts_with("Stop [true] status 0 ("),
+            "Stop has no tool name, and only the command's first line shows: {}",
+            runs[0].line()
+        );
+    }
+
+    /// Edge case 7: 60 runs keep the last 50, newest first.
+    #[tokio::test]
+    async fn the_run_ring_keeps_the_last_50_newest_first() {
+        let fixture = plain(&HooksConfig::default());
+        for n in 0..60 {
+            fixture.hooks.record_run(
+                "Stop",
+                None,
+                &format!("cmd-{n}"),
+                HookRunEnd::Status(0),
+                Instant::now(),
+            );
+        }
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), HOOK_RUN_HISTORY, "the ring holds 50");
+        assert_eq!(runs[0].command, "cmd-59", "newest first");
+        assert_eq!(runs[49].command, "cmd-10", "the oldest kept is #10");
     }
 
     /// `workspace` runs the hook sandboxed: a hook writing outside the workspace fails

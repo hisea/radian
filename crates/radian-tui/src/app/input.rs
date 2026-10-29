@@ -160,7 +160,7 @@ pub enum Input {
     /// cap line. `update` shows it as the burst's line and marks the session for
     /// herdr's `intent stop` label until the next turn starts.
     IntentStopBlocked(String),
-    /// The idle hook-continuation cap (backlog `hooks-stop-and-feedback.md` §3): the cap
+    /// The idle hook-continuation cap (ADR 0045 §3): the cap
     /// line. `update` shows it as the burst's line and marks the session for herdr's
     /// `hook stop` label until the next turn starts.
     HookStopBlocked(String),

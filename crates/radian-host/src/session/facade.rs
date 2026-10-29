@@ -136,6 +136,10 @@ pub trait SessionFacade: Send + Sync {
     /// when untrusted (the inspector's hooks page shows them as the `project` level).
     fn project_hooks_config(&self) -> crate::config::HooksConfig;
 
+    /// The session's recent hook runs, newest first (the inspector's hooks page Recent runs
+    /// section, ADR 0045 §4/§5). In memory only; never journaled.
+    fn hook_runs(&self) -> Vec<crate::HookRunRecord>;
+
     /// The tail of a job's output plus its state, for the inspector's jobs detail.
     /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;

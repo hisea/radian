@@ -312,6 +312,7 @@ not (
   | test(=reconcile_leaves_a_live_wrapper_and_applies_a_finished_one)
 
   | test(=hooks::tests::a_sandboxed_hook_writes_inside_the_workspace)
+  | test(=hooks::tests::exec_args_run_inside_the_workspace_sandbox)
   | test(=hooks::tests::waiting_with_a_running_job_does_not_fire)
   | test(=hooks::tests::workspace_runs_the_hook_sandboxed)
   | test(=profile::tests::the_workspace_tier_asks_for_writable_except_exec)

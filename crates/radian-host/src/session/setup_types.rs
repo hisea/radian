@@ -210,7 +210,7 @@ pub struct HostBindings {
     pub intent_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
     /// The idle hook-continuation cap's notice line (one per cap report; the TUI shows it
     /// as its own line and reports `blocked` with the `hook stop` label until the next turn
-    /// starts, backlog `hooks-stop-and-feedback.md` §3).
+    /// starts, ADR 0045 §3).
     pub hook_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 

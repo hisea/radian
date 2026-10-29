@@ -58,7 +58,6 @@
 | `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
 | `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表；第一阶段的用户是 arc（arc 即 ACP 客户端已落地） |
-| `hooks-stop-and-feedback.md` | decided（四条 hooks 串行，第一条） | 0045、0037、0017、0012、0046、0001 | `Stop` stdin 加 `stop_hook_active`/`background_tasks`/`session_crons`；`PostToolUse`/`Stop` 读 exit 0 JSON：`additionalContext` 非错误反馈、`decision: "block"`、`updatedToolOutput`；hook 续跑空转 8 次封顶、调工具清零；`args` exec 形式；每次运行一条带耗时的记录 |
 | `hooks-async.md` | decided（四条 hooks 的第三条） | 0045、0037、0011、0046 | `PostToolUse`/`Stop` 的 `async`/`asyncRewake`：`additionalContext` 走 `inject`，`asyncRewake` 退出 2 走 `followup` 计一次 wake；不进 `/jobs`；同命令取代、8 个并发上限、会话结束全杀 |
 | `hooks-permission-request.md` | decided（四条 hooks 的第二条） | 0045、0012、0043、0048、0024、0017、0046 | `PermissionRequest` 在权限层判 ask 之后、问人之前触发，所有来源都触发；`allow`/`deny`，超时与错误等于拒绝；`addRules` 到 `session` 等于本会话允许；两层里 `deny` 优先 |
 | `hooks-stopfailure-notification.md` | decided（四条 hooks 的第四条） | 0045、0017、0034、0024、0013、0046 | `StopFailure`（模型错误结束回合，matcher 为 `ModelErrorKind` 闭集）与 `Notification`（`permission_prompt`、`idle_prompt` 60 s）；只观察、后台跑 |

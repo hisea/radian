@@ -80,6 +80,9 @@ pub struct InspectorSnapshot {
     pub tools: Vec<ToolEntry>,
     pub mcp: Vec<McpEntry>,
     pub hooks: Vec<HookEntry>,
+    /// The session's recent hook runs, newest first (the hooks page's Recent runs section,
+    /// the manual's "Recent runs"). In memory only.
+    pub hook_runs: Vec<radian_host::HookRunRecord>,
     /// The `--mcp-config` path, when one was given. `None` renders as `"—"`.
     pub mcp_config_path: Option<String>,
 }
@@ -356,6 +359,11 @@ pub fn draw(
     if !detail_lines.is_empty() {
         reserved += 1 + detail_lines.len();
     }
+    // The Recent runs section (divider, heading, one row per run) takes its rows from the
+    // list's budget, so the newest runs are never pushed below the panel's bottom.
+    if inspector.page == InspectorPage::Hooks && !inspector.snapshot.hook_runs.is_empty() {
+        reserved += 2 + inspector.snapshot.hook_runs.len();
+    }
     if inspector.pending_kill.is_some() {
         reserved += 1;
     }
@@ -370,6 +378,16 @@ pub fn draw(
             empty_message(inspector),
             theme.hint,
         )));
+    }
+    // The hooks page's Recent runs section: the last runs newest first, each the one record
+    // line (`<event>:<tool> [<command>] <end> (<n>ms)`). It is not selectable; the hooks list
+    // above keeps every key.
+    if inspector.page == InspectorPage::Hooks && !inspector.snapshot.hook_runs.is_empty() {
+        panel = panel.divider();
+        panel = panel.row(Line::from(Span::styled("Recent runs", theme.text)));
+        for run in &inspector.snapshot.hook_runs {
+            panel = panel.row(Line::from(Span::raw(run.line())));
+        }
     }
     if !detail_lines.is_empty() {
         panel = panel.divider();

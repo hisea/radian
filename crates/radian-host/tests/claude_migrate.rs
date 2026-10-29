@@ -1251,3 +1251,78 @@ fn an_existing_project_hooks_file_only_gains_missing_entries() {
     );
     assert_eq!(std::fs::read_to_string(&hooks_path).unwrap(), "{not json");
 }
+
+/// Edge case 8: a Claude hook's `args` array is carried over unchanged, in the user
+/// `[hooks]` draft and in the project `.radian/hooks.json` draft, and the written files
+/// keep it (ADR 0045 §4). Dropping the array (the old behavior) fails every assertion.
+#[test]
+fn a_hook_args_array_is_carried_over_unchanged() {
+    let home = Temp::new("args-home");
+    let proj = Temp::new("args-proj");
+    let args = r#"["a b", "$(touch /tmp/x)", ";", "*"]"#;
+    write(
+        home.path(),
+        "settings.json",
+        &format!(
+            r#"{{"hooks": {{"PreToolUse": [{{"matcher": "Bash", "hooks": [{{"type": "command", "command": "/hooks/check", "args": {args}}}]}}]}}}}"#
+        ),
+    );
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        &format!(
+            r#"{{"hooks": {{"Stop": [{{"hooks": [{{"type": "command", "command": "/hooks/stop", "args": {args}}}]}}]}}}}"#
+        ),
+    );
+
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+    let expected = serde_json::json!(["a b", "$(touch /tmp/x)", ";", "*"]);
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
+        .expect("the draft is a valid Radian configuration");
+    assert_eq!(
+        config.hooks.pre_tool_use[0].hooks[0].args,
+        Some(vec![
+            "a b".to_owned(),
+            "$(touch /tmp/x)".to_owned(),
+            ";".to_owned(),
+            "*".to_owned(),
+        ]),
+        "the user draft keeps the array"
+    );
+    let project_hooks: serde_json::Value =
+        serde_json::from_str(draft.project_hooks_json.as_deref().expect("project hooks")).unwrap();
+    assert_eq!(
+        project_hooks["Stop"][0]["hooks"][0]["args"], expected,
+        "the project draft keeps the array"
+    );
+
+    // The written files keep it too.
+    let scratch = Temp::new("args-write");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: Some(scratch.path().join("project-skills")),
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
+    };
+    write_claude_draft(&draft, &targets).unwrap();
+    let written = std::fs::read_to_string(&targets.config_path).unwrap();
+    let written_config = radian_host::parse_config(&targets.config_path, &written).unwrap();
+    assert_eq!(
+        written_config.hooks.pre_tool_use[0].hooks[0].args,
+        Some(vec![
+            "a b".to_owned(),
+            "$(touch /tmp/x)".to_owned(),
+            ";".to_owned(),
+            "*".to_owned(),
+        ]),
+        "the written config keeps the array: {written}"
+    );
+    let written_hooks = std::fs::read_to_string(scratch.path().join("project-hooks.json")).unwrap();
+    let written_json: serde_json::Value = serde_json::from_str(&written_hooks).unwrap();
+    assert_eq!(
+        written_json["Stop"][0]["hooks"][0]["args"], expected,
+        "the written hooks file keeps the array: {written_hooks}"
+    );
+    readable(home.path());
+}

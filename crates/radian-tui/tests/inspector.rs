@@ -45,6 +45,7 @@ fn snapshot() -> InspectorSnapshot {
             level: "user".to_owned(),
             effective: true,
         }],
+        hook_runs: Vec::new(),
         mcp_config_path: Some("--mcp-config mcp.json".to_owned()),
     }
 }

@@ -131,6 +131,24 @@ fn every_hook_event_name_appears_in_the_manual() {
     }
 }
 
+/// Every hook-run end value appears in `docs/user/hooks.md`.
+///
+/// The source is the one closed set the run record, the `/hooks` page and this test read
+/// (the manual's "Recent runs"), so a new end means a new constant first, and the test fails
+/// until the manual names it.
+#[test]
+fn every_hook_run_end_appears_in_the_manual() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let hooks_md = std::fs::read_to_string(manifest.join("../../docs/user/hooks.md"))
+        .expect("hooks.md exists");
+    for end in radian_host::HOOK_RUN_ENDS {
+        assert!(
+            hooks_md.contains(&format!("`{end}")),
+            "hook-run end `{end}` is missing from hooks.md"
+        );
+    }
+}
+
 /// Every theme role the loader knows appears in `docs/user/themes.md`.
 ///
 /// The source is [`radian_tui::theme::Role::ALL`], the same table the loader parses

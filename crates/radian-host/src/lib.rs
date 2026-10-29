@@ -159,7 +159,11 @@ pub use home::{
     memory_dir_for, radian_home, radian_home_for, run_dir_for, sessions_dir, sessions_dir_for,
     skills_dir, skills_dir_for, themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
-pub use hooks::{CommandHooks, HooksWarning, REASON_CHAR_LIMIT};
+pub use hooks::{
+    CommandHooks, HOOK_RUN_END_CANCELLED, HOOK_RUN_END_FAILED_TO_START, HOOK_RUN_END_STATUS,
+    HOOK_RUN_END_TIMED_OUT, HOOK_RUN_ENDS, HOOK_RUN_HISTORY, HookRunEnd, HookRunRecord,
+    HooksWarning, REASON_CHAR_LIMIT,
+};
 pub use job_notify::{JobNotifier, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message};
 pub use mcp::{
     CREDENTIAL_VARS, LoadScope, McpLoad, ProjectPreview, ProjectPreviewEntry, load_mcp_config,

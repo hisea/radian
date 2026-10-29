@@ -3326,3 +3326,16 @@ radian-tui --locked --profile sandbox --lib -E 'test(app::bash::tests::a_bang_co
 |---|---|---|---|
 | TK0230-M6 | the user-lane clear is disabled (`if false && result.effects.iter().any(...)` in `App::update`) | ✅ 3 failed (rc=100) | `app::bash::tests::a_bang_command_clears_the_hook_stop_block`, `app::bash::tests::a_bang_command_clears_the_intent_stop_block`, `app::transcript::tests::a_typed_followup_and_a_steer_clear_the_stop_blocks` |
 | TK0230-M7 | `user_message_sent` clears only the hook-stop flag (the `intent_stop_waiting` reset removed), the twin gap | ✅ 2 failed (rc=100) | `app::bash::tests::a_bang_command_clears_the_intent_stop_block` and `app::transcript::tests::a_typed_followup_and_a_steer_clear_the_stop_blocks`; the hook-stop test still passed |
+
+## TK0231: the hooks page's Recent runs section (2026-10-29, branch `work/TK0231-hook-args-and-run-records`)
+
+ADR 0045 §4 / `docs/user/hooks.md` "Recent runs": the `/hooks` page renders the
+session's recent runs newest first, each in the one record line. The mutation was applied in
+place to `crates/radian-tui/src/inspector.rs`, backed up under `.radian/mut/` and restored
+(`cmp` identical). The named test ran with `cargo nextest run -p radian-tui --test render
+--locked --profile sandbox --no-fail-fast -E
+'test(the_hooks_page_lists_recent_runs_newest_first)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0231-M9 | the Recent runs section is never drawn (`if … && false` in `inspector::draw`) | ✅ 1 failed (rc=100) | `the_hooks_page_lists_recent_runs_newest_first` (neither `Recent runs` nor either record line was on screen) |

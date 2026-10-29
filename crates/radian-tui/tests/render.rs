@@ -3071,6 +3071,65 @@ fn the_trust_panel_lists_the_project_hooks_preview() {
     assert!(text.contains("hooks: Stop * `make verify`"), "{text}");
 }
 
+/// The hooks page's Recent runs section shows the run records newest first, in the one
+/// record format (`<event>:<tool> [<command>] <end> (<n>ms)`; `Stop` has no tool name).
+/// Dropping the section, or reversing the order, fails this.
+#[test]
+fn the_hooks_page_lists_recent_runs_newest_first() {
+    use radian_host::{HookRunEnd, HookRunRecord};
+    use radian_tui::app::Overlay;
+    use radian_tui::command::InspectorPage;
+    use radian_tui::inspector::{HookEntry, Inspector, InspectorSnapshot};
+    let snapshot = InspectorSnapshot {
+        hooks: vec![HookEntry {
+            event: "PreToolUse".to_owned(),
+            matcher: "*".to_owned(),
+            command: "make lint".to_owned(),
+            timeout_secs: 10,
+            source: "user config.toml".to_owned(),
+            level: "user".to_owned(),
+            effective: true,
+        }],
+        hook_runs: vec![
+            HookRunRecord {
+                event: "PreToolUse".to_owned(),
+                tool: Some("shell".to_owned()),
+                command: "make lint".to_owned(),
+                end: HookRunEnd::Status(0),
+                millis: 12,
+            },
+            HookRunRecord {
+                event: "Stop".to_owned(),
+                tool: None,
+                command: "make check".to_owned(),
+                end: HookRunEnd::TimedOut,
+                millis: 60_000,
+            },
+        ],
+        ..Default::default()
+    };
+    let mut app = App::new("m", "s");
+    app.push_overlay(Overlay::Inspector(Inspector::new(
+        InspectorPage::Hooks,
+        snapshot,
+    )));
+    let terminal = render(&mut app, 100, 30);
+    let text = screen(&terminal);
+    assert!(text.contains("Recent runs"), "{text}");
+    assert!(
+        text.contains("PreToolUse:shell [make lint] status 0 (12ms)"),
+        "the tool event names the tool: {text}"
+    );
+    assert!(
+        text.contains("Stop [make check] timed out (60000ms)"),
+        "Stop has no tool name: {text}"
+    );
+    assert!(
+        text.find("PreToolUse:shell").unwrap() < text.find("Stop [make check]").unwrap(),
+        "newest first: {text}"
+    );
+}
+
 /// The session picker (ADR 0035/2): the shared panel with the filter row, the
 /// sessions through the shared list, and the selected `--resume <id>` on the top border.
 #[test]

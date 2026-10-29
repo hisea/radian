@@ -442,8 +442,17 @@ struct PlannedHooks {
     entries: Vec<PlannedEntry>,
 }
 
-/// One matcher entry in merge-plan shape: the matcher and every hook's `(command, timeout)`.
-type PlannedEntry = (Option<String>, Vec<(String, Option<u64>)>);
+/// One matcher entry in merge-plan shape: the matcher and every hook command.
+type PlannedEntry = (Option<String>, Vec<HookCommandDraft>);
+
+/// One translated hook command: the program, its optional exec-form `args` (ADR 0045 §4),
+/// and the optional timeout in seconds. `args: None` is the `/bin/sh -c` form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HookCommandDraft {
+    command: String,
+    args: Option<Vec<String>>,
+    timeout: Option<u64>,
+}
 
 /// What [`plan_merge`] decided: additions plus conflict lines.
 #[derive(Default)]
@@ -624,9 +633,10 @@ fn merge_config(
                         matcher: matcher.clone(),
                         hooks: commands
                             .iter()
-                            .map(|(command, timeout)| super::HookCommand {
-                                command: command.clone(),
-                                timeout_secs: *timeout,
+                            .map(|hook| super::HookCommand {
+                                command: hook.command.clone(),
+                                args: hook.args.clone(),
+                                timeout_secs: hook.timeout,
                             })
                             .collect(),
                     };
@@ -706,7 +716,11 @@ fn plan_merge(
                         entry
                             .hooks
                             .iter()
-                            .map(|hook| (hook.command.clone(), hook.timeout_secs))
+                            .map(|hook| HookCommandDraft {
+                                command: hook.command.clone(),
+                                args: hook.args.clone(),
+                                timeout: hook.timeout_secs,
+                            })
                             .collect(),
                     )
                 })
@@ -984,7 +998,11 @@ fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
                     entry
                         .hooks
                         .iter()
-                        .map(|hook| (hook.command.clone(), hook.timeout_secs))
+                        .map(|hook| HookCommandDraft {
+                            command: hook.command.clone(),
+                            args: hook.args.clone(),
+                            timeout: hook.timeout_secs,
+                        })
                         .collect(),
                 )
             })
@@ -1011,18 +1029,25 @@ fn existing_hook_entries(list: &Item) -> Option<Vec<PlannedEntry>> {
 }
 
 /// One matcher entry as a `[[hooks.<Event>]]` table.
-fn hook_table(matcher: &Option<String>, commands: &[(String, Option<u64>)]) -> Table {
+fn hook_table(matcher: &Option<String>, commands: &[HookCommandDraft]) -> Table {
     let mut entry = Table::new();
     if let Some(matcher) = matcher {
         entry["matcher"] = value(matcher.as_str());
     }
     let mut hooks = ArrayOfTables::new();
-    for (command, timeout) in commands {
+    for command in commands {
         let mut hook = Table::new();
         hook["type"] = value("command");
-        hook["command"] = value(command.as_str());
-        if let Some(secs) = timeout {
-            hook["timeout"] = value(*secs as i64);
+        hook["command"] = value(command.command.as_str());
+        if let Some(args) = &command.args {
+            let mut list = Array::new();
+            for arg in args {
+                list.push(arg.as_str());
+            }
+            hook["args"] = Item::Value(toml_edit::Value::Array(list));
+        }
+        if let Some(secs) = command.timeout {
+            hook["timeout"] = value(secs as i64);
         }
         hooks.push(hook);
     }
@@ -1034,19 +1059,26 @@ fn hook_table(matcher: &Option<String>, commands: &[(String, Option<u64>)]) -> T
 /// list keeps its form).
 fn inline_hook_table(
     matcher: &Option<String>,
-    commands: &[(String, Option<u64>)],
+    commands: &[HookCommandDraft],
 ) -> toml_edit::InlineTable {
     let mut entry = toml_edit::InlineTable::new();
     if let Some(matcher) = matcher {
         entry.insert("matcher", toml_edit::Value::from(matcher.as_str()));
     }
     let mut hooks = Array::new();
-    for (command, timeout) in commands {
+    for command in commands {
         let mut hook = toml_edit::InlineTable::new();
         hook.insert("type", toml_edit::Value::from("command"));
-        hook.insert("command", toml_edit::Value::from(command.as_str()));
-        if let Some(secs) = timeout {
-            hook.insert("timeout", toml_edit::Value::from(*secs as i64));
+        hook.insert("command", toml_edit::Value::from(command.command.as_str()));
+        if let Some(args) = &command.args {
+            let mut list = Array::new();
+            for arg in args {
+                list.push(arg.as_str());
+            }
+            hook.insert("args", toml_edit::Value::Array(list));
+        }
+        if let Some(secs) = command.timeout {
+            hook.insert("timeout", toml_edit::Value::from(secs as i64));
         }
         hooks.push(toml_edit::Value::InlineTable(hook));
     }
@@ -1054,9 +1086,8 @@ fn inline_hook_table(
     entry
 }
 
-/// The canonical shape of one existing matcher entry: the matcher and every hook's
-/// `(command, timeout)`.
-fn table_hook_entry(table: &Table) -> (Option<String>, Vec<(String, Option<u64>)>) {
+/// The canonical shape of one existing matcher entry: the matcher and every hook command.
+fn table_hook_entry(table: &Table) -> (Option<String>, Vec<HookCommandDraft>) {
     let matcher = table
         .get("matcher")
         .and_then(|matcher| matcher.as_str())
@@ -1070,9 +1101,7 @@ fn table_hook_entry(table: &Table) -> (Option<String>, Vec<(String, Option<u64>)
 }
 
 /// The same shape for an inline-table entry (`hooks.<Event> = [{ ... }]`).
-fn inline_hook_entry(
-    table: &toml_edit::InlineTable,
-) -> (Option<String>, Vec<(String, Option<u64>)>) {
+fn inline_hook_entry(table: &toml_edit::InlineTable) -> (Option<String>, Vec<HookCommandDraft>) {
     let matcher = table
         .get("matcher")
         .and_then(|matcher| matcher.as_str())
@@ -1084,16 +1113,25 @@ fn inline_hook_entry(
             hooks
                 .iter()
                 .filter_map(|hook| hook.as_inline_table())
-                .map(|hook| {
-                    (
-                        hook.get("command")
-                            .and_then(|command| command.as_str())
-                            .unwrap_or_default()
-                            .to_owned(),
-                        hook.get("timeout")
-                            .and_then(|timeout| timeout.as_integer())
-                            .and_then(|secs| u64::try_from(secs).ok()),
-                    )
+                .map(|hook| HookCommandDraft {
+                    command: hook
+                        .get("command")
+                        .and_then(|command| command.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    args: hook
+                        .get("args")
+                        .and_then(|args| args.as_array())
+                        .map(|args| {
+                            args.iter()
+                                .filter_map(|arg| arg.as_str())
+                                .map(str::to_owned)
+                                .collect()
+                        }),
+                    timeout: hook
+                        .get("timeout")
+                        .and_then(|timeout| timeout.as_integer())
+                        .and_then(|secs| u64::try_from(secs).ok()),
                 })
                 .collect()
         })
@@ -1101,19 +1139,28 @@ fn inline_hook_entry(
     (matcher, hooks)
 }
 
-/// One existing hook's `(command, timeout)` in canonical shape.
-fn hook_command_entry(table: &Table) -> (String, Option<u64>) {
-    (
-        table
+/// One existing hook in canonical shape.
+fn hook_command_entry(table: &Table) -> HookCommandDraft {
+    HookCommandDraft {
+        command: table
             .get("command")
             .and_then(|command| command.as_str())
             .unwrap_or_default()
             .to_owned(),
-        table
+        args: table
+            .get("args")
+            .and_then(|args| args.as_array())
+            .map(|args| {
+                args.iter()
+                    .filter_map(|arg| arg.as_str())
+                    .map(str::to_owned)
+                    .collect()
+            }),
+        timeout: table
             .get("timeout")
             .and_then(|timeout| timeout.as_integer())
             .and_then(|secs| u64::try_from(secs).ok()),
-    )
+    }
 }
 
 /// Creates `path` with mode `0600` (unix) and writes `text`, or records one skip line when
@@ -1271,12 +1318,26 @@ fn same_hook_entry(first: &Json, second: &Json) -> bool {
         for hook in hooks {
             let hook = hook.as_object()?;
             let command = hook.get("command")?.as_str()?.to_owned();
+            let args = match hook.get("args") {
+                None | Some(Json::Null) => None,
+                Some(Json::Array(items)) => Some(
+                    items
+                        .iter()
+                        .map(|item| item.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<String>>>()?,
+                ),
+                Some(_) => return None,
+            };
             let timeout = match hook.get("timeout") {
                 None | Some(Json::Null) => None,
                 Some(Json::Number(timeout)) => Some(timeout.as_u64()?),
                 Some(_) => return None,
             };
-            commands.push((command, timeout));
+            commands.push(HookCommandDraft {
+                command,
+                args,
+                timeout,
+            });
         }
         Some((matcher, commands))
     }
@@ -1683,16 +1744,16 @@ fn collect_hook_entries(
                 draft.note(format!("{what}: no hooks, skipped"));
                 continue;
             }
-            let mut commands: Vec<(String, Option<u64>)> = Vec::new();
+            let mut commands: Vec<HookCommandDraft> = Vec::new();
             for hook in hooks {
                 let Some(hook) = hook.as_object() else {
                     draft.note(format!("{what}: a hook is not an object, skipped"));
                     continue;
                 };
                 match hook_command(hook) {
-                    Ok((command, timeout)) => {
+                    Ok(command) => {
                         any_command = true;
-                        commands.push((command, timeout));
+                        commands.push(command);
                     }
                     Err(reason) => {
                         draft.note(format!("{what}: a hook was not imported ({reason})"))
@@ -1730,8 +1791,10 @@ fn entry_drop_reason(entry: &serde_json::Map<String, Json>, _kind: &str) -> Opti
     None
 }
 
-/// Reads one inner `{ type, command, timeout }` hook. `Err` is the one-line drop reason.
-fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<(String, Option<u64>), String> {
+/// Reads one inner `{ type, command, args, timeout }` hook. `Err` is the one-line drop
+/// reason. `args` is carried over unchanged (ADR 0045 §4); a value that is not an array of
+/// strings is not imported, like any other outside-the-subset shape.
+fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft, String> {
     if let Some(kind) = hook.get("type").and_then(Json::as_str) {
         if kind != "command" {
             return Err(format!("`type: \"{kind}\"` hooks are not supported"));
@@ -1755,6 +1818,22 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<(String, Option<
     if command.is_empty() {
         return Err("a hook with an empty `command` is not supported".into());
     }
+    let args = match hook.get("args") {
+        None | Some(Json::Null) => None,
+        Some(Json::Array(items)) => {
+            let mut args = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(arg) => args.push(arg.to_owned()),
+                    None => {
+                        return Err("a hook with a non-string `args` entry is not supported".into());
+                    }
+                }
+            }
+            Some(args)
+        }
+        Some(_) => return Err("a hook whose `args` is not an array is not supported".into()),
+    };
     let timeout = match hook.get("timeout") {
         None => None,
         Some(Json::Number(timeout)) => timeout.as_u64().map(|secs| {
@@ -1766,7 +1845,11 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<(String, Option<
         }),
         Some(_) => return Err("a hook with a bad `timeout` is not supported".into()),
     };
-    Ok((command.to_owned(), timeout))
+    Ok(HookCommandDraft {
+        command: command.to_owned(),
+        args,
+        timeout,
+    })
 }
 
 /// Translates one Claude matcher to Radian tool names. Alternatives are split on `|` and
@@ -2293,12 +2376,18 @@ fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
         }
         let hooks: Vec<Json> = commands
             .iter()
-            .map(|(command, timeout)| {
+            .map(|command| {
                 let mut hook = serde_json::Map::new();
                 hook.insert("type".to_owned(), Json::String("command".to_owned()));
-                hook.insert("command".to_owned(), Json::String(command.clone()));
-                if let Some(secs) = timeout {
-                    hook.insert("timeout".to_owned(), Json::Number((*secs).into()));
+                hook.insert("command".to_owned(), Json::String(command.command.clone()));
+                if let Some(args) = &command.args {
+                    hook.insert(
+                        "args".to_owned(),
+                        Json::Array(args.iter().cloned().map(Json::String).collect()),
+                    );
+                }
+                if let Some(secs) = command.timeout {
+                    hook.insert("timeout".to_owned(), Json::Number(secs.into()));
                 }
                 Json::Object(hook)
             })
@@ -2319,9 +2408,6 @@ fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
 
 /// One translated hook entry: the event, the optional Radian matcher, and the commands.
 type HookEntry = (HookEvent, Option<String>, Vec<HookCommandDraft>);
-
-/// One translated hook command with its optional timeout in seconds.
-type HookCommandDraft = (String, Option<u64>);
 
 #[derive(Default)]
 struct Draft {
@@ -2373,12 +2459,18 @@ impl Draft {
                     entry.insert("matcher".into(), Toml::String(matcher.clone()));
                 }
                 let mut list = Vec::new();
-                for (command, timeout) in commands {
+                for command in commands {
                     let mut hook = toml::map::Map::new();
                     hook.insert("type".into(), Toml::String("command".into()));
-                    hook.insert("command".into(), Toml::String(command.clone()));
-                    if let Some(secs) = timeout {
-                        hook.insert("timeout".into(), Toml::Integer(*secs as i64));
+                    hook.insert("command".into(), Toml::String(command.command.clone()));
+                    if let Some(args) = &command.args {
+                        hook.insert(
+                            "args".into(),
+                            Toml::Array(args.iter().cloned().map(Toml::String).collect()),
+                        );
+                    }
+                    if let Some(secs) = command.timeout {
+                        hook.insert("timeout".into(), Toml::Integer(secs as i64));
                     }
                     list.push(Toml::Table(hook));
                 }
