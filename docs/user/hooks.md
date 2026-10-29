@@ -288,9 +288,9 @@ Its stdin:
 It never carries tool arguments, a command, or transcript text: the user's
 command decides what leaves the machine (radian sends nothing itself).
 
-The hook cannot delay the prompt or the frame: it starts in the background and
-the modal or the idle transition appears at once. Its output and exit code are
-ignored (one Recent runs entry only).
+The hook cannot delay the prompt, the frame, or an `exec` exit: it starts in
+the background and the modal or the idle transition appears at once. Its
+output and exit code are ignored (one Recent runs entry only).
 
 ## `StopFailure` and `Notification` return nothing
 
