@@ -142,6 +142,9 @@ impl App {
         if let RuntimeEvent::TurnFinished { outcome, .. } = event {
             // The turn boundary is on disk: a `/fork` that was waiting for it can run now.
             self.session.turn_committed = true;
+            // ADR 0045 §6: a turn ended; the idle clock starts now. Any later input restarts
+            // it, and `/loop` or a goal keeps it from arming at all.
+            self.idle_turn_finished();
             let mut result = match self.session.pending_fork.take() {
                 Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
                 None => UpdateResult::none(),

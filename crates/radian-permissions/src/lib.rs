@@ -52,7 +52,10 @@ pub use hooks::{PermissionHooks, ToolGate, policy_change_event, runtime_event};
 pub use profile::{
     APPROVAL_POLICIES, ApprovalPolicy, Preset, Profile, ProfileError, TIER_ALIASES, TIER_NAMES,
 };
-pub use request::{PermissionRequestDecision, PermissionRequestHooks};
+pub use request::{
+    NOTIFICATION_IDLE_PROMPT, NOTIFICATION_PERMISSION_PROMPT, NOTIFICATION_TYPES,
+    NotificationHooks, PermissionRequestDecision, PermissionRequestHooks,
+};
 pub use rule::{
     Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, evaluate, resource_of,
 };

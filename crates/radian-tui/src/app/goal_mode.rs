@@ -85,6 +85,16 @@ impl GoalMode {
     fn goal(&self) -> std::sync::MutexGuard<'_, Option<GoalState>> {
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Whether an `Active` or `Paused` goal owns the next turn (it re-posts itself): the
+    /// TUI's `idle_prompt` timer stays off then, because the session is not waiting for a
+    /// human (ADR 0045 §6).
+    pub(super) fn active_or_paused(&self) -> bool {
+        matches!(
+            self.goal().as_ref().map(|goal| goal.status),
+            Some(GoalStatus::Active | GoalStatus::Paused)
+        )
+    }
 }
 
 impl Default for GoalMode {

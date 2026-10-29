@@ -38,6 +38,9 @@ pub enum Input {
     /// The deadline of a `/loop --every` wait: the next iteration is due while idle.
     /// The turn-end decision re-checks everything, so a stale deadline is harmless.
     LoopDeadline,
+    /// The TUI's idle timer fired (ADR 0045 §6): a turn ended and no input arrived for the
+    /// idle period. The update decides whether this is still true; a stale one is a no-op.
+    IdleDeadline,
     /// A printable character typed into the focused text field.
     Char(char),
     /// The find box's backspace (not keymap-driven).

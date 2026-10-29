@@ -226,6 +226,14 @@ impl LoopContext<'_> {
                 self.command(radian_host::SessionCommand::Cancel)
             }
             Effect::Quit => Ok(()),
+            // ADR 0045 §6: the TUI's idle timer fired. The hooks observe only and start in
+            // the background, so this never holds the loop.
+            Effect::NotifyIdle => {
+                if let Some(hooks) = &self.command_hooks {
+                    hooks.notify_idle();
+                }
+                Ok(())
+            }
             // ADR 0033: run the `!`/`!!` command through radian-coding's sandboxed executor
             // (`run_user_bash`, the shell tool's own path), off the loop so Esc can cancel it.
             Effect::RunBash {

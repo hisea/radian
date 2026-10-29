@@ -93,6 +93,15 @@ pub trait RuntimeEvents: Send + Sync {
         let _ = error;
     }
 
+    /// The same event as [`RuntimeEvents::on_model_error`], with the failed turn's last
+    /// assistant text (empty when it had none), for the observe-only `StopFailure` hook
+    /// (ADR 0045 §6). Called only for a `RunError::Model`; a hook, compaction, journal or
+    /// cancelled turn never calls it. The default ignores it, so an existing sink is
+    /// unchanged.
+    fn on_stop_failure(&self, error: &ModelError, last_assistant_message: &str) {
+        let _ = (error, last_assistant_message);
+    }
+
     /// A generic host-side hook event: the control port forwards it to subscribers with the
     /// stable name and a JSON payload. The default is a no-op, so a plain sink (or the closure
     /// impl below) ignores it and only the control fanout has to override it.
@@ -650,6 +659,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                 Err(error) => break Err(error),
             }
         };
+        // ADR 0045 §6: the `StopFailure` stdin carries the turn's last assistant text, so it
+        // is read before the run (and its transcript view) is dropped.
+        let last_assistant_message = last_assistant_text(run.transcript());
         drop(run);
         admit_seen(&journal, &claimed, &mut admitted, &tap, &runtime_events).await?;
         // A steer Core accepted but never applied (the turn ended first) goes back to the
@@ -674,6 +686,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> Driver<M, P, H> {
                     // event, so a host can report its kind without parsing the message.
                     if let RunError::Model(model_error) = &error {
                         sink.on_model_error(model_error);
+                        sink.on_stop_failure(model_error, &last_assistant_message);
                     }
                     sink.on_runtime_event(&failed);
                 }
@@ -975,6 +988,19 @@ fn message_meta_id(message: &Message) -> Option<MessageId> {
         | Message::Assistant { meta, .. }
         | Message::Tool { meta, .. } => meta.id.clone(),
     }
+}
+
+/// The text parts of the turn's last assistant message, joined (ADR 0045 §6's
+/// `last_assistant_message`). Empty when the turn has no assistant message yet.
+fn last_assistant_text(transcript: &[Message]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::Assistant { .. } => Some(message.text()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// ADR 0017: a model error **or a hook error** ends the turn instead of the session.

@@ -295,13 +295,15 @@ pub fn import_claude(
             })?;
         let mut warnings = Vec::new();
         let loaded = crate::project_hooks::parse_project_value(&parsed, "<draft>", &mut warnings);
-        let mut want = [0usize; 4];
+        let mut want = [0usize; 6];
         for (event, _, _) in &draft.project_hooks {
             want[match event {
                 HookEvent::Pre => 0,
                 HookEvent::PermissionRequest => 1,
                 HookEvent::Post => 2,
                 HookEvent::Stop => 3,
+                HookEvent::StopFailure => 4,
+                HookEvent::Notification => 5,
             }] += 1;
         }
         let got = [
@@ -309,6 +311,8 @@ pub fn import_claude(
             loaded.permission_request.len(),
             loaded.post_tool_use.len(),
             loaded.stop.len(),
+            loaded.stop_failure.len(),
+            loaded.notification.len(),
         ];
         if want != got {
             return Err(ClaudeMigrateError::InvalidDraft {
@@ -656,6 +660,8 @@ fn merge_config(
                             expected.hooks.permission_request.push(matcher_entry)
                         }
                         "PostToolUse" => expected.hooks.post_tool_use.push(matcher_entry),
+                        "StopFailure" => expected.hooks.stop_failure.push(matcher_entry),
+                        "Notification" => expected.hooks.notification.push(matcher_entry),
                         _ => expected.hooks.stop.push(matcher_entry),
                     }
                 }
@@ -721,6 +727,8 @@ fn plan_merge(
             ("PermissionRequest", &add_hooks.permission_request),
             ("PostToolUse", &add_hooks.post_tool_use),
             ("Stop", &add_hooks.stop),
+            ("StopFailure", &add_hooks.stop_failure),
+            ("Notification", &add_hooks.notification),
         ] {
             let imported: Vec<PlannedEntry> = entries
                 .iter()
@@ -1003,6 +1011,8 @@ fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
         ("PermissionRequest", &hooks.permission_request),
         ("PostToolUse", &hooks.post_tool_use),
         ("Stop", &hooks.stop),
+        ("StopFailure", &hooks.stop_failure),
+        ("Notification", &hooks.notification),
     ]
     .into_iter()
     .map(|(event, entries)| PlannedHooks {
@@ -1765,10 +1775,13 @@ fn collect_hook_entries(
             "PermissionRequest" => Some(HookEvent::PermissionRequest),
             "PostToolUse" => Some(HookEvent::Post),
             "Stop" => Some(HookEvent::Stop),
+            "StopFailure" => Some(HookEvent::StopFailure),
+            "Notification" => Some(HookEvent::Notification),
             _ => {
                 draft.note(format!(
                     "{label} hook event `{event}`: not imported (only \
-                     `PreToolUse`/`PostToolUse`/`Stop`/`PermissionRequest` are supported)"
+                     `PreToolUse`/`PostToolUse`/`Stop`/`PermissionRequest`/`StopFailure`/\
+                     `Notification` are supported)"
                 ));
                 continue;
             }
@@ -1793,7 +1806,15 @@ fn collect_hook_entries(
             let matcher = match entry.get("matcher") {
                 None => None,
                 Some(Json::String(matcher)) if matcher.is_empty() => None,
-                Some(Json::String(matcher)) => translate_matcher(matcher, &what, draft),
+                Some(Json::String(matcher)) => {
+                    match translate_event_matcher(target, matcher, &what, draft) {
+                        Some(matcher) => matcher,
+                        // The entry's matcher names a category radian has no hook for: the
+                        // whole entry is dropped, one report line already said why
+                        // (ADR 0045 §6).
+                        None => continue,
+                    }
+                }
                 Some(_) => {
                     draft.note(format!("{what}: `matcher` is not a string, skipped"));
                     continue;
@@ -1841,12 +1862,73 @@ enum HookEvent {
     PermissionRequest,
     Post,
     Stop,
+    StopFailure,
+    Notification,
 }
 
 impl HookEvent {
-    /// Whether the event accepts `async`/`asyncRewake` (ADR 0045 §5).
+    /// Whether the event accepts `async`/`asyncRewake` (ADR 0045 §5/§6).
     fn accepts_async(self) -> bool {
-        matches!(self, Self::Post | Self::Stop)
+        matches!(
+            self,
+            Self::Post | Self::Stop | Self::StopFailure | Self::Notification
+        )
+    }
+}
+
+/// The one Claude `StopFailure` category → radian `ModelErrorKind` table (ADR 0045 §6).
+/// `None` means the category has no radian kind (the entry is dropped with one report line).
+/// The values are Claude's own matcher names; a regex or any other value is not a category.
+const STOP_FAILURE_CATEGORY_MAP: &[(&str, &str)] = &[
+    ("rate_limit", "unavailable"),
+    ("authentication_failed", "protocol"),
+    ("billing_error", "usage_limit"),
+    ("invalid_request", "protocol"),
+    ("server_error", "unavailable"),
+];
+
+/// Whether a Claude `Notification` matcher names one of the two types radian has. `*` and
+/// empty match both and are kept as written.
+fn notification_matcher_supported(matcher: &str) -> bool {
+    matcher == "*" || radian_permissions::NOTIFICATION_TYPES.contains(&matcher)
+}
+
+/// Translates one entry matcher for an event: the tool events keep the regex translation,
+/// `Notification` keeps only its two types, and `StopFailure` goes through the one category
+/// table. `None` means the entry is dropped (the report line is already written).
+fn translate_event_matcher(
+    event: HookEvent,
+    matcher: &str,
+    what: &str,
+    draft: &mut Draft,
+) -> Option<Option<String>> {
+    match event {
+        HookEvent::StopFailure => {
+            if matcher == "*" {
+                return Some(Some(matcher.to_owned()));
+            }
+            if let Some((_, kind)) = STOP_FAILURE_CATEGORY_MAP
+                .iter()
+                .find(|(category, _)| *category == matcher)
+            {
+                return Some(Some((*kind).to_owned()));
+            }
+            draft.note(format!(
+                "{what}: StopFailure category `{matcher}` has no radian kind, not imported"
+            ));
+            None
+        }
+        HookEvent::Notification => {
+            if notification_matcher_supported(matcher) {
+                Some(Some(matcher.to_owned()))
+            } else {
+                draft.note(format!(
+                    "{what}: Notification type `{matcher}` has no radian type, not imported"
+                ));
+                None
+            }
+        }
+        _ => Some(translate_matcher(matcher, what, draft)),
     }
 }
 
@@ -1858,7 +1940,8 @@ fn entry_drop_reason(entry: &serde_json::Map<String, Json>, event: HookEvent) ->
         for key in ["async", "asyncRewake"] {
             if entry.contains_key(key) {
                 return Some(format!(
-                    "`{key}` is only supported on `PostToolUse` and `Stop`"
+                    "`{key}` is only supported on `PostToolUse`, `Stop`, `StopFailure` and \
+                     `Notification`"
                 ));
             }
         }
@@ -1911,7 +1994,11 @@ fn hook_command(
     // hook that writes `"async": false` is dropped and reported like an async one (ADR 0045
     // §5).
     if !event.accepts_async() && (hook.contains_key("async") || hook.contains_key("asyncRewake")) {
-        return Err("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`".into());
+        return Err(
+            "`async`/`asyncRewake` is only supported on `PostToolUse`, `Stop`, `StopFailure` \
+             and `Notification`"
+                .into(),
+        );
     }
     if let Some(context) = hook.get("context").and_then(Json::as_str)
         && context == "fork"
@@ -2479,6 +2566,8 @@ fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
             HookEvent::PermissionRequest => "PermissionRequest",
             HookEvent::Post => "PostToolUse",
             HookEvent::Stop => "Stop",
+            HookEvent::StopFailure => "StopFailure",
+            HookEvent::Notification => "Notification",
         };
         let mut entry = serde_json::Map::new();
         if let Some(matcher) = matcher {
@@ -2570,6 +2659,8 @@ impl Draft {
                     HookEvent::PermissionRequest => "PermissionRequest",
                     HookEvent::Post => "PostToolUse",
                     HookEvent::Stop => "Stop",
+                    HookEvent::StopFailure => "StopFailure",
+                    HookEvent::Notification => "Notification",
                 };
                 let mut entry = toml::map::Map::new();
                 if let Some(matcher) = matcher {

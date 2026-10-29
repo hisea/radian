@@ -1,7 +1,8 @@
 //! User-level external command hooks (ADR 0045 slice A): the Claude/Codex subset as an
 //! [`radian_core::Hooks`] implementation.
 //!
-//! Four events, all shell commands from the user's own `config.toml` (`[hooks]`):
+//! Six events, all shell commands from the user's own `config.toml` (`[hooks]`): the four
+//! deciding events below and the two observe-only ones (ADR 0045 §6) documented at the end:
 //!
 //! - `PreToolUse` runs before each matching tool call. Exit 0 continues (JSON stdout may
 //!   carry `hookSpecificOutput.permissionDecision: "deny"` or `updatedInput`); exit 2
@@ -40,6 +41,12 @@
 //!   degrade to a marked `inject` (no wake) with the wake-budget notice, the same degrade as
 //!   the background-job notifier (ADR 0045 §2). An `async` `Stop` hook is not part of that
 //!   chain: it is spawned and its own result is delivered afterwards (ADR 0045 §5).
+//! - `StopFailure` (once per turn that ends `Failed` on a model error) and `Notification`
+//!   (`permission_prompt` when a human is about to be asked, `idle_prompt` from the TUI's
+//!   60 s timer) only observe (ADR 0045 §6): they start in the background, their stdout is
+//!   not read, and their exit code or timeout only adds a recent-runs entry. Their matchers
+//!   are closed sets, not regexes; `async`/`asyncRewake` on them are accepted and inert.
+//!   `exec -p` waits at most 5 s for a `StopFailure` run, then kills its process group.
 //!
 //! Async hooks are not jobs: they never enter the [`Jobs`] registry, `/jobs` or the `job`
 //! tool. The `/hooks` page shows them under "Running", `Stop` lists each one in
@@ -80,16 +87,19 @@
 //! (ADR 0045 §4). Every run leaves one in-memory record, newest kept (the manual's "Recent
 //! runs"), shown on the `/hooks` page and logged at info.
 
-use crate::config::{HookCommand, HookMatcher, HooksConfig};
+use crate::config::{
+    HookCommand, HookMatcher, HooksConfig, NOTIFICATION_IDLE_PROMPT,
+    NOTIFICATION_PERMISSION_PROMPT, NOTIFICATION_TYPES, STOP_FAILURE_MATCHERS,
+};
 use crate::goal::SharedGoal;
 use crate::intent_stop;
 use crate::wake_gate::WakeGate;
 use radian_coding::Jobs;
 use radian_core::{
-    ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageId, RunOutcome,
-    RunStatus, ToolCall, ToolDecision, ToolResult,
+    ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageId, ModelError,
+    RunOutcome, RunStatus, ToolCall, ToolDecision, ToolResult,
 };
-use radian_permissions::{PermissionRequestDecision, PermissionRequestHooks};
+use radian_permissions::{NotificationHooks, PermissionRequestDecision, PermissionRequestHooks};
 use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
@@ -266,6 +276,33 @@ enum CompiledMatcher {
     Never,
 }
 
+/// One compiled observe-only entry (ADR 0045 §6): its matcher is a value of a closed set
+/// (`*`/empty matches every value), never a regex.
+#[derive(Clone, Debug)]
+struct CompiledObserveEntry {
+    hooks: Vec<HookCommand>,
+    matcher: ObserveMatcher,
+}
+
+/// The `StopFailure`/`Notification` matcher after load: `All`, one closed-set value, or
+/// `Never` for a value outside the set (warned once at load, never run).
+#[derive(Clone, Debug)]
+enum ObserveMatcher {
+    All,
+    Value(String),
+    Never,
+}
+
+impl ObserveMatcher {
+    fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Value(allowed) => allowed == value,
+            Self::Never => false,
+        }
+    }
+}
+
 /// One async hook process running right now. It is not a job: the model cannot `wait` or
 /// `kill` it, `/jobs` never lists it, and only the `/hooks` page's "Running" section and
 /// `Stop`'s `background_tasks` show it (ADR 0045 §5).
@@ -344,6 +381,14 @@ struct AsyncRun {
     handle: Arc<AsyncRunHandle>,
 }
 
+/// One observe-only run in flight: its process handle, and whether `exec -p` waits for it
+/// (only `StopFailure`; a `Notification` hook never postpones an exit).
+#[derive(Debug)]
+struct ObserveRun {
+    handle: Arc<AsyncRunHandle>,
+    waits_on_exit: bool,
+}
+
 /// The user-level command hooks: one [`Hooks`] implementation for every event, plus the
 /// `PermissionRequest` chain the permission layer calls through
 /// [`radian_permissions::PermissionRequestHooks`].
@@ -356,6 +401,10 @@ pub struct CommandHooks {
     permission_request: Vec<CompiledEntry>,
     post: Vec<CompiledEntry>,
     stop: Vec<HookMatcher>,
+    /// The observe-only `StopFailure` entries (ADR 0045 §6), matched by `ModelErrorKind`.
+    stop_failure: Vec<CompiledObserveEntry>,
+    /// The observe-only `Notification` entries (ADR 0045 §6), matched by notification type.
+    notification: Vec<CompiledObserveEntry>,
     workspace: PathBuf,
     session_id: String,
     sandbox: SandboxSlot,
@@ -418,6 +467,13 @@ pub struct CommandHooks {
     /// The async hooks running right now, in spawn order. Not the [`Jobs`] registry: these
     /// are never model-visible jobs (ADR 0045 §5).
     async_running: Arc<std::sync::Mutex<Vec<AsyncRun>>>,
+    /// The observe-only runs (`StopFailure`, `Notification`) in flight (ADR 0045 §6). They
+    /// are not async hooks: they never enter the jobs registry, `Stop`'s `background_tasks`,
+    /// or supersede one another. `exec -p` waits only for the `StopFailure` runs (at most
+    /// 5 s); a `Notification` run never delays an exit.
+    observe_running: Arc<std::sync::Mutex<Vec<ObserveRun>>>,
+    /// Bumped whenever one observe run finishes or is killed, so a waiter re-checks.
+    observe_signal: Arc<Notify>,
     /// Bumped whenever one async hook finishes (or fails to start), so a waiter re-checks.
     async_signal: Arc<Notify>,
     /// The id sequence for [`RunningHook::id`].
@@ -548,6 +604,20 @@ impl CommandHooks {
                 .chain(config.stop.iter())
                 .cloned()
                 .collect(),
+            stop_failure: compile_observe_layered(
+                &project.stop_failure,
+                &config.stop_failure,
+                "StopFailure",
+                STOP_FAILURE_MATCHERS,
+                &warn,
+            ),
+            notification: compile_observe_layered(
+                &project.notification,
+                &config.notification,
+                "Notification",
+                NOTIFICATION_TYPES,
+                &warn,
+            ),
             workspace: workspace.to_path_buf(),
             session_id: session_id.to_owned(),
             sandbox,
@@ -569,6 +639,8 @@ impl CommandHooks {
             consecutive: Arc::new(AtomicU32::new(0)),
             runs: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             async_running: Arc::new(std::sync::Mutex::new(Vec::new())),
+            observe_running: Arc::new(std::sync::Mutex::new(Vec::new())),
+            observe_signal: Arc::new(Notify::new()),
             async_signal: Arc::new(Notify::new()),
             async_seq: Arc::new(AtomicU64::new(0)),
             async_ended: Arc::new(AtomicBool::new(false)),
@@ -586,6 +658,8 @@ impl CommandHooks {
             && self.permission_request.is_empty()
             && self.post.is_empty()
             && self.stop.is_empty()
+            && self.stop_failure.is_empty()
+            && self.notification.is_empty()
     }
 
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
@@ -709,6 +783,186 @@ impl CommandHooks {
         Arc::clone(&self.async_signal)
     }
 
+    /// Fires the `StopFailure` observers for one turn that ended on a model error
+    /// (ADR 0045 §6). Called by the host's runtime-event layer from the driver's
+    /// `on_model_error` path, once per failed turn. The entries whose matcher names this
+    /// kind (or `*`) start in the background and return at once; the turn, its exit code and
+    /// its output never wait for them.
+    pub fn run_stop_failure(&self, error: &ModelError, last_assistant_message: &str) {
+        if self.stop_failure.is_empty() {
+            return;
+        }
+        let kind = error.kind().as_str();
+        let stdin = serde_json::json!({
+            "hook_event_name": "StopFailure",
+            "cwd": self.workspace.to_string_lossy(),
+            "session_id": self.session_id,
+            "error": kind,
+            "error_details": short(&error.to_string()),
+            "last_assistant_message": last_assistant_message,
+        });
+        self.observe_entries("StopFailure", &self.stop_failure, kind, &stdin);
+    }
+
+    /// Fires the TUI's `idle_prompt` observers (ADR 0045 §6): a turn ended and no input
+    /// arrived for the idle period. `exec` never calls this (it exits at the turn end).
+    pub fn notify_idle(&self) {
+        NotificationHooks::notification(self, NOTIFICATION_IDLE_PROMPT, None);
+    }
+
+    /// Starts every matching observe-only entry's hooks, one run per `command` + `args`
+    /// (the project/user dedupe of ADR 0045 §1 item 3). Nothing blocks and no output is
+    /// read: a run's exit code and timeout only reach the recent-runs ring.
+    fn observe_entries(
+        &self,
+        event: &str,
+        entries: &[CompiledObserveEntry],
+        value: &str,
+        stdin: &serde_json::Value,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        for entry in entries {
+            if !entry.matcher.matches(value) {
+                continue;
+            }
+            for hook in &entry.hooks {
+                if !seen.insert(dedup_key(hook)) {
+                    continue;
+                }
+                self.spawn_observe(hook, stdin.clone(), event, event == "StopFailure");
+            }
+        }
+    }
+
+    /// Starts one observe-only run and returns at once (ADR 0045 §6). The run is registered
+    /// so [`CommandHooks::wait_observe`] can wait on it and kill it, and so the session end
+    /// kills it. Its result is discarded: these events observe, never decide.
+    fn spawn_observe(
+        &self,
+        hook: &HookCommand,
+        stdin_json: serde_json::Value,
+        event: &str,
+        waits_on_exit: bool,
+    ) {
+        if self.async_ended.load(Ordering::SeqCst) {
+            return;
+        }
+        let handle = Arc::new(AsyncRunHandle::default());
+        {
+            let mut running = self
+                .observe_running
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // Re-checked under the lock: an end that set the flag while this call waited
+            // must not be overtaken by a run it would never drain.
+            if self.async_ended.load(Ordering::SeqCst) {
+                return;
+            }
+            running.push(ObserveRun {
+                handle: Arc::clone(&handle),
+                waits_on_exit,
+            });
+        }
+        let this = self.clone();
+        let hook = hook.clone();
+        let event = event.to_owned();
+        self.runtime.spawn(async move {
+            // The configured timeout, or 60 s: `async` is inert here and never moves it.
+            let _ = this
+                .execute_with_timeout(
+                    &hook,
+                    &stdin_json,
+                    &event,
+                    None,
+                    Some(&handle),
+                    hook.observe_timeout(),
+                )
+                .await;
+            handle.exited.store(true, Ordering::SeqCst);
+            this.finish_observe(&handle);
+        });
+    }
+
+    /// Waits at most `timeout` for the `StopFailure` runs to finish, then kills the ones still
+    /// running (ADR 0045 §6). `exec -p` calls it before its session end, so a slow
+    /// `StopFailure` hook costs at most 5 s and leaves no process group behind; the run's
+    /// exit code and output are unchanged. A `Notification` run is never waited for (the
+    /// session end kills it).
+    pub async fn wait_observe(&self, timeout: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.observe_signal.notified();
+            tokio::pin!(notified);
+            let waiting = self
+                .observe_running
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .iter()
+                .any(|run| run.waits_on_exit);
+            if !waiting {
+                return;
+            }
+            tokio::select! {
+                () = &mut notified => {}
+                () = tokio::time::sleep_until(deadline) => {
+                    self.kill_waited_observe();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Kills the `StopFailure` runs still in flight at the 5 s `exec -p` deadline. Each run
+    /// delivers nothing and its recent-runs entry says `cancelled`.
+    fn kill_waited_observe(&self) {
+        let mut running = self
+            .observe_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut keep = Vec::new();
+        for run in running.drain(..) {
+            if !run.waits_on_exit {
+                keep.push(run);
+                continue;
+            }
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            let pid = run.handle.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_group(pid);
+            }
+        }
+        *running = keep;
+        drop(running);
+        self.observe_signal.notify_waiters();
+    }
+
+    /// Kills every observe-only run still in flight (the session end). Each run delivers
+    /// nothing and its recent-runs entry says `cancelled`.
+    fn kill_observe(&self) {
+        let mut running = self
+            .observe_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for run in running.drain(..) {
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            let pid = run.handle.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_group(pid);
+            }
+        }
+        drop(running);
+        self.observe_signal.notify_waiters();
+    }
+
+    /// Removes one finished observe run and wakes a waiter.
+    fn finish_observe(&self, handle: &Arc<AsyncRunHandle>) {
+        self.observe_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .retain(|run| !Arc::ptr_eq(&run.handle, handle));
+        self.observe_signal.notify_waiters();
+    }
+
     /// Ends the session's async hooks (ADR 0045 §5): every still-running run's process group
     /// is killed and its result is never delivered, and no new async hook starts afterwards.
     /// Idempotent. The host calls this when the session's driver is joined
@@ -739,6 +993,7 @@ impl CommandHooks {
             }
         }
         drop(running);
+        self.kill_observe();
         self.async_signal.notify_waiters();
     }
 
@@ -1177,6 +1432,21 @@ impl CommandHooks {
         tool: Option<&str>,
         cancel: Option<&AsyncRunHandle>,
     ) -> Result<ProcOutput, HookError> {
+        self.execute_with_timeout(hook, stdin_json, event, tool, cancel, hook.timeout())
+            .await
+    }
+
+    /// [`CommandHooks::execute`] with an explicit timeout: observe-only runs never inherit
+    /// the async default, because `async` is inert on them (ADR 0045 §6).
+    async fn execute_with_timeout(
+        &self,
+        hook: &HookCommand,
+        stdin_json: &serde_json::Value,
+        event: &str,
+        tool: Option<&str>,
+        cancel: Option<&AsyncRunHandle>,
+        timeout: std::time::Duration,
+    ) -> Result<ProcOutput, HookError> {
         let started = Instant::now();
         let input = serde_json::to_string(stdin_json)
             .map_err(|error| HookError::new(format!("could not encode the hook input: {error}")))?;
@@ -1224,10 +1494,10 @@ impl CommandHooks {
             }
             std_child.wait_with_output()
         });
-        let timeout_secs = hook.timeout().as_secs();
+        let timeout_secs = timeout.as_secs();
         let finished = tokio::select! {
             result = &mut waiter => Some(result),
-            () = tokio::time::sleep(hook.timeout()) => None,
+            () = tokio::time::sleep(timeout) => None,
         };
         match finished {
             Some(Ok(Ok(output))) => {
@@ -2096,6 +2366,41 @@ fn compile_layered(
         .collect()
 }
 
+/// Compiles one observe-only event's two layers in run order (project first, then the user's).
+/// A matcher outside `allowed` warns once here (never per run) and that entry never runs
+/// (ADR 0045 §6).
+fn compile_observe_layered(
+    project: &[HookMatcher],
+    user: &[HookMatcher],
+    event: &str,
+    allowed: &[&str],
+    warn: &HooksWarning,
+) -> Vec<CompiledObserveEntry> {
+    project
+        .iter()
+        .chain(user.iter())
+        .enumerate()
+        .map(|(index, entry)| {
+            let matcher = match entry.matcher.as_deref() {
+                None | Some("") | Some("*") => ObserveMatcher::All,
+                Some(value) if allowed.contains(&value) => ObserveMatcher::Value(value.to_owned()),
+                Some(value) => {
+                    (warn)(&format!(
+                        "{event}[{index}] matcher {value:?} is not one of {}; the entry will \
+                         never run",
+                        allowed.join(", ")
+                    ));
+                    ObserveMatcher::Never
+                }
+            };
+            CompiledObserveEntry {
+                hooks: entry.hooks.clone(),
+                matcher,
+            }
+        })
+        .collect()
+}
+
 /// Compiles one `{ matcher, hooks }` entry: the regex is built once at load time, so an
 /// invalid pattern warns once there (not per call) and the entry never runs.
 fn compile_entry(
@@ -2143,6 +2448,41 @@ fn short(text: &str) -> String {
         format!("{kept}…[truncated]")
     } else {
         kept
+    }
+}
+
+impl NotificationHooks for CommandHooks {
+    /// Fires the `Notification` observers (ADR 0045 §6): `permission_prompt` when a human is
+    /// about to be asked, `idle_prompt` from the TUI's idle timer. The chain starts every
+    /// matching hook in the background and returns at once, so it never delays a prompt; the
+    /// message carries the tool name only, never its arguments.
+    fn notification(&self, notification_type: &str, tool: Option<&str>) {
+        if self.notification.is_empty() {
+            return;
+        }
+        let message = match notification_type {
+            NOTIFICATION_PERMISSION_PROMPT => format!(
+                "radian needs your permission to use {}",
+                tool.unwrap_or_default()
+            ),
+            NOTIFICATION_IDLE_PROMPT => "radian is waiting for your input".to_owned(),
+            // Not a value of the closed set: nothing observes it.
+            _ => return,
+        };
+        let stdin = serde_json::json!({
+            "hook_event_name": "Notification",
+            "cwd": self.workspace.to_string_lossy(),
+            "session_id": self.session_id,
+            "notification_type": notification_type,
+            "title": "radian",
+            "message": message,
+        });
+        self.observe_entries(
+            "Notification",
+            &self.notification,
+            notification_type,
+            &stdin,
+        );
     }
 }
 
@@ -2566,6 +2906,269 @@ mod tests {
 
     fn warned(warnings: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
         warnings.lock().unwrap().clone()
+    }
+
+    /// Waits for one observe-only hook's stdin file to hold a complete JSON object. A
+    /// `Notification` run is not waited for by `wait_observe` (by design), so its file is
+    /// the only completion signal.
+    async fn wait_notification(path: &Path) -> String {
+        for _ in 0..600 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && serde_json::from_str::<serde_json::Value>(&text).is_ok()
+            {
+                return text;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never held valid JSON", path.display());
+    }
+
+    /// `StopFailure` runs only the entry whose matcher names the failed turn's kind (or `*`),
+    /// and its stdin carries the kind, the details and the last assistant text (ADR 0045 §6).
+    #[tokio::test]
+    async fn stop_failure_selects_the_kind_and_carries_its_stdin() {
+        let root = TempRoot::new("stop-failure");
+        let hit = root.outside("hit.json");
+        let miss = root.outside("miss.json");
+        let config = HooksConfig {
+            stop_failure: vec![
+                entry(
+                    "usage_limit",
+                    vec![hook(&format!("cat > '{}'", hit.display()))],
+                ),
+                entry(
+                    "transport",
+                    vec![hook(&format!("cat > '{}'", miss.display()))],
+                ),
+            ],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.run_stop_failure(
+            &radian_core::ModelError::UsageLimit {
+                message: "the plan window is used up".into(),
+                resets_in: None,
+            },
+            "I was mid-sentence",
+        );
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(10))
+            .await;
+        let text = std::fs::read_to_string(&hit).expect("the matching hook ran");
+        assert!(text.contains("\"error\":\"usage_limit\""), "{text}");
+        assert!(
+            text.contains("\"error_details\":\"model usage limit"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"last_assistant_message\":\"I was mid-sentence\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"hook_event_name\":\"StopFailure\""),
+            "{text}"
+        );
+        assert!(!miss.exists(), "the non-matching entry never runs");
+    }
+
+    /// A `StopFailure` matcher outside `MODEL_ERROR_KINDS` warns once at load and that entry
+    /// never runs (ADR 0045 §6). `rate_limit` is Claude's name, not a radian kind.
+    #[tokio::test]
+    async fn an_out_of_set_stop_failure_matcher_warns_and_never_runs() {
+        let root = TempRoot::new("stop-failure-bad");
+        let hit = root.outside("never.json");
+        let config = HooksConfig {
+            stop_failure: vec![entry(
+                "rate_limit",
+                vec![hook(&format!("cat > '{}'", hit.display()))],
+            )],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let warnings = warned(&fixture.warnings);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("rate_limit")
+                    && warning.contains("will never run")),
+            "{warnings:?}"
+        );
+        fixture.hooks.run_stop_failure(
+            &radian_core::ModelError::UsageLimit {
+                message: "quota".into(),
+                resets_in: None,
+            },
+            "",
+        );
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(1))
+            .await;
+        assert!(!hit.exists(), "an outside-the-set matcher never runs");
+        assert!(fixture.hooks.hook_runs().is_empty());
+    }
+
+    /// A `Notification` hook receives its type, title and message, and the message names the
+    /// tool but never its arguments (ADR 0045 §6).
+    #[tokio::test]
+    async fn notification_carries_the_type_and_a_tool_name_only() {
+        let root = TempRoot::new("notification");
+        let permission = root.outside("permission.json");
+        let idle = root.outside("idle.json");
+        let config = HooksConfig {
+            notification: vec![
+                entry(
+                    "permission_prompt",
+                    vec![hook(&format!("cat > '{}'", permission.display()))],
+                ),
+                entry(
+                    "idle_prompt",
+                    vec![hook(&format!("cat > '{}'", idle.display()))],
+                ),
+            ],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        NotificationHooks::notification(&fixture.hooks, "permission_prompt", Some("shell"));
+        let text = wait_notification(&permission).await;
+        assert!(
+            text.contains("\"notification_type\":\"permission_prompt\""),
+            "{text}"
+        );
+        assert!(text.contains("\"title\":\"radian\""), "{text}");
+        assert!(
+            text.contains("\"message\":\"radian needs your permission to use shell\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("tool_input"),
+            "arguments never leave: {text}"
+        );
+        assert!(
+            !idle.exists(),
+            "the idle entry never runs for a permission prompt"
+        );
+
+        fixture.hooks.notify_idle();
+        let text = wait_notification(&idle).await;
+        assert!(
+            text.contains("\"notification_type\":\"idle_prompt\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"message\":\"radian is waiting for your input\""),
+            "{text}"
+        );
+    }
+
+    /// Both observe-only events are always background: `async` is accepted and inert, and
+    /// the default timeout stays the synchronous 60 s. A `wait_observe` deadline kills the
+    /// `StopFailure` run's process group (the `exec -p` 5 s rule); a `Notification` run is
+    /// never waited for.
+    #[tokio::test]
+    async fn observe_hooks_are_async_and_a_wait_deadline_kills_them() {
+        let root = TempRoot::new("observe-async");
+        let pidfile = root.outside("pid");
+        let mut sleeping = hook(&format!("echo $$ > '{}'; sleep 30", pidfile.display()));
+        sleeping.async_hook = true;
+        let config = HooksConfig {
+            stop_failure: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![sleeping],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.run_stop_failure(
+            &radian_core::ModelError::Transport("stream ended".into()),
+            "",
+        );
+        // The run is registered before `run_stop_failure` returns, so the pid appears while
+        // the wait below is still running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the hook never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let started = std::time::Instant::now();
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(1))
+            .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "wait_observe waited past its deadline"
+        );
+        let mut gone = false;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only probes existence.
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            gone,
+            "the observe run's process group survived the deadline"
+        );
+        // The killed run's recent-runs entry says `cancelled` (ADR 0045 §6): the deadline
+        // kills it and its end is recorded, never delivered.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if fixture
+                .hooks
+                .hook_runs()
+                .iter()
+                .any(|run| run.end == HookRunEnd::Cancelled)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the killed observe run was not recorded cancelled: {:?}",
+                fixture.hooks.hook_runs()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A `Notification` hook never postpones an exit: `wait_observe` returns without waiting
+    /// for it (the session end kills it). Only `StopFailure` is waited for (ADR 0045 §6).
+    #[tokio::test]
+    async fn notification_does_not_delay_the_exit_wait() {
+        let root = TempRoot::new("notification-no-wait");
+        let config = HooksConfig {
+            notification: vec![entry("idle_prompt", vec![hook("sleep 5")])],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.notify_idle();
+        let started = std::time::Instant::now();
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a Notification hook held the exit wait: {:?}",
+            started.elapsed()
+        );
+        fixture.hooks.end_session().await;
     }
 
     /// Exit 2 denies the call with the hook's stderr as the reason.
@@ -4425,8 +5028,16 @@ mod tests {
     }
 
     async fn wait_for_json(path: &Path) -> serde_json::Value {
-        wait_for_file(path).await;
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        // The file is created before its bytes land, so existence alone is not enough.
+        for _ in 0..600 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(value) = serde_json::from_str(&text)
+            {
+                return value;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never held valid JSON", path.display());
     }
 
     /// Waits until a `Stop` continuation was actually queued (the gate records the wake

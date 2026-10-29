@@ -47,6 +47,7 @@
 | `context-pruning.md` | idea | 新 ADR | 轻量档：清被同路径后续 `read` 取代的旧结果（占工具字节 24%）；条件：阈值 A/B 收益不够时才做 |
 | `compaction-threshold.md` | idea | 0018、0008 | `[compaction] threshold` + 压缩后确定性补水；条件：eval-metrics 落地后做，A/B 定缺省值 |
 | `arc-flows.md` | decided（1、2）；idea（3、4） | 0048、0043、0044、0025、0008 | 一个仓库按任务种类选 worker 参数与 gate profile：`[flows.<name>]` + task `flow` 字段；先落地 `review` stage；非代码资产的交付规则待定；第 4 步 trigger（clock / every N merges）与 ratchet / retro / fix 三个 flow 为 idea |
+| `arc-scope.md` | decided | 0048、0036、0025、0049、0008 | 子项目作为任务范围：`[scopes.<name>] path` + task/plan `scope`；worker cwd、gate commands 的 cwd 与锁、review 的 diff 都按 scope；一仓多 store 与稀疏 worktree 不做 |
 | `herdr-prompt-radian.md` | decided（跟踪上游 #4732） | 0034 | herdr 的 `agent prompt`/`send-keys` 只认编译进去的 agent 种类，自报的 radian 被拒；不提 PR（herdr 只收名单内 PR），在 herdr #4732 补复现；我们用 `pane send-text` + `send-keys enter` |
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
@@ -58,7 +59,6 @@
 | `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
 | `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表；第一阶段的用户是 arc（arc 即 ACP 客户端已落地） |
-| `hooks-stopfailure-notification.md` | decided（四条 hooks 的第四条） | 0045、0017、0034、0024、0013、0046 | `StopFailure`（模型错误结束回合，matcher 为 `ModelErrorKind` 闭集）与 `Notification`（`permission_prompt`、`idle_prompt` 60 s）；只观察、后台跑 |
 | `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
 | `provider-gemini-native.md` | idea（方向已定：做） | 0026、0014、0007、0015、0017 | Gemini 原生 `generateContent` adapter，过 provider contract；第二步 Vertex（同协议加 GCP 认证） |
 | `provider-azure-responses.md` | idea | 0026 | Azure OpenAI 走 Responses：同一 adapter 的配置变体（deployment URL、`api-version`、`api-key` header），有用户需要再做 |

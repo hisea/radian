@@ -31,6 +31,8 @@ impl App {
             new_session: false,
             pending: 0,
             quit_pending: None,
+            idle_since: None,
+            idle_notified: false,
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
