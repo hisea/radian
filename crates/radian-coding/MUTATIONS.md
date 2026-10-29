@@ -910,3 +910,23 @@ wording back; the source was restored from `.radian/jobs.rs.rework.orig` (never
 |---|---|---|---|
 | TK0217-M1 | `job_spec` puts the bare "A `read` with no range" back | ✅ 1 failed (rc=100) | `a_shell_job_set_names_the_read_op_not_the_read_tool` (`` `job` must say its `read` is an op, not the file tool ``) |
 
+## TK0244: grep's defaults and the manual (2026-10-29, branch `work/TK0244-grep-narrow-defaults-and-manual`)
+
+The worker's data showed the offer shaped the behaviour: `context` asked for in 90 of 96 calls,
+a median result of 6.1 KB and five at the 32 KiB cap. The defaults are now 50 matches and
+16384 output bytes, and the manual documents both. Each mutation was applied by hand to
+`crates/radian-coding/src/provider.rs`, backed up under `.radian/provider.rs.orig` and restored
+from that copy (never `git checkout`), confirmed byte-identical with `shasum -a 256`; the named
+test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test search -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0244-M1 | `max_grep_output_bytes: 16 << 10` → `32 << 10` (the old byte cap) | ✅ 1 failed (rc=100) | `grep_defaults_cut_the_output_at_16384_bytes_and_name_the_limit` (the note named the 32768-byte limit and the output passed 16384 B) |
+| TK0244-M2 | `default_grep_matches: 50` → `200` (the old match default) | ✅ 1 failed (rc=100) | `grep_defaults_cut_matches_at_fifty_and_name_the_cut` (60 match lines were returned instead of 50, and no truncation note appeared) |
+
+The docs drift test's own failure was checked the same way: changing the per-file cap in
+`docs/user/tools.md` from 50 to 60 made `the_manual_names_the_grep_limits_from_the_code` fail
+with "tools.md names the 50 per-file cap"; the page was restored from `.radian/tools.md.orig`
+and confirmed byte-identical with `shasum -a 256`.
+

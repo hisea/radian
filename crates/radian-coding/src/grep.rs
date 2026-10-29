@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::args;
 use crate::fail;
-use crate::provider::Limits;
+use crate::provider::{Limits, ToolPresence};
 use crate::search;
 use crate::workspace::{WorkspaceRoot, display_path};
 
@@ -59,12 +59,13 @@ fn fits(body_len: usize, line_len: usize, byte_cap: usize) -> bool {
 fn byte_note(byte_cap: usize, total: usize, files_matched: usize, mode: OutputMode) -> String {
     let narrow = match mode {
         OutputMode::Content => {
-            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"files\"`"
+            "narrow with a more specific `path` or `glob`, a lower `context`, or \
+             `output: \"files\"` first"
         }
         OutputMode::Files => {
-            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"count\"`"
+            "narrow with a more specific `path` or `glob`, or `output: \"count\"` first"
         }
-        OutputMode::Count => "narrow with a more specific `pattern`, `path` or `glob`",
+        OutputMode::Count => "narrow with a more specific `path` or `glob` first",
     };
     format!(
         "[truncated: output hit {byte_cap} byte limit; showing the first {total} matches \
@@ -86,12 +87,13 @@ fn byte_note_content(
 ) -> String {
     let narrow = match mode {
         OutputMode::Content => {
-            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"files\"\""
+            "narrow with a more specific `path` or `glob`, a lower `context`, or \
+             `output: \"files\"` first"
         }
         OutputMode::Files => {
-            "narrow with a more specific `pattern`, `path` or `glob`, or `output: \"count\"\""
+            "narrow with a more specific `path` or `glob`, or `output: \"count\"` first"
         }
-        OutputMode::Count => "narrow with a more specific `pattern`, `path` or `glob`",
+        OutputMode::Count => "narrow with a more specific `path` or `glob` first",
     };
     let dropped = if dropped_matches > 0 {
         format!("dropped {dropped_context} context lines and {dropped_matches} matches; ")
@@ -115,6 +117,7 @@ struct GrepArgs {
 }
 
 pub(crate) fn schema() -> serde_json::Value {
+    let defaults = Limits::default();
     json!({
         "type": "object",
         "properties": {
@@ -144,13 +147,22 @@ pub(crate) fn schema() -> serde_json::Value {
             "context": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Lines to show before and after each match. Default: 0. The tool cuts values above 30 to 30."
+                "description": format!(
+                    "Lines of context to show before and after each match. Default: 0, the \
+                     normal case: every context line costs tokens. Values above {} are cut \
+                     to {}.",
+                    defaults.max_grep_context, defaults.max_grep_context
+                )
             },
             "max_matches": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 5000,
-                "description": "Maximum matches to return. Default: 200."
+                "maximum": defaults.max_grep_matches,
+                "description": format!(
+                    "Maximum matches to return, across the whole search. Default: {}. \
+                     Maximum: {}.",
+                    defaults.default_grep_matches, defaults.max_grep_matches
+                )
             },
             "output": {
                 "type": "string",
@@ -164,16 +176,28 @@ pub(crate) fn schema() -> serde_json::Value {
     })
 }
 
-pub(crate) fn spec() -> ToolSpec {
+pub(crate) fn spec(presence: ToolPresence) -> ToolSpec {
+    let defaults = Limits::default();
+    // A range is read back with `read`; name that tool only when it is mounted (ADR 0043 §4).
+    let read_hint = if presence.read {
+        " To read a range around a match, use `read` with `offset` and `limit`."
+    } else {
+        ""
+    };
     ToolSpec {
         name: "grep".into(),
-        description: "Search file contents with a Rust regex. The tool reports each match \
-                      as `path:line:text`. `.gitignore` and `.ignore` files apply from the \
-                      workspace root down to the search directory, and the global gitignore \
-                      is not read. The tool skips `.git`, symlinks, and binary files. Use \
-                      `output: \"files\"` for which files contain a pattern. Use `output: \
-                      \"count\"` for how many matches there are."
-            .into(),
+        description: format!(
+            "Search file contents with a Rust regex. This tool is for locating lines, not \
+             for reading a file: it reports each match as `path:line:text`. `.gitignore` \
+             and `.ignore` files apply from the workspace root down to the search directory, \
+             and the global gitignore is not read. The tool skips `.git`, symlinks, and \
+             binary files. `context` lines cost tokens: the default 0 is the normal \
+             case.{read_hint} A search is cut at {} matches and {} output bytes; a cut ends \
+             with a `[truncated: ...]` note naming the limit and how to narrow it. Use \
+             `output: \"files\"` for which files contain a pattern. Use `output: \"count\"` \
+             for how many matches there are.",
+            defaults.default_grep_matches, defaults.max_grep_output_bytes
+        ),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
     }

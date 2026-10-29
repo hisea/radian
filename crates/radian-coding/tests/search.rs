@@ -4,7 +4,7 @@
 mod common;
 
 use common::{TempDir, assert_outside, call, sentinel_outside, structured, text, tools};
-use radian_coding::{CodingTools, Limits};
+use radian_coding::{CodingTools, Limits, ToolPresence};
 use radian_core::{ToolConcurrency, ToolProvider, ToolSession};
 use serde_json::json;
 use std::path::PathBuf;
@@ -390,6 +390,222 @@ async fn grep_caps_the_total_matches_and_names_the_cut() {
     assert_eq!(failure.code, "grep_limit_exceeded", "{failure:?}");
 }
 
+// ---------- the defaults: 50 matches and 16384 output bytes ----------
+
+/// The defaults are part of the offer: 60 matching lines with no `max_matches` are cut at
+/// the default 50 and the note names the count; asking for 60 returns all 60.
+#[tokio::test]
+async fn grep_defaults_cut_matches_at_fifty_and_name_the_cut() {
+    let dir = TempDir::new("grep-default-matches");
+    let root = dir.file("ws");
+    // Two files, so the per-file cap (also 50) is not what cuts the search.
+    for (name, start) in [("a.txt", 0), ("b.txt", 30)] {
+        let content = (start..start + 30)
+            .map(|i| format!("hit {i}\n"))
+            .collect::<String>();
+        dir.write(&format!("ws/{name}"), &content);
+    }
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "hit"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    let shown = body.lines().filter(|line| line.contains(".txt:")).count();
+    assert_eq!(shown, 50, "the default cap is 50 matches: {body}");
+    assert!(
+        body.contains("[truncated: showing the first 50 matches]"),
+        "the note names the default cut: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(50));
+    assert_eq!(structured(&out)["truncated"], json!(true));
+
+    let out = call(&tools, "grep", json!({"pattern": "hit", "max_matches": 60}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    let shown = body.lines().filter(|line| line.contains(".txt:")).count();
+    assert_eq!(shown, 60, "an explicit 60 returns all 60: {body}");
+    assert_eq!(structured(&out)["matches"], json!(60));
+}
+
+/// 50 matches with `context: 10` would add about 100 KiB of context; the default byte cap
+/// cuts the output at 16384 bytes, keeps every match line, and names the limit and the
+/// lower `context` in the note.
+#[tokio::test]
+async fn grep_defaults_cut_the_output_at_16384_bytes_and_name_the_limit() {
+    let dir = TempDir::new("grep-default-bytes");
+    let root = dir.file("ws");
+    let mut content = String::new();
+    for block in 0..50 {
+        content.push_str(&format!("needle {block}\n"));
+        for filler in 0..20 {
+            content.push_str(&format!("filler-{block}-{filler}-{}\n", "x".repeat(90)));
+        }
+    }
+    dir.write("ws/f.txt", &content);
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "context": 10}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.len() <= 16384,
+        "output {}B passes the 16384B cap",
+        body.len()
+    );
+    assert!(
+        body.contains("16384 byte limit"),
+        "the note names the default byte cap: {body}"
+    );
+    assert!(
+        body.contains("lower `context`"),
+        "the note names the way to narrow that matters here: {body}"
+    );
+    assert!(
+        body.contains("dropped") && body.contains("context lines"),
+        "the note names the dropped context lines: {body}"
+    );
+    let shown = body.lines().filter(|line| line.contains("f.txt:")).count();
+    assert_eq!(shown, 50, "every match line survives: {body}");
+}
+
+/// A `context` of 40 is cut to the 30-line maximum and the cut is named, as before.
+#[tokio::test]
+async fn a_context_of_forty_is_cut_to_thirty_and_said() {
+    let dir = TempDir::new("grep-context-forty");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "hit\n");
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "hit", "context": 40}))
+        .await
+        .unwrap();
+    assert!(
+        text(&out).contains("[context cut to 30 lines]"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(structured(&out)["context"], json!(30));
+}
+
+/// `output: "files"` is cut by the match cap too: 60 matching files with the default 50
+/// fill 50 lines and name the cut.
+#[tokio::test]
+async fn grep_files_mode_is_cut_by_the_match_cap() {
+    let dir = TempDir::new("grep-files-match-cap");
+    let root = dir.file("ws");
+    for i in 0..60 {
+        dir.write(&format!("ws/f{i:02}.txt"), "needle\n");
+    }
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "files"}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert_eq!(
+        body.lines().filter(|line| line.ends_with(" match")).count(),
+        50,
+        "{body}"
+    );
+    assert!(
+        body.contains("[truncated: showing the first 50 matches]"),
+        "{body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(50));
+    assert_eq!(structured(&out)["files"], json!(50));
+}
+
+/// `output: "files"` is cut by the byte cap before the match cap when the result is long
+/// enough; the note names the byte limit and points at `output: "count"`.
+#[tokio::test]
+async fn grep_files_mode_is_cut_by_the_byte_cap() {
+    let dir = TempDir::new("grep-files-byte-cap");
+    let root = dir.file("ws");
+    for i in 0..60 {
+        dir.write(&format!("ws/f{i:02}.txt"), "needle\n");
+    }
+    let tools = tools_with(
+        &root,
+        Limits {
+            max_grep_output_bytes: 1024,
+            ..Limits::default()
+        },
+    );
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "files"}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(
+        body.len() <= 1024,
+        "output {}B passes the 1024B cap",
+        body.len()
+    );
+    assert!(body.contains("1024 byte limit"), "{body}");
+    assert!(
+        body.contains("output: \"count\""),
+        "the files-mode note points at count: {body}"
+    );
+    assert_eq!(structured(&out)["truncated"], json!(true));
+    assert!(
+        structured(&out)["matches"].as_u64().unwrap() < 50,
+        "the byte cap cut before the match cap: {body}"
+    );
+}
+
+/// `output: "count"` is cut by the match cap too: it reports the capped total and the note.
+#[tokio::test]
+async fn grep_count_mode_is_cut_by_the_match_cap() {
+    let dir = TempDir::new("grep-count-match-cap");
+    let root = dir.file("ws");
+    for i in 0..60 {
+        dir.write(&format!("ws/f{i:02}.txt"), "needle\n");
+    }
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "count"}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(body.contains("50 matches in 50 files"), "{body}");
+    assert!(
+        body.contains("[truncated: showing the first 50 matches]"),
+        "{body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(50));
+}
+
+/// Zero matches changes nothing: the same one-line note, no truncation.
+#[tokio::test]
+async fn grep_zero_matches_is_unchanged() {
+    let dir = TempDir::new("grep-zero");
+    let root = dir.file("ws");
+    dir.write("ws/a.txt", "nothing here\n");
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "[no matches for `needle`]\n");
+    assert_eq!(structured(&out)["matches"], json!(0));
+    assert_eq!(structured(&out)["truncated"], json!(false));
+}
+
 #[tokio::test]
 async fn grep_caps_the_context_argument() {
     let dir = TempDir::new("grep-cap-context");
@@ -671,6 +887,44 @@ async fn the_output_values_are_defined_in_the_schema_only() {
                 && text.contains("`files`")
                 && text.contains("`count`")),
         "the schema still defines all three values: {field}"
+    );
+}
+
+/// ADR 0043 §4: the `read` hint names that tool only when it is mounted, so a `grep`-only
+/// set never points the model at an absent tool.
+#[tokio::test]
+async fn grep_names_read_only_when_it_is_mounted() {
+    let dir = TempDir::new("grep-read-hint");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+
+    let full = tools.open_session().await.unwrap();
+    let grep = full
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "grep")
+        .expect("the grep spec");
+    assert!(
+        grep.description
+            .contains("use `read` with `offset` and `limit`"),
+        "the full set points a range read at `read`: {}",
+        grep.description
+    );
+
+    let restricted = tools
+        .open_session_with(ToolPresence::from_names(["grep"]))
+        .await
+        .unwrap();
+    let grep = restricted
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "grep")
+        .expect("the grep spec");
+    assert!(
+        !grep.description.contains("`read`"),
+        "a grep-only set must not name `read`: {}",
+        grep.description
     );
 }
 
@@ -1059,7 +1313,7 @@ async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
     let full = call(
         &uncapped,
         "grep",
-        json!({"pattern": "needle", "context": 30}),
+        json!({"pattern": "needle", "context": 30, "max_matches": 500}),
     )
     .await
     .unwrap();
@@ -1090,9 +1344,13 @@ async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
             ..Limits::default()
         },
     );
-    let out = call(&capped, "grep", json!({"pattern": "needle", "context": 30}))
-        .await
-        .unwrap();
+    let out = call(
+        &capped,
+        "grep",
+        json!({"pattern": "needle", "context": 30, "max_matches": 500}),
+    )
+    .await
+    .unwrap();
     let body = text(&out);
     assert!(
         body.len() <= 8192,

@@ -1,5 +1,5 @@
 ---
-description: The built-in file tools, with `read`'s text, directory and image branches, its limits and its error codes.
+description: The built-in file tools: `read`'s text, directory and image branches with its limits and error codes, and `grep`'s arguments, defaults and caps.
 ---
 
 # Tools
@@ -68,3 +68,33 @@ Absolute and `~` paths read the cargo registry sources, the toolchain source tre
 In the `full` tier they also read any other path except the deny set.
 `write`, `patch` and shell working directories never leave the workspace.
 See `permissions` for the tiers and the deny set.
+
+## `grep`
+
+`grep` searches file contents with a Rust regex and reports each match as `path:line:text`.
+It locates lines; it does not read a file for you: read a range around a hit with `read` and its `offset` and `limit`.
+Context lines are shown as `path-line-text`, and `--` separates non-contiguous groups.
+
+| Argument | Type | Default | What it does |
+|---|---|---|---|
+| `pattern` | string, required | — | Rust regex to search for in each line. |
+| `path` | string | the workspace root | A directory or file to search, in the forms `permissions` defines. Several whitespace-separated paths are searched in one call and share the caps. |
+| `glob` | string | — | Search only files whose workspace-relative path matches this glob. `**` crosses directories; `*` does not. |
+| `case_insensitive` | boolean | `false` | Ignore case. |
+| `context` | integer, 0 or more | `0` | Context lines to show before and after each match. Default 0 is the normal case: every context line costs tokens. Values above 30 are cut to 30. |
+| `max_matches` | integer, 1 to 5000 | `50` | Maximum matches to return across the whole search. A value above 5000 fails with `grep_limit_exceeded`. |
+| `output` | string | `content` | `content` prints each match line; `files` prints one `<path>: N matches` line per matching file; `count` prints only the totals. |
+
+`context` only shapes `content` lines; `files` and `count` never show them.
+The per-file cap is 50 matches: a file with more ends its output with `[<path>: more than 50 matches in one file]`.
+A result is capped at 16384 bytes (16 KiB), notes included.
+The match caps and the byte cap apply in all three `output` modes.
+
+Past a match cap the output ends with `[truncated: showing the first N matches]`.
+Past the byte cap, context lines are dropped first to keep every match line; only if the match lines alone do not fit are whole match lines cut, in order.
+The output then ends with a note whose first line is `[truncated: output hit 16384 byte limit; ...]`, naming what was dropped and how to narrow the search: a narrower `path` or `glob`, a lower `context`, or `output: "files"` first (`output: "count"` in `files` mode).
+A `content` or `files` search with no matches prints ``[no matches for `<pattern>`]``; `count` prints `0 matches in 0 files`.
+
+`.gitignore` and `.ignore` files apply from the workspace root down to the search directory, and the global gitignore is not read.
+`.git`, symlinks and binary files are skipped.
+The read-only roots are the ones described for `read`.

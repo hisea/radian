@@ -43,9 +43,9 @@ pub struct Limits {
     /// Hard cap on `grep`'s total output bytes (match and context lines plus the
     /// truncation notes). Past it the tool first drops context lines to keep every match,
     /// and only then cuts whole match lines, ending with one note naming the byte limit,
-    /// what was dropped, and how to narrow the search. Half of `default_read_bytes`:
-    /// the data shows large results come mainly from context lines, and 32 KiB still
-    /// holds about two hundred short match lines while that context bloat is cut.
+    /// what was dropped, and how to narrow the search. A quarter of `default_read_bytes`:
+    /// the data shows large results come mainly from context lines, and 16 KiB still
+    /// holds about fifty short match lines while that context bloat is cut.
     pub max_grep_output_bytes: usize,
     /// `shell`'s output budget **per stream** when the model does not give one. Smaller than
     /// `default_read_bytes`: a shell result competes with the rest of the turn, and a truncated
@@ -91,17 +91,17 @@ impl Default for Limits {
             max_glob_results: 5000,
             default_glob_results: 500,
             max_grep_matches: 5000,
-            default_grep_matches: 200,
+            default_grep_matches: 50,
             default_grep_matches_per_file: 50,
             max_grep_context: 30,
-            max_grep_output_bytes: 32 << 10, // 32 KiB, half of `read`'s default
+            max_grep_output_bytes: 16 << 10, // 16 KiB, a quarter of `read`'s default
             // Per stream. 24 KiB sits inside the brief's 16-32 KiB band and below what other
             // agents show inline (30k chars, 50 KB, ~10k tokens ≈ 40 KiB): it halves the
             // previous 64 KiB per stream, still fits a typical failure tail, is divisible by 8
-            // for the 1/8 failure head, and matches the grep cap (24-32 KiB) from the same
-            // backlog item so the two truncated tools budget alike. A truncated run stays
-            // recoverable through `job` (ADR 0037 decision 3a), or repeatable with a larger
-            // `max_output_bytes`.
+            // for the 1/8 failure head, and stays above the grep output cap (16 KiB) from the
+            // same backlog item, so a shell tail still carries more than a search result. A
+            // truncated run stays recoverable through `job` (ADR 0037 decision 3a), or
+            // repeatable with a larger `max_output_bytes`.
             default_shell_output_bytes: 24 << 10,
             // The model may ask for more, up to `read`'s own hard cap.
             max_shell_output_bytes: 1 << 20,
@@ -458,7 +458,7 @@ fn specs(shell: Option<(SandboxMode, bool)>, presence: ToolPresence) -> Vec<Tool
         specs.push(glob::spec());
     }
     if presence.grep {
-        specs.push(grep::spec());
+        specs.push(grep::spec(presence));
     }
     if let Some((mode, git_writable)) = shell
         && presence.shell

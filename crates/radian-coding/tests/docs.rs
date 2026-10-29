@@ -415,6 +415,52 @@ fn the_manual_names_the_image_limits_from_the_code() {
     );
 }
 
+/// `grep`'s caps are the code's, not prose that can drift: the manual's `## \`grep\`` table
+/// and prose name the default total match cap, the per-file cap, the context cut and the
+/// byte cap, all read from `Limits`.
+#[test]
+fn the_manual_names_the_grep_limits_from_the_code() {
+    let text = radian_coding::docs::find("tools.md").expect("tools.md is in the table");
+    let limits = radian_coding::Limits::default();
+    let rows = radian_coding::drift::table_under(text, "tools.md", "## `grep`");
+    let row = |name: &str| {
+        rows.iter()
+            .find(|row| {
+                row.first()
+                    .is_some_and(|cell| cell.trim_matches('`') == name)
+            })
+            .unwrap_or_else(|| panic!("tools.md's `grep` table has a `{name}` row: {rows:?}"))
+    };
+    let default_matches = limits.default_grep_matches.to_string();
+    assert_eq!(
+        row("max_matches").get(2).map(|cell| cell.trim_matches('`')),
+        Some(default_matches.as_str()),
+        "the `max_matches` default comes from the code: {:?}",
+        row("max_matches")
+    );
+    let context = row("context").join(" ");
+    assert!(
+        context.contains(&format!(
+            "Values above {} are cut to {}",
+            limits.max_grep_context, limits.max_grep_context
+        )),
+        "the `context` cut comes from the code: {context}"
+    );
+    assert!(
+        text.contains(&format!(
+            "per-file cap is {} matches",
+            limits.default_grep_matches_per_file
+        )),
+        "tools.md names the {} per-file cap",
+        limits.default_grep_matches_per_file
+    );
+    assert!(
+        text.contains(&format!("capped at {} bytes", limits.max_grep_output_bytes)),
+        "tools.md names the {} byte cap",
+        limits.max_grep_output_bytes
+    );
+}
+
 /// The hand-written table matches `docs/user/` on disk, including the pages in subdirectories.
 #[test]
 fn the_table_matches_docs_user_on_disk() {
