@@ -174,20 +174,27 @@ impl Outbox {
         let _ = closed.wait_for(|closed| *closed).await;
     }
 
-    /// Sends one message, waiting for room in the bounded queue. No message is ever dropped
-    /// while the outbox is open.
+    /// Sends one message, waiting for room in the bounded queue. A free slot never waits and
+    /// never loses the message, even after [`Outbox::close`]: the close releases only a producer
+    /// that waits for room. No message is ever dropped while the outbox is open.
     async fn send(&self, message: Value) {
+        let message = match self.tx.try_send(message) {
+            Ok(()) => return,
+            // The writer is gone: nothing can be delivered, and nothing waits.
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+            Err(mpsc::error::TrySendError::Full(message)) => message,
+        };
         tokio::select! {
             _ = self.tx.send(message) => {}
             _ = self.wait_closed() => {}
         }
     }
 
-    /// The synchronous producer's path (the live-event sink). A free queue slot never blocks;
-    /// a full queue waits with `block_in_place`, which moves the turn off its worker so the
-    /// writer keeps draining on another one, and `Handle::block_on` runs the select there.
-    /// `wait_closed` makes that wait end at shutdown. The ACP process always builds a
-    /// multi-thread runtime (`run_acp_blocking`), which `block_in_place` requires.
+    /// The synchronous producer's path (the live-event sink). A free queue slot never blocks and
+    /// never loses the message; a full queue waits with `block_in_place`, which moves the turn
+    /// off its worker so the writer keeps draining on another one, and `Handle::block_on` runs
+    /// the select there. `wait_closed` makes that wait end at shutdown. The ACP process always
+    /// builds a multi-thread runtime (`run_acp_blocking`), which `block_in_place` requires.
     fn send_blocking(&self, message: Value) {
         let message = match self.tx.try_send(message) {
             Ok(()) => return,
@@ -660,6 +667,26 @@ mod tests {
             rx.len(),
             ACP_OUTBOX_CAPACITY,
             "the released producer did not add a message to the closed outbox"
+        );
+    }
+
+    /// [`Outbox::close`] releases the producers that wait for room, and only those. A producer
+    /// that finds a free slot never waits, so closing the outbox must not drop its message:
+    /// otherwise a response that was in flight when stdin ended would be lost at random.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_the_outbox_does_not_drop_a_message_that_had_room() {
+        let (tx, rx) = mpsc::channel(ACP_OUTBOX_CAPACITY);
+        let out = Outbox::new(tx);
+        out.close();
+
+        for id in 0..ACP_OUTBOX_CAPACITY {
+            out.respond(&json!(id), json!(id)).await;
+        }
+
+        assert_eq!(
+            rx.len(),
+            ACP_OUTBOX_CAPACITY,
+            "a message with room in the queue is delivered even after the outbox closed"
         );
     }
 }
