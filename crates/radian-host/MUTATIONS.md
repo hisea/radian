@@ -1774,3 +1774,37 @@ Each mutation was applied in place to `crates/radian-host/src/config/hooks.rs`,
 | TK0234-M12 | import-claude rewrites an imported `timeout: 0` to 60 again | ✅ 1 failed (rc=100) | `claude_migrate::an_imported_zero_timeout_keeps_the_async_default` (the draft said `timeout = 60`) |
 
 4/4 caught, no equivalent mutation.
+
+## TK0235: the async hook lifecycle — supersede, the cap, session end (2026-10-29, branch `work/TK0235-async-hook-lifecycle`)
+
+ADR 0045 §5. Each mutation was applied in place to `crates/radian-host/src/hooks.rs` (or
+`src/session/local.rs` for the session-end wiring row), the named test ran with
+`cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'` (`-p radian-tui --test pty` for M7), and the source was restored from a
+backup under `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0235-M1 | the supersede check never matches (`if true \|\| run.key != key …`), so an earlier run keeps going and delivers too | ✅ 1 failed (rc=100) | `hooks::tests::a_superseded_async_hook_is_killed_and_only_the_latest_result_is_delivered` (both texts arrived) |
+| TK0235-M2 | the per-session cap is disabled (`if false && running.len() >= MAX_ASYNC_HOOKS`) | ✅ 1 failed (rc=100) | `hooks::tests::the_ninth_concurrent_async_hook_does_not_start` (nine hooks ran) |
+| TK0235-M3 | `CommandHooks::end_session` returns at once, so session end kills nothing and delivers the pending result | ✅ 1 failed (rc=100) | `hooks::tests::ending_the_session_kills_a_running_async_hook_and_delivers_nothing` (the ended session still listed a running hook) |
+| TK0235-M4 | the supersede rule cancels every run of the same hook, ignoring `exited` and whether the group kill found a live group | ✅ 1 failed (rc=100) | `hooks::tests::a_finished_async_run_is_not_superseded_while_its_result_is_delivered` (the delivering run was cancelled) |
+| TK0235-M5 | the kill signals the leader only (`kill(pid)` instead of `kill(-pid)`) | ✅ 1 failed (rc=100) | `hooks::tests::a_superseded_hook_kills_its_grandchild_too` (the superseded shell stayed alive behind its grandchild's pipe) |
+| TK0235-M6 | a non-completed turn ends the session's async hooks (`self.end_session()` in the non-`Completed` early return) | ✅ 1 failed (rc=100) | `hooks::tests::a_cancelled_turn_leaves_a_running_async_hook_alone` (the cancelled turn killed the hook) |
+| TK0235-M7 | `LocalSession::join` no longer calls `end_session`, so no host end path kills them | ✅ 1 failed (rc=100) | `pty_new_kills_a_running_async_hook` (the hook survived `/new`) |
+
+7/7 caught, no equivalent mutation.
+
+## TK0235 (rework): the cap counts processes, the session end guards the enqueue (2026-10-29, branch `work/TK0235-async-hook-lifecycle`)
+
+ADR 0045 §5. Each mutation was applied in place to `crates/radian-host/src/hooks.rs`, the
+named test ran with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and the source was restored from a backup under
+`.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0235-M8 | the session-end guard is dropped again: `end_session` sets `async_ended` without taking `deliver_gate`, and `deliver_async` checks the flag without it | ✅ 1 failed (rc=100) | `hooks::tests::the_session_end_waits_for_a_delivery_already_enqueueing` (the end returned while the delivery was still blocked in the journal) |
+| TK0235-M9 | the cap counts registered entries again (`running.len()`), including runs whose process already exited | ✅ 1 failed (rc=100) | `hooks::tests::the_cap_counts_running_processes_not_delivering_results` (the ninth hook was refused with no hook process running) |
+
+2/2 caught, no equivalent mutation.

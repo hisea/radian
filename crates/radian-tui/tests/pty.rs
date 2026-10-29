@@ -7131,6 +7131,92 @@ async fn pty_new_refuses_while_a_background_job_runs() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
+/// Edge case 6: `/new` ends the old session (ADR 0045 §5). A `Stop` hook still running
+/// when the next session opens is killed: its pid is gone, and its text never reaches the
+/// old session's journal or the new session. Without the session-end kill the hook outlives
+/// `run_loop_and_teardown` and its output is injected later.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_new_kills_a_running_async_hook() {
+    let dir = TempDir::new("new-async-hook");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let pidfile = dir.path().join("hook.pid");
+    let config = dir.path().join("hooks.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\n\
+             command = \"echo $$ > {}; sleep 30; echo GHOST-RESULT\"\nasync = true\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("FIRST-DONE")]).await;
+    let mut pty = Pty::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "asynchook",
+        ],
+        40,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    assert!(
+        pty.wait_for_screen("FIRST-DONE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    // The `Stop` hook runs after the turn: wait for it to record its pid.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let pid: i32 = loop {
+        if let Ok(text) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = text.trim().parse()
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the async Stop hook never recorded its pid:\n{}",
+            pty.screen()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    pty.send(b"/new\r");
+    assert!(
+        pty.wait_for_screen("--resume asynchook", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the old session's async hook survived /new (pid {pid})\n{}",
+        pty.screen()
+    );
+    // The result never appears: the hook was killed mid-sleep, and the old session's inbox
+    // was closed. The new session does not carry it either.
+    let old = std::fs::read_to_string(sessions.join("asynchook.jsonl")).unwrap_or_default();
+    assert!(
+        !old.contains("GHOST-RESULT"),
+        "the killed hook's text reached the old journal"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
 /// A background job can be managed with `job` without an approval prompt: `job` is fixed
 /// `allow` in every tier because the command was approved when it started (ADR 0037
 /// decision 8). The call names an id the mock cannot know (real ids carry the app's pid),
