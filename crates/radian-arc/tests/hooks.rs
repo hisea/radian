@@ -186,6 +186,16 @@ fn the_default_after_merge_removes_the_branches_and_the_worktree_and_passes_ever
             "`{name}` did not reach the hook: {env:?}"
         );
     }
+    let arc_names: std::collections::BTreeSet<&str> = env
+        .keys()
+        .map(String::as_str)
+        .filter(|name| name.starts_with("ARC_"))
+        .collect();
+    assert_eq!(
+        arc_names,
+        radian_arc::hooks::HOOK_ENV.iter().copied().collect(),
+        "the hook sets exactly the listed variables"
+    );
     assert_eq!(env["ARC_TASK"], task);
     assert_eq!(env["ARC_PLAN"], plan);
     assert_eq!(env["ARC_ATTEMPT"], format!("{task}-1"));
