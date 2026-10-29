@@ -18,6 +18,45 @@ use tokio::time::timeout;
 /// A hang watchdog, not a performance assertion (the same shape as `cli.rs`'s).
 const EXIT_WATCHDOG: Duration = Duration::from_secs(120);
 
+/// Whether a pid is still alive (`kill 0` only probes).
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    // SAFETY: signal 0 checks existence and sends nothing.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// Waits for one pid to disappear, reporting whether it did within `limit`.
+#[cfg(unix)]
+async fn gone_within(pid: u32, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if !alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// Waits for a hook to record its pid while `exec` still runs.
+#[cfg(unix)]
+async fn wait_for_pid_file(path: &Path) -> u32 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the async hook never recorded its pid in {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// A fresh directory that no test shares, so nothing touches the user's real HOME, config
 /// or credentials.
 fn scratch(prefix: &str) -> PathBuf {
@@ -551,4 +590,71 @@ async fn p_without_a_background_job_is_unchanged() {
 
     assert_eq!(code, 0, "{err}");
     assert_eq!(out, "hello\n", "stdout carries only the model text");
+}
+
+/// Edge case 5: `exec -p` does not wait for an async hook (ADR 0045 §5). A `PostToolUse`
+/// hook that sleeps 30 s is killed when the run ends: the process exits promptly and the
+/// hook's process group is gone. Without the session-end kill the run waits out the sleep
+/// (30 s, past the 20 s assertion) and the pid stays alive; an end that waits for the
+/// blocking reader would hang for the same 30 s.
+#[cfg(unix)]
+#[tokio::test]
+async fn p_exits_promptly_and_kills_a_running_async_hook() {
+    let server = MockServer::start(vec![
+        tool_reply("c1", "shell", &json!({"command": "true"}).to_string()),
+        text_reply("done"),
+    ])
+    .await;
+    let env = Env::fresh("async-hook-exit");
+    let pidfile = env.ws.join("hook.pid");
+    let config = env.home.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[model]\nmodel = \"m\"\n\
+             [[hooks.PostToolUse]]\nmatcher = \"shell\"\n[[hooks.PostToolUse.hooks]]\n\
+             type = \"command\"\ncommand = \"echo $$ > {}; sleep 30\"\nasync = true\n",
+            pidfile.display()
+        ),
+    )
+    .unwrap();
+    let args = [
+        "--model",
+        "m",
+        "--base-url",
+        &server.base_url,
+        "--workspace",
+        env.ws.to_str().unwrap(),
+        "--yes",
+        "--session-id",
+        "async-hook-exit",
+        "--config",
+        config.to_str().unwrap(),
+        "-p",
+        "hello",
+    ];
+    let started = std::time::Instant::now();
+    let mut child = spawn(&args, &env);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"")
+        .await
+        .expect("stdin");
+    let pid = wait_for_pid_file(&pidfile).await;
+    let output = timeout(EXIT_WATCHDOG, child.wait_with_output())
+        .await
+        .expect("exec did not exit within the watchdog")
+        .expect("wait");
+    let elapsed = started.elapsed();
+    assert_eq!(output.status.code(), Some(0), "{:?}", output);
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "exec waited for the async hook: {elapsed:?}"
+    );
+    assert!(
+        gone_within(pid, Duration::from_secs(10)).await,
+        "the async hook's process group survived exec (pid {pid})"
+    );
 }
