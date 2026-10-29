@@ -1329,12 +1329,14 @@ impl CommandHooks {
     /// `{ "type": "addRules", "destination": "session", "behavior": "allow" }`
     /// asks for a session grant, exactly like the approval prompt's "allow for this
     /// session" (ADR 0045 §4). The item's `rules` are not parsed. Any other `type`,
-    /// `destination` or `behavior` warns one line and records nothing.
-    fn session_grant_requested(&self, updated: Option<&serde_json::Value>) -> bool {
+    /// `destination` or `behavior` warns one line and records nothing, and so does a
+    /// present value that is not an array (a JSON `null` included: it is present, so it
+    /// is not the same as the field's absence).
+    fn session_grant_requested(&self, updated: Option<&Option<serde_json::Value>>) -> bool {
         let Some(updated) = updated else {
             return false;
         };
-        let Some(items) = updated.as_array() else {
+        let Some(items) = updated.as_ref().and_then(serde_json::Value::as_array) else {
             (self.warn)(
                 "the PermissionRequest hook returned updatedPermissions that is not an \
                  array; ignoring it",
@@ -1509,8 +1511,9 @@ struct HookSpecificOutput {
 }
 
 /// One `PermissionRequest` `hookSpecificOutput.decision` (ADR 0045 §4). `updatedPermissions`
-/// is read only for the one item shape this version acts on; a present `null` counts as
-/// present for the two unsupported fields, so a warn is not lost.
+/// is read only for the one item shape this version acts on; it is kept as
+/// `Option<Option<_>>` (see [`present`]) so a present `null` warns once instead of reading
+/// as an absent field.
 #[derive(Debug, Default, Deserialize)]
 #[allow(non_snake_case)]
 struct PermissionDecisionOutput {
@@ -1520,8 +1523,8 @@ struct PermissionDecisionOutput {
     message: Option<String>,
     /// Parsed by [`CommandHooks::session_grant_requested`], so a malformed value warns
     /// instead of failing the whole decision closed.
-    #[serde(default)]
-    updatedPermissions: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "present")]
+    updatedPermissions: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "present")]
     updatedInput: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "present")]
@@ -1529,8 +1532,9 @@ struct PermissionDecisionOutput {
 }
 
 /// Deserializes a possibly-`null` field while keeping "present" apart from "absent"
-/// ([`HookSpecificOutput::updatedToolOutput`]): a plain `Option` maps a present JSON `null`
-/// to `None`, so the field's own validation never runs. `T::deserialize` here is
+/// ([`HookSpecificOutput::updatedToolOutput`],
+/// [`PermissionDecisionOutput::updatedPermissions`]): a plain `Option` maps a present JSON
+/// `null` to `None`, so the field's own validation never runs. `T::deserialize` here is
 /// `Option<Value>`, so `null` becomes `Some(None)` and any value `Some(Some(value))`.
 fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -4745,6 +4749,35 @@ mod tests {
                     "{script}: {warned:?}"
                 );
             }
+        }
+    }
+
+    /// §3 / rework 2: a present `updatedPermissions` that is not an array warns one line and
+    /// records nothing, and the allow still stands. A JSON `null` is present, not an absent
+    /// field: deserializing it into a plain `Option<Value>` conflates the two and loses the
+    /// warning.
+    #[tokio::test]
+    async fn a_non_array_updated_permissions_warns_including_null() {
+        for value in ["null", r#""session""#, "{}", "42"] {
+            let script = format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"decision":{{"behavior":"allow","updatedPermissions":{value}}}}}}}'"#
+            );
+            let fixture = plain(&permission_request_config("shell", &script));
+            assert_eq!(
+                request(&fixture, &call("shell", serde_json::json!({})))
+                    .await
+                    .unwrap(),
+                PermissionRequestDecision::Allow {
+                    session_grant: false
+                },
+                "{value}"
+            );
+            let warned = warned(&fixture.warnings);
+            assert_eq!(warned.len(), 1, "{value}: {warned:?}");
+            assert!(
+                warned[0].contains("updatedPermissions"),
+                "{value}: {warned:?}"
+            );
         }
     }
 

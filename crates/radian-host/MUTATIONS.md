@@ -1732,5 +1732,6 @@ restored from `.radian/mut/host-hooks.rs` (`cmp` empty).
 | TK0233-M4 | an accepted item never sets `granted` (`if accepted && false`), so the one supported shape records nothing | ✅ 1 failed (rc=100) | `hooks::tests::permission_request_accepts_only_the_session_add_rules_item` |
 | TK0233-M5 | the `destination` check is dropped, so `projectSettings` records a session grant | ✅ 1 failed (rc=100) | `command_hooks::an_unsupported_updated_permissions_destination_allows_once_without_a_grant` |
 | TK0233-M6 | a `deny` no longer stops the chain (`Deny` becomes an allow with a grant), so a final deny does not discard a project grant | ✅ 1 failed (rc=100) | `command_hooks::a_user_deny_discards_a_project_updated_permissions_grant` |
+| TK0233-M7 | the field is a plain `Option<Value>` again, so a present `updatedPermissions: null` reads as an absent field and warns nothing (rework 2, restored from `.radian/mut/host-hooks-fixed.rs`) | ✅ 1 failed (rc=100) | `hooks::tests::a_non_array_updated_permissions_warns_including_null` |
 
-3/3 caught, no equivalent mutation.
+4/4 caught, no equivalent mutation.
