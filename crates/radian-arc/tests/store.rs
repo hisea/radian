@@ -900,6 +900,122 @@ fn init_refuses_outside_a_repository_and_without_an_origin_remote() {
     assert!(!scratch.repo().join(".radian/arc/config.toml").exists());
 }
 
+/// A bare remote named `name` with `main`, added to the repository `repo` and pushed to, with
+/// its `HEAD` set, so `init` can read the main branch from it.
+fn add_remote(scratch: &Scratch, repo: &Path, name: &str) {
+    let bare = format!("{name}.git");
+    git(&scratch.dir, &["init", "-q", "--bare", &bare]);
+    let path = scratch.path(&bare);
+    git(&path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(repo, &["remote", "add", name, path.to_str().unwrap()]);
+    git(repo, &["push", "-q", "-u", name, "main"]);
+    git(repo, &["remote", "set-head", name, "main"]);
+}
+
+/// A repository whose only remote is `upstream` initializes: `init` uses the remote it finds
+/// instead of a literal `origin`, and the generated `after_merge` lines name it (ADR 0048
+/// decision 10).
+#[test]
+fn init_uses_a_remote_that_is_not_origin() {
+    let scratch = Scratch::new("init-other-remote");
+    git(&scratch.dir, &["init", "-q", "repo"]);
+    git(
+        &scratch.repo(),
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
+    scratch.write("repo/README.md", "hello\n");
+    git(&scratch.repo(), &["add", "README.md"]);
+    git(&scratch.repo(), &["commit", "-q", "-m", "first"]);
+    add_remote(&scratch, &scratch.repo(), "upstream");
+
+    let report = Store::init(&scratch.repo(), false).expect("init succeeds without origin");
+    assert_eq!(report.remote, "upstream");
+    assert_eq!(report.main_branch, "main");
+    assert!(report.config_created);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "`upstream` reachable" && check.passed()),
+        "{:?}",
+        report.checks
+    );
+    let config = config::load(&report.config_path).expect("the config init wrote parses");
+    assert_eq!(config.repository.remote, "upstream");
+    assert_eq!(config.repository.main_branch, "main");
+    assert_eq!(
+        config.hooks.after_merge.first().map(String::as_str),
+        Some("git push upstream --delete work/$ARC_TASK")
+    );
+    assert!(
+        !config
+            .hooks
+            .after_merge
+            .iter()
+            .any(|line| line.contains("origin")),
+        "{:?}",
+        config.hooks.after_merge
+    );
+}
+
+/// A repository whose `config.toml` names another remote as operational uses that remote: the
+/// checks, the report and the main branch are read from it, and the file is kept.
+#[test]
+fn init_uses_the_remote_the_config_names() {
+    let scratch = fixture("init-configured-remote");
+    add_remote(&scratch, &scratch.repo(), "upstream");
+    scratch.write(
+        "repo/.radian/arc/config.toml",
+        "schema_version = 1\n[repository]\nremote = \"upstream\"\n",
+    );
+
+    let report = Store::init(&scratch.repo(), false).expect("init succeeds with upstream");
+    assert_eq!(report.remote, "upstream");
+    assert!(!report.config_created, "an existing config is kept");
+    assert!(
+        report.remote_url.ends_with("upstream.git"),
+        "{}",
+        report.remote_url
+    );
+    assert_eq!(report.main_branch, "main");
+    for name in ["`upstream` reachable", "push to `upstream` `main`"] {
+        assert!(
+            report.checks.iter().any(|check| check.name == name),
+            "missing check {name}: {:?}",
+            report.checks
+        );
+    }
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.name.contains("origin")),
+        "{:?}",
+        report.checks
+    );
+}
+
+/// Several remotes and no `origin` is ambiguous, so `init` refuses and names every remote
+/// instead of guessing.
+#[test]
+fn init_refuses_to_guess_between_remotes() {
+    let scratch = fixture("init-ambiguous-remote");
+    git(&scratch.repo(), &["remote", "remove", "origin"]);
+    add_remote(&scratch, &scratch.repo(), "upstream");
+    add_remote(&scratch, &scratch.repo(), "mirror");
+
+    let error = Store::init(&scratch.repo(), false).expect_err("two remotes and no origin");
+    assert_eq!(error.exit(), Exit::Error);
+    for name in ["upstream", "mirror"] {
+        assert!(
+            error.message().contains(name),
+            "the error names `{name}`: {}",
+            error.message()
+        );
+    }
+    assert!(!scratch.repo().join(".radian/arc/config.toml").exists());
+}
+
 #[test]
 fn a_task_file_parses_through_the_model() {
     let scratch = fixture("model");

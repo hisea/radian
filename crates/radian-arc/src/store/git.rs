@@ -27,6 +27,36 @@ pub(crate) fn remote_url(dir: &Path, remote: &str) -> Result<String, String> {
     git::ok(dir, &["remote", "get-url", remote])
 }
 
+/// The remote `init` uses when no `config.toml` names one: `origin` when the repository has
+/// it, else its only remote. Several remotes without `origin` are ambiguous, so the refusal
+/// lists them by name; a repository with no remote at all is refused too.
+pub(crate) fn default_remote(dir: &Path) -> Result<String, String> {
+    let listed = git::ok(dir, &["remote"])?;
+    let remotes: Vec<&str> = listed
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .collect();
+    if remotes.contains(&"origin") {
+        return Ok("origin".to_owned());
+    }
+    match remotes.as_slice() {
+        [] => Err(format!(
+            "the repository at {} has no remote; arc reads the main branch from one and pushes \
+             task branches to it (add one, for example `origin`)",
+            dir.display()
+        )),
+        [only] => Ok((*only).to_owned()),
+        several => Err(format!(
+            "the repository at {} has no `origin` remote and more than one other remote ({}); \
+             arc reads the main branch from one and pushes task branches to it, so add an \
+             `origin` remote or keep only the one it should use",
+            dir.display(),
+            several.join(", ")
+        )),
+    }
+}
+
 /// The branch a task starts from: the remote's own HEAD (`<remote>/HEAD`) when it is known,
 /// else the checked-out branch, else `main`.
 pub(crate) fn main_branch(dir: &Path, remote: &str) -> String {

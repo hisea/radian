@@ -1666,3 +1666,35 @@ identical.
 | TK0237-M4 | `IntegrationMethod` accepts a value this build does not run (`command`, `pr`) | `store::config::tests::integration_method_and_style_are_closed_sets` | ✅ 1 failed |
 | TK0237-M5 | `IntegrationRun::run` skips the missing-target check and lets the fetch fail as a git error | `review::a_target_branch_missing_on_the_remote_fails_the_integration` (the merge returned an error instead of `review.rework_pending`) | ✅ 1 failed |
 | TK0237-M6 | `read::remote_target_base` takes its merge base from `[repository] main_branch` instead of `Config::target_branch()` | `read::a_target_branch_ahead_of_main_is_the_task_diff_base` (the diff listed `release.txt`, a target-branch commit, as the task's change) | ✅ 1 failed |
+
+## TK0238: `[hooks]` and the `after_merge` point (2026-10-29, branch `work/TK0238-hooks-after-merge`)
+
+`finish_integration` records `after_merge` and `merged_sha` in the same write that moves the
+task to `done.merged`; the holder of `runner.lock` runs every pending point first in a pass,
+and `radian arc merge` runs it when it can take the lock without waiting. Each point is an
+ordered command array, a failing command is one `warning:` line and the next still runs, and a
+point is cleared only after its commands ran. Each mutation was applied by hand, the `radian`
+binary was rebuilt with `cargo build -p radian-tui --bin radian` where the test drives the CLI,
+the tests ran with `cargo nextest run -p radian-arc --locked --profile sandbox` (narrowed to
+`--test hooks` or `--lib` with `-E`), and the file was restored from `.radian/mut/` with `cp`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0238-M1 | `finish_integration` moves the task to `done.merged` without recording `after_merge` or `merged_sha` | `hooks::the_default_after_merge_removes_the_branches_and_the_worktree_and_passes_every_variable` (the remote branch stayed) | ✅ 1 failed |
+| TK0238-M2 | `run_point` clears the pending point before its commands run | `hooks::a_hook_killed_mid_run_is_run_again_on_the_next_pass` (the killed pass left no pending point, so the next pass ran nothing) | ✅ 1 failed |
+| TK0238-M3 | `run_point` stops the array at the first failing command (`break`) | `hooks::a_failing_hook_command_warns_and_the_next_command_runs` (the second command never ran) | ✅ 1 failed |
+| TK0238-M4 | the CLI `merge` runs its hooks even when another process holds `runner.lock` | `hooks::the_cli_leaves_the_hook_pending_while_a_loop_holds_runner_lock` (the CLI cleared the point the loop should have run) | ✅ 1 failed |
+| TK0238-M5 | the default `after_merge` lines use the literal `origin` instead of the configured remote | `store::config::tests::the_default_hooks_name_the_configured_remote` | ✅ 1 failed |
+| TK0238-M6 | `Hooks::unbuilt` accepts every unbuilt point (`None`) | `store::config::tests::the_hooks_section_defaults_to_an_empty_after_merge_and_refuses_unbuilt_points` | ✅ 1 failed |
+| TK0238-M7 | `record_failure` leaves no record for a recorded failure (`write_finish` dropped from its body) | `run::a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass` (A stayed in `doing.running`, so the loop never settled: no reconcile freed the slot) | ✅ 1 failed |
+
+M7 covers the settle change in `crates/radian-arc/tests/run.rs`: the test now settles on B's printed
+start plus A's `todo.retry_wait` instead of catching B in `doing`, because a repeated pass inside
+the same `run` call can already reconcile a wrapper that exits at once. It ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test run -E
+'test(a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass)'` after
+`cargo build -p radian-tui --bin radian`, and the file was restored from `.radian/mut/work_mod.rs`
+(`cmp` identical). After the settle change the whole `run` binary passed 79/79 in each of three
+runs and in one run under load (alongside `cargo nextest run -p radian-arc -E 'not binary(run)'`,
+which passed 625/625), the same `--profile sandbox`, the `radian` binary rebuilt first.

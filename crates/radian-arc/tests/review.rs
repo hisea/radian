@@ -1119,10 +1119,11 @@ fn reverify_refuses_a_task_that_never_reached_review() {
 
 // ---- merge ---------------------------------------------------------------------------
 
-/// Main unchanged: the candidate is `head_sha`; the remote main becomes it, the task is
-/// `done.merged`, and its worktree is gone.
+/// Main unchanged: the candidate is `head_sha`; the remote main becomes it, and the task is
+/// `done.merged`. The worktree stays: arc itself removes nothing, and this merge path runs no
+/// hook.
 #[test]
-fn merge_with_main_unchanged_pushes_the_head_and_removes_the_worktree() {
+fn merge_with_main_unchanged_pushes_the_head_and_leaves_the_worktree_to_the_hooks() {
     let fixture = Fixture::new("merge-unchanged");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
@@ -1146,7 +1147,16 @@ fn merge_with_main_unchanged_pushes_the_head_and_removes_the_worktree() {
         Some(head.clone()),
         "the task branch stays on the remote"
     );
-    assert!(!worktree.exists(), "the worktree was removed");
+    assert!(
+        worktree.exists(),
+        "no hard-coded removal: the worktree is the hook's job"
+    );
+    let stored = fixture
+        .store
+        .load_task(&fixture.task)
+        .expect("the task reads");
+    assert_eq!(stored.item.pending_hooks, vec!["after_merge".to_owned()]);
+    assert_eq!(stored.item.merged_sha.as_deref(), Some(head.as_str()));
     let human = fixture.verdict(&fixture.attempt_label(), Stage::Human);
     assert!(human.is_pass());
     assert_eq!(human.sha, head);

@@ -31,6 +31,7 @@ pub mod acp;
 pub mod attempt;
 pub mod gate;
 mod git;
+pub mod hooks;
 pub mod mcp;
 mod process;
 pub mod read;

@@ -396,6 +396,13 @@ pub struct TaskFile {
     /// collected by the plan's follow-up. Absent reads `false`, so a task merged before the
     /// field existed is never collected.
     pub followup_pending: bool,
+    /// The hook points a transition owes (ADR 0048 decisions 10 and 13). A point is added in
+    /// the same write that moves the task, and removed only after its commands ran, success
+    /// or failure. Absent reads empty, so a task written before hooks existed runs none.
+    pub pending_hooks: Vec<String>,
+    /// The sha the last merge pushed to the target branch, which the `after_merge` hook reads
+    /// as `ARC_MERGED_SHA`. Absent reads none.
+    pub merged_sha: Option<String>,
     /// Gate stages this brief adds to the profile's.
     pub extra_stages: Vec<String>,
     pub max_attempts: Option<u32>,
@@ -530,6 +537,8 @@ impl TaskFile {
             retry_count: 0,
             allow_noop,
             followup_pending: false,
+            pending_hooks: Vec::new(),
+            merged_sha: None,
             extra_stages,
             max_attempts: None,
             max_cost_usd: None,
@@ -587,6 +596,15 @@ impl TaskFile {
         }
         if self.followup_pending {
             out.push_str("followup_pending: true\n");
+        }
+        if !self.pending_hooks.is_empty() {
+            out.push_str(&frontmatter::list_field(
+                "pending_hooks",
+                &self.pending_hooks,
+            ));
+        }
+        if let Some(sha) = &self.merged_sha {
+            out.push_str(&format!("merged_sha: {}\n", frontmatter::scalar(sha)));
         }
         out.push_str(&frontmatter::list_field("extra_stages", &self.extra_stages));
         if let Some(limit) = self.max_attempts {
@@ -677,6 +695,16 @@ impl TaskFile {
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?;
         let followup_pending = fields.optional_bool("followup_pending")?.unwrap_or(false);
+        let pending_hooks = fields.optional_list("pending_hooks")?;
+        for point in &pending_hooks {
+            if !crate::hooks::valid_point(point) {
+                return Err(format!(
+                    "`pending_hooks` names `{point}`; points are {}",
+                    crate::hooks::HOOK_POINTS.join(", ")
+                ));
+            }
+        }
+        let merged_sha = fields.optional_string("merged_sha")?;
         let extra_stages = fields.optional_list("extra_stages")?;
         for stage in &extra_stages {
             if !STAGE_NAMES.contains(&stage.as_str()) {
@@ -723,6 +751,8 @@ impl TaskFile {
             retry_count,
             allow_noop,
             followup_pending,
+            pending_hooks,
+            merged_sha,
             extra_stages,
             max_attempts,
             max_cost_usd,
@@ -915,6 +945,8 @@ mod tests {
             retry_count: 1,
             allow_noop: Some(true),
             followup_pending: true,
+            pending_hooks: vec!["after_merge".to_owned()],
+            merged_sha: Some("e".repeat(40)),
             extra_stages: vec!["mutation".to_owned(), "review".to_owned()],
             max_attempts: Some(2),
             max_cost_usd: Some(1.5),
@@ -987,6 +1019,36 @@ mod tests {
         let task = sample_task();
         let text = task.to_text();
         assert_eq!(TaskFile::from_text(&text).unwrap(), task);
+    }
+
+    /// A file written before `pending_hooks` and `merged_sha` existed has neither field, reads
+    /// the documented defaults, and is written back without them.
+    #[test]
+    fn an_absent_pending_hook_record_reads_empty_and_stays_out_of_the_file() {
+        let mut task = sample_task();
+        task.pending_hooks = Vec::new();
+        task.merged_sha = None;
+        let text = task.to_text();
+        assert!(!text.contains("pending_hooks:"), "{text}");
+        assert!(!text.contains("merged_sha:"), "{text}");
+        let read = TaskFile::from_text(&text).expect("an older file reads");
+        assert!(read.pending_hooks.is_empty());
+        assert_eq!(read.merged_sha, None);
+        assert!(!read.to_text().contains("pending_hooks:"));
+    }
+
+    /// A hand-edited point outside the one list is refused by name.
+    #[test]
+    fn an_unknown_pending_hook_is_refused_by_name() {
+        let text = sample_task().to_text().replace(
+            "pending_hooks:\n  - after_merge",
+            "pending_hooks:\n  - after_nothing",
+        );
+        let error = TaskFile::from_text(&text).expect_err("an unknown point must fail");
+        assert!(error.contains("after_nothing"), "{error}");
+        for point in crate::hooks::HOOK_POINTS {
+            assert!(error.contains(point), "the error lists `{point}`: {error}");
+        }
     }
 
     /// A file written before `total_cost_usd` existed has no field and reads its `cost_usd`

@@ -8,7 +8,7 @@ This page covers the files arc keeps; the commands are in [`arc`](index.md), the
 
 ## `config.toml`
 
-`init` writes `config.toml` and every other subcommand reads it.
+`init` writes `config.toml`, and it reads an existing one for the remote it names; every other subcommand reads it.
 Unknown keys are refused by name, and `schema_version` must be `1`.
 A key you leave out takes its default.
 
@@ -58,6 +58,8 @@ A key you leave out takes its default.
 | `integration.target_branch` | string | not set: `repository.main_branch` | A branch name | The branch integration fetches, builds the candidate on, and pushes to, and the branch a first attempt starts from (`merge-main` merges it). Unset, it is [`repository.main_branch`](#configtoml). Takes effect at the next attempt and the next integration run. |
 | `integration.method` | string | `"push"` | `push`, `command`, `pr` | How the candidate reaches the target branch. This build runs only `push`: it pushes the candidate to the target branch without force. `command` and `pr` are decided but not built yet; the file is refused with a message saying so. Takes effect at the next integration run. |
 | `integration.style` | string | `"merge"` | `merge`, `squash`, `rebase` | How the candidate commit is built. This build runs only `merge`: a merge commit, never a rebase. `squash` and `rebase` are decided but not built yet; the file is refused with a message saying so. Takes effect at the next integration run. |
+| `hooks.after_merge` | array of strings | `[]` (but `init` writes the three default lines named in [`arc`](index.md#hooks)) | Shell command lines | The commands run in the repository root after a task reaches `done.merged`, in order. A failing command logs one `warning:` line and the next still runs; the merge stands. The commands are at-least-once, so they must be safe to run twice, and they receive the variables in [Hooks](index.md#hooks). They run with `gate.command_timeout_secs` as the timeout and write `runs/<task>/hooks/after_merge-NN.log`. Takes effect when a pending hook runs, so a change between the merge and the run is used. |
+| `hooks.after_fail`, `hooks.after_rework`, `hooks.after_awaiting_human`, `hooks.after_proposed` | array of strings | not set | Shell command lines | Decided but not built yet: a file that sets any of them is refused with a message naming the point, and `after_merge` is the only point this build runs. |
 
 `gate.profiles.<name>` above is written out as `gate.profiles.default` in the file `init` writes.
 A stage may be listed once per profile: a profile that lists a stage twice, or that lists `integration`, is refused by name.
@@ -177,6 +179,8 @@ A cancelled plan takes no change record: it is final.
 | `retry_count` | integer | no | `0` or more; how many retries arc started since the task's last lead or review rework; `0` when absent. The lead's brief and the review rework set it back to `0`; a conflict rework keeps it, and `max_attempts` counts it. |
 | `allow_noop` | boolean | no | `true`, `false`; absent uses [`flows.<name>.allow_noop`](#configtoml), and `false` for the implicit `default` flow of a file without `[flows]`. An explicit `false` is the task's own and does not fall back. |
 | `followup_pending` | boolean | no | `true`, `false`; `false` when absent. arc writes `true` when the task reaches `done.merged` on any merge path, while [`gate.review.propose_followups`](files.md#configtoml) is `true` and the task is not itself a follow-up (see [The review's follow-up](gate.md#the-reviews-follow-up)). Only a merged task that carries it is collected, and only once: a task merged before the field existed, or merged while the switch was `false`, has no field and is never collected. An outside change to it is refused by `adopt`, like the other fields only arc sets. |
+| `pending_hooks` | list of strings | no | Hook point names (`after_merge`, `after_fail`, `after_rework`, `after_awaiting_human`, `after_proposed`); `[]` when absent. The point a transition owes; the same write that moves the task adds it, and it is removed only after the point's commands ran, success or failure. A file from before the field reads as `[]` and runs no hook. An outside change to it is refused by `adopt`, like the other fields only arc sets. |
+| `merged_sha` | string | no | The sha the last merge pushed to the target branch; absent when the task did not merge. The `after_merge` hook reads it as `ARC_MERGED_SHA`. An outside change to it is refused by `adopt`, like the other fields only arc sets. |
 | `extra_stages` | list of strings | yes | gate stages added to the profile (`[]` when there are none) |
 | `max_attempts` | integer | no | 1 or more; overrides `limits.max_attempts` for this task |
 | `max_cost_usd` | number | no | 0 or more, US dollars; overrides the plan limit |
@@ -221,7 +225,7 @@ A task leaves `doing` for `review.verifying` when a pushed attempt ends.
 | `review.awaiting_human` | `review.rework_pending` | `radian arc reject --note <text>`: the note is recorded. |
 | `review.integrating` | `review.ready_to_merge` | The integration stage passed against the current target branch; its `base_sha` and `candidate_sha` are in the integration verdict. |
 | `review.integrating` | `review.rework_pending` | A conflict, or a failing key command. |
-| `review.ready_to_merge` | `done.merged` | The target branch is still the integration `base_sha`; the candidate was pushed to it and contains `verified_sha`; the worktree is removed. |
+| `review.ready_to_merge` | `done.merged` | The target branch is still the integration `base_sha`; the candidate was pushed to it and contains `verified_sha`; the write records the `after_merge` hook (and `merged_sha`) in the task. |
 | `review.ready_to_merge` | `review.integrating` | The target branch moved after integration, or the push was rejected as non-fast-forward: integrate again. |
 | `review.awaiting_human` | `review.verifying` | The remote `work/<task>` is no longer `verified_sha`, or the verdict set no longer matches the recorded digest: every verdict and the approval of the old commit are invalid. |
 | `review.rework_pending`, `review.awaiting_human` | `review.verifying` | `radian arc reverify`, or `radian arc run` reverifying a `commands` or integration command failure by itself once the target branch moved: a new attempt is claimed without a worker; its verdicts are its own. |
@@ -252,6 +256,7 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/auto_reverify.json` | The `(head_sha, remote target branch)` pairs a scheduling pass already re-verified for the task, and the text of the last `limits.max_auto_reverify` stop. |
 | `runs/<task>/conflict_rework.json` | How many conflict reworks arc has written for the task in a row. The lead's rework and an attempt that does not end in a conflict set it back to `0`. |
 | `runs/<task>/review_cost.json` | The attempt whose `review` stage cost arc already added to the task's counters, with the `cost_after` and `total_after` counters that charge produced. A pass that dies between the charge and the state move therefore neither loses nor doubles the review: an application whose task counters do not carry the recorded charge adds it again. |
+| `runs/<task>/hooks/<point>-NN.log` | One hook command's stdout and stderr, where `NN` is the command's position in the point's list from 1 (`after_merge-01.log`). A point with `[]`, or one whose commands never started, has no file. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). |
 | `runs/<task>/attempts/<attempt id>/profile.json` | The gate profile that attempt's verification ran under: its name, stages, `before_attempt` and `commands`. A merge of that attempt reads it, so a flow removed or a [`gate_profile`](#configtoml) changed after the gate ran does not change how its verdicts are approved and integrated. Its old `key_commands` still reads, but integration uses the current [`integration.key_commands`](#configtoml), never it. A verdict written before the file existed leaves it absent, and the merge resolves the flow's profile then. |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
