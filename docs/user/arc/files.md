@@ -8,7 +8,7 @@ This page covers the files arc keeps; the commands are in [`arc`](index.md), the
 
 ## `config.toml`
 
-`init` writes `config.toml` and every other subcommand reads it.
+`init` writes `config.toml`, and it reads an existing one for the remote it names; every other subcommand reads it.
 Unknown keys are refused by name, and `schema_version` must be `1`.
 A key you leave out takes its default.
 
