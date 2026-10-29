@@ -385,11 +385,11 @@ v0 does not have: a resident daemon (`radian arc serve` is a loop a person or th
 
 `radian arc init` runs in the repository. It:
 
-- finds the repository root, the `origin` URL, and the main branch, and writes `config.toml`;
+- finds the repository root, the remote, and the main branch, and writes `config.toml`; the remote is the `[repository] remote` of a `config.toml` that already exists, else `origin` when the repository has it, else the repository's only remote (several remotes and no `origin` are refused, naming each one), so a repository whose remote is not `origin` initializes and records that remote;
 - writes `worker-brief.md` with a short generic default when it does not exist, and never overwrites an existing file;
 - creates the layout of decision 5;
 - adds the arc paths to `.git/info/exclude` (a local file: `init` never changes a committed `.gitignore`): always `ledger/`, `runs/`, `attempts/`, the two locks, `worktrees/`, and `worker-brief.md`; also `config.toml`, `plans/`, and `tasks/` unless `--track` is given;
-- checks the requirements: a stored provider credential (`radian login`), a working push to `origin`, and a working `workspace`-tier sandbox (bubblewrap on Linux); the reachability and dry-run push checks are git calls that talk to the remote, so `[limits] git_remote_timeout_secs` bounds them and a timed-out check is reported like a failed one;
+- checks the requirements: a stored provider credential (`radian login`), a working push to that remote, and a working `workspace`-tier sandbox (bubblewrap on Linux); the reachability and dry-run push checks are git calls that talk to the remote, so `[limits] git_remote_timeout_secs` bounds them and a timed-out check is reported like a failed one;
 - prints the command that registers `radian arc mcp` with the lead. It does not change the lead's configuration.
 
 The gate commands in `config.toml` are empty or the default profile. The owner writes them.
