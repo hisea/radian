@@ -586,7 +586,7 @@ impl LocalSession {
         // its result never delivered, and no new one starts. Every host reaches its end here
         // — the TUI exiting, `/new` opening the next session, and `exec` finishing (a `-p`
         // run does not wait for a hook) — so this is the one place the kill belongs.
-        self.command_hooks.end_session();
+        self.command_hooks.end_session().await;
         let done = self.driver.done.lock().unwrap().take();
         match done {
             Some(done) => done

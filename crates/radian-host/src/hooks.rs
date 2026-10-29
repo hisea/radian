@@ -47,11 +47,14 @@
 //! running job (no trigger while any is in flight). Their lifecycle (ADR 0045 §5): a hook is
 //! identified by its event plus its `command` and `args`, and a new run of a hook whose
 //! earlier run is still running kills that run's process group (it delivers nothing and its
-//! record says `cancelled`); at most [`MAX_ASYNC_HOOKS`] run per session, and a run over the
-//! cap does not start (one warning, a `failed to start` record); a cancelled turn leaves
+//! record says `cancelled`); at most [`MAX_ASYNC_HOOKS`] processes run per session (a run
+//! whose process exited while its result is still delivering holds no slot), and a run over
+//! the cap does not start (one warning, a `failed to start` record); a cancelled turn leaves
 //! running async hooks alone; the session's end ([`CommandHooks::end_session`], called when
 //! the driver is joined: the TUI exiting, `/new`, an `exec` run ending) kills every running
-//! one and delivers nothing, and `exec -p` never waits for them.
+//! one and delivers nothing, and `exec -p` never waits for them. The end is one critical
+//! section with delivery: a result either finishes its inbox enqueue first or finds the
+//! session ended, and nothing reaches the old session after the end returns.
 //!
 //! Two layers, one chain (ADR 0045 slice B): the project hooks
 //! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
@@ -422,6 +425,13 @@ pub struct CommandHooks {
     /// The session ended (its driver is joined): every running async hook was killed, its
     /// result is never delivered, and no new one starts (ADR 0045 §5).
     async_ended: Arc<AtomicBool>,
+    /// Serializes async-result delivery against the session end (ADR 0045 §5). A delivery
+    /// holds it from the `async_ended` check through the inbox enqueue, and
+    /// [`CommandHooks::end_session`] holds it while it sets the flag and drains the registry:
+    /// a result cannot pass the check and then enqueue after the end began, and the end does
+    /// not return while a delivery is still enqueuing, so nothing reaches the old session
+    /// afterwards.
+    deliver_gate: Arc<tokio::sync::Mutex<()>>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
@@ -562,6 +572,7 @@ impl CommandHooks {
             async_signal: Arc::new(Notify::new()),
             async_seq: Arc::new(AtomicU64::new(0)),
             async_ended: Arc::new(AtomicBool::new(false)),
+            deliver_gate: Arc::new(tokio::sync::Mutex::new(())),
             warn,
             wake,
             intent_stop_warn,
@@ -703,7 +714,13 @@ impl CommandHooks {
     /// Idempotent. The host calls this when the session's driver is joined
     /// ([`crate::LocalSession::join`]): the TUI exiting, `/new`, and the end of an `exec`
     /// run all land there, and `exec -p` never waits for a hook.
-    pub fn end_session(&self) {
+    ///
+    /// The delivery gate is taken **before** the flag is set: a delivery either finishes its
+    /// enqueue first (it belongs to this session and is not retracted) or, from the flag on,
+    /// finds the session ended and enqueues nothing. So when this returns, no async result
+    /// can still reach the inbox.
+    pub async fn end_session(&self) {
+        let _delivery = self.deliver_gate.lock().await;
         self.async_ended.store(true, Ordering::SeqCst);
         let mut running = self
             .async_running
@@ -1321,7 +1338,14 @@ impl CommandHooks {
         });
         // THE PER-SESSION CAP (ADR 0045 §5): the run that would be the ninth does not start.
         // It runs after the supersede above, so replacing the same hook never counts twice.
-        if running.len() >= MAX_ASYNC_HOOKS {
+        // The count is of running **processes**, not of registered entries: a run whose
+        // process already exited but whose result is still delivering is not a process and
+        // holds no slot (its entry stays only so the supersede race can see it).
+        let processes = running
+            .iter()
+            .filter(|run| !run.handle.exited.load(Ordering::SeqCst))
+            .count();
+        if processes >= MAX_ASYNC_HOOKS {
             drop(running);
             (self.warn)(&format!(
                 "the {event} async hook did not start: {MAX_ASYNC_HOOKS} async hooks are \
@@ -1408,6 +1432,10 @@ impl CommandHooks {
         event: &str,
         output: Result<ProcOutput, HookError>,
     ) {
+        // The check and the inbox enqueue are one critical section (ADR 0045 §5):
+        // `end_session` takes the same gate before it sets `async_ended`, so a result cannot
+        // pass the check and then append itself to the old session after the end began.
+        let _delivery = self.deliver_gate.lock().await;
         if self.async_ended.load(Ordering::SeqCst) {
             // The session is over: the result belongs to a session nobody is in.
             return;
@@ -5987,7 +6015,7 @@ mod tests {
             "both runs are listed while one delivers: {ids:?}"
         );
         assert!(ids.contains(&first_id));
-        fixture.hooks.end_session();
+        fixture.hooks.end_session().await;
     }
 
     /// Edge case 4, end to end: with the first run's result already in the inbox (its
@@ -6088,7 +6116,7 @@ mod tests {
         wait_gone(first, "the superseded shell").await;
         wait_gone(child, "the superseded hook's grandchild").await;
         // The second run sleeps 30 s: end the session so the cleanup is exercised, not leaked.
-        fixture.hooks.end_session();
+        fixture.hooks.end_session().await;
         drain_async(&fixture).await;
     }
 
@@ -6109,7 +6137,7 @@ mod tests {
         after_patch(&fixture, "one.rs").await;
         let pid = wait_for_pids(&pids, 1).await[0];
         assert_eq!(fixture.hooks.async_hooks_running(), 1);
-        fixture.hooks.end_session();
+        fixture.hooks.end_session().await;
         assert_eq!(
             fixture.hooks.async_hooks_running(),
             0,
@@ -6133,6 +6161,141 @@ mod tests {
             "no run after the end"
         );
         assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 1);
+    }
+
+    /// Rework (cap): the cap counts running hook processes, not registered entries. Eight
+    /// runs whose processes have already exited stay listed while their results are
+    /// delivered, but they hold no process, so a ninth distinct hook still starts. Counting
+    /// registered entries rejects it as the ninth.
+    #[tokio::test]
+    async fn the_cap_counts_running_processes_not_delivering_results() {
+        let fixture = plain(&post_hooks(Vec::new()));
+        for n in 0..MAX_ASYNC_HOOKS {
+            let hook = async_hook(&format!("true # {n}"));
+            let (_, handle) = fixture
+                .hooks
+                .begin_async_run(&hook, "PostToolUse", Some("patch"))
+                .unwrap_or_else(|| panic!("run {n} starts"));
+            // The process has exited; the result is still waiting to be delivered.
+            handle.exited.store(true, Ordering::SeqCst);
+        }
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            MAX_ASYNC_HOOKS,
+            "eight delivering entries are still listed"
+        );
+        let ninth = async_hook("true # ninth");
+        assert!(
+            fixture
+                .hooks
+                .begin_async_run(&ninth, "PostToolUse", Some("patch"))
+                .is_some(),
+            "no hook process is running, so the ninth hook starts"
+        );
+        assert!(
+            warned(&fixture.warnings).is_empty(),
+            "no cap warning: {:?}",
+            warned(&fixture.warnings)
+        );
+        fixture.hooks.end_session().await;
+    }
+
+    /// Rework (session end): the end is an atomic guard around the inbox enqueue, not a check
+    /// before it. A delivery that is inside the enqueue when the end begins finishes before
+    /// `end_session` returns, so nothing can append to the old session afterwards. With the
+    /// check outside the guard, `end_session` returns while the delivery is still blocked in
+    /// the journal, and its text lands after the end.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_session_end_waits_for_a_delivery_already_enqueueing() {
+        use radian_core::{JournalRecord, TranscriptJournal as _};
+        use radian_session::{SessionCreatedData, SessionJournal};
+
+        let root = TempRoot::new("async-end-guard");
+        let journal = Arc::new(
+            SessionJournal::create(
+                root.dir.join("s.jsonl"),
+                "sid",
+                SessionCreatedData::new(
+                    "/work/example",
+                    serde_json::json!({"provider": "example", "model": "m-1"}),
+                ),
+            )
+            .unwrap(),
+        );
+        let inbox = Inbox::durable(64, Arc::clone(&journal));
+        let (warn, warnings) = warnings_collector();
+        let (wake, wake_notices) = warnings_collector();
+        let (intent, intent_notices) = warnings_collector();
+        let (hook_stop, hook_stop_notices) = warnings_collector();
+        let config = post_hooks(vec![async_hook(
+            r#"printf '%s' '{"hookSpecificOutput":{"additionalContext":"late"}}'"#,
+        )]);
+        let hooks = CommandHooks::new(
+            &config,
+            &HooksConfig::default(),
+            &root.ws,
+            "test-session",
+            SandboxSlot::empty(),
+            &inbox,
+            &tokio::runtime::Handle::current(),
+            warn,
+            wake,
+            intent,
+            hook_stop,
+        );
+        let fixture = Fixture {
+            _root: root,
+            hooks,
+            warnings,
+            wake_notices,
+            intent_notices,
+            hook_stop_notices,
+            inbox,
+        };
+
+        // An open replacement segment holds the delivery inside the inbox's journal append,
+        // so it is provably mid-enqueue when the session end begins.
+        journal
+            .append(JournalRecord::TranscriptReplaced {
+                revision: 1,
+                len: 0,
+            })
+            .await
+            .unwrap();
+        after_patch(&fixture, "one.rs").await;
+        journal.wait_for_gate_waiter().await;
+
+        let end = {
+            let hooks = fixture.hooks.clone();
+            tokio::spawn(async move { hooks.end_session().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !end.is_finished(),
+            "the session end must wait for the delivery that is already enqueueing"
+        );
+
+        // Close the segment: the delivery's enqueue finishes, then the end sets its flag
+        // and returns. Nothing can append after it.
+        journal
+            .append(JournalRecord::TranscriptReplacementCommitted {
+                revision: 1,
+                len: 0,
+            })
+            .await
+            .unwrap();
+        end.await.expect("the session-end task did not panic");
+        let entry = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the delivery completed before the end returned");
+        assert_eq!(entry.message.text(), "[PostToolUse hook] late");
+        assert!(
+            fixture.inbox.claim_next_step().await.is_none(),
+            "nothing is delivered after the end"
+        );
     }
 
     /// Edge case 8: a cancelled turn leaves a running async hook alone — it belongs to an

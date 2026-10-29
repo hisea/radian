@@ -1794,3 +1794,17 @@ backup under `.radian/mut/` (`cmp` empty).
 | TK0235-M7 | `LocalSession::join` no longer calls `end_session`, so no host end path kills them | ✅ 1 failed (rc=100) | `pty_new_kills_a_running_async_hook` (the hook survived `/new`) |
 
 7/7 caught, no equivalent mutation.
+
+## TK0235 (rework): the cap counts processes, the session end guards the enqueue (2026-10-29, branch `work/TK0235-async-hook-lifecycle`)
+
+ADR 0045 §5. Each mutation was applied in place to `crates/radian-host/src/hooks.rs`, the
+named test ran with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and the source was restored from a backup under
+`.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0235-M8 | the session-end guard is dropped again: `end_session` sets `async_ended` without taking `deliver_gate`, and `deliver_async` checks the flag without it | ✅ 1 failed (rc=100) | `hooks::tests::the_session_end_waits_for_a_delivery_already_enqueueing` (the end returned while the delivery was still blocked in the journal) |
+| TK0235-M9 | the cap counts registered entries again (`running.len()`), including runs whose process already exited | ✅ 1 failed (rc=100) | `hooks::tests::the_cap_counts_running_processes_not_delivering_results` (the ninth hook was refused with no hook process running) |
+
+2/2 caught, no equivalent mutation.

@@ -136,11 +136,14 @@ still running, radian kills the earlier run's process group: it delivers
 nothing, and its Recent runs entry says `cancelled`. A run whose process has
 already exited is delivering its result and is not superseded. At most 8 async
 hook processes run at once: a run over the cap does not start, shows one
-warning line, and its Recent runs entry says `failed to start`. A cancelled
-turn leaves running async hooks alone. When the session ends — you quit,
+warning line, and its Recent runs entry says `failed to start`. Only running
+processes count: a run whose process already exited while its result waits to
+be delivered does not hold one of the 8 places. A cancelled turn leaves
+running async hooks alone. When the session ends — you quit,
 `/new` opens the next session, or a `radian exec` run ends — every running
 async hook's process group is killed and nothing more is delivered; `exec -p`
-never waits for one.
+never waits for one. A result whose delivery has already begun when the
+session ends finishes before the end returns, and nothing arrives afterwards.
 
 Its result is delivered when the process exits. An async hook cannot change a
 call or a turn: a returned `permissionDecision`, `updatedInput`,
@@ -410,7 +413,7 @@ first line; with `args` it is the program only. `<end>` is exactly one of:
 | `status <code>` | The process exited with that code. |
 | `timed out` | The run passed its `timeout` and its process group was killed. Its milliseconds are at least the timeout. |
 | `cancelled` | The run was cancelled: the process ended on a signal (for example `kill`), radian killed its process group because the same hook fired again or the session ended, or radian could not finish waiting on it. |
-| `failed to start` | The process never started: the command was not found, the sandbox could not build it, or the session already has 8 async hooks running. |
+| `failed to start` | The process never started: the command was not found, the sandbox could not build it, or the session already has 8 async hook processes running. |
 
 Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
 least `1ms`.
