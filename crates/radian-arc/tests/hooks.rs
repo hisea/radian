@@ -649,6 +649,32 @@ fn after_awaiting_human_fires_once_with_its_point_and_state() {
     assert!(pending(&store, &task).is_empty(), "the record is cleared");
 }
 
+/// A point that runs after the task moved on still reports the phase it fired for: the
+/// `after_awaiting_human` hook runs while the task is already `review.rework_pending`.
+#[test]
+fn a_hook_that_runs_after_the_task_moved_reports_the_phase_it_fired_for() {
+    let (repo, store, plan) = setup("hooks-moved");
+    let (task, _head, _worktree) = prepare_task(&repo, &store, &plan, "feature");
+    set_hooks(&repo, &[("after_awaiting_human", &[HOOK_LINE])]);
+    review::reject(&store, &task, "the diff does not match the brief").expect("reject runs");
+    assert_eq!(
+        state(&store, &task),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert_eq!(
+        pending(&store, &task),
+        vec!["after_awaiting_human".to_owned(), "after_rework".to_owned()]
+    );
+
+    let run = repo.radian(&["arc", "run"]);
+    assert_eq!(run.code, 0, "run: {}\n{}", run.stderr, run.stdout);
+    assert_eq!(
+        hook_lines(&repo),
+        vec!["after_awaiting_human review.awaiting_human"],
+        "ARC_STATE is the phase the point fired for, not the task's later phase"
+    );
+}
+
 /// A task added through the MCP `add_task` tool records `after_proposed` but runs nothing; the
 /// next serve pass runs it once, with `todo.proposed`.
 #[test]

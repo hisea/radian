@@ -641,7 +641,7 @@ Each point is an array of shell command lines, default `[]`:
 | `ARC_WORKTREE` | The task's worktree, absolute: `.radian/arc/worktrees/<task>`. |
 | `ARC_TARGET_BRANCH` | The branch the merge targeted: [`integration.target_branch`](files.md#configtoml), else [`repository.main_branch`](files.md#configtoml). |
 | `ARC_MERGED_SHA` | The sha the merge pushed to the target branch. `after_merge` only. |
-| `ARC_STATE` | The task's state and phase as `<state>.<phase>` when the command runs. |
+| `ARC_STATE` | The state and phase the point fires for: `done.merged`, a `failed.*` phase, `review.rework_pending`, `review.awaiting_human`, or `todo.proposed`. |
 | `ARC_HOOK` | The point name. |
 
 **A phone notification.** This `after_awaiting_human` command sends only the repository name, task id and phase; it carries no transcript, command text, model, usage or cost:

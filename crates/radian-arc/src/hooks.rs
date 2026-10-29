@@ -144,7 +144,8 @@ fn run_point(
 }
 
 /// The environment one point receives (decision 10). `ARC_MERGED_SHA` belongs to
-/// [`AFTER_MERGE`] only.
+/// [`AFTER_MERGE`] only, and `ARC_STATE` is the state and phase the point fires for, not the
+/// task's later state when a pending point runs after another move.
 fn env_for(
     store: &Store,
     config: &Config,
@@ -160,10 +161,7 @@ fn env_for(
         ("ARC_BRANCH", format!("work/{}", task.id)),
         ("ARC_WORKTREE", worktree.display().to_string()),
         ("ARC_TARGET_BRANCH", config.target_branch().to_owned()),
-        (
-            "ARC_STATE",
-            format!("{}.{}", task.state.as_str(), task.phase),
-        ),
+        ("ARC_STATE", point_state(task, point)),
         ("ARC_HOOK", point.to_owned()),
     ];
     if point == AFTER_MERGE
@@ -172,6 +170,22 @@ fn env_for(
         env.push(("ARC_MERGED_SHA", sha.clone()));
     }
     env
+}
+
+/// The `<state>.<phase>` the point fires for. `after_fail` keeps the failed phase the task is
+/// in (a task that moved `failed.exhausted` → `failed.cancelled` before the hook ran reports
+/// the latter); the other points name their own phase.
+fn point_state(task: &TaskFile, point: &str) -> String {
+    match point {
+        AFTER_MERGE => "done.merged".to_owned(),
+        AFTER_FAIL if task.state == crate::store::model::TaskState::Failed => {
+            format!("failed.{}", task.phase)
+        }
+        AFTER_REWORK => "review.rework_pending".to_owned(),
+        AFTER_AWAITING_HUMAN => "review.awaiting_human".to_owned(),
+        AFTER_PROPOSED => format!("todo.{}", crate::store::model::PROPOSED_PHASE),
+        _ => format!("{}.{}", task.state.as_str(), task.phase),
+    }
 }
 
 /// The point a task file may name, when it is one of [`HOOK_POINTS`]. The task reader uses this
