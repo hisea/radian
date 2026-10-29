@@ -130,3 +130,19 @@ source was restored from `.radian/mut/perm-hooks.rs` (`cmp` empty).
 | TK0232-M12 | the hook never runs (`permission_request.filter(\|_\| false)`), today's path on every ask | ✅ 2 failed (rc=100) | `command_hooks::an_exec_without_a_terminal_lets_the_permission_request_hook_run_the_call` and `command_hooks::an_exec_without_a_terminal_returns_the_permission_request_deny_message` |
 
 6/6 caught, no equivalent mutation.
+
+## TK0233: a `PermissionRequest` `updatedPermissions` session grant (2026-10-29, branch `work/TK0233-permission-request-session-grant`)
+
+ADR 0045 §2/§4. Each mutation was applied in place to
+`crates/radian-permissions/src/hooks.rs`, the named test ran with `cargo nextest run
+-p radian-permissions --locked --profile sandbox --no-fail-fast --test hooks -E
+'test(<name>)'`, and the source was restored from `.radian/mut/perm-hooks.rs` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0233-M1 | the hook's `session_grant` is dropped (`if session_grant && false`), so no grant is recorded | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_session_grant_covers_later_calls` |
+| TK0233-M2 | a hook grant needs a human turn too (`hook_granted && human`), so a `System` turn's grant never covers | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_grant_covers_a_non_human_turn` |
+| TK0233-M3 | the grant is recorded as the exact key instead of `session_grant_for`, so a `shell` prefix is lost | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_shell_grant_widens_to_the_prefix` |
+
+3/3 caught, no equivalent mutation.

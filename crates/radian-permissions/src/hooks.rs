@@ -76,6 +76,12 @@ pub struct PermissionHooks {
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
     grants: Mutex<HashSet<SessionGrant>>,
+    /// Session grants a `PermissionRequest` hook recorded with `updatedPermissions`
+    /// (ADR 0045 §4). They are kept apart from the human grants because a hook answers
+    /// asks on every turn source, including a non-human one (`exec -p`, a `Stop`
+    /// continuation, an arc worker), while a human grant still needs a human turn. A hook
+    /// grant answers only a question the rules already asked, so it widens nothing.
+    hook_grants: Mutex<HashSet<SessionGrant>>,
     /// The current turn's source, set by the host before each turn. `HookContext` has no
     /// source field, so the host supplies it; `None` is treated as non-human (fail safe).
     source: Mutex<Option<InputSource>>,
@@ -98,6 +104,7 @@ impl PermissionHooks {
             permission_request: RwLock::new(None),
             audit,
             grants: Mutex::new(HashSet::new()),
+            hook_grants: Mutex::new(HashSet::new()),
             source: Mutex::new(None),
             next_id: AtomicU64::new(0),
         }
@@ -444,16 +451,25 @@ impl PermissionHooks {
         // versa): the key carries the kind, so borrowing a narrower grant to leave is
         // impossible. A shell prefix grant covers a later command with the same prefix
         // ([`shell::session_grant_prefix`]) — never a compound, a wrapper, or a
-        // never-prefix command, which stay exact.
+        // never-prefix command, which stay exact. A `PermissionRequest` grant answers a
+        // script's question on every turn source, so it is checked without `human`.
         let human = self.turn_source() == Some(InputSource::User);
-        let granted = human
-            && session_grant_covers(
-                &self.grants.lock().unwrap(),
-                call,
-                &resource,
-                &workspace,
-                leaving_sandbox.is_some(),
-            );
+        let hook_granted = session_grant_covers(
+            &self.hook_grants.lock().unwrap(),
+            call,
+            &resource,
+            &workspace,
+            leaving_sandbox.is_some(),
+        );
+        let granted = hook_granted
+            || (human
+                && session_grant_covers(
+                    &self.grants.lock().unwrap(),
+                    call,
+                    &resource,
+                    &workspace,
+                    leaving_sandbox.is_some(),
+                ));
         if granted {
             self.record(
                 &request_id,
@@ -492,13 +508,27 @@ impl PermissionHooks {
             };
             match decision {
                 Ok(PermissionRequestDecision::NoDecision) => {}
-                Ok(PermissionRequestDecision::Allow) => {
+                Ok(PermissionRequestDecision::Allow { session_grant }) => {
+                    if session_grant {
+                        // Exactly what `AllowForSession` records: the exact key, or the
+                        // shell prefix, and never across the sandbox boundary.
+                        self.hook_grants.lock().unwrap().insert(session_grant_for(
+                            call,
+                            &resource,
+                            &workspace,
+                            leaving_sandbox.is_some(),
+                        ));
+                    }
                     self.record(
                         &request_id,
                         &call_id,
                         ResolvedDecision::Allow,
                         AuditApprover::User,
-                        Some("allowed by the PermissionRequest hook".into()),
+                        Some(if session_grant {
+                            "allowed for this session".into()
+                        } else {
+                            "allowed by the PermissionRequest hook".into()
+                        }),
                     );
                     return Ok(ToolDecision::Allow);
                 }
