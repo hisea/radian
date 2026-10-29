@@ -925,6 +925,11 @@ test ran alone with
 | TK0244-M1 | `max_grep_output_bytes: 16 << 10` → `32 << 10` (the old byte cap) | ✅ 1 failed (rc=100) | `grep_defaults_cut_the_output_at_16384_bytes_and_name_the_limit` (the note named the 32768-byte limit and the output passed 16384 B) |
 | TK0244-M2 | `default_grep_matches: 50` → `200` (the old match default) | ✅ 1 failed (rc=100) | `grep_defaults_cut_matches_at_fifty_and_name_the_cut` (60 match lines were returned instead of 50, and no truncation note appeared) |
 
+Both were re-run once each on the final code at `3770db7d5` and were still caught:
+`grep_defaults_cut_the_output_at_16384_bytes_and_name_the_limit` failed for M1 and
+`grep_defaults_cut_matches_at_fifty_and_name_the_cut` failed for M2, with each source restored
+from `.radian/provider.rs.orig` and confirmed byte-identical with `cmp` and `shasum -a 256`.
+
 The docs drift test's own failure was checked the same way: changing the per-file cap in
 `docs/user/tools.md` from 50 to 60 made `the_manual_names_the_grep_limits_from_the_code` fail
 with "tools.md names the 50 per-file cap"; the page was restored from `.radian/tools.md.orig`
