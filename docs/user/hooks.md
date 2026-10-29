@@ -178,7 +178,7 @@ The exit code decides.
 
 | Exit code | `PreToolUse` | `PostToolUse` | `Stop` |
 |---|---|---|---|
-| `0` | Continue. Stdout may carry JSON (below); empty stdout continues silently, and stdout that is not JSON warns and continues. | Continue. | Continue. |
+| `0` | Continue. Stdout may carry JSON (below); empty stdout continues silently, and stdout that is not JSON warns and continues. | Continue. Stdout may carry JSON (below). | Continue. Stdout may carry JSON (below). |
 | `2` | Deny: stderr (at most 2000 characters) becomes the reason. Empty stderr denies with a default message. | The tool already ran, so there is nothing to deny: stderr is fed back to the model with the result, and the result is marked as an error. | Ask for more: the reasons join into one message that opens another turn. Past the wake budget the turn still opens its message but does not wake: it waits visibly with a wake-budget notice instead. |
 | other, timeout, or signal | Hook error: the call is denied and the turn ends. | Hook error: the turn ends. | The turn ends with a warning. |
 
@@ -201,6 +201,51 @@ against the permission rules, and later hooks see the replaced input:
 ```json
 {"hookSpecificOutput": {"updatedInput": {"command": "echo safe"}}}
 ```
+
+`PostToolUse` and `Stop` also read these fields from their exit-0 JSON
+output. Empty stdout does nothing, and stdout that is not JSON warns once and
+changes nothing.
+
+`hookSpecificOutput.additionalContext` (string) adds feedback without
+failing. On `PostToolUse` it appends `[PostToolUse hook] <text>` to the result
+and does not mark it an error. On `Stop` it opens another turn through the
+same path as exit 2: it joins every other hook's exit 2 and the built-in
+validator in one message, counts one wake, and warns nothing.
+
+```json
+{"hookSpecificOutput": {"additionalContext": "formatted 3 files"}}
+```
+
+`decision: "block"` with `reason` (string) is the JSON form of exit 2:
+
+```json
+{"decision": "block", "reason": "the formatter failed"}
+```
+
+On `PostToolUse` it appends the reason and marks the result an error; on
+`Stop` it asks for another turn. When both `decision: "block"` and
+`additionalContext` are given, both texts enter the result or message, block
+first.
+
+`hookSpecificOutput.updatedToolOutput` (string, `PostToolUse` only) replaces
+the result's content with one text part. `is_error` and `error_code` do not
+change:
+
+```json
+{"hookSpecificOutput": {"updatedToolOutput": "the reformatted file"}}
+```
+
+The project layer replaces first, so a user-layer hook sees the replaced
+result in its `tool_response`. The replacement, not the tool's original text,
+is what the transcript and the journal record. A value that is not a string
+is a hook error.
+
+These three fields, like stderr, keep at most 2000 characters; longer text
+ends with `…[truncated]`.
+
+`permissionDecision` applies only to `PreToolUse`; on `PostToolUse` and
+`Stop` it is ignored with one warning line. `updatedInput` on `Stop` is
+ignored with one warning line too.
 
 ## Worked examples
 

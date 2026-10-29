@@ -10,15 +10,20 @@
 //!   `"allow"`/`"ask"` decisions are refused with a warning and treated as no decision —
 //!   a hook can only narrow what the permission rules already allowed (ADR 0012 P1).
 //!   `updatedInput` becomes [`ToolDecision::Rewrite`]: re-validated, hooks not re-run.
-//! - `PostToolUse` runs after each matching call's result, before it is committed. Exit 2
-//!   feeds the hook's stderr back to the model alongside the result; any other exit or a
-//!   timeout is a hook error and fails closed (the result is replaced with `hook_error`).
+//! - `PostToolUse` runs after each matching call's result, before it is committed. Exit 0 may
+//!   carry `hookSpecificOutput.additionalContext` (non-error feedback appended to the
+//!   result), `decision: "block"` with `reason` (the JSON form of exit 2: the feedback
+//!   rides along and the result is marked an error), and `hookSpecificOutput.updatedToolOutput`
+//!   (a string that replaces the result's content). Exit 2 feeds the hook's stderr back to the
+//!   model alongside the result; any other exit or a timeout is a hook error and fails closed
+//!   (the result is replaced with `hook_error`).
 //! - `Stop` runs once per completed turn (see [`Hooks::on_turn_end`]: only
 //!   [`RunStatus::Completed`] runs the hook; any other terminal status runs nothing).
 //!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
-//!   the inbox, at most a [`WakeGate`] window's worth of continuations; past the gate
-//!   it degrades to a marked `inject` (no wake) with the wake-budget notice, the same
-//!   degrade as the background-job notifier (ADR 0045 §2).
+//!   the inbox; `decision: "block"` and `hookSpecificOutput.additionalContext` join the same
+//!   chain. Continuations are limited to a [`WakeGate`] window's worth; past the gate they
+//!   degrade to a marked `inject` (no wake) with the wake-budget notice, the same degrade as
+//!   the background-job notifier (ADR 0045 §2).
 //!
 //! Two layers, one chain (ADR 0045 slice B): the project hooks
 //! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
@@ -61,9 +66,10 @@ use crate::intent_stop;
 use crate::wake_gate::WakeGate;
 use std::sync::Weak;
 
-/// How many characters of a hook's stderr enter the transcript (deny reasons, PostToolUse
-/// feedback, Stop continuations). Hooks are the user's own commands, but their output is
-/// model context, so it stays bounded.
+/// How many characters of a hook's feedback enter the transcript (deny reasons, PostToolUse
+/// feedback, `additionalContext`, `decision.reason`, `updatedToolOutput`, Stop
+/// continuations). Hooks are the user's own commands, but their output is model context, so
+/// it stays bounded.
 pub const REASON_CHAR_LIMIT: usize = 2000;
 
 /// How many validator-fired continuations may follow each other: the third consecutive
@@ -454,7 +460,11 @@ impl CommandHooks {
                     continue;
                 }
                 match self.execute(hook, &stdin, "Stop").await {
-                    Ok(output) if output.code == Some(0) => {}
+                    Ok(output) if output.code == Some(0) => {
+                        if let Some(parsed) = self.parsed_output(&output.stdout, "Stop") {
+                            reasons.extend(self.stop_output_reasons(parsed));
+                        }
+                    }
                     Ok(output) if output.code == Some(2) => {
                         let reason = short(&output.stderr);
                         reasons.push(if reason.trim().is_empty() {
@@ -885,6 +895,82 @@ impl CommandHooks {
         }
     }
 
+    /// Applies one exit-0 `PostToolUse` output to the result. An `updatedToolOutput` string
+    /// replaces the content first (one text part; `is_error` and `error_code` stay), then a
+    /// `decision: "block"` reason is appended as the error feedback, then
+    /// `additionalContext` as non-error feedback. A non-string `updatedToolOutput` is a hook
+    /// error (fail closed).
+    fn apply_post_output(
+        &self,
+        parsed: HookOutput,
+        result: &mut ToolResult,
+    ) -> Result<(), HookError> {
+        let specific = parsed.hookSpecificOutput.unwrap_or_default();
+        if specific.permissionDecision.is_some() {
+            (self.warn)(
+                "PostToolUse hook returned permissionDecision, which only PreToolUse uses; \
+                 ignoring it",
+            );
+        }
+        if let Some(updated) = specific.updatedToolOutput {
+            match updated {
+                serde_json::Value::String(text) => {
+                    result.content = vec![ContentPart::text(short(&text))];
+                }
+                _ => {
+                    return Err(HookError::new(
+                        "the PostToolUse hook returned a non-string updatedToolOutput",
+                    ));
+                }
+            }
+        }
+        if parsed.decision.as_deref() == Some("block") {
+            let reason = specific.reason.or(parsed.reason).unwrap_or_default();
+            let reason = if reason.trim().is_empty() {
+                "the PostToolUse hook reported an error with no message".to_owned()
+            } else {
+                short(&reason)
+            };
+            result
+                .content
+                .push(ContentPart::text(format!("[PostToolUse hook] {reason}")));
+            result.is_error = true;
+        }
+        if let Some(context) = specific.additionalContext {
+            result.content.push(ContentPart::text(format!(
+                "[PostToolUse hook] {}",
+                short(&context)
+            )));
+        }
+        Ok(())
+    }
+
+    /// The reasons one exit-0 `Stop` output contributes to the turn's single continuation:
+    /// `decision: "block"` first, then `additionalContext` (ADR 0045 §2). Fields only
+    /// `PreToolUse` uses warn once and are ignored.
+    fn stop_output_reasons(&self, parsed: HookOutput) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let specific = parsed.hookSpecificOutput.unwrap_or_default();
+        if specific.permissionDecision.is_some() || specific.updatedInput.is_some() {
+            (self.warn)(
+                "Stop hook returned permissionDecision or updatedInput, which only PreToolUse \
+                 uses; ignoring them",
+            );
+        }
+        if parsed.decision.as_deref() == Some("block") {
+            let reason = specific.reason.or(parsed.reason).unwrap_or_default();
+            reasons.push(if reason.trim().is_empty() {
+                "the Stop hook requested another turn".to_owned()
+            } else {
+                short(&reason)
+            });
+        }
+        if let Some(context) = specific.additionalContext {
+            reasons.push(short(&context));
+        }
+        reasons
+    }
+
     /// Parses an exit-0 stdout as JSON per Claude: empty output continues silently, garbage
     /// warns and continues (the hook exited successfully, so there is nothing to fail
     /// closed on).
@@ -926,6 +1012,8 @@ struct HookOutput {
     hookSpecificOutput: Option<HookSpecificOutput>,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    decision: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -937,6 +1025,10 @@ struct HookSpecificOutput {
     reason: Option<String>,
     #[serde(default)]
     updatedInput: Option<serde_json::Value>,
+    #[serde(default)]
+    additionalContext: Option<String>,
+    #[serde(default)]
+    updatedToolOutput: Option<serde_json::Value>,
 }
 
 /// Kills a timed-out hook's whole session group (`setsid` in `spawn_piped` put it in one).
@@ -1080,7 +1172,11 @@ impl Hooks for CommandHooks {
                 });
                 let output = self.execute(hook, &stdin, "PostToolUse").await?;
                 match output.code {
-                    Some(0) => {}
+                    Some(0) => {
+                        if let Some(parsed) = self.parsed_output(&output.stdout, "PostToolUse") {
+                            self.apply_post_output(parsed, result)?;
+                        }
+                    }
                     // The reason is fed back to the model with the result: the tool already
                     // ran, so there is nothing to deny — the feedback rides along instead.
                     Some(2) => {
@@ -1452,6 +1548,242 @@ mod tests {
             result.text().contains("lint-broke"),
             "the reason rides along: {}",
             result.text()
+        );
+    }
+
+    /// Edge case 1: exit-0 `additionalContext` rides back with the result and does **not**
+    /// mark it an error. Not reading stdout (the old PostToolUse behavior) leaves the result
+    /// as the tool wrote it and fails this.
+    #[tokio::test]
+    async fn post_tool_use_additional_context_feeds_back_without_an_error() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"additionalContext":"reformatted"}}'"#;
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(script)])],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert!(
+            !result.is_error,
+            "additionalContext is not an error signal: {:?}",
+            result
+        );
+        assert_eq!(
+            result.text(),
+            "patched[PostToolUse hook] reformatted",
+            "the feedback appends to the result"
+        );
+    }
+
+    /// Edge case 2: `decision: "block"` with a reason is the JSON form of exit 2: the same
+    /// result text and the same error mark. Ignoring the exit-0 object leaves the result
+    /// untouched and fails the equality.
+    #[tokio::test]
+    async fn post_tool_use_block_decision_matches_exit_2() {
+        let config = HooksConfig {
+            post_tool_use: vec![entry(
+                "patch",
+                vec![hook("printf '%s' 'lint-broke' >&2; exit 2")],
+            )],
+            ..HooksConfig::default()
+        };
+        let exit_2 = plain(&config);
+        let mut from_exit = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        exit_2
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut from_exit)
+            .await
+            .unwrap();
+
+        let script = r#"printf '%s' '{"decision":"block","reason":"lint-broke"}'"#;
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(script)])],
+            ..HooksConfig::default()
+        };
+        let block = plain(&config);
+        let mut from_block = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        block
+            .hooks
+            .after_tool_call(
+                &cx(),
+                &call("patch", serde_json::json!({})),
+                &mut from_block,
+            )
+            .await
+            .unwrap();
+
+        assert!(from_exit.is_error && from_block.is_error);
+        assert_eq!(
+            from_block.text(),
+            from_exit.text(),
+            "block and exit 2 carry the same feedback"
+        );
+    }
+
+    /// Edge case 3 (unit half): the project layer's `updatedToolOutput` replaces first, so
+    /// the user layer sees the replaced result on stdin and its own replacement wins.
+    /// Ignoring `updatedToolOutput` leaves the user's stdin and the final result at the
+    /// tool's original text and fails both.
+    #[tokio::test]
+    async fn the_user_hook_sees_the_project_replaced_result() {
+        let root = TempRoot::new("post-replace");
+        let stdin_path = root.dir.join("user-stdin.json");
+        let project = HooksConfig {
+            post_tool_use: vec![entry(
+                "patch",
+                vec![hook(
+                    r#"printf '%s' '{"hookSpecificOutput":{"updatedToolOutput":"from-project"}}'"#,
+                )],
+            )],
+            ..HooksConfig::default()
+        };
+        let user_script = format!(
+            "input=$(cat); printf '%s' \"$input\" > {}; \
+             printf '%s' '{{\"hookSpecificOutput\":{{\"updatedToolOutput\":\"from-user\"}}}}'",
+            stdin_path.display()
+        );
+        let user = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(&user_script)])],
+            ..HooksConfig::default()
+        };
+        let fixture = layered_with_root(root, &user, &project, SandboxSlot::empty());
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
+        let seen = stdin["tool_response"].to_string();
+        assert!(
+            seen.contains("from-project"),
+            "the user hook sees the project replacement: {seen}"
+        );
+        assert_eq!(
+            result.text(),
+            "from-user",
+            "the user layer's replacement is the final result"
+        );
+        assert!(
+            stdin["tool_response"]["is_error"] == serde_json::json!(false),
+            "the replacement keeps is_error: {stdin}"
+        );
+    }
+
+    /// Edge case 4: an `updatedToolOutput` that is not a string fails closed as a hook
+    /// error, like a non-zero exit. Treating it as text or ignoring it returns `Ok` here.
+    #[tokio::test]
+    async fn a_non_string_updated_tool_output_is_a_hook_error() {
+        for value in ["42", "{\"body\":\"no\"}"] {
+            let script = format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"updatedToolOutput":{value}}}}}'"#
+            );
+            let config = HooksConfig {
+                post_tool_use: vec![entry("patch", vec![hook(&script)])],
+                ..HooksConfig::default()
+            };
+            let fixture = plain(&config);
+            let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+            let error = fixture
+                .hooks
+                .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("updatedToolOutput"), "{error}");
+        }
+    }
+
+    /// Edge case 7: a 10,000-character `additionalContext` keeps 2,000 characters and the
+    /// existing truncation marker. Forwarding it whole fails the length and the marker.
+    #[tokio::test]
+    async fn a_long_additional_context_is_truncated() {
+        let long = "x".repeat(10_000);
+        let script =
+            format!(r#"printf '%s' '{{"hookSpecificOutput":{{"additionalContext":"{long}"}}}}'"#);
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(&script)])],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.text(),
+            format!(
+                "patched[PostToolUse hook] {}…[truncated]",
+                "x".repeat(REASON_CHAR_LIMIT)
+            )
+        );
+    }
+
+    /// Edge case 8: exit-0 stdout that is not JSON warns once and leaves the result alone
+    /// (the old PostToolUse never read stdout, so there was no warning and this failed).
+    #[tokio::test]
+    async fn a_non_json_post_tool_use_stdout_warns_once_and_leaves_the_result_alone() {
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook("printf '%s' 'not json'")])],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert_eq!(result.text(), "patched");
+        assert!(!result.is_error);
+        let warnings = warned(&fixture.warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("not JSON"), "{warnings:?}");
+    }
+
+    /// `permissionDecision` on `PostToolUse` and `permissionDecision`/`updatedInput` on
+    /// `Stop` are ignored with one warning line and change nothing.
+    #[tokio::test]
+    async fn fields_only_pre_tool_use_uses_warn_once_and_are_ignored() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"permissionDecision":"deny"}}'"#;
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(script)])],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap();
+        assert_eq!(result.text(), "patched");
+        assert_eq!(
+            warned(&fixture.warnings).len(),
+            1,
+            "{:?}",
+            warned(&fixture.warnings)
+        );
+
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"permissionDecision":"deny","updatedInput":{"command":"x"}}}'"#;
+        let fixture = plain(&stop_config(script));
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the ignored fields open no turn"
+        );
+        assert_eq!(
+            warned(&fixture.warnings).len(),
+            1,
+            "{:?}",
+            warned(&fixture.warnings)
         );
     }
 
@@ -1839,6 +2171,93 @@ mod tests {
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
             "exit 0 continues nothing"
+        );
+    }
+
+    /// Edge case 5: a project-layer `additionalContext` and a user-layer exit 2 join one
+    /// continuation: one turn, one wake, one message carrying both reasons (project first).
+    /// Ignoring `additionalContext` loses the project reason and fails.
+    #[tokio::test]
+    async fn stop_additional_context_merges_with_another_layers_exit_2() {
+        let project = stop_config(
+            r#"printf '%s' '{"hookSpecificOutput":{"additionalContext":"project-context"}}'"#,
+        );
+        let user = stop_config("echo user-reason >&2; exit 2");
+        let fixture = layered(&user, &project);
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the merged continuation opens a turn");
+        let text = entry.message.text();
+        let project_at = text
+            .find("project-context")
+            .expect("project reason: {text}");
+        let user_at = text.find("user-reason").expect("user reason: {text}");
+        assert!(
+            project_at < user_at,
+            "the project reason rides first: {text}"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 1, "one wake, not two");
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "one continuation, not two"
+        );
+    }
+
+    /// `decision: "block"` on `Stop` opens the same continuation as exit 2 (the JSON form).
+    #[tokio::test]
+    async fn stop_block_decision_opens_the_same_continuation() {
+        let config = stop_config(r#"printf '%s' '{"decision":"block","reason":"keep-going"}'"#);
+        let fixture = plain(&config);
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("block opens a turn");
+        assert!(entry.message.text().contains("keep-going"));
+        assert_eq!(fixture.hooks.stop_wakes(), 1);
+    }
+
+    /// Edge case 6: `additionalContext` past the wake gate degrades to a marked `inject`
+    /// with the same three visible signals as exit 2 (inbox entry, degrade count, wake
+    /// notice). Ignoring the field opens no continuation and injects nothing, so the
+    /// step claim fails.
+    #[tokio::test]
+    async fn stop_additional_context_degrades_past_the_wake_gate() {
+        tokio::time::pause();
+        let config = stop_config(
+            r#"printf '%s' '{"hookSpecificOutput":{"additionalContext":"keep-going"}}'"#,
+        );
+        let fixture = plain(&config);
+        for i in 0..MAX_WAKES_PER_WINDOW {
+            fixture.hooks.run_stop_once(&completed_quiet()).await;
+            assert!(
+                fixture.inbox.claim_next_turn().await.is_some(),
+                "continuation {i}: still inside the budget"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the gated continuation must not open a turn"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the gated verdict injects");
+        assert!(step.message.text().contains("keep-going"));
+        assert_eq!(fixture.hooks.degraded(), 1);
+        assert_eq!(
+            warned(&fixture.wake_notices).len(),
+            1,
+            "the degrade fires the wake notice: {:?}",
+            warned(&fixture.wake_notices)
         );
     }
 

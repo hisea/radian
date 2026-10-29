@@ -10,15 +10,23 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use futures_util::future::BoxFuture;
-use radian_core::{CancellationToken, HookContext, Hooks, InputSource, ToolCall, ToolDecision};
+use radian_core::{
+    Agent, CancellationToken, ContentPart, HookContext, Hooks, InputSource, Message, Model,
+    ModelContext, ModelError, ModelRequest, ModelResponse, NoopSink, StopReason, ToolCall,
+    ToolContext, ToolDecision, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession,
+    ToolSpec, TurnOptions,
+};
 use radian_host::memory::InjectionConfig;
 use radian_host::{CommandHooks, session_hooks};
 use radian_permissions::{
     Action, ApprovalError, ApprovalOutcome, ApprovalPolicy, ApprovalRequest, Approver, NoopAudit,
     PermissionHooks, Preset, Profile, ResourceMatcher, Rule, ToolMatcher,
 };
-use radian_session::{SessionCreatedData, SessionJournal};
+use radian_session::{EventData, Session, SessionCreatedData, SessionJournal};
 use serde_json::json;
 
 fn scratch(label: &str) -> common::TempDir {
@@ -318,6 +326,200 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
         "the permission denial stands: {decision:?}"
     );
     assert!(!marker.exists(), "a denied call must not run the hook");
+}
+
+/// Returns its scripted responses in order, with no network.
+struct ScriptedModel(Mutex<VecDeque<ModelResponse>>);
+
+impl ScriptedModel {
+    fn new(replies: Vec<ModelResponse>) -> Self {
+        Self(Mutex::new(replies.into()))
+    }
+}
+
+impl Model for ScriptedModel {
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _cx: ModelContext<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("a scripted reply"))
+    }
+}
+
+/// One `echo` tool that always returns `original`.
+struct EchoTool;
+
+struct EchoSession {
+    specs: Vec<ToolSpec>,
+}
+
+impl ToolProvider for EchoTool {
+    type Session = EchoSession;
+
+    async fn open_session(&self) -> Result<EchoSession, ToolError> {
+        Ok(EchoSession {
+            specs: vec![ToolSpec {
+                name: "echo".into(),
+                description: "echo".into(),
+                input_schema: json!({"type": "object"}),
+                concurrency: Default::default(),
+            }],
+        })
+    }
+}
+
+impl ToolSession for EchoSession {
+    fn tool_specs(&self) -> &[ToolSpec] {
+        &self.specs
+    }
+
+    async fn execute(
+        &self,
+        _call: &ToolCall,
+        _cx: ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolFailure> {
+        Ok(ToolOutput::text("original"))
+    }
+}
+
+fn no_limits() -> Option<radian_core::RateLimits> {
+    None
+}
+
+/// Edge case 3 (journal half, run under `--features journal-selfcheck`): with
+/// `updatedToolOutput` in both layers, the user hook's stdin `tool_response` is the
+/// project-replaced result, and the final transcript tool message and the journal's
+/// `ToolExecutionSettled` both hold the user layer's text. Ignoring `updatedToolOutput`
+/// (the old behavior) leaves every one of the three at `original` and fails.
+#[tokio::test]
+async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal() {
+    let ws = scratch("post-replace-journal");
+    let user_stdin = ws.join("user-stdin.json");
+    let project = radian_host::config::HooksConfig {
+        post_tool_use: vec![radian_host::config::HookMatcher {
+            matcher: Some("echo".into()),
+            hooks: vec![radian_host::config::HookCommand {
+                command:
+                    r#"printf '%s' '{"hookSpecificOutput":{"updatedToolOutput":"from-project"}}'"#
+                        .into(),
+                timeout_secs: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let user = radian_host::config::HooksConfig {
+        post_tool_use: vec![radian_host::config::HookMatcher {
+            matcher: Some("echo".into()),
+            hooks: vec![radian_host::config::HookCommand {
+                command: format!(
+                    "input=$(cat); printf '%s' \"$input\" > {}; \
+                     printf '%s' '{{\"hookSpecificOutput\":{{\"updatedToolOutput\":\"from-user\"}}}}'",
+                    user_stdin.display()
+                ),
+                timeout_secs: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let inbox = radian_runtime::Inbox::new(64);
+    let hooks = Arc::new(CommandHooks::new(
+        &user,
+        &project,
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &inbox,
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ));
+    let model = ScriptedModel::new(vec![
+        ModelResponse {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+            }],
+            provider_payload: None,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            limits: no_limits(),
+        },
+        ModelResponse {
+            content: vec![ContentPart::text("done")],
+            reasoning: Vec::new(),
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            limits: no_limits(),
+        },
+    ]);
+    let agent = Arc::new(Agent::new(model, EchoTool).with_hooks(hooks));
+    let journal_path = ws.join("journal.jsonl");
+    let journal = Arc::new(
+        SessionJournal::create(
+            &journal_path,
+            "sid",
+            SessionCreatedData::new("/work/example", json!({"provider": "example"})),
+        )
+        .unwrap(),
+    );
+    let mut chat = agent
+        .open_session_with_journal(Vec::new(), journal)
+        .await
+        .expect("a journaled session");
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .expect("the turn finishes");
+    chat.close().await.expect("the session closes");
+
+    let tool = chat
+        .transcript()
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("a tool result");
+    assert_eq!(tool.text(), "from-user", "the user layer's text is final");
+
+    let stdin: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&user_stdin).unwrap()).unwrap();
+    let seen = stdin["tool_response"].to_string();
+    assert!(
+        seen.contains("from-project"),
+        "the user hook sees the project replacement: {seen}"
+    );
+    assert!(
+        !seen.contains("original"),
+        "the project replacement, not the tool's text: {seen}"
+    );
+
+    let session = Session::open(&journal_path).unwrap();
+    let settled: Vec<_> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ToolExecutionSettled { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settled.len(), 1, "one settled record");
+    assert_eq!(
+        settled[0].text(),
+        "from-user",
+        "the journal holds the replaced result"
+    );
 }
 
 /// A hook's `permissionDecision: "allow"` is refused: the call still follows the permission

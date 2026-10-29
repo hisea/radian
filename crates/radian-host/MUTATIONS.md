@@ -1623,3 +1623,23 @@ and `cargo nextest run -p radian-runtime --locked --profile sandbox --no-fail-fa
 | TK0228-M12 | `reset_wakes` leaves a queued continuation's id in the pending set | ✅ 1 failed (rc=100) | `hooks::tests::a_user_message_clears_stop_hook_active` |
 | TK0228-M13 | a queued continuation's id is never added to the pending set | ✅ 1 failed (rc=100) | `hooks::tests::the_continued_turn_reports_stop_hook_active` |
 | TK0228-M14 | `claim_next_turn` does not fire the turn-claimed callback (mutation in `crates/radian-runtime/src/inbox.rs`) | ✅ 1 failed (rc=100) | `queue::the_turn_claimed_callback_fires_for_every_opened_turn` |
+
+## TK0229: PostToolUse and Stop read exit-0 JSON feedback (2026-10-29, branch `work/TK0229-hook-json-feedback`)
+
+ADR 0045 §2/§5: `PostToolUse` and `Stop` parse exit-0 stdout for
+`hookSpecificOutput.additionalContext`, `decision: "block"` and (`PostToolUse` only)
+`hookSpecificOutput.updatedToolOutput`, each truncated to `REASON_CHAR_LIMIT`. Each mutation was
+applied in place to `crates/radian-host/src/hooks.rs`, the named tests ran with
+`cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast`, and the source was
+restored from `.radian/mut/hooks.rs.orig` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0229-M1 | `PostToolUse` exit 0 ignores stdout (`Some(0) => {}`) | ✅ 8 failed (rc=100) | `hooks::tests::{a_non_json_post_tool_use_stdout_warns_once_and_leaves_the_result_alone, a_non_string_updated_tool_output_is_a_hook_error, a_long_additional_context_is_truncated, fields_only_pre_tool_use_uses_warn_once_and_are_ignored, post_tool_use_additional_context_feeds_back_without_an_error, post_tool_use_block_decision_matches_exit_2, the_user_hook_sees_the_project_replaced_result}` and `command_hooks::updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal` |
+| TK0229-M2 | `additionalContext` marks the result an error (`result.is_error = true`) | ✅ 1 failed (rc=100) | `hooks::tests::post_tool_use_additional_context_feeds_back_without_an_error` |
+| TK0229-M3 | `updatedToolOutput` is ignored | ✅ 3 failed (rc=100) | `hooks::tests::{a_non_string_updated_tool_output_is_a_hook_error, the_user_hook_sees_the_project_replaced_result}` and `command_hooks::updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal` |
+| TK0229-M4 | a non-string `updatedToolOutput` is accepted (ignored) instead of failing closed | ✅ 1 failed (rc=100) | `hooks::tests::a_non_string_updated_tool_output_is_a_hook_error` |
+| TK0229-M5 | `Stop` drops `additionalContext` (never joins the continuation) | ✅ 2 failed (rc=100) | `hooks::tests::{stop_additional_context_degrades_past_the_wake_gate, stop_additional_context_merges_with_another_layers_exit_2}` |
+| TK0229-M6 | `additionalContext` enters untruncated | ✅ 1 failed (rc=100) | `hooks::tests::a_long_additional_context_is_truncated` |
+| TK0229-M7 | the `PostToolUse` layers are compiled user-first | ✅ 3 failed (rc=100) | `hooks::tests::{a_project_post_tool_use_runs_once_per_edit_with_its_feedback_first, the_user_hook_sees_the_project_replaced_result}` and `command_hooks::updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal` |
+| TK0229-M8 | `Stop` ignores `decision: "block"` | ✅ 1 failed (rc=100) | `hooks::tests::stop_block_decision_opens_the_same_continuation` |
