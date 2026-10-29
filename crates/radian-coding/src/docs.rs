@@ -36,6 +36,10 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/arc/index.md"),
     ),
     (
+        "arc/integration.md",
+        include_str!("../../../docs/user/arc/integration.md"),
+    ),
+    (
         "arc/loop.md",
         include_str!("../../../docs/user/arc/loop.md"),
     ),

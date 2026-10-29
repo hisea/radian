@@ -11,7 +11,7 @@ This build has the storage layer, the subcommands that read and write it: `init`
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
 `radian arc serve` is the scheduling loop and `radian arc run` is one pass of it, and a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
-This page holds the `radian arc` commands; the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), the flows that give tasks their worker and gate in [`arc/flows`](flows.md), the worker in [`arc/worker`](worker.md), and the files arc keeps are in [`arc/files`](files.md).
+This page holds the `radian arc` commands; how the merge builds and pushes the integration candidate is in [`arc/integration`](integration.md), the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), the lead's MCP server in [`arc/mcp`](mcp.md), the TUI in [`arc/tui`](tui.md), the flows that give tasks their worker and gate in [`arc/flows`](flows.md), the worker in [`arc/worker`](worker.md), and the files arc keeps are in [`arc/files`](files.md).
 
 ## `radian arc`
 
@@ -590,15 +590,13 @@ Then it:
 
 1. writes your `human` pass verdict for `verified_sha` (`runs/<task>/attempts/<attempt id>/verdicts/human.json`) and moves the task to `review.integrating`.
    The verdict has no `approver` when you ran `merge`, and `approver` `auto` when `radian arc run` merged it at auto level `merge`.
-2. runs the integration stage against the current remote target branch (`[integration] target_branch`, else `[repository] main_branch`). The candidate is built with `[integration] style`: `merge` (the default) uses `head_sha` when the target is still the task's `base_sha`, otherwise a merge commit of `head_sha` onto the target; `squash` makes one commit on top of the target with the task's changes applied, with the message `<task title> (<task id>)`; `rebase` replays the task's commits on the target, and a branch that contains a merge commit is linearized. The current `[integration] key_commands` run on the candidate.
+2. runs the integration stage against the current remote target branch (`[integration] target_branch`, else `[repository] main_branch`). The candidate is built with `[integration] style` and the current `[integration] key_commands` run on it; see [Integration](integration.md) for each style, the rule that `rebase` needs a linear branch, and the key commands.
    A conflict or a failing key command moves the task to `review.rework_pending` with the reason, and `merge` exits `0`.
    A passing integration moves the task to `review.ready_to_merge`.
-3. pushes the candidate to the remote target branch without force: `git push <remote> <candidate>:refs/heads/<target>`.
-   When the target moved after integration (or the push is rejected as non-fast-forward), the task returns to `review.integrating` and `merge` integrates again, at most 3 times in one command. After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
-4. checks that what landed is the candidate: for `merge`, the remote target branch is the candidate and the candidate contains `head_sha`; for `squash` and `rebase`, the remote target branch's tree is the candidate's tree. A failed check records the reason and moves the task to `review.rework_pending`; it never reaches `done.merged`. On a passing check it moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing; the default `[hooks] after_merge` lines remove the task's worktree (`.radian/arc/worktrees/<task>`) and its branches (see [Hooks](#hooks)).
+3. pushes the candidate to the remote target branch without force and, when the target moved or the push was rejected, integrates again, at most 3 times in one command (see [The push](integration.md#the-push)). After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
+4. checks that what landed is the candidate (see [The after-push check](integration.md#the-after-push-check)). A failed check records the reason and moves the task to `review.rework_pending`; it never reaches `done.merged`. On a passing check it moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing; the default `[hooks] after_merge` lines remove the task's worktree (`.radian/arc/worktrees/<task>`) and its branches (see [Hooks](#hooks)).
    The task's branch stays on the remote until a hook deletes it.
 
-`merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.
 On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A hook command that fails is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added. When a scheduling loop holds `runner.lock`, the command leaves its pending hook for the loop; otherwise it runs it itself before it prints.
 
 The exit codes are the command's own:

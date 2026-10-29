@@ -22,6 +22,7 @@ Each line names one page and what it covers.
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
 - `arc/index`: plan and task orchestration: every subcommand and the exit codes.
 - `arc/gate`: the gate: verification stages, the review stage, failures, retries, the budget, and reconcile.
+- `arc/integration`: how the merge builds and pushes the integration candidate: the styles, the key commands and the after-push check.
 - `arc/loop`: the scheduling loop: one pass, `loop.log`, `serve`, and its signals.
 - `arc/files`: the files arc keeps: `config.toml`, plan and task files, and the `.radian/arc/` layout.
 - `arc/flows`: what a flow is, a two-flow example, how a task picks one, the two concurrency limits, and binary deliverables.
