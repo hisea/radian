@@ -351,9 +351,15 @@ fetches the remote target branch with an explicit refspec
 - `squash`: the checkout goes to the target branch, `git merge --squash` stages the task's
   changes and `git commit --allow-empty` makes one commit with the message
   `<task title> (<task id>)` and the fixed identity.
-- `rebase`: the checkout goes to `head_sha` and `git rebase <target>` replays the task's
-  commits on the target; a branch with a merge commit is linearized. When the target is
-  already an ancestor of `head_sha`, the candidate is `head_sha`.
+- `rebase`: a branch whose `<remote target>..<head_sha>` range contains a merge commit is
+  refused before the fast path and before any rebase: the verdict fails with a reason that
+  names the merge commits and says the branch must be linear for `rebase` (or to use
+  `merge`/`squash`), so a change made only in a merge's resolution cannot be dropped. A
+  linear branch's checkout goes to `head_sha` and `git rebase` replays its commits on the
+  target with `--no-autostash` and `-c rebase.rebaseMerges=false -c rebase.autoSquash=false
+  -c rebase.updateRefs=false -c rebase.autoStash=false`, so the repository's git
+  configuration cannot change the result. When the target is already an ancestor of
+  `head_sha`, the candidate is `head_sha` (the branch is linear then).
 
 A conflict aborts the merge or the rebase and writes a `fail` verdict with reason `conflict`,
 the sorted paths, and no candidate. The key commands run on the candidate under the same rules

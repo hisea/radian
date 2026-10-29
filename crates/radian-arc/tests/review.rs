@@ -1447,6 +1447,50 @@ fn a_rebase_merge_replays_the_branch_and_reaches_done_merged() {
     assert_eq!(verdict.integration_style, Some(IntegrationStyle::Rebase));
 }
 
+/// A `rebase` merge refuses a branch that contains a merge commit before the fast path: the
+/// target has not moved, but the branch would land with its merge commit, so nothing is
+/// pushed and the task goes to `review.rework_pending` with a reason naming the merge commit.
+/// Mutation: drop the refusal check and the fast path reaches `done.merged`.
+#[test]
+fn a_rebase_merge_refuses_a_branch_with_a_merge_commit() {
+    let fixture = Fixture::new("merge-rebase-merge-commit");
+    fixture.style("rebase");
+    let branch = format!("work/{}", fixture.task);
+    fixture
+        .repo
+        .commit_on(&branch, &fixture.base, "a.txt", "a\n");
+    let side = fixture
+        .repo
+        .commit_on("side", &fixture.base, "side.txt", "side\n");
+    fixture.repo.git(&["checkout", &branch]);
+    fixture.repo.git(&["merge", "--no-ff", "--no-edit", &side]);
+    let head = fixture.repo.rev("HEAD");
+    fixture.repo.git(&["push", "origin", &branch]);
+    fixture.repo.git(&["checkout", "main"]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = merged.reason.expect("a reason");
+    assert!(reason.contains(&head[..7]), "{reason}");
+    assert!(reason.contains("linear"), "{reason}");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(fixture.base.as_str()),
+        "a refused rebase moved main"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        (stored.state, stored.phase.as_str()),
+        (TaskState::Review, "rework_pending")
+    );
+}
+
 /// A `rebase` conflict with `merge-main` off sends the task to `review.rework_pending` with
 /// the reason `conflict` and never moves main.
 #[test]

@@ -490,12 +490,184 @@ fn a_rebase_conflict_is_aborted_and_leaves_the_checkout_clean() {
     assert!(status.is_empty(), "the checkout is not clean: {status}");
 }
 
-/// Edge 6: a branch with a merge commit inside it is linearized by `rebase`: git drops the
-/// merge commit and replays the commits it brought in, so no change is lost and the tree is
-/// the merge's. Mutation: pass `--rebase-merges` and the branch keeps its merge commit.
+/// Edge 1: `rebase` with the target unchanged and a merge commit in the branch is refused
+/// before the fast path, which would push the branch unchanged. The reason names the merge
+/// commit and asks for a linear branch. Mutation: drop the refusal check and the fast path
+/// returns `head`.
 #[test]
-fn rebase_of_a_branch_with_a_merge_commit_is_linearized() {
-    let repo = TestRepo::new("integration-rebase-merge");
+fn rebase_refuses_a_branch_with_a_merge_commit_when_the_target_is_unchanged() {
+    let repo = TestRepo::new("integration-rebase-merge-unchanged");
+    let base = repo.rev("main");
+    let branch = "work/TK0001-merge";
+    repo.commit_on(branch, &base, "a.txt", "a\n");
+    let side = repo.commit_on("side", &base, "side.txt", "side\n");
+    repo.git(&["checkout", branch]);
+    repo.git(&["merge", "--no-ff", "--no-edit", &side]);
+    let head = repo.rev("HEAD");
+    repo.push(branch);
+    let key_commands = vec!["echo ran > ran.txt".to_string()];
+
+    let verdict = rebase(
+        &repo,
+        "TK0001-merge",
+        "TK0001-merge-1",
+        &base,
+        &head,
+        &key_commands,
+    );
+
+    assert_eq!(verdict.result, VerdictResult::Fail);
+    let reason = verdict.reason.clone().expect("a reason");
+    assert!(reason.contains(&head[..7]), "{reason}");
+    assert!(reason.contains("linear"), "{reason}");
+    assert!(reason.contains("`merge` or `squash`"), "{reason}");
+    assert!(
+        verdict.candidate_sha.is_none(),
+        "a refused rebase built a candidate"
+    );
+    assert!(
+        verdict.commands.is_empty(),
+        "key commands ran on a refused branch"
+    );
+    assert_eq!(repo.ls_remote("refs/heads/main"), Some(base));
+    assert!(
+        !repo
+            .repo
+            .join(".radian/arc/gates/integration/ran.txt")
+            .exists(),
+        "the refused branch reached the integration checkout"
+    );
+}
+
+/// Edge 2: the target moved and the branch contains a merge whose resolution added a file.
+/// `git rebase` would drop the merge and lose that file; the refusal keeps every change and
+/// nothing is pushed. Mutation: drop the refusal check and the rebase loses the file.
+#[test]
+fn rebase_refuses_a_branch_whose_merge_resolution_added_a_file() {
+    let repo = TestRepo::new("integration-rebase-merge-resolution");
+    let base = repo.rev("main");
+    let branch = "work/TK0001-resolution";
+    repo.commit_on(branch, &base, "a.txt", "a\n");
+    let side = repo.commit_on("side", &base, "side.txt", "side\n");
+    repo.git(&["checkout", branch]);
+    repo.git(&["merge", "--no-ff", "--no-commit", &side]);
+    common::write(
+        &repo.repo.join("resolution.txt"),
+        "only in the merge resolution\n",
+    );
+    repo.git(&["add", "resolution.txt"]);
+    repo.git(&["commit", "-m", "merge side"]);
+    let head = repo.rev("HEAD");
+    repo.push(branch);
+    let moved = repo.advance_main("other.txt", "other\n");
+
+    let verdict = rebase(
+        &repo,
+        "TK0001-resolution",
+        "TK0001-resolution-1",
+        &base,
+        &head,
+        &[],
+    );
+
+    assert_eq!(verdict.result, VerdictResult::Fail);
+    let reason = verdict.reason.clone().expect("a reason");
+    assert!(reason.contains(&head[..7]), "{reason}");
+    assert!(
+        verdict.candidate_sha.is_none(),
+        "a refused rebase built a candidate"
+    );
+    assert_eq!(
+        repo.ls_remote("refs/heads/main"),
+        Some(moved),
+        "the refused rebase moved the target"
+    );
+    // No silent loss: the merge and its resolution are still on the task branch.
+    assert_eq!(
+        repo.git(&["show", &format!("{head}:resolution.txt")]),
+        "only in the merge resolution"
+    );
+    assert!(
+        repo.git(&["rev-list", "--merges", &format!("{base}..{head}")])
+            .contains(&head),
+        "the branch lost its merge commit"
+    );
+}
+
+/// Edge 3: the user's git configuration cannot change a rebase. With
+/// `rebase.rebaseMerges`, `rebase.autoSquash` and `rebase.updateRefs` set in the repository,
+/// a linear branch is replayed exactly as without them, and the task branch stays where it
+/// was. Mutation: run plain `git rebase` and `rebase.updateRefs` moves the task branch.
+#[test]
+fn rebase_ignores_the_users_rebase_configuration() {
+    let repo = TestRepo::new("integration-rebase-config");
+    let base = repo.rev("main");
+    let branch = "work/TK0001-config";
+    let head = repo.commit_on(branch, &base, "one.txt", "one\n");
+    repo.push(branch);
+    let moved = repo.advance_main("other.txt", "other\n");
+
+    let plain = rebase(
+        &repo,
+        "TK0001-config",
+        "TK0001-config-1",
+        &base,
+        &head,
+        &["test -f other.txt".to_string()],
+    );
+    assert_eq!(plain.result, VerdictResult::Pass, "{:?}", plain.reason);
+    let plain_candidate = plain.candidate_sha.clone().expect("a candidate");
+
+    repo.git(&["config", "rebase.rebaseMerges", "true"]);
+    repo.git(&["config", "rebase.autoSquash", "true"]);
+    repo.git(&["config", "rebase.updateRefs", "true"]);
+    let configured = rebase(
+        &repo,
+        "TK0001-config",
+        "TK0001-config-2",
+        &base,
+        &head,
+        &["test -f other.txt".to_string()],
+    );
+
+    assert_eq!(
+        configured.result,
+        VerdictResult::Pass,
+        "{:?}",
+        configured.reason
+    );
+    let candidate = configured.candidate_sha.clone().expect("a candidate");
+    assert_eq!(
+        repo.git(&["rev-list", "--count", &format!("{moved}..{candidate}")]),
+        repo.git(&[
+            "rev-list",
+            "--count",
+            &format!("{moved}..{plain_candidate}")
+        ]),
+        "ambient config changed how many commits were replayed"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", &format!("{candidate}^{{tree}}")]),
+        repo.git(&["rev-parse", &format!("{plain_candidate}^{{tree}}")]),
+        "ambient config changed the replayed tree"
+    );
+    assert!(
+        repo.git(&["rev-list", "--merges", &format!("{moved}..{candidate}")])
+            .is_empty(),
+        "ambient rebase.rebaseMerges kept a merge commit"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", branch]),
+        head,
+        "ambient rebase.updateRefs moved the task branch"
+    );
+}
+
+/// Edge 5: `merge` is not refused for a branch that contains a merge commit; it still makes
+/// one merge commit of the branch onto the moved target.
+#[test]
+fn merge_of_a_branch_with_a_merge_commit_is_not_refused() {
+    let repo = TestRepo::new("integration-merge-merge-commit");
     let base = repo.rev("main");
     let branch = "work/TK0001-merge";
     repo.commit_on(branch, &base, "a.txt", "a\n");
@@ -505,40 +677,105 @@ fn rebase_of_a_branch_with_a_merge_commit_is_linearized() {
     let head = repo.rev("HEAD");
     repo.push(branch);
     let moved = repo.advance_main("other.txt", "other\n");
-    let key_commands = vec![
-        "test -f a.txt".to_string(),
-        "test -f side.txt".to_string(),
-        "test -f other.txt".to_string(),
-    ];
-    let run = IntegrationRun {
-        repository: &repo.repo,
-        remote: "origin",
-        task: "TK0001-merge",
-        title: "A task",
-        attempt: "TK0001-merge-1",
-        head_sha: &head,
-        base_sha: &base,
-        main_ref: "refs/remotes/origin/main",
-        key_commands: &key_commands,
-        style: IntegrationStyle::Rebase,
-        profile: "default",
-        timeout: Duration::from_secs(30),
-    };
 
-    let verdict = run.run().unwrap();
+    let verdict = style(
+        &repo,
+        "TK0001-merge",
+        "TK0001-merge-1",
+        &base,
+        &head,
+        &["test -f side.txt".to_string()],
+        IntegrationStyle::Merge,
+    );
+
     assert_eq!(verdict.result, VerdictResult::Pass, "{:?}", verdict.reason);
     let candidate = verdict.candidate_sha.clone().expect("a candidate");
-    assert!(
-        repo.git(&["rev-list", "--merges", &format!("{moved}..{candidate}")])
-            .is_empty(),
-        "the merge commit was not dropped"
+    let parents = repo.git(&["rev-list", "--parents", "-n", "1", &candidate]);
+    let parts: Vec<&str> = parents.split_whitespace().collect();
+    assert_eq!(parts.len(), 3, "not a merge commit: {parents}");
+    assert!(parts.contains(&moved.as_str()), "{parents}");
+    assert!(parts.contains(&head.as_str()), "{parents}");
+}
+
+/// Edge 5: `squash` is not refused for a branch that contains a merge commit; it still makes
+/// one commit on the moved target with the merge's tree.
+#[test]
+fn squash_of_a_branch_with_a_merge_commit_is_not_refused() {
+    let repo = TestRepo::new("integration-squash-merge-commit");
+    let base = repo.rev("main");
+    let branch = "work/TK0001-merge";
+    repo.commit_on(branch, &base, "a.txt", "a\n");
+    let side = repo.commit_on("side", &base, "side.txt", "side\n");
+    repo.git(&["checkout", branch]);
+    repo.git(&["merge", "--no-ff", "--no-edit", &side]);
+    let head = repo.rev("HEAD");
+    repo.push(branch);
+    let moved = repo.advance_main("other.txt", "other\n");
+
+    let verdict = style(
+        &repo,
+        "TK0001-merge",
+        "TK0001-merge-1",
+        &base,
+        &head,
+        &["test -f side.txt".to_string()],
+        IntegrationStyle::Squash,
     );
-    assert_eq!(
-        repo.git(&["rev-list", "--count", &format!("{moved}..{candidate}")]),
-        "2",
-        "the two sides' commits were not replayed"
-    );
+
+    assert_eq!(verdict.result, VerdictResult::Pass, "{:?}", verdict.reason);
+    let candidate = verdict.candidate_sha.clone().expect("a candidate");
+    let parents = repo.git(&["rev-list", "--parents", "-n", "1", &candidate]);
+    let parts: Vec<&str> = parents.split_whitespace().collect();
+    assert_eq!(parts.len(), 2, "not one commit: {parents}");
+    assert_eq!(parts[1], moved, "not on the new main: {parents}");
     let tree = repo.git(&["rev-parse", &format!("{candidate}^{{tree}}")]);
-    let expected = merge_tree(&repo, "rebase-merge-tree", &moved, &head);
-    assert_eq!(tree, expected, "a change was lost in the linearization");
+    let expected = merge_tree(&repo, "squash-merge-commit-tree", &moved, &head);
+    assert_eq!(tree, expected, "the squashed tree is not the merge's");
+}
+
+/// One integration run with `style`, for the refusal and config cases.
+fn style(
+    repo: &TestRepo,
+    task: &str,
+    attempt: &str,
+    base: &str,
+    head: &str,
+    key_commands: &[String],
+    style: IntegrationStyle,
+) -> Verdict {
+    IntegrationRun {
+        repository: &repo.repo,
+        remote: "origin",
+        task,
+        title: "A task",
+        attempt,
+        head_sha: head,
+        base_sha: base,
+        main_ref: "refs/remotes/origin/main",
+        key_commands,
+        style,
+        profile: "default",
+        timeout: Duration::from_secs(30),
+    }
+    .run()
+    .unwrap()
+}
+
+fn rebase(
+    repo: &TestRepo,
+    task: &str,
+    attempt: &str,
+    base: &str,
+    head: &str,
+    key_commands: &[String],
+) -> Verdict {
+    style(
+        repo,
+        task,
+        attempt,
+        base,
+        head,
+        key_commands,
+        IntegrationStyle::Rebase,
+    )
 }

@@ -3,8 +3,9 @@
 //! Integration builds the commit that would be merged, with the `[integration] style`:
 //! `merge` (a merge commit, or `head_sha` when the target has not moved), `squash` (one
 //! commit on top of the target with the task's changes applied) or `rebase` (the task's
-//! commits replayed on the target). The style changes the candidate's sha, never the task's
-//! `verified_sha`; the review half compares what landed with the candidate after the push.
+//! commits replayed on the target; a branch that contains a merge commit is refused). The
+//! style changes the candidate's sha, never the task's `verified_sha`; the review half
+//! compares what landed with the candidate after the push.
 //!
 //! The key commands run on the candidate. The verdict records the target branch it used
 //! (`base_sha`), the candidate and the style. [`merge_ready`] re-reads the target branch: the
@@ -132,7 +133,17 @@ impl IntegrationRun<'_> {
                     squash_onto(&checkout, self.title, self.task, &head)?
                 }
                 IntegrationStyle::Rebase => {
-                    if git::is_ancestor(self.repository, &remote_main, &head)? {
+                    // A plain `git rebase` drops a merge commit without saying so, and a
+                    // change that exists only in the merge's resolution would disappear;
+                    // the user's `rebase.rebaseMerges` would make the same command keep it
+                    // instead. A rebase candidate is therefore built only from a linear
+                    // branch. The check runs before the fast path too: when the target has
+                    // not moved, `head` could still carry a merge commit, and the fast path
+                    // would push it unchanged.
+                    let merges = merge_commits(self.repository, &remote_main, &head)?;
+                    if !merges.is_empty() {
+                        BuildOutcome::failed(rebase_refusal(self.task, &merges))
+                    } else if git::is_ancestor(self.repository, &remote_main, &head)? {
                         // The task's commits are already on the target: replaying them would
                         // only rewrite their shas.
                         checkout.prepare(&head)?;
@@ -311,6 +322,15 @@ impl BuildOutcome {
             failure: None,
         }
     }
+
+    /// A candidate this style refuses to build. Nothing was prepared, so no key command runs.
+    fn failed(failure: String) -> Self {
+        Self {
+            candidate_sha: None,
+            conflict_paths: Vec::new(),
+            failure: Some(failure),
+        }
+    }
 }
 
 /// Merges `sha` onto the checkout's current HEAD, with arc's fixed identity.
@@ -387,15 +407,33 @@ fn squash_onto(
 /// Replays the commits between `upstream` and the checkout's HEAD onto `upstream`.
 ///
 /// The checkout must already be prepared at `head`. A conflict aborts the rebase and leaves
-/// the checkout on `head`, so the next run can reuse it. A branch that contains a merge commit
-/// is linearized: `git rebase` drops the merge commit and replays the commits it brought in.
+/// the checkout on `head`, so the next run can reuse it. The stage refuses a branch that
+/// contains a merge commit before this runs, so the branch here is linear; the explicit
+/// flags and `-c` overrides keep the user's git configuration from changing the rebase (a
+/// `rebase.rebaseMerges`, `rebase.autoSquash`, `rebase.updateRefs` or `rebase.autoStash` set
+/// in the repository must not make the same candidate build differently).
 fn rebase_onto(
     checkout: &GateCheckout,
     upstream: &str,
     head: &str,
 ) -> Result<BuildOutcome, GateError> {
     let path = checkout.path();
-    let output = git::run(&path, &["rebase", upstream])?;
+    let output = git::run(
+        &path,
+        &[
+            "-c",
+            "rebase.rebaseMerges=false",
+            "-c",
+            "rebase.autoSquash=false",
+            "-c",
+            "rebase.updateRefs=false",
+            "-c",
+            "rebase.autoStash=false",
+            "rebase",
+            "--no-autostash",
+            upstream,
+        ],
+    )?;
     if output.success() {
         let candidate_sha = git::ok(&path, &["rev-parse", "HEAD"])?;
         return Ok(BuildOutcome::ready(candidate_sha));
@@ -424,6 +462,31 @@ fn rebase_onto(
 /// candidate build, and the next `prepare` resets the checkout again.
 fn restore(checkout: &Path, args: &[&str]) {
     let _ = git::run(checkout, args);
+}
+
+/// The merge commits in `upstream..sha`, newest first, as `git rev-list --merges` lists them.
+fn merge_commits(repository: &Path, upstream: &str, sha: &str) -> Result<Vec<String>, GateError> {
+    let range = format!("{upstream}..{sha}");
+    let output = git::ok(repository, &["rev-list", "--merges", &range])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The reason a `rebase` integration refuses `work/<task>`: its merge commits, short.
+fn rebase_refusal(task: &str, merges: &[String]) -> String {
+    let listed = merges
+        .iter()
+        .map(|sha| &sha[..sha.len().min(7)])
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "rebase_needs_linear_branch: `work/{task}` contains merge commit(s) {listed}; a `rebase` \
+         integration needs a linear branch (use `merge` or `squash`)"
+    )
 }
 
 fn merge_message(task: &str, head: &str) -> String {
