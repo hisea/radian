@@ -168,12 +168,14 @@ allow_env = ["MY_TOKEN_NAME"]
 
 ## `[hooks]`
 
-User-level command hooks: four events, each a list of `{ matcher, hooks }` entries.
-A matcher is a regular expression over Radian tool names, anchored to the whole name (`shell|write` names two tools); `*`, an empty matcher, or a missing matcher matches every tool.
-Each hook is `{ type = "command", command, args, timeout }`.
+User-level command hooks: six events, each a list of `{ matcher, hooks }` entries.
+A tool-event matcher is a regular expression over Radian tool names, anchored to the whole name (`shell|write` names two tools); `*`, an empty matcher, or a missing matcher matches every tool.
+`StopFailure` and `Notification` use their own closed sets instead of a regex (`hooks.md` lists every value).
+Each hook is `{ type = "command", command, args, timeout, async, asyncRewake }`.
 Without `args`, the command runs as `/bin/sh -c` inside the session sandbox when one is enforced; with `args` (an array of strings), `command` is an executable started directly with exactly those arguments and no shell. `timeout` is seconds (`60` when unset or `0`).
 `PreToolUse` exit `2` denies the call; other failures fail closed.
 `PermissionRequest` fires when a rule asks and answers the prompt with `allow` or `deny`; its exit `2` denies too.
+`StopFailure` and `Notification` only observe: they never block, their output is not read, and their timeout or exit code only records a run (`hooks.md`).
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
@@ -181,6 +183,8 @@ Without `args`, the command runs as `/bin/sh -c` inside the session sandbox when
 | `hooks.PermissionRequest` | array of entries | none | Answer a permission `ask` before anyone is asked (`allow` or `deny`). |
 | `hooks.PostToolUse` | array of entries | none | React after a tool call. |
 | `hooks.Stop` | array of entries | none | React at stop. The matcher is ignored. |
+| `hooks.StopFailure` | array of entries | none | Observe a turn that ended on a model error. The matcher is a `ModelErrorKind` (`transport`, `protocol`, `unavailable`, `usage_limit`, `context_overflow`, `empty_response`), or `*`. |
+| `hooks.Notification` | array of entries | none | Observe a prompt about to reach a human (`permission_prompt`) or a TUI turn left waiting (`idle_prompt`). |
 | `hooks.intent_stop` | boolean | `true` | The built-in stop validator. `false` turns it off; user `Stop` hooks still run. |
 
 Anything outside this shape is skipped with one line, never refused: unknown event names, a `type` other than `"command"`, non-command handler keys, an empty command, a bad timeout. An `args` that is not an array of strings skips only that hook (one line), not the entry or the file.

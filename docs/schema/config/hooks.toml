@@ -53,6 +53,21 @@ type = "command"
 command = "/work/example/hooks/verify.sh"
 timeout = 30
 
+# 只观察的两个事件（ADR 0045 §6）：后台跑、不读 stdout、超时/退出码只记一行最近运行。
+# `StopFailure` 的 matcher 是 `ModelErrorKind` 闭集；`Notification` 只有 `permission_prompt` 与
+# `idle_prompt`。`async` 在这两个事件上被接受但无意义（本来就在后台跑）。
+[[hooks.StopFailure]]
+matcher = "usage_limit"
+[[hooks.StopFailure.hooks]]
+type = "command"
+command = "/work/example/hooks/quota.sh"
+
+[[hooks.Notification]]
+matcher = "permission_prompt"
+[[hooks.Notification.hooks]]
+type = "command"
+command = "/work/example/hooks/notify.sh"
+
 # 子集之外：逐条跳过并各报一行（启动行 `[config] ignored key …`）。
 [[hooks.PreToolUse]]
 matcher = "read"

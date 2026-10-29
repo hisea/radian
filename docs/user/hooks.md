@@ -1,13 +1,15 @@
 ---
-description: Run your own commands when a tool runs or the model stops.
+description: Run your own commands when a tool runs, the model stops, a turn fails, or radian needs you.
 ---
 
 # Hooks
 
-Hooks run your own commands at four moments: before a tool runs, when a
-permission rule is about to ask you, after a tool runs, and when the model
-stops. Use them to log, to format, to block, to answer a prompt yourself, or
-to continue a turn with your own check.
+Hooks run your own commands at six moments: before a tool runs, when a
+permission rule is about to ask you, after a tool runs, when the model
+stops, when a turn ends on a model error, and when radian is waiting for
+you. Use them to log, to format, to block, to answer a prompt yourself, to
+continue a turn with your own check, or to notify you from a session you are
+not watching.
 
 A hook never widens permissions. On `PreToolUse`, a hook that says `allow` or
 `ask` is refused with a warning and treated as no decision. The call still
@@ -17,7 +19,7 @@ one event that may say `allow`: it answers a call the rules already judged
 
 ## Events
 
-Four events exist. Their names are case-sensitive.
+Six events exist. Their names are case-sensitive.
 
 | Event | When it runs | The matcher |
 |---|---|---|
@@ -25,12 +27,22 @@ Four events exist. Their names are case-sensitive.
 | `PermissionRequest` | Before a permission prompt, when the rules say `ask` | Filters by tool name |
 | `PostToolUse` | After each tool call | Filters by tool name |
 | `Stop` | After a completed turn | Ignored; every entry runs |
+| `StopFailure` | After a turn that ends on a model error | Filters by error kind |
+| `Notification` | When radian is about to ask you, or a TUI turn sits idle | Filters by notification type |
 
 Any other event name is skipped with one warning. Only a completed turn runs
 `Stop`: a cancelled, failed or otherwise unfinished turn runs nothing.
 `PermissionRequest` fires after the permission rules and an existing session
 grant resolved a call to `ask`, and before anyone is asked. A `deny` rule hit,
 an allowed call, and an `auto`-approved call never fire it.
+
+`StopFailure` and `Notification` only observe. They run in the background,
+their stdout is not read, and their exit code or timeout only adds one Recent
+runs entry: they never block a turn, a prompt or an exit, and never change an
+exit code. Their default timeout is 60 seconds; an explicit `timeout` still
+wins. `async` on either is accepted and inert: they always run in the
+background, so the field changes nothing (the 600-second async default does
+not apply either).
 
 ## Where hooks live
 
@@ -59,7 +71,9 @@ whose `args` is not an array of strings is one exception: only that hook is
 skipped, the warning names it, and the entry's other hooks still load. So is
 `async` or `asyncRewake` on `PreToolUse` or `PermissionRequest`: those two
 events decide before the call, so the hook is skipped with one warning and
-the entry's other hooks still load. Nothing outside the subset ever refuses
+the entry's other hooks still load. A `StopFailure` or `Notification` matcher
+outside its closed set warns once and that entry never runs, like an invalid
+tool pattern. Nothing outside the subset ever refuses
 startup.
 
 ## The user config shape
@@ -92,6 +106,18 @@ async = true
 type = "command"
 command = "notify-send radian stopped"
 timeout = 30
+
+[[hooks.StopFailure]]
+matcher = "usage_limit"
+[[hooks.StopFailure.hooks]]
+type = "command"
+command = "notify-send radian 'the quota window is used up'"
+
+[[hooks.Notification]]
+matcher = "permission_prompt"
+[[hooks.Notification.hooks]]
+type = "command"
+command = "notify-send radian 'waiting for your approval'"
 ```
 
 Each event holds a list of entries. Each entry holds a `matcher` and a list
@@ -117,7 +143,9 @@ The default timeout is 60 seconds; zero means the default. A second
 result returns at once, and a `Stop` hook does not hold the turn end. Only
 `PostToolUse` and `Stop` accept it. `PreToolUse` and `PermissionRequest` run to
 decide before the call, so a hook with `async` there is skipped with one
-warning and the entry's other hooks still load. `asyncRewake = true` implies
+warning and the entry's other hooks still load. `StopFailure` and
+`Notification` accept `async` but it is inert: those events always run in the
+background and keep their 60-second default. `asyncRewake = true` implies
 `async`.
 
 An async hook starts exactly like a synchronous one: same working directory,
@@ -170,6 +198,107 @@ The project file spells the same shape in JSON:
 }
 ```
 
+## `StopFailure`
+
+`StopFailure` runs once per turn that ends `Failed` on a model error: a provider
+or transport failure, a protocol error, a used-up plan window, a
+provider-recognized context overflow, or an empty response. A hook error or a
+compaction error that ends the turn runs nothing, and a journal error ends the
+session, so nothing runs; a
+cancelled turn runs nothing (those are not model errors; see `cli.md` for the
+turn outcomes). It also never runs after a `Completed` turn, even one whose
+answer looked wrong.
+
+The `matcher` is the error kind. `*`, a blank string, or a missing matcher
+matches every kind.
+
+| Matcher | The failure it names |
+|---|---|
+| `transport` | A connection, stream or idle-timeout failure (including a cancellation sentinel; a user cancel is a cancelled turn, not this). |
+| `protocol` | A bad request or response: 400/401/403/404, a malformed stream. |
+| `unavailable` | A 408/429/5xx/529 or an explicit overload the provider may recover from. |
+| `usage_limit` | A recognized plan or quota window that is used up. |
+| `context_overflow` | A provider-recognized request over its context window. |
+| `empty_response` | A final answer with no text and no tool call. |
+
+Any other value is a load-time warning and that entry never runs; `rate_limit`
+is one of those (it is Claude's name, not a radian kind). The table above is
+also the Claude import mapping for `authentication_failed` → `protocol`,
+`billing_error` → `usage_limit`, `invalid_request` → `protocol`,
+`rate_limit` → `unavailable`, and `server_error` → `unavailable`; Claude's
+`max_output_tokens` and `unknown` have no radian kind, so an entry naming one
+is dropped with one report line. `import-claude` reports every translation and
+drop.
+
+Its stdin:
+
+```json
+{
+  "hook_event_name": "StopFailure",
+  "cwd": "/path/to/workspace",
+  "session_id": "0193…",
+  "error": "usage_limit",
+  "error_details": "model usage limit reached: …",
+  "last_assistant_message": "I was checking the tests when …"
+}
+```
+
+`error` is one of the matcher values. `error_details` is the error's own text,
+cut to 2000 characters. `last_assistant_message` has the same rule as `Stop`:
+the text parts of the turn's last assistant message joined together; an empty
+string means the turn has none.
+
+The hook cannot block the turn or change its outcome. `radian exec -p` waits at
+most 5 seconds after its last turn for a running `StopFailure` hook, then kills
+its process group; the run's exit code and output are unchanged. A TUI session
+keeps the hook running in the background and kills it when the session ends.
+
+## `Notification`
+
+`Notification` observes two moments. `matcher` is a closed set of two values;
+`*`, a blank string, or a missing matcher matches both. Any other value is a
+load-time warning and that entry never runs. `import-claude` keeps
+`permission_prompt` and `idle_prompt` entries and drops Claude's other
+notification types with one report line.
+
+| Matcher | When it runs |
+|---|---|
+| `permission_prompt` | Each time radian is about to ask a human for approval: the TUI approval modal, or `exec`'s terminal prompt. It runs after the permission rules produced `ask` and after a `PermissionRequest` hook gave no decision. An ask that a hook answered, an allowed call, and an `auto`-approved call never fire it. |
+| `idle_prompt` | In the TUI only: once when a turn has ended and 60 seconds pass with no input. Any input restarts the timer. It does not run while `/loop` or an active or paused goal has the next turn scheduled. `radian exec -p` exits at its turn end, so it has no idle state. |
+
+The 60 seconds is a fixed constant; there is no config key. It fires for a
+turn of any outcome, including a failed or cancelled one.
+
+Its stdin:
+
+```json
+{
+  "hook_event_name": "Notification",
+  "cwd": "/path/to/workspace",
+  "session_id": "0193…",
+  "notification_type": "permission_prompt",
+  "title": "radian",
+  "message": "radian needs your permission to use shell"
+}
+```
+
+`notification_type` is the value the matcher chose. `title` is always
+`radian`. `message` is `radian needs your permission to use <tool name>` for
+`permission_prompt` and `radian is waiting for your input` for `idle_prompt`.
+It never carries tool arguments, a command, or transcript text: the user's
+command decides what leaves the machine (radian sends nothing itself).
+
+The hook cannot delay the prompt or the frame: it starts in the background and
+the modal or the idle transition appears at once. Its output and exit code are
+ignored (one Recent runs entry only).
+
+## `StopFailure` and `Notification` return nothing
+
+Neither event decides anything. Any stdout is ignored, exit 2 has no meaning,
+and any other exit or a timeout only records the Recent runs entry. There is
+no JSON to print and no field to set. The only visible effect is the command
+the hook itself runs.
+
 Set `[hooks] intent_stop = false` to turn off the built-in stop validator
 that also runs on the `Stop` path. It defaults to on. It runs even with no
 hooks configured. It stays quiet while a goal or `/loop` owns the turn end
@@ -201,7 +330,9 @@ case-sensitive. `*`, a blank string, or a missing matcher matches every
 tool. Any other value is a regular expression anchored to the whole tool
 name, so `shell|write` matches the `shell` and `write` tools, and `sh` does
 not match `shell`. A pattern that does not compile matches nothing. `Stop`
-ignores the matcher.
+ignores the matcher. `StopFailure` and `Notification` do not use regexes: their
+matchers are the closed sets in their sections above (`*` or blank matches
+all).
 
 Type `/hooks` to open the inspector's hooks page. It shows each configured
 entry and whether its matcher compiles, a Running section for async hooks
@@ -290,7 +421,9 @@ already started keeps its value. A turn that ends without completing runs no
 
 ## What a hook returns
 
-The exit code decides.
+The exit code decides for the four deciding events. `StopFailure` and
+`Notification` ignore output entirely: they only observe, and their exit code
+or timeout adds one Recent runs entry and nothing else (see their sections).
 
 | Exit code | `PreToolUse` | `PermissionRequest` | `PostToolUse` | `Stop` |
 |---|---|---|---|---|
@@ -405,8 +538,9 @@ Every hook run records one entry, when it finishes or when it never starts:
 <event>:<tool name> [<first line of the command>] <end> (<n>ms)
 ```
 
-`Stop` has no tool name. The command is the `command` as written, cut to its
-first line; with `args` it is the program only. `<end>` is exactly one of:
+`Stop`, `StopFailure` and `Notification` have no tool name. The command is the
+`command` as written, cut to its first line; with `args` it is the program only.
+`<end>` is exactly one of:
 
 | End | Meaning |
 |---|---|
@@ -424,6 +558,8 @@ entries, in the same scrolling list: `↑`/`↓` reaches every retained run, and
 `⏎` on a run shows its record. Running async hooks sit above that section in
 their own Running list, each as `<event>:<tool> [<command first line>] running
 (<n>ms)` (or `<event> [<command first line>] running (<n>ms)` for `Stop`).
+`StopFailure` and `Notification` runs are not listed as running (they always
+run in the background); their finished run still appears in Recent runs.
 Each run is also logged with `tracing` at info as it finishes. Runs are not
 journaled: they never enter the transcript or the session journal. `radian
 exec` has no `/hooks` page, so there it is only the log line.
