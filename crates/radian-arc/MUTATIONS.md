@@ -1765,4 +1765,23 @@ file, the named tests ran with `cargo nextest run -p radian-arc --locked --profi
 
 7/7 caught.
 
+## TK0240: the rebase refusal and the ambient-config override (2026-10-29, branch `work/TK0240-push-squash-rebase`)
+
+The review of TK0240 found that a `rebase` candidate could keep or drop a merge commit
+depending on the user's git configuration, and that a branch with a merge commit took the
+fast path when the target had not moved. The integration stage now refuses a
+`<target>..<head_sha>` range that contains a merge commit before the fast path and before
+any rebase, and runs the rebase with explicit flags and `-c` overrides. Each mutation was
+applied by hand to `crates/radian-arc/src/gate/integration.rs`, backed up under
+`.radian/mut/integration.rs.orig`, the named tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --no-fail-fast`, and the file was restored from that copy with
+`cp` and confirmed byte-identical with `cmp` and `shasum -a 256`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0240-M8 | the `rebase` refusal check never fires (`if false`) | `integration::rebase_refuses_a_branch_with_a_merge_commit_when_the_target_is_unchanged`, `integration::rebase_refuses_a_branch_whose_merge_resolution_added_a_file`, `review::a_rebase_merge_refuses_a_branch_with_a_merge_commit` | ✅ 3 failed |
+| TK0240-M9 | `rebase_onto` runs plain `git rebase <upstream>` with no `-c` overrides or `--no-autostash` | `integration::rebase_ignores_the_users_rebase_configuration` (`rebase.updateRefs` moved `work/<task>`) | ✅ 1 failed |
+
+2/2 caught.
+
 
