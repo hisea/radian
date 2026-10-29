@@ -3339,3 +3339,16 @@ place to `crates/radian-tui/src/inspector.rs`, backed up under `.radian/mut/` an
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0231-M9 | the Recent runs section is never drawn (`if … && false` in `inspector::draw`) | ✅ 1 failed (rc=100) | `the_hooks_page_lists_recent_runs_newest_first` (neither `Recent runs` nor either record line was on screen) |
+
+## TK0231 (rework): the Recent runs rows scroll with the hooks list (2026-10-29, branch `work/TK0231-hook-args-and-run-records`)
+
+`docs/user/hooks.md` "Recent runs": with 50 retained runs on a normal-height panel, the run
+rows share the configured entries' scrolling list, so `↓` reaches the oldest retained run
+instead of clipping it below the fold. The mutation was applied in place to
+`crates/radian-tui/src/inspector.rs`, backed up under `.radian/mut/` and restored (`cmp`
+identical). The named test ran with `cargo nextest run -p radian-tui --test render --locked
+--profile sandbox --no-fail-fast -E 'test(the_hooks_page)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0231-M12 | `Inspector::len` counts only the configured hooks, so the selection never enters the run rows (the old clipped shape) | ✅ 1 failed (rc=100) | `the_hooks_page_scrolls_to_every_retained_run` (Down stayed on the configured hook, so the newest run was never selected) |

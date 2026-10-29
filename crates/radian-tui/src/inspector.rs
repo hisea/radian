@@ -111,13 +111,14 @@ impl Inspector {
         }
     }
 
-    /// The rows on the current page.
+    /// The rows on the current page (the hooks page counts its run rows too: they scroll
+    /// with the list).
     pub fn len(&self) -> usize {
         match self.page {
             InspectorPage::Jobs => self.snapshot.jobs.len(),
             InspectorPage::Tools => self.snapshot.tools.len(),
             InspectorPage::Mcp => self.snapshot.mcp.len(),
-            InspectorPage::Hooks => self.snapshot.hooks.len(),
+            InspectorPage::Hooks => self.snapshot.hooks.len() + self.snapshot.hook_runs.len(),
         }
     }
 
@@ -161,6 +162,19 @@ impl Inspector {
             return;
         }
         self.selected = (self.selected as i32 + delta).rem_euclid(len as i32) as usize;
+    }
+
+    /// The row the shared list draws its cursor on. The hooks page puts one non-selectable
+    /// "Recent runs" heading between the configured entries and the run rows, so a selection
+    /// in the run rows maps one row past it.
+    fn list_selected(&self) -> usize {
+        if self.page == InspectorPage::Hooks
+            && self.selected >= self.snapshot.hooks.len()
+            && !self.snapshot.hook_runs.is_empty()
+        {
+            return self.selected + 1;
+        }
+        self.selected
     }
 
     /// The id the jobs page would kill (`k`), or `None` on another page or an empty list.
@@ -353,23 +367,27 @@ pub fn draw(
     let items = list_items(inspector);
     // Budget: the area minus the panel's two borders, the tab row, the divider, and — when
     // shown — the detail divider plus the detail rows and the confirm row. The list takes
-    // what is left, at least one row, so the bottom hints are never clipped.
+    // what is left, at least one row, so the bottom hints are never clipped. The hooks
+    // page's Recent runs rows are part of this one list, so the window follows the selection
+    // through every retained run.
     let mut reserved = 4usize;
     let detail_lines = detail_text(inspector, inner);
     if !detail_lines.is_empty() {
         reserved += 1 + detail_lines.len();
     }
-    // The Recent runs section (divider, heading, one row per run) takes its rows from the
-    // list's budget, so the newest runs are never pushed below the panel's bottom.
-    if inspector.page == InspectorPage::Hooks && !inspector.snapshot.hook_runs.is_empty() {
-        reserved += 2 + inspector.snapshot.hook_runs.len();
-    }
     if inspector.pending_kill.is_some() {
         reserved += 1;
     }
     let budget = (area.height as usize).saturating_sub(reserved).max(1);
-    let list =
-        crate::select_list::view(theme, &items, "", inspector.selected, budget, inner, ascii);
+    let list = crate::select_list::view(
+        theme,
+        &items,
+        "",
+        inspector.list_selected(),
+        budget,
+        inner,
+        ascii,
+    );
     for line in list.lines {
         panel = panel.row(line);
     }
@@ -378,16 +396,6 @@ pub fn draw(
             empty_message(inspector),
             theme.hint,
         )));
-    }
-    // The hooks page's Recent runs section: the last runs newest first, each the one record
-    // line (`<event>:<tool> [<command>] <end> (<n>ms)`). It is not selectable; the hooks list
-    // above keeps every key.
-    if inspector.page == InspectorPage::Hooks && !inspector.snapshot.hook_runs.is_empty() {
-        panel = panel.divider();
-        panel = panel.row(Line::from(Span::styled("Recent runs", theme.text)));
-        for run in &inspector.snapshot.hook_runs {
-            panel = panel.row(Line::from(Span::raw(run.line())));
-        }
     }
     if !detail_lines.is_empty() {
         panel = panel.divider();
@@ -473,20 +481,37 @@ fn list_items(inspector: &Inspector) -> Vec<crate::select_list::Item> {
                 ))
             })
             .collect(),
-        InspectorPage::Hooks => inspector
-            .snapshot
-            .hooks
-            .iter()
-            .map(|hook| {
-                crate::select_list::Item::new(format!("{} {}", hook.event, hook.matcher))
-                    .description(format!(
-                        "{} \u{b7} {} \u{b7} {}",
-                        hook.command,
-                        hook.level,
-                        if hook.effective { "on" } else { "off" }
-                    ))
-            })
-            .collect(),
+        InspectorPage::Hooks => {
+            let mut items: Vec<crate::select_list::Item> = inspector
+                .snapshot
+                .hooks
+                .iter()
+                .map(|hook| {
+                    crate::select_list::Item::new(format!("{} {}", hook.event, hook.matcher))
+                        .description(format!(
+                            "{} \u{b7} {} \u{b7} {}",
+                            hook.command,
+                            hook.level,
+                            if hook.effective { "on" } else { "off" }
+                        ))
+                })
+                .collect();
+            // The Recent runs section: one heading row, then the last runs newest first,
+            // each the one record line (`<event>:<tool> [<command>] <end> (<n>ms)`). They
+            // share the configured entries' scrolling list so every retained run is
+            // reachable; the selection skips the heading (`list_selected`).
+            if !inspector.snapshot.hook_runs.is_empty() {
+                items.push(crate::select_list::Item::new("Recent runs"));
+                items.extend(
+                    inspector
+                        .snapshot
+                        .hook_runs
+                        .iter()
+                        .map(|run| crate::select_list::Item::new(run.line())),
+                );
+            }
+            items
+        }
     }
 }
 
@@ -571,23 +596,46 @@ fn detail_text(inspector: &Inspector, inner: usize) -> Vec<ratatui::text::Line<'
             out
         }
         InspectorPage::Hooks => {
-            let Some(hook) = inspector.snapshot.hooks.get(inspector.selected) else {
+            if let Some(hook) = inspector.snapshot.hooks.get(inspector.selected) {
+                return vec![
+                    Line::from(Span::raw(truncate(&format!("event {}", hook.event)))),
+                    Line::from(Span::raw(truncate(&format!("match {}", hook.matcher)))),
+                    Line::from(Span::raw(truncate(&hook.command))),
+                    Line::from(Span::raw(truncate(&format!(
+                        "timeout {}s \u{b7} {} \u{b7} {} \u{b7} {}",
+                        hook.timeout_secs,
+                        hook.source,
+                        hook.level,
+                        if hook.effective {
+                            "effective"
+                        } else {
+                            "off (bad matcher)"
+                        }
+                    )))),
+                ];
+            }
+            // A run row's detail: the record's own fields.
+            let Some(run) = inspector
+                .snapshot
+                .hook_runs
+                .get(inspector.selected - inspector.snapshot.hooks.len())
+            else {
                 return Vec::new();
             };
             vec![
-                Line::from(Span::raw(truncate(&format!("event {}", hook.event)))),
-                Line::from(Span::raw(truncate(&format!("match {}", hook.matcher)))),
-                Line::from(Span::raw(truncate(&hook.command))),
                 Line::from(Span::raw(truncate(&format!(
-                    "timeout {}s \u{b7} {} \u{b7} {} \u{b7} {}",
-                    hook.timeout_secs,
-                    hook.source,
-                    hook.level,
-                    if hook.effective {
-                        "effective"
-                    } else {
-                        "off (bad matcher)"
+                    "event {} \u{b7} {}",
+                    run.event,
+                    match &run.tool {
+                        Some(tool) => format!("tool {tool}"),
+                        None => "no tool (Stop)".to_owned(),
                     }
+                )))),
+                Line::from(Span::raw(truncate(&run.command))),
+                Line::from(Span::raw(truncate(&format!(
+                    "end {} \u{b7} {}ms",
+                    run.end.label(),
+                    run.millis
                 )))),
             ]
         }

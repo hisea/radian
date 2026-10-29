@@ -302,12 +302,12 @@ first line; with `args` it is the program only. `<end>` is exactly one of:
 Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
 least `1ms`.
 
-The session keeps the last 50 runs in memory, newest first, and the `/hooks`
-page shows them in its Recent runs section below the configured entries. The
-configured list above stays the selectable one; the run section is read-only.
-Each run is also logged with `tracing` at info as it finishes. Runs are not
-journaled: they never enter the transcript or the session journal. `radian
-exec` has no `/hooks` page, so there it is only the log line.
+The session keeps the last 50 runs in memory, newest first. The `/hooks`
+page lists them in its Recent runs section below the configured entries, in the
+same scrolling list: `↑`/`↓` reaches every retained run, and `⏎` on a run shows
+its record. Each run is also logged with `tracing` at info as it finishes. Runs
+are not journaled: they never enter the transcript or the session journal.
+`radian exec` has no `/hooks` page, so there it is only the log line.
 
 ## Worked examples
 

@@ -3130,6 +3130,102 @@ fn the_hooks_page_lists_recent_runs_newest_first() {
     );
 }
 
+/// The hooks page keeps every retained run reachable: with 50 run records (the session
+/// ring's last 50) and a normal-height panel, the rows below the fold are part of the same
+/// scrolling list, so ↓ reaches the oldest run and draws it. Appending the section after the
+/// list (the old shape) clips the older rows and fails this.
+#[test]
+fn the_hooks_page_scrolls_to_every_retained_run() {
+    use radian_host::{HookRunEnd, HookRunRecord};
+    use radian_tui::app::{Input, Overlay};
+    use radian_tui::command::InspectorPage;
+    use radian_tui::inspector::{HookEntry, Inspector, InspectorSnapshot};
+    let runs: Vec<HookRunRecord> = (0..50)
+        .map(|i| HookRunRecord {
+            event: "PreToolUse".to_owned(),
+            tool: Some("shell".to_owned()),
+            command: format!("run-{:02}", 49 - i),
+            end: HookRunEnd::Status(0),
+            millis: 1,
+        })
+        .collect();
+    let snapshot = InspectorSnapshot {
+        hooks: vec![HookEntry {
+            event: "PreToolUse".to_owned(),
+            matcher: "*".to_owned(),
+            command: "make lint".to_owned(),
+            timeout_secs: 10,
+            source: "user config.toml".to_owned(),
+            level: "user".to_owned(),
+            effective: true,
+        }],
+        hook_runs: runs,
+        ..Default::default()
+    };
+    let mut app = App::new("m", "s");
+    app.push_overlay(Overlay::Inspector(Inspector::new(
+        InspectorPage::Hooks,
+        snapshot,
+    )));
+    let terminal = render(&mut app, 100, 24);
+    let text = screen(&terminal);
+    assert!(text.contains("Recent runs"), "{text}");
+    assert!(
+        text.contains("run-49"),
+        "the newest run is drawn first: {text}"
+    );
+    assert!(
+        !text.contains("run-00"),
+        "the oldest run starts below the fold: {text}"
+    );
+    // One Down from the configured hook skips the non-selectable heading and lands on the
+    // newest run row.
+    app.update(Input::InspectorKey(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+    )));
+    let terminal = render(&mut app, 100, 24);
+    let text = screen(&terminal);
+    let heading = text
+        .lines()
+        .find(|line| line.contains("Recent runs"))
+        .expect("the heading is drawn");
+    assert!(
+        !heading.contains('\u{276f}'),
+        "the heading is never selectable: {heading}"
+    );
+    let newest = text
+        .lines()
+        .find(|line| line.contains("run-49"))
+        .expect("the newest run is drawn");
+    assert!(
+        newest.contains('\u{276f}'),
+        "the selection lands on the newest run, not the heading: {newest}"
+    );
+    // One Down per remaining row reaches the oldest retained run.
+    for _ in 0..49 {
+        app.update(Input::InspectorKey(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+    }
+    let terminal = render(&mut app, 100, 24);
+    let text = screen(&terminal);
+    assert!(
+        text.contains("run-00"),
+        "↓ reaches the oldest retained run: {text}"
+    );
+    // The cursor lands on a run row, never on the section heading between the rows.
+    let oldest = text
+        .lines()
+        .find(|line| line.contains("run-00"))
+        .expect("the oldest run is drawn");
+    assert!(
+        oldest.contains('\u{276f}') || oldest.contains("> PreToolUse"),
+        "the selected run carries the cursor: {oldest}"
+    );
+}
+
 /// The session picker (ADR 0035/2): the shared panel with the filter row, the
 /// sessions through the shared list, and the selected `--resume <id>` on the top border.
 #[test]
