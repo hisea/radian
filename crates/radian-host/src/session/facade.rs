@@ -140,6 +140,10 @@ pub trait SessionFacade: Send + Sync {
     /// section, ADR 0045 §4/§5). In memory only; never journaled.
     fn hook_runs(&self) -> Vec<crate::HookRunRecord>;
 
+    /// The async hooks running right now, in spawn order (the inspector's hooks page Running
+    /// section, ADR 0045 §5). They are not jobs: `/jobs` and the `job` tool never show them.
+    fn running_async_hooks(&self) -> Vec<crate::RunningHook>;
+
     /// The tail of a job's output plus its state, for the inspector's jobs detail.
     /// `None` for an unknown id. The ring is in-memory, so this is not I/O.
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)>;

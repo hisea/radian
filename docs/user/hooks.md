@@ -52,12 +52,14 @@ and when no layer gives a decision the ordinary prompt (or denial) follows.
 
 A missing file is empty, never an error. An unreadable project file warns
 once and loads nothing. A hook whose `type` is not `"command"`, an entry
-with handler keys outside the command subset (`async`, `if`, `http`,
-`prompt`, `agent`), a missing or empty `command`, a bad `timeout`, a
-non-string matcher, or a missing or empty `hooks` list is
-skipped with one warning each. A hook whose `args` is not an array of strings
-is the one exception: only that hook is skipped, the warning names it, and the
-entry's other hooks still load. Nothing outside the subset ever refuses
+with handler keys outside the command subset (`if`, `http`, `prompt`,
+`agent`), a missing or empty `command`, a bad `timeout`, a non-string matcher,
+or a missing or empty `hooks` list is skipped with one warning each. A hook
+whose `args` is not an array of strings is one exception: only that hook is
+skipped, the warning names it, and the entry's other hooks still load. So is
+`async` or `asyncRewake` on `PreToolUse` or `PermissionRequest`: those two
+events decide before the call, so the hook is skipped with one warning and
+the entry's other hooks still load. Nothing outside the subset ever refuses
 startup.
 
 ## The user config shape
@@ -78,6 +80,13 @@ command = "/work/example/hooks/lint"
 args = ["--check", "src/lib.rs"]
 timeout = 30
 
+[[hooks.PostToolUse]]
+matcher = "write"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "/work/example/hooks/lint-async"
+async = true
+
 [[hooks.Stop]]
 [[hooks.Stop.hooks]]
 type = "command"
@@ -87,7 +96,8 @@ timeout = 30
 
 Each event holds a list of entries. Each entry holds a `matcher` and a list
 of `hooks`. Each hook holds `type = "command"`, a `command`, an optional
-`args`, and an optional `timeout` in seconds.
+`args`, an optional `timeout` in seconds, and the optional `async` and
+`asyncRewake` booleans (`false` by default).
 
 Without `args`, `command` is a shell command string and runs through
 `/bin/sh -c`. With `args`, `command` names an executable — an absolute or
@@ -100,6 +110,36 @@ warning, and the entry's other hooks still load.
 
 The default timeout is 60 seconds; zero means the default. A second
 `[[...hooks]]` table under one entry runs a second command.
+
+## Async hooks
+
+`async = true` starts the hook in the background instead of waiting: the tool
+result returns at once, and a `Stop` hook does not hold the turn end. Only
+`PostToolUse` and `Stop` accept it. `PreToolUse` and `PermissionRequest` run to
+decide before the call, so a hook with `async` there is skipped with one
+warning and the entry's other hooks still load. `asyncRewake = true` implies
+`async`.
+
+An async hook starts exactly like a synchronous one: same working directory,
+same sandbox, same environment rules, same stdin. The default timeout is 600
+seconds instead of 60; an explicit `timeout` still wins. It is not part of a
+`Stop` continuation chain and does not count toward the consecutive
+idle-continuation cap. It is not a job either: it never appears in `/jobs` or
+the `job` tool, and the model cannot wait on or kill it. The `/hooks` page
+shows running async hooks in a Running section, and `Stop` lists each one in
+`background_tasks` with `"type": "hook"`. While one runs, the built-in stop
+validator stays off, like a running job.
+
+Its result is delivered when the process exits. An async hook cannot change a
+call or a turn: a returned `permissionDecision`, `updatedInput`,
+`updatedToolOutput` or `decision` is ignored with one warning.
+
+| End | What happens |
+|---|---|
+| exit 0 with `hookSpecificOutput.additionalContext` | The text enters context as a `System` `inject`: `[<event> hook] <text>`, at most 2000 characters. It waits for the next model call — the running turn's next step, or the next turn — and never wakes an idle session. |
+| exit 2 without `asyncRewake` | The stderr text takes the same `inject` path, at most 2000 characters. Empty stderr uses a fallback line. |
+| exit 2 with `asyncRewake` | The stderr text takes the `followup` lane: an idle session wakes one turn and the wake counts against the same wake budget as `Stop` continuations. Past the budget it degrades to an `inject` with the same three signals as a degraded background notice. |
+| other exit, timeout, or start failure | One warning line and one Recent runs entry. It never fails closed: the action the hook checked already happened. |
 
 The project file spells the same shape in JSON:
 
@@ -149,7 +189,8 @@ not match `shell`. A pattern that does not compile matches nothing. `Stop`
 ignores the matcher.
 
 Type `/hooks` to open the inspector's hooks page. It shows each configured
-entry and whether its matcher compiles, and a Recent runs section (see
+entry and whether its matcher compiles, a Running section for async hooks
+(see [Async hooks](#async-hooks)), and a Recent runs section (see
 [Recent runs](#recent-runs)).
 
 ## What a hook receives
@@ -222,7 +263,7 @@ the last assistant message's text:
 | Field | Type | Value when it does not apply | When it is filled |
 |---|---|---|---|
 | `stop_hook_active` | boolean | `false` | `true` only on the turn that claims a `Stop` continuation: a hook exit 2, a `Stop` hook's exit-0 `decision: "block"` or `additionalContext`, or the built-in stop validator. |
-| `background_tasks` | array | `[]` | The background jobs running when `Stop` runs. An entry is `{"id": "job-…", "type": "shell", "status": "running", "description": "make check", "command": "make check\necho done"}`: `description` is the command's first line, `command` the full command. A host with no job registry reports `[]`. |
+| `background_tasks` | array | `[]` | The background jobs and async hooks running when `Stop` runs. A job entry is `{"id": "job-…", "type": "shell", "status": "running", "description": "make check", "command": "make check\necho done"}`: `description` is the command's first line, `command` the full command. An async hook entry has the same fields with `"type": "hook"`. A host with no job registry still lists running async hooks and reports `[]` when there are none. |
 | `session_crons` | array | `[]` | The session-level schedulers that open turns by themselves: `{"id": "loop", "type": "loop"}` while `/loop` is on, and `{"id": "goal", "type": "goal", "status": "active"}` or `{"id": "goal", "type": "goal", "status": "paused"}` while a goal is active or paused. `radian exec` has no `/loop`, so it can carry only the goal entry. |
 
 `stop_hook_active` describes the turn the hook runs for. It is `true` when that
@@ -267,7 +308,9 @@ against the permission rules, and later hooks see the replaced input:
 
 `PostToolUse` and `Stop` also read these fields from their exit-0 JSON
 output. Empty stdout does nothing, and stdout that is not JSON warns once and
-changes nothing.
+changes nothing. A synchronous hook applies them to the result or the turn as
+described below. An async hook ignores every control field with one warning;
+only its `additionalContext` reaches context (see [Async hooks](#async-hooks)).
 
 `hookSpecificOutput.additionalContext` (string) adds feedback without
 failing. On `PostToolUse` it appends `[PostToolUse hook] <text>` to the result
@@ -360,12 +403,15 @@ first line; with `args` it is the program only. `<end>` is exactly one of:
 Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
 least `1ms`.
 
-The session keeps the last 50 runs in memory, newest first. The `/hooks`
-page lists them in its Recent runs section below the configured entries, in the
-same scrolling list: `↑`/`↓` reaches every retained run, and `⏎` on a run shows
-its record. Each run is also logged with `tracing` at info as it finishes. Runs
-are not journaled: they never enter the transcript or the session journal.
-`radian exec` has no `/hooks` page, so there it is only the log line.
+The session keeps the last 50 finished runs in memory, newest first. The
+`/hooks` page lists them in its Recent runs section below the configured
+entries, in the same scrolling list: `↑`/`↓` reaches every retained run, and
+`⏎` on a run shows its record. Running async hooks sit above that section in
+their own Running list, each as `<event>:<tool> [<command first line>] running
+(<n>ms)` (or `<event> [<command first line>] running (<n>ms)` for `Stop`).
+Each run is also logged with `tracing` at info as it finishes. Runs are not
+journaled: they never enter the transcript or the session journal. `radian
+exec` has no `/hooks` page, so there it is only the log line.
 
 ## Worked examples
 
@@ -420,5 +466,7 @@ usually has a matcher that
 does not compile (the hooks page says so) or a tool name that is not a
 Radian tool name (MCP tools carry their `server__` prefix). A hook that
 denies everything usually exits non-zero by accident: check the timeout
-(a slow command past 60 seconds fails closed) and check stderr. A project
+(a slow synchronous command past 60 seconds fails closed; an async one past
+600 only warns and records the run, because the action it checked already
+happened) and check stderr. A project
 file that never loads is in an untrusted directory: trust it first.

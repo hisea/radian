@@ -151,12 +151,13 @@ fn the_unknown_fields_are_ignored_but_reported() {
 }
 
 /// `hooks.toml` (ADR 0045 slice A): the four events parse with matchers and commands;
-/// the non-subset entries (`http`, `async`, unknown event) are skipped, never refused.
+/// the non-subset entries (`http`, `async` on `PreToolUse`, unknown event) are skipped,
+/// never refused, and `async`/`asyncRewake` load on `PostToolUse`.
 #[test]
 fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     let (path, text) = fixture("hooks.toml");
     let config = config::parse(&path, &text).unwrap();
-    assert_eq!(config.hooks.pre_tool_use.len(), 1);
+    assert_eq!(config.hooks.pre_tool_use.len(), 2);
     assert_eq!(
         config.hooks.pre_tool_use[0].matcher.as_deref(),
         Some("shell|write")
@@ -172,7 +173,13 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     );
     assert_eq!(config.hooks.pre_tool_use[0].hooks.len(), 1);
     assert_eq!(config.hooks.pre_tool_use[0].hooks[0].timeout_secs, Some(10));
-    assert_eq!(config.hooks.post_tool_use.len(), 1);
+    assert_eq!(config.hooks.post_tool_use.len(), 2);
+    assert!(config.hooks.post_tool_use[1].hooks[0].async_hook);
+    assert!(config.hooks.post_tool_use[1].hooks[1].async_rewake);
+    assert_eq!(
+        config.hooks.post_tool_use[1].hooks[0].timeout().as_secs(),
+        config::DEFAULT_ASYNC_HOOK_TIMEOUT_SECS
+    );
     assert_eq!(config.hooks.stop.len(), 1);
     assert_eq!(config.hooks.stop[0].hooks[0].timeout_secs, Some(30));
     assert_eq!(
@@ -181,8 +188,8 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
         "the fixture pins the kill switch off"
     );
     for key in [
-        "hooks.PostToolUse[1]",
         "hooks.PreToolUse[1]",
+        "hooks.PreToolUse[2].hooks[1]",
         "hooks.SessionStart",
     ] {
         assert!(

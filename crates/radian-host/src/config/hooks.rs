@@ -2,7 +2,8 @@
 //! `config.toml`.
 //!
 //! Only four events exist — `PreToolUse`, `PostToolUse`, `Stop` and `PermissionRequest` — each
-//! a list of `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args, timeout }`
+//! a list of `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args,
+//! timeout, async, asyncRewake }`
 //! table. `args` is optional: with it `command` is the program and the hook starts without a
 //! shell; without it `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's case-sensitive pattern over **Radian** tool names
 //! (`shell`, `write`, `patch`, `read`, …): `*` or a missing/empty matcher matches every
@@ -12,10 +13,15 @@
 //!
 //! Anything outside the subset never refuses the file. An unknown event name, a malformed
 //! entry, a hook whose `type` is not `"command"`, or an entry carrying one of the
-//! non-command handler keys (`async`, `if`, `http`, `prompt`, `agent`) is skipped with one
-//! line in [`Config::skipped`], so the startup line says it once. An `args` that is not an
-//! array of strings is not a structural defect: it drops that hook only, one line named down
-//! to the hook, and the entry's other hooks still load.
+//! non-command handler keys (`if`, `http`, `prompt`, `agent`) is skipped with one line in
+//! [`Config::skipped`], so the startup line says it once. An `args` that is not an array of
+//! strings is not a structural defect: it drops that hook only, one line named down to the
+//! hook, and the entry's other hooks still load. The same goes for `async`/`asyncRewake` on
+//! an event that does not accept them (`PreToolUse`, `PermissionRequest`).
+//!
+//! `async` (default `false`) and `asyncRewake` (default `false`; `true` implies `async`)
+//! are accepted on `PostToolUse` and `Stop` only (ADR 0045 §1/§5): the hook starts like a
+//! synchronous one and the tool result or the `Stop` chain continues at once.
 
 use toml::Value;
 
@@ -38,6 +44,10 @@ pub const STOP: &str = "Stop";
 /// may run before it counts as a hook error (fail closed).
 pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 60;
 
+/// The default timeout of an `async` hook that does not set `timeout`, in seconds (ADR 0045
+/// §5): background checks are allowed to be slow.
+pub const DEFAULT_ASYNC_HOOK_TIMEOUT_SECS: u64 = 600;
+
 /// The `[hooks] intent_stop` default: the built-in validator runs unless turned off.
 pub const DEFAULT_INTENT_STOP: bool = true;
 
@@ -53,14 +63,30 @@ pub struct HookCommand {
     pub args: Option<Vec<String>>,
     /// Seconds before the run counts as a hook error. `None` means the default.
     pub timeout_secs: Option<u64>,
+    /// `async`: the hook runs in the background (ADR 0045 §5). Accepted on `PostToolUse`
+    /// and `Stop` only; the reader drops it elsewhere with one warning.
+    pub async_hook: bool,
+    /// `asyncRewake`: an `async` hook whose exit 2 wakes an idle session through the wake
+    /// gate (ADR 0045 §5). `true` implies [`HookCommand::async_hook`].
+    pub async_rewake: bool,
 }
 
 impl HookCommand {
+    /// Whether this hook runs in the background. `asyncRewake` implies `async`.
+    pub fn is_async(&self) -> bool {
+        self.async_hook || self.async_rewake
+    }
+
     /// The effective timeout: the configured one, or the default when unset or zero (a zero
-    /// timeout would fire at once, which is never what a config means).
+    /// timeout would fire at once, which is never what a config means). An `async` hook's
+    /// default is [`DEFAULT_ASYNC_HOOK_TIMEOUT_SECS`], not the synchronous one.
     pub fn timeout(&self) -> std::time::Duration {
         match self.timeout_secs {
-            Some(0) | None => std::time::Duration::from_secs(DEFAULT_HOOK_TIMEOUT_SECS),
+            Some(0) | None => std::time::Duration::from_secs(if self.is_async() {
+                DEFAULT_ASYNC_HOOK_TIMEOUT_SECS
+            } else {
+                DEFAULT_HOOK_TIMEOUT_SECS
+            }),
             Some(secs) => std::time::Duration::from_secs(secs),
         }
     }
@@ -114,8 +140,8 @@ pub fn matcher_effective(matcher: Option<&str>) -> bool {
 }
 
 /// Handler keys this slice does not implement (ADR 0045): an entry carrying any of them is
-/// skipped, never run.
-const NON_COMMAND_HANDLER_KEYS: [&str; 5] = ["async", "if", "http", "prompt", "agent"];
+/// skipped, never run. `async` is no longer one of them; it is a field of its own.
+const NON_COMMAND_HANDLER_KEYS: [&str; 4] = ["if", "http", "prompt", "agent"];
 
 /// Reads `[hooks]` (already looked up as a TOML value). Never refuses: everything outside
 /// the subset is skipped and named, so one startup line says what was ignored.
@@ -149,11 +175,13 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             config.skipped.push(format!("hooks.{event}"));
             continue;
         };
+        let accepts_async = matches!(event.as_str(), POST_TOOL_USE | STOP);
         for (index, item) in items.iter().enumerate() {
-            let parsed = parse_entry(item);
-            // A bad `args` drops that hook only: the entry's other hooks still load (ADR
-            // 0045 §4). Each dropped hook is one line, named down to the hook.
-            for hook_index in &parsed.bad_args {
+            let parsed = parse_entry(item, accepts_async);
+            // A bad `args`, or `async` on an event that does not accept it, drops that hook
+            // only: the entry's other hooks still load (ADR 0045 §1/§4). Each dropped hook
+            // is one line, named down to the hook.
+            for hook_index in parsed.dropped_hooks() {
                 config
                     .skipped
                     .push(format!("hooks.{event}[{index}].hooks[{hook_index}]"));
@@ -161,9 +189,9 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
             match parsed.entry {
                 Some(entry) => list.push(entry),
                 // One entry, one line: a bad hook drops its whole entry, never a sibling
-                // entry, and never the file. When every hook was dropped for a bad `args`,
-                // the per-hook lines above already say it.
-                None if parsed.bad_args.is_empty() => {
+                // entry, and never the file. When every hook was dropped one by one, the
+                // per-hook lines above already say it.
+                None if !parsed.dropped_any() => {
                     config.skipped.push(format!("hooks.{event}[{index}]"));
                 }
                 None => {}
@@ -173,14 +201,15 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
     Ok(())
 }
 
-/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped only for a bad `args`.
+/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped one by one.
 struct ParsedEntry {
-    /// The entry, `None` when it is skipped as a whole (then `bad_args` is empty) or when
-    /// every hook was dropped for a bad `args` (then `bad_args` names them).
+    /// The entry, `None` when it is skipped as a whole (then `dropped` is empty) or when
+    /// every hook was dropped individually (then `dropped` names them).
     entry: Option<HookMatcher>,
-    /// Indexes of hooks dropped because `args` is not an array of strings. The rest of the
-    /// entry still loads; each index is one warning line.
-    bad_args: Vec<usize>,
+    /// Indexes of hooks dropped for a bad `args`, or for `async`/`asyncRewake` on an event
+    /// that does not accept them. The rest of the entry still loads; each index is one
+    /// warning line.
+    dropped: Vec<usize>,
 }
 
 impl ParsedEntry {
@@ -188,15 +217,26 @@ impl ParsedEntry {
     fn skipped() -> Self {
         Self {
             entry: None,
-            bad_args: Vec::new(),
+            dropped: Vec::new(),
         }
+    }
+
+    /// The indexes of hooks dropped one by one.
+    fn dropped_hooks(&self) -> &[usize] {
+        &self.dropped
+    }
+
+    /// Whether any hook was dropped one by one (so the entry's own line would repeat it).
+    fn dropped_any(&self) -> bool {
+        !self.dropped.is_empty()
     }
 }
 
 /// Reads one `{ matcher, hooks }` entry. A structural defect skips the whole entry (one
 /// line): a hook whose `type` is not `"command"`, a hook carrying a non-command handler
-/// key, a missing or empty `command`, or a bad `timeout`. A bad `args` drops only that hook.
-fn parse_entry(item: &Value) -> ParsedEntry {
+/// key, a missing or empty `command`, or a bad `timeout`. A bad `args`, or `async` on an
+/// event that does not accept it, drops only that hook.
+fn parse_entry(item: &Value, accepts_async: bool) -> ParsedEntry {
     let Some(table) = item.as_table() else {
         return ParsedEntry::skipped();
     };
@@ -212,11 +252,11 @@ fn parse_entry(item: &Value) -> ParsedEntry {
         return ParsedEntry::skipped();
     }
     let mut commands = Vec::new();
-    let mut bad_args = Vec::new();
+    let mut dropped = Vec::new();
     for (index, hook) in hooks.iter().enumerate() {
-        match parse_command(hook) {
+        match parse_command(hook, accepts_async) {
             CommandParse::Ok(command) => commands.push(command),
-            CommandParse::BadArgs => bad_args.push(index),
+            CommandParse::DropHook => dropped.push(index),
             CommandParse::Skip => return ParsedEntry::skipped(),
         }
     }
@@ -225,21 +265,22 @@ fn parse_entry(item: &Value) -> ParsedEntry {
             matcher,
             hooks: commands,
         }),
-        bad_args,
+        dropped,
     }
 }
 
 /// One hook row's parse result.
 enum CommandParse {
     Ok(HookCommand),
-    /// `args` is present but is not an array of strings: drop this hook only.
-    BadArgs,
+    /// `args` is present but is not an array of strings, or `async`/`asyncRewake` is set on
+    /// an event that does not accept them: drop this hook only.
+    DropHook,
     /// Outside the command subset: drop the whole entry.
     Skip,
 }
 
-/// Reads one `{ type, command, args, timeout }` hook.
-fn parse_command(hook: &Value) -> CommandParse {
+/// Reads one `{ type, command, args, timeout, async, asyncRewake }` hook.
+fn parse_command(hook: &Value, accepts_async: bool) -> CommandParse {
     let Some(table) = hook.as_table() else {
         return CommandParse::Skip;
     };
@@ -269,18 +310,36 @@ fn parse_command(hook: &Value) -> CommandParse {
             let mut args = Vec::with_capacity(items.len());
             for item in items {
                 let Some(arg) = item.as_str() else {
-                    return CommandParse::BadArgs;
+                    return CommandParse::DropHook;
                 };
                 args.push(arg.to_owned());
             }
             Some(args)
         }
-        Some(_) => return CommandParse::BadArgs,
+        Some(_) => return CommandParse::DropHook,
     };
+    let async_rewake = match table.get("asyncRewake") {
+        None => false,
+        Some(Value::Boolean(on)) => *on,
+        Some(_) => return CommandParse::DropHook,
+    };
+    let async_hook = match table.get("async") {
+        None => async_rewake,
+        Some(Value::Boolean(on)) => *on || async_rewake,
+        Some(_) => return CommandParse::DropHook,
+    };
+    // Presence, not value: the fields belong to `PostToolUse` and `Stop` alone, so a hook
+    // that writes `async = false` on a pre-call event still asked for a field those events
+    // do not accept and is dropped like an `async = true` one (ADR 0045 §5).
+    if !accepts_async && (table.contains_key("async") || table.contains_key("asyncRewake")) {
+        return CommandParse::DropHook;
+    }
     CommandParse::Ok(HookCommand {
         command: command.to_owned(),
         args,
         timeout_secs,
+        async_hook,
+        async_rewake,
     })
 }
 
@@ -476,7 +535,7 @@ mod tests {
             "[[hooks.PostToolUse.hooks]]\n",
             "type = \"command\"\n",
             "command = \"echo hi\"\n",
-            "async = true\n",
+            "if = \"true\"\n",
             "[[hooks.SessionStart]]\n",
             "matcher = \"read\"\n",
             "[[hooks.SessionStart.hooks]]\n",
@@ -492,6 +551,110 @@ mod tests {
             assert!(
                 config.skipped.contains(&key.to_string()),
                 "{:?}",
+                config.skipped
+            );
+        }
+    }
+
+    /// The async fields (ADR 0045 §5): `async` and `asyncRewake` parse on `PostToolUse` and
+    /// `Stop`, `asyncRewake` implies `async`, and the async default timeout is 600 s. On
+    /// `PreToolUse` that hook is dropped with one line while its sibling still loads.
+    #[test]
+    fn async_hooks_parse_on_post_and_stop_and_drop_on_pre() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.PostToolUse]]\n",
+            "matcher = \"patch\"\n",
+            "[[hooks.PostToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"make lint\"\n",
+            "async = true\n",
+            "[[hooks.Stop]]\n",
+            "[[hooks.Stop.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"make verify\"\n",
+            "asyncRewake = true\n",
+            "[[hooks.PreToolUse]]\n",
+            "matcher = \"shell\"\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo sync\"\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo async\"\n",
+            "async = true\n",
+        ));
+        assert!(config.hooks.post_tool_use[0].hooks[0].async_hook);
+        assert!(!config.hooks.post_tool_use[0].hooks[0].async_rewake);
+        assert_eq!(
+            config.hooks.post_tool_use[0].hooks[0].timeout().as_secs(),
+            DEFAULT_ASYNC_HOOK_TIMEOUT_SECS,
+            "an async hook without `timeout` defaults to 600 s, not 60"
+        );
+        assert!(config.hooks.stop[0].hooks[0].is_async());
+        assert!(
+            config.hooks.stop[0].hooks[0].async_rewake,
+            "asyncRewake implies async"
+        );
+        assert_eq!(
+            config.hooks.pre_tool_use[0].hooks.len(),
+            1,
+            "the async PreToolUse hook drops, its sibling still loads"
+        );
+        assert_eq!(config.hooks.pre_tool_use[0].hooks[0].command, "echo sync");
+        assert_eq!(
+            config.skipped,
+            vec!["hooks.PreToolUse[0].hooks[1]".to_owned()],
+            "one line names the dropped async hook"
+        );
+    }
+
+    /// A pre-call hook that writes `async = false` or `asyncRewake = false` still carries a
+    /// field those events do not accept: presence, not the effective value, drops it with
+    /// one line, and its siblings still load (ADR 0045 §5).
+    #[test]
+    fn an_explicitly_false_async_field_on_pre_is_still_dropped() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.PreToolUse]]\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo async-off\"\n",
+            "async = false\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo rewake-off\"\n",
+            "asyncRewake = false\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo keep\"\n",
+            "[[hooks.PermissionRequest]]\n",
+            "[[hooks.PermissionRequest.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo ask\"\n",
+            "async = false\n",
+        ));
+        assert_eq!(
+            config.hooks.pre_tool_use[0].hooks.len(),
+            1,
+            "the false-valued fields still drop their hooks: {:?}",
+            config.hooks.pre_tool_use
+        );
+        assert_eq!(config.hooks.pre_tool_use[0].hooks[0].command, "echo keep");
+        assert!(
+            config.hooks.permission_request.is_empty(),
+            "PermissionRequest drops it too: {:?}",
+            config.hooks.permission_request
+        );
+        assert_eq!(config.skipped.len(), 3, "one line per dropped hook");
+        for key in [
+            "hooks.PreToolUse[0].hooks[0]",
+            "hooks.PreToolUse[0].hooks[1]",
+            "hooks.PermissionRequest[0].hooks[0]",
+        ] {
+            assert!(
+                config.skipped.iter().any(|line| line == key),
+                "{key}: {:?}",
                 config.skipped
             );
         }

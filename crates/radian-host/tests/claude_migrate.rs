@@ -1327,6 +1327,201 @@ fn a_hook_args_array_is_carried_over_unchanged() {
     readable(home.path());
 }
 
+/// ADR 0045 §5 / edge case 5's import half: `async` and `asyncRewake` are carried into the
+/// user draft and the project hooks draft on `PostToolUse`/`Stop`, while an async
+/// `PreToolUse` hook is still dropped with one report line. Dropping every async entry
+/// (the old behavior) fails these assertions.
+#[test]
+fn async_hooks_are_imported_on_post_and_stop_but_not_on_pre() {
+    let home = Temp::new("async-home");
+    let proj = Temp::new("async-proj");
+    write(
+        home.path(),
+        "settings.json",
+        r#"{"hooks": {
+            "PostToolUse": [{"matcher": "Edit", "hooks": [
+                {"type": "command", "command": "/hooks/lint", "async": true},
+                {"type": "command", "command": "/hooks/rewake", "asyncRewake": true}
+            ]}],
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "/hooks/too-early", "async": true},
+                {"type": "command", "command": "/hooks/sync"}
+            ]}]
+        }}"#,
+    );
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "/hooks/verify", "async": true, "asyncRewake": true}
+        ]}]}}"#,
+    );
+
+    let draft = import_claude(Some(home.path()), Some(proj.path())).unwrap();
+    let report = draft.notes.join("\n");
+    assert!(
+        report.contains("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`"),
+        "the PreToolUse async hook is dropped with a report line: {report}"
+    );
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
+        .expect("the draft is a valid Radian configuration");
+    assert_eq!(config.hooks.post_tool_use[0].hooks.len(), 2);
+    assert!(config.hooks.post_tool_use[0].hooks[0].async_hook);
+    assert!(!config.hooks.post_tool_use[0].hooks[0].async_rewake);
+    assert!(config.hooks.post_tool_use[0].hooks[1].async_rewake);
+    assert!(
+        config.hooks.post_tool_use[0].hooks[1].is_async(),
+        "asyncRewake implies async"
+    );
+    assert_eq!(
+        config.hooks.pre_tool_use[0].hooks.len(),
+        1,
+        "only the sync PreToolUse hook imports"
+    );
+    assert_eq!(config.hooks.pre_tool_use[0].hooks[0].command, "/hooks/sync");
+    assert!(
+        config.hooks.pre_tool_use[0]
+            .hooks
+            .iter()
+            .all(|hook| !hook.is_async()),
+        "no async hook on PreToolUse"
+    );
+
+    let project_hooks: serde_json::Value =
+        serde_json::from_str(draft.project_hooks_json.as_deref().expect("project hooks")).unwrap();
+    assert_eq!(project_hooks["Stop"][0]["hooks"][0]["async"], true);
+    assert_eq!(project_hooks["Stop"][0]["hooks"][0]["asyncRewake"], true);
+
+    // The written files carry the flags too.
+    let scratch = Temp::new("async-write");
+    let targets = ClaudeTargets {
+        config_path: scratch.path().join("config.toml"),
+        user_skills_dir: scratch.path().join("user-skills"),
+        user_agents_path: scratch.path().join("AGENTS.md"),
+        project_skills_dir: None,
+        project_hooks_path: Some(scratch.path().join("project-hooks.json")),
+    };
+    write_claude_draft(&draft, &targets).unwrap();
+    let written = std::fs::read_to_string(&targets.config_path).unwrap();
+    let written_config = radian_host::parse_config(&targets.config_path, &written).unwrap();
+    assert!(written_config.hooks.post_tool_use[0].hooks[0].async_hook);
+    assert!(written_config.hooks.post_tool_use[0].hooks[1].async_rewake);
+    let written_hooks = std::fs::read_to_string(scratch.path().join("project-hooks.json")).unwrap();
+    let written_json: serde_json::Value = serde_json::from_str(&written_hooks).unwrap();
+    let loaded =
+        radian_host::project_hooks::parse_project_value(&written_json, "written", &mut Vec::new());
+    assert!(loaded.stop[0].hooks[0].async_rewake);
+}
+
+/// ADR 0045 §5: the async fields belong to `PostToolUse` and `Stop`. A pre-call hook that
+/// writes either one explicitly as `false` is dropped and reported like an async one —
+/// presence, not value — so the import never emits a hook the config parser rejects.
+#[test]
+fn an_explicitly_false_async_field_on_pre_is_not_imported() {
+    let home = Temp::new("async-false-home");
+    write(
+        home.path(),
+        "settings.json",
+        r#"{"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "/hooks/async-off", "async": false},
+                {"type": "command", "command": "/hooks/rewake-off", "asyncRewake": false},
+                {"type": "command", "command": "/hooks/sync"}
+            ]}],
+            "PermissionRequest": [{"hooks": [
+                {"type": "command", "command": "/hooks/ask", "async": false}
+            ]}]
+        }}"#,
+    );
+
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    let report = draft.notes.join("\n");
+    assert_eq!(
+        report
+            .matches("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`")
+            .count(),
+        3,
+        "one report line per dropped hook: {report}"
+    );
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
+        .expect("the draft is a valid Radian configuration");
+    assert_eq!(
+        config.hooks.pre_tool_use[0].hooks.len(),
+        1,
+        "the explicitly false fields still drop their hooks"
+    );
+    assert_eq!(config.hooks.pre_tool_use[0].hooks[0].command, "/hooks/sync");
+    assert!(
+        config.hooks.permission_request.is_empty(),
+        "PermissionRequest drops it too"
+    );
+}
+
+/// ADR 0045 §5: importing a Claude async hook with `timeout: 0` must keep zero (or omit it),
+/// not freeze the synchronous 60-second default into the draft. Zero means "the default" in
+/// Radian too, and an async hook's default is 600 s, so `HookCommand::timeout()` must still
+/// select the async default after the import.
+#[test]
+fn an_imported_zero_timeout_keeps_the_async_default() {
+    let home = Temp::new("async-zero-home");
+    write(
+        home.path(),
+        "settings.json",
+        r#"{"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [
+            {"type": "command", "command": "/hooks/lint", "async": true, "timeout": 0},
+            {"type": "command", "command": "/hooks/format", "timeout": 0}
+        ]}]}}"#,
+    );
+
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    assert!(
+        draft.config_toml.contains("timeout = 0"),
+        "zero stays zero in the draft: {}",
+        draft.config_toml
+    );
+    let config = radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml)
+        .expect("the draft is a valid Radian configuration");
+    assert_eq!(config.hooks.post_tool_use[0].hooks[0].timeout_secs, Some(0));
+    assert_eq!(
+        config.hooks.post_tool_use[0].hooks[0].timeout().as_secs(),
+        radian_host::config::DEFAULT_ASYNC_HOOK_TIMEOUT_SECS,
+        "an imported async hook with `timeout: 0` uses the 600 s async default"
+    );
+    assert_eq!(
+        config.hooks.post_tool_use[0].hooks[1].timeout().as_secs(),
+        radian_host::config::DEFAULT_HOOK_TIMEOUT_SECS,
+        "a synchronous hook with `timeout: 0` still defaults to 60 s"
+    );
+
+    // The project draft renders the same zero, and the project reader picks the async default.
+    let proj = Temp::new("async-zero-proj");
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "/hooks/verify", "async": true, "timeout": 0}
+        ]}]}}"#,
+    );
+    let project_draft = import_claude(None, Some(proj.path())).unwrap();
+    let project_hooks: serde_json::Value = serde_json::from_str(
+        project_draft
+            .project_hooks_json
+            .as_deref()
+            .expect("project hooks"),
+    )
+    .unwrap();
+    assert_eq!(project_hooks["Stop"][0]["hooks"][0]["timeout"], 0);
+    let mut warnings = Vec::new();
+    let loaded =
+        radian_host::project_hooks::parse_project_value(&project_hooks, "test", &mut warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        loaded.stop[0].hooks[0].timeout().as_secs(),
+        radian_host::config::DEFAULT_ASYNC_HOOK_TIMEOUT_SECS,
+        "the project reader also keeps the 600 s async default"
+    );
+}
+
 /// ADR 0046: any `args` that is not an array of strings drops that hook with one report
 /// line. `null` counts — in user and in project settings, which share `hook_command` — so
 /// a `null` hook never imports as shell form; its good sibling still imports.

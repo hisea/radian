@@ -80,6 +80,9 @@ pub struct InspectorSnapshot {
     pub tools: Vec<ToolEntry>,
     pub mcp: Vec<McpEntry>,
     pub hooks: Vec<HookEntry>,
+    /// The async hooks running right now, in spawn order (the hooks page's Running
+    /// section). They are not jobs: `/jobs` and the `job` tool never show them.
+    pub hook_running: Vec<radian_host::RunningHook>,
     /// The session's recent hook runs, newest first (the hooks page's Recent runs section,
     /// the manual's "Recent runs"). In memory only.
     pub hook_runs: Vec<radian_host::HookRunRecord>,
@@ -111,14 +114,18 @@ impl Inspector {
         }
     }
 
-    /// The rows on the current page (the hooks page counts its run rows too: they scroll
-    /// with the list).
+    /// The rows on the current page (the hooks page counts its running and run rows too:
+    /// they scroll with the list).
     pub fn len(&self) -> usize {
         match self.page {
             InspectorPage::Jobs => self.snapshot.jobs.len(),
             InspectorPage::Tools => self.snapshot.tools.len(),
             InspectorPage::Mcp => self.snapshot.mcp.len(),
-            InspectorPage::Hooks => self.snapshot.hooks.len() + self.snapshot.hook_runs.len(),
+            InspectorPage::Hooks => {
+                self.snapshot.hooks.len()
+                    + self.snapshot.hook_running.len()
+                    + self.snapshot.hook_runs.len()
+            }
         }
     }
 
@@ -164,17 +171,23 @@ impl Inspector {
         self.selected = (self.selected as i32 + delta).rem_euclid(len as i32) as usize;
     }
 
-    /// The row the shared list draws its cursor on. The hooks page puts one non-selectable
-    /// "Recent runs" heading between the configured entries and the run rows, so a selection
-    /// in the run rows maps one row past it.
+    /// The row the shared list draws its cursor on. The hooks page puts non-selectable
+    /// headings before the Running rows and the Recent runs rows, so a selection in those
+    /// sections maps past the headings above it.
     fn list_selected(&self) -> usize {
-        if self.page == InspectorPage::Hooks
-            && self.selected >= self.snapshot.hooks.len()
-            && !self.snapshot.hook_runs.is_empty()
-        {
-            return self.selected + 1;
+        if self.page != InspectorPage::Hooks {
+            return self.selected;
         }
-        self.selected
+        let hooks = self.snapshot.hooks.len();
+        let running = self.snapshot.hook_running.len();
+        let mut offset = 0;
+        if self.selected >= hooks && running > 0 {
+            offset += 1;
+        }
+        if self.selected >= hooks + running && !self.snapshot.hook_runs.is_empty() {
+            offset += 1;
+        }
+        self.selected + offset
     }
 
     /// The id the jobs page would kill (`k`), or `None` on another page or an empty list.
@@ -499,10 +512,22 @@ fn list_items(inspector: &Inspector) -> Vec<crate::select_list::Item> {
                         ))
                 })
                 .collect();
+            // The Running section: one heading row, then one line per async hook in
+            // spawn order. Async hooks are not jobs, so this page is their only listing.
+            if !inspector.snapshot.hook_running.is_empty() {
+                items.push(crate::select_list::Item::new("Running"));
+                items.extend(
+                    inspector
+                        .snapshot
+                        .hook_running
+                        .iter()
+                        .map(|run| crate::select_list::Item::new(run.line())),
+                );
+            }
             // The Recent runs section: one heading row, then the last runs newest first,
             // each the one record line (`<event>:<tool> [<command>] <end> (<n>ms)`). They
             // share the configured entries' scrolling list so every retained run is
-            // reachable; the selection skips the heading (`list_selected`).
+            // reachable; the selection skips the headings (`list_selected`).
             if !inspector.snapshot.hook_runs.is_empty() {
                 items.push(crate::select_list::Item::new("Recent runs"));
                 items.extend(
@@ -617,11 +642,33 @@ fn detail_text(inspector: &Inspector, inner: usize) -> Vec<ratatui::text::Line<'
                     )))),
                 ];
             }
+            // A running row's detail: the async hook's own fields.
+            let hooks = inspector.snapshot.hooks.len();
+            let running = inspector.snapshot.hook_running.len();
+            if let Some(run) = inspector
+                .snapshot
+                .hook_running
+                .get(inspector.selected.saturating_sub(hooks))
+                .filter(|_| inspector.selected >= hooks && inspector.selected < hooks + running)
+            {
+                return vec![
+                    Line::from(Span::raw(truncate(&format!(
+                        "event {} \u{b7} {}",
+                        run.event,
+                        match &run.tool {
+                            Some(tool) => format!("tool {tool}"),
+                            None => "no tool (Stop)".to_owned(),
+                        }
+                    )))),
+                    Line::from(Span::raw(truncate(&run.command))),
+                    Line::from(Span::raw(truncate(&format!("running \u{b7} {}", run.id)))),
+                ];
+            }
             // A run row's detail: the record's own fields.
             let Some(run) = inspector
                 .snapshot
                 .hook_runs
-                .get(inspector.selected - inspector.snapshot.hooks.len())
+                .get(inspector.selected - hooks - running)
             else {
                 return Vec::new();
             };
@@ -680,5 +727,59 @@ mod tests {
         assert!(!inspector.detail);
         inspector.prev_page();
         assert_eq!(inspector.page, InspectorPage::Jobs);
+    }
+
+    /// The hooks page lists running async hooks under a "Running" heading, before the
+    /// recent runs; both headings are skipped by the selection, and a running row's detail
+    /// names the hook (ADR 0045 §5).
+    #[test]
+    fn the_hooks_page_lists_running_async_hooks() {
+        let snapshot = InspectorSnapshot {
+            hook_running: vec![radian_host::RunningHook {
+                id: "hook-1".to_owned(),
+                event: "PostToolUse".to_owned(),
+                tool: Some("patch".to_owned()),
+                command: "make lint".to_owned(),
+                started: std::time::Instant::now(),
+            }],
+            hook_runs: vec![radian_host::HookRunRecord {
+                event: "Stop".to_owned(),
+                tool: None,
+                command: "make check".to_owned(),
+                end: radian_host::HookRunEnd::Status(0),
+                millis: 3,
+            }],
+            ..InspectorSnapshot::default()
+        };
+        let mut inspector = Inspector::new(InspectorPage::Hooks, snapshot);
+        assert_eq!(inspector.len(), 2, "one running hook and one run");
+        let items = list_items(&inspector);
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels[0], "Running", "{labels:?}");
+        assert!(labels[1].contains("PostToolUse:patch"), "{labels:?}");
+        assert!(labels[1].contains("running"), "{labels:?}");
+        assert_eq!(labels[2], "Recent runs", "{labels:?}");
+
+        inspector.selected = 0;
+        inspector.detail = true;
+        assert_eq!(inspector.list_selected(), 1, "past the Running heading");
+        assert!(
+            detail_text(&inspector, 80)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("hook-1")),
+            "the running row's detail names the hook: {:?}",
+            detail_text(&inspector, 80)
+        );
+        inspector.selected = 1;
+        assert_eq!(inspector.list_selected(), 3, "past both headings");
+        assert!(
+            detail_text(&inspector, 80)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| span.content.contains("end status 0")),
+            "the run row's detail is unchanged: {:?}",
+            detail_text(&inspector, 80)
+        );
     }
 }

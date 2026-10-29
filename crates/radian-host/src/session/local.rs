@@ -778,6 +778,10 @@ impl SessionFacade for LocalSession {
         self.command_hooks.hook_runs()
     }
 
+    fn running_async_hooks(&self) -> Vec<crate::RunningHook> {
+        self.command_hooks.running_async_hooks()
+    }
+
     fn job_tail(&self, id: &str, max: usize) -> Option<(radian_coding::JobState, String)> {
         let jobs = self.jobs.as_ref()?;
         jobs.tail(id, max).map(|(state, _, tail)| (state, tail))
