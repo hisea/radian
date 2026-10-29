@@ -219,6 +219,7 @@ not (
   | test(=ordinary_turn_ends_do_not_continue)
   | test(=p_chains_two_jobs_through_two_woken_turns)
   | test(=p_ends_on_the_idle_hook_continuation_cap)
+  | test(=p_exits_promptly_and_kills_a_running_async_hook)
   | test(=p_exits_three_when_a_stop_hook_fills_the_wake_gate)
   | test(=p_exits_three_when_the_wake_gate_closes)
   | test(=p_waits_for_a_background_job_and_exits_with_the_woken_turn)

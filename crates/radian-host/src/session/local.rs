@@ -582,6 +582,11 @@ impl LocalSession {
 
     /// Waits for the driver task. Callable once; a second call reports `Panicked`.
     pub async fn join(&self) -> DriverEnd {
+        // Session end (ADR 0045 §5): every running async hook's process group is killed and
+        // its result never delivered, and no new one starts. Every host reaches its end here
+        // — the TUI exiting, `/new` opening the next session, and `exec` finishing (a `-p`
+        // run does not wait for a hook) — so this is the one place the kill belongs.
+        self.command_hooks.end_session();
         let done = self.driver.done.lock().unwrap().take();
         match done {
             Some(done) => done

@@ -44,7 +44,14 @@
 //! Async hooks are not jobs: they never enter the [`Jobs`] registry, `/jobs` or the `job`
 //! tool. The `/hooks` page shows them under "Running", `Stop` lists each one in
 //! `background_tasks` with `type: "hook"`, and the intent-stop validator treats one like a
-//! running job (no trigger while any is in flight).
+//! running job (no trigger while any is in flight). Their lifecycle (ADR 0045 §5): a hook is
+//! identified by its event plus its `command` and `args`, and a new run of a hook whose
+//! earlier run is still running kills that run's process group (it delivers nothing and its
+//! record says `cancelled`); at most [`MAX_ASYNC_HOOKS`] run per session, and a run over the
+//! cap does not start (one warning, a `failed to start` record); a cancelled turn leaves
+//! running async hooks alone; the session's end ([`CommandHooks::end_session`], called when
+//! the driver is joined: the TUI exiting, `/new`, an `exec` run ending) kills every running
+//! one and delivers nothing, and `exec -p` never waits for them.
 //!
 //! Two layers, one chain (ADR 0045 slice B): the project hooks
 //! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
@@ -162,6 +169,10 @@ pub type HooksWarning = Arc<dyn Fn(&str) + Send + Sync>;
 /// How many finished hook runs one session keeps in memory, newest kept. The `/hooks` page
 /// shows them; they are never journaled (ADR 0001 records transcript events only).
 pub const HOOK_RUN_HISTORY: usize = 50;
+
+/// The most async hook processes one session runs at once (ADR 0045 §5). A run that would be
+/// the ninth does not start: one warning line and a `failed to start` recent-runs entry.
+pub const MAX_ASYNC_HOOKS: usize = 8;
 
 /// The closed set of ways one hook run ends, as the record, the `/hooks` page and the docs
 /// drift test spell them (the manual's "Recent runs"). `status` carries the exit code; the
@@ -286,6 +297,50 @@ impl RunningHook {
     }
 }
 
+/// The identity the supersede rule uses (ADR 0045 §5): the event plus the same `command` and
+/// `args` pair the dedup key uses, so a project and a user entry naming one hook are one
+/// hook. The tool name is not part of it: one `PostToolUse` hook matched for two different
+/// tools is still the same hook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AsyncHookKey {
+    event: String,
+    command: String,
+    args: Option<Vec<String>>,
+}
+
+impl AsyncHookKey {
+    fn of(hook: &HookCommand, event: &str) -> Self {
+        Self {
+            event: event.to_owned(),
+            command: hook.command.clone(),
+            args: hook.args.clone(),
+        }
+    }
+}
+
+/// The handshake between one async run's own task and the code that supersedes it or ends
+/// the session.
+#[derive(Debug, Default)]
+struct AsyncRunHandle {
+    /// The child's process-group leader pid, `0` until the process has started (or when it
+    /// never started).
+    pid: AtomicU32,
+    /// A supersede or the session end cancelled this run: it delivers nothing.
+    cancelled: AtomicBool,
+    /// The process has exited (or never started); its result may still be delivering. A run
+    /// past this point is never superseded, because only a still-running process is.
+    exited: AtomicBool,
+}
+
+/// One async hook in the running registry: the `/hooks` page's view plus what supersede and
+/// the session end need (ADR 0045 §5).
+#[derive(Debug)]
+struct AsyncRun {
+    running: RunningHook,
+    key: AsyncHookKey,
+    handle: Arc<AsyncRunHandle>,
+}
+
 /// The user-level command hooks: one [`Hooks`] implementation for every event, plus the
 /// `PermissionRequest` chain the permission layer calls through
 /// [`radian_permissions::PermissionRequestHooks`].
@@ -359,11 +414,14 @@ pub struct CommandHooks {
     runs: Arc<std::sync::Mutex<VecDeque<HookRunRecord>>>,
     /// The async hooks running right now, in spawn order. Not the [`Jobs`] registry: these
     /// are never model-visible jobs (ADR 0045 §5).
-    async_running: Arc<std::sync::Mutex<Vec<RunningHook>>>,
+    async_running: Arc<std::sync::Mutex<Vec<AsyncRun>>>,
     /// Bumped whenever one async hook finishes (or fails to start), so a waiter re-checks.
     async_signal: Arc<Notify>,
     /// The id sequence for [`RunningHook::id`].
     async_seq: Arc<AtomicU64>,
+    /// The session ended (its driver is joined): every running async hook was killed, its
+    /// result is never delivered, and no new one starts (ADR 0045 §5).
+    async_ended: Arc<AtomicBool>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
@@ -503,6 +561,7 @@ impl CommandHooks {
             async_running: Arc::new(std::sync::Mutex::new(Vec::new())),
             async_signal: Arc::new(Notify::new()),
             async_seq: Arc::new(AtomicU64::new(0)),
+            async_ended: Arc::new(AtomicBool::new(false)),
             warn,
             wake,
             intent_stop_warn,
@@ -619,7 +678,9 @@ impl CommandHooks {
         self.async_running
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
+            .iter()
+            .map(|run| run.running.clone())
+            .collect()
     }
 
     /// How many async hooks are running right now. The intent-stop validator counts these
@@ -635,6 +696,33 @@ impl CommandHooks {
     /// each one (tests and a host that wants to drain them).
     pub fn async_signal(&self) -> Arc<Notify> {
         Arc::clone(&self.async_signal)
+    }
+
+    /// Ends the session's async hooks (ADR 0045 §5): every still-running run's process group
+    /// is killed and its result is never delivered, and no new async hook starts afterwards.
+    /// Idempotent. The host calls this when the session's driver is joined
+    /// ([`crate::LocalSession::join`]): the TUI exiting, `/new`, and the end of an `exec`
+    /// run all land there, and `exec -p` never waits for a hook.
+    pub fn end_session(&self) {
+        self.async_ended.store(true, Ordering::SeqCst);
+        let mut running = self
+            .async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for run in running.drain(..) {
+            // A run whose process already exited is delivering its result; the session is
+            // over, so `deliver_async` drops it (the `async_ended` flag) without a kill.
+            if run.handle.exited.load(Ordering::SeqCst) {
+                continue;
+            }
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            let pid = run.handle.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                kill_group(pid);
+            }
+        }
+        drop(running);
+        self.async_signal.notify_waiters();
     }
 
     /// Background work that makes the intent-stop validator stand down: the job registry
@@ -805,7 +893,7 @@ impl CommandHooks {
                     self.spawn_async(hook, hook_stdin, "Stop", None);
                     continue;
                 }
-                match self.execute(hook, &hook_stdin, "Stop", None).await {
+                match self.execute(hook, &hook_stdin, "Stop", None, None).await {
                     Ok(output) if output.code == Some(0) => {
                         if let Some(parsed) = self.parsed_output(&output.stdout, "Stop") {
                             reasons.extend(self.stop_output_reasons(parsed));
@@ -1061,13 +1149,16 @@ impl CommandHooks {
     ///
     /// The child is a plain `std` process (`SandboxCommand` cannot become a Tokio command):
     /// stdin is written and the output waited on a blocking thread, and a timeout kills the
-    /// whole session group (`setsid` in `spawn_piped`) before reaping it.
+    /// whole session group (`setsid` in `spawn_piped`) before reaping it. `cancel` is the
+    /// async run's handle: the pid is published there so a supersede or the session end can
+    /// kill the group, and a run already cancelled when it starts is killed at once.
     async fn execute(
         &self,
         hook: &HookCommand,
         stdin_json: &serde_json::Value,
         event: &str,
         tool: Option<&str>,
+        cancel: Option<&AsyncRunHandle>,
     ) -> Result<ProcOutput, HookError> {
         let started = Instant::now();
         let input = serde_json::to_string(stdin_json)
@@ -1088,6 +1179,15 @@ impl CommandHooks {
             }
         };
         let pid = std_child.id();
+        // The async path publishes the pid before anything can kill it, then re-checks the
+        // cancel flag: a supersede that landed between registration and this spawn saw no pid
+        // and only set the flag (ADR 0045 §5).
+        if let Some(cancel) = cancel {
+            cancel.pid.store(pid, Ordering::SeqCst);
+            if cancel.cancelled.load(Ordering::SeqCst) {
+                kill_tree(pid);
+            }
+        }
         // Dropping this future — a cancelled turn, a Core race — must kill the whole
         // process group, not leave the hook running after nobody waits for its answer
         // (ADR 0045 §4; edge case 9 of `hooks-permission-request`).
@@ -1165,30 +1265,121 @@ impl CommandHooks {
         event: &str,
         tool: Option<&str>,
     ) {
-        let seq = self.async_seq.fetch_add(1, Ordering::SeqCst);
-        let id = format!("hook-{}-{seq}", std::process::id());
-        let running = RunningHook {
-            id: id.clone(),
-            event: event.to_owned(),
-            tool: tool.map(str::to_owned),
-            command: hook.command.clone(),
-            started: Instant::now(),
+        let Some((id, handle)) = self.begin_async_run(hook, event, tool) else {
+            return;
         };
-        self.async_running
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(running);
         let this = self.clone();
         let hook = hook.clone();
         let event = event.to_owned();
         let tool = tool.map(str::to_owned);
         self.runtime.spawn(async move {
-            let output = this
-                .execute(&hook, &stdin_json, &event, tool.as_deref())
+            this.run_async(&hook, &stdin_json, &event, tool.as_deref(), &id, &handle)
                 .await;
-            this.deliver_async(&hook, &event, output).await;
-            this.finish_async(&id);
         });
+    }
+
+    /// Registers one async run and returns its id plus the handle its task shares with the
+    /// supersede and session-end paths. `None` when the run does not start: the per-session
+    /// cap (one warning and a `failed to start` record) or a session that has already ended.
+    fn begin_async_run(
+        &self,
+        hook: &HookCommand,
+        event: &str,
+        tool: Option<&str>,
+    ) -> Option<(String, Arc<AsyncRunHandle>)> {
+        if self.async_ended.load(Ordering::SeqCst) {
+            // The session is over: no process starts. Not a cap failure (no warning, no
+            // record) — the hook would have run for a session nobody is in.
+            return None;
+        }
+        let key = AsyncHookKey::of(hook, event);
+        let started = Instant::now();
+        let mut running = self
+            .async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // THE SUPERSEDE RULE (ADR 0045 §5): a new run of the same hook kills the earlier
+        // run's process group; that run delivers nothing and its record says `cancelled`. A
+        // run whose process already exited (or whose group is already gone) is delivering its
+        // result and is never superseded.
+        running.retain(|run| {
+            if run.key != key || run.handle.exited.load(Ordering::SeqCst) {
+                return true;
+            }
+            let pid = run.handle.pid.load(Ordering::SeqCst);
+            if pid != 0 && !kill_group(pid) {
+                // `ESRCH`: the process was already reaped, so its result is in delivery.
+                return true;
+            }
+            run.handle.cancelled.store(true, Ordering::SeqCst);
+            false
+        });
+        // THE PER-SESSION CAP (ADR 0045 §5): the run that would be the ninth does not start.
+        // It runs after the supersede above, so replacing the same hook never counts twice.
+        if running.len() >= MAX_ASYNC_HOOKS {
+            drop(running);
+            (self.warn)(&format!(
+                "the {event} async hook did not start: {MAX_ASYNC_HOOKS} async hooks are \
+                 already running"
+            ));
+            self.record_run(
+                event,
+                tool,
+                &hook.command,
+                HookRunEnd::FailedToStart,
+                started,
+            );
+            return None;
+        }
+        let seq = self.async_seq.fetch_add(1, Ordering::SeqCst);
+        let id = format!("hook-{}-{seq}", std::process::id());
+        let handle = Arc::new(AsyncRunHandle::default());
+        running.push(AsyncRun {
+            running: RunningHook {
+                id: id.clone(),
+                event: event.to_owned(),
+                tool: tool.map(str::to_owned),
+                command: hook.command.clone(),
+                started: Instant::now(),
+            },
+            key,
+            handle: Arc::clone(&handle),
+        });
+        drop(running);
+        Some((id, handle))
+    }
+
+    /// One async run on the session runtime: spawn, deliver, unregister. A run a supersede
+    /// or the session end cancelled delivers nothing (ADR 0045 §5); [`Self::execute`] has
+    /// already recorded its end.
+    async fn run_async(
+        &self,
+        hook: &HookCommand,
+        stdin_json: &serde_json::Value,
+        event: &str,
+        tool: Option<&str>,
+        id: &str,
+        handle: &AsyncRunHandle,
+    ) {
+        let started = Instant::now();
+        if handle.cancelled.load(Ordering::SeqCst) {
+            // Cancelled before the process started: kill nothing, record the end.
+            self.record_run(event, tool, &hook.command, HookRunEnd::Cancelled, started);
+            handle.exited.store(true, Ordering::SeqCst);
+            self.finish_async(id);
+            return;
+        }
+        let output = self
+            .execute(hook, stdin_json, event, tool, Some(handle))
+            .await;
+        // From here the result is in delivery: a supersede no longer applies.
+        handle.exited.store(true, Ordering::SeqCst);
+        if handle.cancelled.load(Ordering::SeqCst) || self.async_ended.load(Ordering::SeqCst) {
+            self.finish_async(id);
+            return;
+        }
+        self.deliver_async(hook, event, output).await;
+        self.finish_async(id);
     }
 
     /// Removes one finished async hook from the running registry and wakes waiters.
@@ -1196,7 +1387,7 @@ impl CommandHooks {
         self.async_running
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .retain(|hook| hook.id != id);
+            .retain(|run| run.running.id != id);
         self.async_signal.notify_waiters();
     }
 
@@ -1212,6 +1403,10 @@ impl CommandHooks {
         event: &str,
         output: Result<ProcOutput, HookError>,
     ) {
+        if self.async_ended.load(Ordering::SeqCst) {
+            // The session is over: the result belongs to a session nobody is in.
+            return;
+        }
         let output = match output {
             Ok(output) => output,
             Err(error) => {
@@ -1407,7 +1602,9 @@ impl CommandHooks {
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
         });
-        let output = self.execute(hook, &stdin, "PreToolUse", Some(tool)).await?;
+        let output = self
+            .execute(hook, &stdin, "PreToolUse", Some(tool), None)
+            .await?;
         match output.code {
             Some(2) => {
                 let reason = short(&output.stderr);
@@ -1633,7 +1830,7 @@ impl CommandHooks {
             "session_id": self.session_id,
         });
         let output = self
-            .execute(hook, &stdin, "PermissionRequest", Some(tool))
+            .execute(hook, &stdin, "PermissionRequest", Some(tool), None)
             .await?;
         match output.code {
             Some(2) => {
@@ -1828,17 +2025,24 @@ impl Drop for KillGroupOnDrop {
 /// Kills a timed-out hook's whole session group (`setsid` in `spawn_piped` put it in one).
 /// Best effort, like the shell tool's own kill paths: the waiter still reaps the child.
 fn kill_tree(pid: u32) {
+    kill_group(pid);
+}
+
+/// Sends `SIGKILL` to the process group `pid` leads, and reports whether the signal was
+/// delivered. `false` means the group is already gone (`ESRCH`): its leader was reaped, so
+/// nothing is running any more. On a host without process groups the signal is a no-op and a
+/// caller must still treat the run as cancelled, so this reports `true`.
+fn kill_group(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // Negative pid = the group. The leader may already have been reaped (a hook that
         // forked and exited), so an error here is not a failure.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) == 0 }
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
+        true
     }
 }
 
@@ -2037,7 +2241,7 @@ impl Hooks for CommandHooks {
                     continue;
                 }
                 let output = self
-                    .execute(hook, &stdin, "PostToolUse", Some(&call.name))
+                    .execute(hook, &stdin, "PostToolUse", Some(&call.name), None)
                     .await?;
                 match output.code {
                     Some(0) => {
@@ -5266,6 +5470,9 @@ mod tests {
 
     /// Edge case 2: three edits to three files in one turn, each matched by its own async
     /// command, produce three separate injected messages (one per result, never merged).
+    /// Each edit's run is drained before the next edit: the same three commands fire on every
+    /// edit, and the supersede rule (ADR 0045 §5) would kill a still-running predecessor's
+    /// result — a different rule from "one message per result", which this test is about.
     #[tokio::test]
     async fn three_async_edits_in_one_turn_inject_three_separate_messages() {
         let hook_for = |file: &str, text: &str| {
@@ -5281,6 +5488,7 @@ mod tests {
         ]));
         for path in ["a.rs", "b.rs", "c.rs"] {
             after_patch(&fixture, path).await;
+            drain_async(&fixture).await;
         }
         drain_async(&fixture).await;
         let mut texts = Vec::new();
@@ -5545,5 +5753,419 @@ mod tests {
         );
         assert_eq!(fixture.hooks.stop_wakes(), 0);
         assert!(fixture.inbox.claim_next_step().await.is_some());
+    }
+
+    // ---------- async hook lifecycle (ADR 0045 §5) ----------
+
+    /// Whether a pid is still alive (`kill 0` only probes).
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 checks existence and sends nothing.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Waits until `path` holds at least `count` pids, and returns them in file order.
+    #[cfg(unix)]
+    async fn wait_for_pids(path: &Path, count: usize) -> Vec<u32> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let pids: Vec<u32> = text
+                    .lines()
+                    .filter_map(|line| line.trim().parse().ok())
+                    .collect();
+                if pids.len() >= count {
+                    return pids;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the async hook never recorded its pid in {}",
+                path.display()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Waits for one pid to disappear, failing the test when it outlives the deadline.
+    #[cfg(unix)]
+    async fn wait_gone(pid: u32, what: &str) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while alive(pid) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what} (pid {pid}) is still alive"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Waits until a run record matching `end` is in the session's history.
+    async fn wait_for_run_end(fixture: &Fixture, end: HookRunEnd) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if fixture.hooks.hook_runs().iter().any(|run| run.end == end) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no run record for {end:?}: {:?}",
+                fixture.hooks.hook_runs()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// An async hook that records its own pid, names the edited file in its result, and
+    /// sleeps `sleep_secs` before exiting: two runs of the one command tell themselves apart
+    /// by their stdin.
+    #[cfg(unix)]
+    fn tagged_async_hook(pids: &Path, sleep_secs: u64) -> HookCommand {
+        async_hook(&format!(
+            "echo $$ >> {}; input=$(cat); case \"$input\" in *one.rs*) tag=ONE;; *) tag=TWO;; esac; \
+             sleep {sleep_secs}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"%s\"}}}}' \
+             \"$tag\"",
+            pids.display()
+        ))
+    }
+
+    /// Edge case 1: the same async hook fired twice 100 ms apart. The first run's process
+    /// group is killed (its pid is gone), only the second run's text is injected, and the
+    /// killed run's record says `cancelled`. Without the supersede rule both texts arrive.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_superseded_async_hook_is_killed_and_only_the_latest_result_is_delivered() {
+        let root = TempRoot::new("async-supersede");
+        let pids = root.dir.join("pids");
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![tagged_async_hook(&pids, 2)]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        after_patch(&fixture, "one.rs").await;
+        let first = wait_for_pids(&pids, 1).await[0];
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        after_patch(&fixture, "two.rs").await;
+        let all = wait_for_pids(&pids, 2).await;
+        assert_eq!(all.len(), 2, "one pid per run: {all:?}");
+        wait_gone(first, "the superseded run's process group").await;
+        drain_async(&fixture).await;
+        let mut texts = Vec::new();
+        while let Some(entry) = fixture.inbox.claim_next_step().await {
+            texts.push(entry.message.text());
+        }
+        assert_eq!(
+            texts,
+            vec!["[PostToolUse hook] TWO"],
+            "only the latest run delivers"
+        );
+        let runs = fixture.hooks.hook_runs();
+        assert!(
+            runs.iter().any(|run| run.end == HookRunEnd::Cancelled),
+            "the killed run is recorded as cancelled: {runs:?}"
+        );
+        assert!(
+            runs.iter().any(|run| run.end == HookRunEnd::Status(0)),
+            "the second run completed: {runs:?}"
+        );
+    }
+
+    /// Edge case 2: two different async commands fired together both run. The supersede key
+    /// is the command (plus its args), so it never reaches across commands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_different_async_commands_run_without_superseding_each_other() {
+        let root = TempRoot::new("async-two-commands");
+        let pids = root.dir.join("pids");
+        let emit = |text: &str| {
+            async_hook(&format!(
+                "echo $$ >> {}; sleep 1; printf '%s' \
+                 '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{text}\"}}}}'",
+                pids.display()
+            ))
+        };
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![emit("a-done"), emit("b-done")]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        after_patch(&fixture, "a.rs").await;
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            2,
+            "different commands never supersede each other"
+        );
+        drain_async(&fixture).await;
+        let mut texts = Vec::new();
+        while let Some(entry) = fixture.inbox.claim_next_step().await {
+            texts.push(entry.message.text());
+        }
+        texts.sort();
+        assert_eq!(
+            texts,
+            vec!["[PostToolUse hook] a-done", "[PostToolUse hook] b-done"]
+        );
+    }
+
+    /// Edge case 3: nine runs of nine different commands at once. Eight start; the ninth does
+    /// not, and it leaves exactly one warning and one `failed to start` record. Starting all
+    /// nine leaves no warning and nine running hooks.
+    #[tokio::test]
+    async fn the_ninth_concurrent_async_hook_does_not_start() {
+        let hooks: Vec<HookCommand> = (0..9)
+            .map(|n| {
+                async_hook(&format!(
+                    "sleep 1; printf '%s' \
+                     '{{\"hookSpecificOutput\":{{\"additionalContext\":\"n{n}\"}}}}'"
+                ))
+            })
+            .collect();
+        let fixture = plain(&post_hooks(hooks));
+        after_patch(&fixture, "a.rs").await;
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            MAX_ASYNC_HOOKS,
+            "the cap holds at {MAX_ASYNC_HOOKS}"
+        );
+        let warnings = warned(&fixture.warnings);
+        assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("did not start") && warnings[0].contains("already running"),
+            "{warnings:?}"
+        );
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(
+            runs.len(),
+            1,
+            "one record for the run that never started: {runs:?}"
+        );
+        assert_eq!(runs[0].end, HookRunEnd::FailedToStart);
+        assert!(runs[0].command.contains("n8"), "{:?}", runs[0]);
+        drain_async(&fixture).await;
+        assert_eq!(fixture.hooks.async_hooks_running(), 0);
+    }
+
+    /// Edge case 4: a run whose process already exited is delivering its result; the same
+    /// hook firing again must not supersede it. The entry stays registered until its delivery
+    /// finishes, so the supersede reads "the process exited" (and the group kill finds
+    /// nothing), leaves it alone, and both texts stand.
+    #[tokio::test]
+    async fn a_finished_async_run_is_not_superseded_while_its_result_is_delivered() {
+        let fixture = plain(&post_hooks(Vec::new()));
+        let hook = async_hook("true");
+        let (first_id, first) = fixture
+            .hooks
+            .begin_async_run(&hook, "PostToolUse", Some("patch"))
+            .expect("the first run registers");
+        // The process exited before delivery starts: the task sets this first.
+        first.exited.store(true, Ordering::SeqCst);
+        let (_, second) = fixture
+            .hooks
+            .begin_async_run(&hook, "PostToolUse", Some("patch"))
+            .expect("the second run registers");
+        assert!(
+            !first.cancelled.load(Ordering::SeqCst),
+            "a run whose process already exited is never superseded"
+        );
+        assert!(!second.cancelled.load(Ordering::SeqCst));
+        let ids: Vec<String> = fixture
+            .hooks
+            .running_async_hooks()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "both runs are listed while one delivers: {ids:?}"
+        );
+        assert!(ids.contains(&first_id));
+        fixture.hooks.end_session();
+    }
+
+    /// Edge case 4, end to end: with the first run's result already in the inbox (its
+    /// delivery is blocked inside the sink), the same hook fires again. The run is not
+    /// superseded and the enqueued text stays: no later run can retract a result that
+    /// already reached the inbox.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_delivery_in_progress_keeps_its_text_when_the_hook_fires_again() {
+        /// Blocks the first inbox enqueue until the test releases it.
+        struct DeliveryGate {
+            first: AtomicBool,
+            reached: std::sync::mpsc::Sender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl radian_runtime::RuntimeEvents for DeliveryGate {
+            fn on_runtime_event(&self, event: &radian_session::RuntimeEvent) {
+                if !matches!(event, radian_session::RuntimeEvent::InboxEnqueued { .. }) {
+                    return;
+                }
+                if self.first.swap(false, Ordering::SeqCst) {
+                    let _ = self.reached.send(());
+                    let _ = self
+                        .release
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .recv();
+                }
+            }
+        }
+
+        let root = TempRoot::new("async-delivering");
+        let pids = root.dir.join("pids");
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![tagged_async_hook(&pids, 0)]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        fixture.inbox.set_runtime_events(Arc::new(DeliveryGate {
+            first: AtomicBool::new(true),
+            reached: reached_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }));
+        after_patch(&fixture, "one.rs").await;
+        // The hook exits at once; its delivery is now held inside the inbox.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tokio::task::spawn_blocking(move || reached_rx.recv()),
+        )
+        .await
+        .expect("the first result never reached the inbox")
+        .expect("the gate task did not panic")
+        .expect("the gate was dropped");
+        after_patch(&fixture, "two.rs").await;
+        release_tx.send(()).unwrap();
+        drain_async(&fixture).await;
+        let mut texts = Vec::new();
+        while let Some(entry) = fixture.inbox.claim_next_step().await {
+            texts.push(entry.message.text());
+        }
+        assert_eq!(
+            texts,
+            vec!["[PostToolUse hook] ONE", "[PostToolUse hook] TWO"],
+            "the delivering run is not superseded"
+        );
+    }
+
+    /// Edge case 7: a superseded hook's grandchild is in the same process group (the hook
+    /// leads its own session), so the group kill stops it too. Killing only the leader
+    /// leaves the grandchild and fails this.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_superseded_hook_kills_its_grandchild_too() {
+        let root = TempRoot::new("async-grandchild");
+        let pids = root.dir.join("pids");
+        let grandchild = root.dir.join("grandchild");
+        let script = format!(
+            "sleep 30 & echo $! > {}; echo $$ >> {}; sleep 30",
+            grandchild.display(),
+            pids.display()
+        );
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![async_hook(&script)]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        after_patch(&fixture, "a.rs").await;
+        let first = wait_for_pids(&pids, 1).await[0];
+        let child = wait_for_pids(&grandchild, 1).await[0];
+        // The same command fires again: the first process group (the shell and the
+        // `sleep 30` it forked) is killed.
+        after_patch(&fixture, "b.rs").await;
+        wait_gone(first, "the superseded shell").await;
+        wait_gone(child, "the superseded hook's grandchild").await;
+        // The second run sleeps 30 s: end the session so the cleanup is exercised, not leaked.
+        fixture.hooks.end_session();
+        drain_async(&fixture).await;
+    }
+
+    /// Edge case 5/6 at the hook layer: ending the session kills every running async hook's
+    /// process group, delivers nothing, records `cancelled`, and starts no further run.
+    /// Without the session-end kill the pid outlives the session and its text would inject.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ending_the_session_kills_a_running_async_hook_and_delivers_nothing() {
+        let root = TempRoot::new("async-session-end");
+        let pids = root.dir.join("pids");
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![tagged_async_hook(&pids, 30)]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        after_patch(&fixture, "one.rs").await;
+        let pid = wait_for_pids(&pids, 1).await[0];
+        assert_eq!(fixture.hooks.async_hooks_running(), 1);
+        fixture.hooks.end_session();
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            0,
+            "the ended session lists no running hook"
+        );
+        wait_gone(pid, "the session-end kill").await;
+        wait_for_run_end(&fixture, HookRunEnd::Cancelled).await;
+        assert!(
+            fixture.inbox.claim_next_step().await.is_none(),
+            "an ended session's hook delivers nothing"
+        );
+        assert!(fixture.inbox.claim_next_turn().await.is_none());
+        // No new run starts after the session ended, and nothing is recorded for one.
+        let runs = fixture.hooks.hook_runs().len();
+        after_patch(&fixture, "two.rs").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(fixture.hooks.async_hooks_running(), 0);
+        assert_eq!(
+            fixture.hooks.hook_runs().len(),
+            runs,
+            "no run after the end"
+        );
+        assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 1);
+    }
+
+    /// Edge case 8: a cancelled turn leaves a running async hook alone — it belongs to an
+    /// action that already happened — and its result still injects. A cancel path that also
+    /// ends the hooks kills the pid and loses the text.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_turn_leaves_a_running_async_hook_alone() {
+        let root = TempRoot::new("async-cancel");
+        let pids = root.dir.join("pids");
+        let fixture = layered_with_root(
+            root,
+            &post_hooks(vec![tagged_async_hook(&pids, 1)]),
+            &HooksConfig::default(),
+            SandboxSlot::empty(),
+        );
+        after_patch(&fixture, "one.rs").await;
+        let pid = wait_for_pids(&pids, 1).await[0];
+        fixture.inbox.cancel(radian_runtime::CancelCause::Requested);
+        fixture
+            .hooks
+            .run_stop_once(&completed_outcome(
+                RunStatus::Cancelled(CancelReason::Requested),
+                Some("stopping"),
+            ))
+            .await;
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            1,
+            "a cancelled turn never touches a running async hook"
+        );
+        drain_async(&fixture).await;
+        assert!(!alive(pid), "the hook ran to its own end");
+        let injected = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the cancelled turn left the result alone");
+        assert_eq!(injected.message.text(), "[PostToolUse hook] ONE");
     }
 }

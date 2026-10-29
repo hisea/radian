@@ -130,6 +130,18 @@ shows running async hooks in a Running section, and `Stop` lists each one in
 `background_tasks` with `"type": "hook"`. While one runs, the built-in stop
 validator stays off, like a running job.
 
+Async hooks have a lifecycle. Two runs are the same hook when their event,
+`command` and `args` match. When that hook fires while an earlier run of it is
+still running, radian kills the earlier run's process group: it delivers
+nothing, and its Recent runs entry says `cancelled`. A run whose process has
+already exited is delivering its result and is not superseded. At most 8 async
+hook processes run at once: a run over the cap does not start, shows one
+warning line, and its Recent runs entry says `failed to start`. A cancelled
+turn leaves running async hooks alone. When the session ends — you quit,
+`/new` opens the next session, or a `radian exec` run ends — every running
+async hook's process group is killed and nothing more is delivered; `exec -p`
+never waits for one.
+
 Its result is delivered when the process exits. An async hook cannot change a
 call or a turn: a returned `permissionDecision`, `updatedInput`,
 `updatedToolOutput` or `decision` is ignored with one warning.
@@ -397,7 +409,7 @@ first line; with `args` it is the program only. `<end>` is exactly one of:
 |---|---|
 | `status <code>` | The process exited with that code. |
 | `timed out` | The run passed its `timeout` and its process group was killed. Its milliseconds are at least the timeout. |
-| `cancelled` | The run was cancelled: the process ended on a signal (for example `kill`), or radian could not finish waiting on it. |
+| `cancelled` | The run was cancelled: the process ended on a signal (for example `kill`), radian killed its process group because the same hook fired again or the session ended, or radian could not finish waiting on it. |
 | `failed to start` | The process never started: the command was not found, or the sandbox could not build it. |
 
 Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
