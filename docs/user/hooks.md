@@ -396,7 +396,7 @@ ignored with one warning line too.
 
 ## Recent runs
 
-Every hook run records one entry when it finishes:
+Every hook run records one entry, when it finishes or when it never starts:
 
 ```
 <event>:<tool name> [<first line of the command>] <end> (<n>ms)
@@ -410,7 +410,7 @@ first line; with `args` it is the program only. `<end>` is exactly one of:
 | `status <code>` | The process exited with that code. |
 | `timed out` | The run passed its `timeout` and its process group was killed. Its milliseconds are at least the timeout. |
 | `cancelled` | The run was cancelled: the process ended on a signal (for example `kill`), radian killed its process group because the same hook fired again or the session ended, or radian could not finish waiting on it. |
-| `failed to start` | The process never started: the command was not found, or the sandbox could not build it. |
+| `failed to start` | The process never started: the command was not found, the sandbox could not build it, or the session already has 8 async hooks running. |
 
 Milliseconds are whole milliseconds, rounded up, so a fast hook reports at
 least `1ms`.
