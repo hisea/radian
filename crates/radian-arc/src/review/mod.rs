@@ -328,7 +328,7 @@ pub struct Merged {
     pub candidate_sha: Option<String>,
     /// How many integration runs the command made.
     pub rounds: u32,
-    /// A cleanup step that failed after the merge; the merge itself is done.
+    /// A follow-up step that failed after the merge; the merge itself is done.
     pub warning: Option<String>,
     /// Set when a conflict with main wrote the next attempt's brief instead of waiting for
     /// the lead.
@@ -2749,6 +2749,12 @@ fn finish_integration(
         task.state = model::TaskState::Done;
         task.phase = "merged".to_owned();
         task.retry_at = None;
+        // The pending hook and the sha it reads are recorded in this same write, so a crash
+        // after the merge cannot lose the hook: the holder of `runner.lock` runs it, at least
+        // once, until the point is cleared (ADR 0048 decisions 10 and 13).
+        task.pending_hooks
+            .push(crate::hooks::AFTER_MERGE.to_owned());
+        task.merged_sha = Some(candidate.clone());
         // The switch is read here, with the merged-state write, not when the merge started:
         // an auto merge can run its integration while the owner changes the setting, and the
         // task merged under the per-plan rule only when the switch is on at this moment and
@@ -2760,7 +2766,7 @@ fn finish_integration(
         }
         Ok(())
     })?;
-    let mut warning = remove_worktree(store, task_id).err();
+    let mut warning = None;
     // The merge stands whatever the follow-up does: a plan that changed outside arc leaves a
     // warning, not a failed merge.
     let followup = match store.load_task(task_id) {
@@ -2895,7 +2901,7 @@ impl MergeStep {
     }
 
     /// A merged task: its line (and the follow-up task's, when arc proposed one), with the
-    /// warning a cleanup step left after the merge as the summary's note.
+    /// warning the follow-up left after the merge as the summary's note.
     fn merged(merged: Merged) -> Self {
         Self {
             line: Some(merged.line()),
@@ -3660,30 +3666,6 @@ fn push_candidate(
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, Error> {
     let out = git(repo, &["merge-base", "--is-ancestor", ancestor, descendant])?;
     Ok(out.success())
-}
-
-/// Removes the task's worktree after a merge. The branch stays on the remote: only the
-/// checkout goes. A dirty worktree is not forced away: the merge stands, and the failure is
-/// a warning.
-fn remove_worktree(store: &Store, task: &str) -> Result<(), String> {
-    let path = store.root().join("worktrees").join(task);
-    if path.exists() {
-        let path = path.to_string_lossy().into_owned();
-        let out = crate::git::run(store.repo(), &["worktree", "remove", &path])
-            .map_err(|error| error.to_string())?;
-        if !out.success() {
-            return Err(format!(
-                "cannot remove worktree {path}: {}",
-                out.stderr.trim()
-            ));
-        }
-    }
-    let out =
-        crate::git::run(store.repo(), &["worktree", "prune"]).map_err(|error| error.to_string())?;
-    if !out.success() {
-        return Err(format!("git worktree prune failed: {}", out.stderr.trim()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

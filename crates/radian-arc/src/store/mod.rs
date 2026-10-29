@@ -416,7 +416,23 @@ impl Store {
     /// runs the requirement checks.
     pub fn init(dir: &Path, track: bool) -> Result<InitReport, Error> {
         let repository = git::repository_root(dir).map_err(Error::Failed)?;
-        let remote = "origin".to_owned();
+        let root = repository.join(ARC_DIR);
+        let config_path = root.join(CONFIG_FILE);
+        // A config that already exists names the operational remote, so `init` reads it from
+        // there rather than looking for `origin`; without one it takes `origin`, or the
+        // repository's only remote (ADR 0048 decision 15).
+        let existing =
+            if config_path.is_file() {
+                Some(config::load(&config_path).map_err(|error| {
+                    Error::Failed(format!("{}: {error}", config_path.display()))
+                })?)
+            } else {
+                None
+            };
+        let remote = match &existing {
+            Some(config) => config.repository.remote.clone(),
+            None => git::default_remote(&repository).map_err(Error::Failed)?,
+        };
         let remote_url = git::remote_url(&repository, &remote).map_err(|_| {
             Error::Failed(format!(
                 "the repository at {} has no `{remote}` remote; arc reads the main branch \
@@ -425,7 +441,6 @@ impl Store {
             ))
         })?;
         let main_branch = git::main_branch(&repository, &remote);
-        let root = repository.join(ARC_DIR);
         for sub in [
             "plans",
             "tasks",
@@ -441,12 +456,15 @@ impl Store {
                 Error::Failed(format!("cannot create {}: {error}", path.display()))
             })?;
         }
-        let config_path = root.join(CONFIG_FILE);
-        let config_created = if config_path.is_file() {
-            false
-        } else {
-            write_atomic(&config_path, config::default_text(&main_branch).as_bytes())?;
-            true
+        let config_created = match &existing {
+            Some(_) => false,
+            None => {
+                write_atomic(
+                    &config_path,
+                    config::default_text_with_remote(&main_branch, &remote).as_bytes(),
+                )?;
+                true
+            }
         };
         // The standing worker instructions (ADR 0048 decision 7). A file the owner edited is
         // never overwritten: `init` only fills in the generic default.
@@ -1549,6 +1567,12 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.followup_pending != current.followup_pending {
                 touched.push("followup_pending");
+            }
+            if last.pending_hooks != current.pending_hooks {
+                touched.push("pending_hooks");
+            }
+            if last.merged_sha != current.merged_sha {
+                touched.push("merged_sha");
             }
             if last.retry_at != current.retry_at {
                 touched.push("retry_at");
