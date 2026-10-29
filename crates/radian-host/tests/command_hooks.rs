@@ -214,6 +214,8 @@ async fn a_late_stop_verdict_belongs_to_the_turn_it_opens() {
                 command: script,
                 args: None,
                 timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
             }],
         }],
         ..Default::default()
@@ -317,6 +319,8 @@ async fn permissions_deny_short_circuits_before_command_hooks_run() {
                 command: format!("touch {}", marker.display()),
                 args: None,
                 timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
             }],
         }],
     );
@@ -414,6 +418,8 @@ async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journ
                         .into(),
                 args: None,
                 timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
             }],
         }],
         ..Default::default()
@@ -429,6 +435,8 @@ async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journ
                 ),
                 args: None,
                 timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
             }],
         }],
         ..Default::default()
@@ -561,6 +569,8 @@ async fn allow_output_does_not_bypass_the_permission_rules() {
                 command: script.into(),
                 args: None,
                 timeout_secs: None,
+                async_hook: false,
+                async_rewake: false,
             }],
         }],
     );
@@ -646,6 +656,8 @@ fn request_commands(
             command: script.to_owned(),
             args: None,
             timeout_secs,
+            async_hook: false,
+            async_rewake: false,
         }],
     };
     let user = radian_host::config::HooksConfig {
@@ -1103,6 +1115,8 @@ async fn an_unsupported_updated_permissions_destination_allows_once_without_a_gr
             command: script,
             args: None,
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         }],
     };
     let user = radian_host::config::HooksConfig {

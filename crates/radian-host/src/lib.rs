@@ -162,7 +162,7 @@ pub use home::{
 pub use hooks::{
     CommandHooks, HOOK_RUN_END_CANCELLED, HOOK_RUN_END_FAILED_TO_START, HOOK_RUN_END_STATUS,
     HOOK_RUN_END_TIMED_OUT, HOOK_RUN_ENDS, HOOK_RUN_HISTORY, HookRunEnd, HookRunRecord,
-    HooksWarning, REASON_CHAR_LIMIT,
+    HooksWarning, REASON_CHAR_LIMIT, RunningHook,
 };
 pub use job_notify::{JobNotifier, NOTIFY_INLINE_BYTES, orphan_jobs, orphan_message};
 pub use mcp::{

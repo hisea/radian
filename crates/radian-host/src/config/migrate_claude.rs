@@ -448,12 +448,15 @@ struct PlannedHooks {
 type PlannedEntry = (Option<String>, Vec<HookCommandDraft>);
 
 /// One translated hook command: the program, its optional exec-form `args` (ADR 0045 §4),
-/// and the optional timeout in seconds. `args: None` is the `/bin/sh -c` form.
+/// the optional timeout in seconds, and the `async`/`asyncRewake` flags (ADR 0045 §5).
+/// `args: None` is the `/bin/sh -c` form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HookCommandDraft {
     command: String,
     args: Option<Vec<String>>,
     timeout: Option<u64>,
+    async_hook: bool,
+    async_rewake: bool,
 }
 
 /// What [`plan_merge`] decided: additions plus conflict lines.
@@ -639,6 +642,8 @@ fn merge_config(
                                 command: hook.command.clone(),
                                 args: hook.args.clone(),
                                 timeout_secs: hook.timeout,
+                                async_hook: hook.async_hook,
+                                async_rewake: hook.async_rewake,
                             })
                             .collect(),
                     };
@@ -726,6 +731,8 @@ fn plan_merge(
                                 command: hook.command.clone(),
                                 args: hook.args.clone(),
                                 timeout: hook.timeout_secs,
+                                async_hook: hook.async_hook,
+                                async_rewake: hook.async_rewake,
                             })
                             .collect(),
                     )
@@ -1009,6 +1016,8 @@ fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
                             command: hook.command.clone(),
                             args: hook.args.clone(),
                             timeout: hook.timeout_secs,
+                            async_hook: hook.async_hook,
+                            async_rewake: hook.async_rewake,
                         })
                         .collect(),
                 )
@@ -1056,6 +1065,12 @@ fn hook_table(matcher: &Option<String>, commands: &[HookCommandDraft]) -> Table 
         if let Some(secs) = command.timeout {
             hook["timeout"] = value(secs as i64);
         }
+        if command.async_hook {
+            hook["async"] = value(true);
+        }
+        if command.async_rewake {
+            hook["asyncRewake"] = value(true);
+        }
         hooks.push(hook);
     }
     entry["hooks"] = Item::ArrayOfTables(hooks);
@@ -1086,6 +1101,12 @@ fn inline_hook_table(
         }
         if let Some(secs) = command.timeout {
             hook.insert("timeout", toml_edit::Value::from(secs as i64));
+        }
+        if command.async_hook {
+            hook.insert("async", toml_edit::Value::from(true));
+        }
+        if command.async_rewake {
+            hook.insert("asyncRewake", toml_edit::Value::from(true));
         }
         hooks.push(toml_edit::Value::InlineTable(hook));
     }
@@ -1139,6 +1160,18 @@ fn inline_hook_entry(table: &toml_edit::InlineTable) -> (Option<String>, Vec<Hoo
                         .get("timeout")
                         .and_then(|timeout| timeout.as_integer())
                         .and_then(|secs| u64::try_from(secs).ok()),
+                    async_hook: hook
+                        .get("async")
+                        .and_then(|on| on.as_bool())
+                        .unwrap_or(false)
+                        || hook
+                            .get("asyncRewake")
+                            .and_then(|on| on.as_bool())
+                            .unwrap_or(false),
+                    async_rewake: hook
+                        .get("asyncRewake")
+                        .and_then(|on| on.as_bool())
+                        .unwrap_or(false),
                 })
                 .collect()
         })
@@ -1167,6 +1200,18 @@ fn hook_command_entry(table: &Table) -> HookCommandDraft {
             .get("timeout")
             .and_then(|timeout| timeout.as_integer())
             .and_then(|secs| u64::try_from(secs).ok()),
+        async_hook: table
+            .get("async")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false)
+            || table
+                .get("asyncRewake")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false),
+        async_rewake: table
+            .get("asyncRewake")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -1344,6 +1389,15 @@ fn same_hook_entry(first: &Json, second: &Json) -> bool {
                 command,
                 args,
                 timeout,
+                async_hook: hook.get("async").and_then(Json::as_bool).unwrap_or(false)
+                    || hook
+                        .get("asyncRewake")
+                        .and_then(Json::as_bool)
+                        .unwrap_or(false),
+                async_rewake: hook
+                    .get("asyncRewake")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false),
             });
         }
         Some((matcher, commands))
@@ -1729,7 +1783,7 @@ fn collect_hook_entries(
                 draft.note(format!("{what}: not an object, skipped"));
                 continue;
             };
-            if let Some(reason) = entry_drop_reason(entry, "entry") {
+            if let Some(reason) = entry_drop_reason(entry, target) {
                 draft.note(format!("{what}: not imported ({reason})"));
                 continue;
             }
@@ -1759,7 +1813,7 @@ fn collect_hook_entries(
                     draft.note(format!("{what}: a hook is not an object, skipped"));
                     continue;
                 };
-                match hook_command(hook) {
+                match hook_command(hook, target) {
                     Ok(command) => {
                         any_command = true;
                         commands.push(command);
@@ -1786,9 +1840,27 @@ enum HookEvent {
     Stop,
 }
 
-/// Why an entry (the outer `{ matcher, hooks }` object) is dropped, if it is.
-fn entry_drop_reason(entry: &serde_json::Map<String, Json>, _kind: &str) -> Option<String> {
-    for key in ["async", "if", "http", "prompt", "agent"] {
+impl HookEvent {
+    /// Whether the event accepts `async`/`asyncRewake` (ADR 0045 §5).
+    fn accepts_async(self) -> bool {
+        matches!(self, Self::Post | Self::Stop)
+    }
+}
+
+/// Why an entry (the outer `{ matcher, hooks }` object) is dropped, if it is. `async` is a
+/// supported field now, so only an entry-level `async` on an event that does not accept it
+/// still drops the entry (ADR 0045 §5).
+fn entry_drop_reason(entry: &serde_json::Map<String, Json>, event: HookEvent) -> Option<String> {
+    if !event.accepts_async() {
+        for key in ["async", "asyncRewake"] {
+            if entry.contains_key(key) {
+                return Some(format!(
+                    "`{key}` is only supported on `PostToolUse` and `Stop`"
+                ));
+            }
+        }
+    }
+    for key in ["if", "http", "prompt", "agent"] {
         if entry.contains_key(key) {
             return Some(format!("`{key}` hooks are not supported"));
         }
@@ -1801,10 +1873,15 @@ fn entry_drop_reason(entry: &serde_json::Map<String, Json>, _kind: &str) -> Opti
     None
 }
 
-/// Reads one inner `{ type, command, args, timeout }` hook. `Err` is the one-line drop
-/// reason. `args` is carried over unchanged (ADR 0045 §4); a value that is not an array of
-/// strings is not imported, like any other outside-the-subset shape.
-fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft, String> {
+/// Reads one inner `{ type, command, args, timeout, async, asyncRewake }` hook. `Err` is the
+/// one-line drop reason. `args` is carried over unchanged (ADR 0045 §4); a value that is not
+/// an array of strings is not imported, like any other outside-the-subset shape. `async` and
+/// `asyncRewake` are carried on `PostToolUse` and `Stop`; on `PreToolUse` and
+/// `PermissionRequest` that hook is dropped with a report line (ADR 0045 §5).
+fn hook_command(
+    hook: &serde_json::Map<String, Json>,
+    event: HookEvent,
+) -> Result<HookCommandDraft, String> {
     if let Some(kind) = hook.get("type").and_then(Json::as_str) {
         if kind != "command" {
             return Err(format!("`type: \"{kind}\"` hooks are not supported"));
@@ -1812,10 +1889,23 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft
     } else {
         return Err("a hook without `type: \"command\"` is not supported".into());
     }
-    for key in ["async", "if", "http", "prompt", "agent"] {
+    for key in ["if", "http", "prompt", "agent"] {
         if hook.contains_key(key) {
             return Err(format!("`{key}` hooks are not supported"));
         }
+    }
+    let async_rewake = match hook.get("asyncRewake") {
+        None => false,
+        Some(Json::Bool(on)) => *on,
+        Some(_) => return Err("a hook with a non-boolean `asyncRewake` is not supported".into()),
+    };
+    let async_hook = match hook.get("async") {
+        None => async_rewake,
+        Some(Json::Bool(on)) => *on || async_rewake,
+        Some(_) => return Err("a hook with a non-boolean `async` is not supported".into()),
+    };
+    if (async_hook || async_rewake) && !event.accepts_async() {
+        return Err("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`".into());
     }
     if let Some(context) = hook.get("context").and_then(Json::as_str)
         && context == "fork"
@@ -1863,6 +1953,8 @@ fn hook_command(hook: &serde_json::Map<String, Json>) -> Result<HookCommandDraft
         command: command.to_owned(),
         args,
         timeout,
+        async_hook,
+        async_rewake,
     })
 }
 
@@ -2404,6 +2496,12 @@ fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
                 if let Some(secs) = command.timeout {
                     hook.insert("timeout".to_owned(), Json::Number(secs.into()));
                 }
+                if command.async_hook {
+                    hook.insert("async".to_owned(), Json::Bool(true));
+                }
+                if command.async_rewake {
+                    hook.insert("asyncRewake".to_owned(), Json::Bool(true));
+                }
                 Json::Object(hook)
             })
             .collect();
@@ -2487,6 +2585,12 @@ impl Draft {
                     }
                     if let Some(secs) = command.timeout {
                         hook.insert("timeout".into(), Toml::Integer(secs as i64));
+                    }
+                    if command.async_hook {
+                        hook.insert("async".into(), Toml::Boolean(true));
+                    }
+                    if command.async_rewake {
+                        hook.insert("asyncRewake".into(), Toml::Boolean(true));
                     }
                     list.push(Toml::Table(hook));
                 }

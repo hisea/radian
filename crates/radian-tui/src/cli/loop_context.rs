@@ -1132,6 +1132,7 @@ impl LoopContext<'_> {
                 session.mcp_config_path().as_deref(),
             ),
             hooks: radian_tui::inspector::hook_entries(&session.hooks_config()),
+            hook_running: session.running_async_hooks(),
             hook_runs: session.hook_runs(),
             mcp_config_path: session.mcp_config_path(),
         }
@@ -1285,6 +1286,9 @@ mod tests {
             todo!()
         }
         fn hook_runs(&self) -> Vec<radian_host::HookRunRecord> {
+            todo!()
+        }
+        fn running_async_hooks(&self) -> Vec<radian_host::RunningHook> {
             todo!()
         }
         fn job_tail(&self, _id: &str, _max: usize) -> Option<(radian_coding::JobState, String)> {

@@ -27,13 +27,24 @@
 //!   (a string that replaces the result's content). Exit 2 feeds the hook's stderr back to the
 //!   model alongside the result; any other exit or a timeout is a hook error and fails closed
 //!   (the result is replaced with `hook_error`).
+//!   A hook with `async = true` starts the same way and the result continues at once
+//!   (ADR 0045 §5): its exit-0 `additionalContext` enters context through `inject` before the
+//!   next model call, and an `asyncRewake` exit 2 wakes an idle session through the wake gate
+//!   (failing that, it degrades to an inject). `permissionDecision`, `updatedInput`,
+//!   `updatedToolOutput` and `decision` are ignored with one warning: the call already ran.
 //! - `Stop` runs once per completed turn (see [`Hooks::on_turn_end`]: only
 //!   [`RunStatus::Completed`] runs the hook; any other terminal status runs nothing).
 //!   Exit 2 starts another turn with the hook's stderr as a `System` `followup` through
 //!   the inbox; `decision: "block"` and `hookSpecificOutput.additionalContext` join the same
 //!   chain. Continuations are limited to a [`WakeGate`] window's worth; past the gate they
 //!   degrade to a marked `inject` (no wake) with the wake-budget notice, the same degrade as
-//!   the background-job notifier (ADR 0045 §2).
+//!   the background-job notifier (ADR 0045 §2). An `async` `Stop` hook is not part of that
+//!   chain: it is spawned and its own result is delivered afterwards (ADR 0045 §5).
+//!
+//! Async hooks are not jobs: they never enter the [`Jobs`] registry, `/jobs` or the `job`
+//! tool. The `/hooks` page shows them under "Running", `Stop` lists each one in
+//! `background_tasks` with `type: "hook"`, and the intent-stop validator treats one like a
+//! running job (no trigger while any is in flight).
 //!
 //! Two layers, one chain (ADR 0045 slice B): the project hooks
 //! (`<workspace>/.radian/hooks.json`, loaded only when trusted) run first, then the user's
@@ -241,6 +252,40 @@ enum CompiledMatcher {
     Never,
 }
 
+/// One async hook process running right now. It is not a job: the model cannot `wait` or
+/// `kill` it, `/jobs` never lists it, and only the `/hooks` page's "Running" section and
+/// `Stop`'s `background_tasks` show it (ADR 0045 §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningHook {
+    /// The registry id (`hook-…`), unique within the session.
+    pub id: String,
+    /// `PostToolUse` or `Stop`.
+    pub event: String,
+    /// The tool name for `PostToolUse`; `None` for `Stop`.
+    pub tool: Option<String>,
+    /// The command as written (the first line is shown).
+    pub command: String,
+    /// When the process started.
+    pub started: Instant,
+}
+
+impl RunningHook {
+    /// The one page line: the run-record shape with `running` in place of the end.
+    pub fn line(&self) -> String {
+        let event = match &self.tool {
+            Some(tool) => format!("{}:{tool}", self.event),
+            None => self.event.clone(),
+        };
+        let millis = u64::try_from(self.started.elapsed().as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        format!(
+            "{event} [{}] running ({millis}ms)",
+            first_line(&self.command)
+        )
+    }
+}
+
 /// The user-level command hooks: one [`Hooks`] implementation for every event, plus the
 /// `PermissionRequest` chain the permission layer calls through
 /// [`radian_permissions::PermissionRequestHooks`].
@@ -312,6 +357,13 @@ pub struct CommandHooks {
     /// The last [`HOOK_RUN_HISTORY`] finished runs, oldest first (newest at the back); shared
     /// across clones, one ring per session. Never journaled.
     runs: Arc<std::sync::Mutex<VecDeque<HookRunRecord>>>,
+    /// The async hooks running right now, in spawn order. Not the [`Jobs`] registry: these
+    /// are never model-visible jobs (ADR 0045 §5).
+    async_running: Arc<std::sync::Mutex<Vec<RunningHook>>>,
+    /// Bumped whenever one async hook finishes (or fails to start), so a waiter re-checks.
+    async_signal: Arc<Notify>,
+    /// The id sequence for [`RunningHook::id`].
+    async_seq: Arc<AtomicU64>,
     warn: HooksWarning,
     /// The wake-budget notice line (routed like `warn`, as its own transcript notice).
     wake: HooksWarning,
@@ -448,6 +500,9 @@ impl CommandHooks {
             hook_idle: Arc::new(AtomicU32::new(0)),
             consecutive: Arc::new(AtomicU32::new(0)),
             runs: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            async_running: Arc::new(std::sync::Mutex::new(Vec::new())),
+            async_signal: Arc::new(Notify::new()),
+            async_seq: Arc::new(AtomicU64::new(0)),
             warn,
             wake,
             intent_stop_warn,
@@ -556,6 +611,36 @@ impl CommandHooks {
             .rev()
             .cloned()
             .collect()
+    }
+
+    /// The async hooks running right now, in spawn order (the `/hooks` page's Running
+    /// section and `Stop`'s `background_tasks`). In memory only.
+    pub fn running_async_hooks(&self) -> Vec<RunningHook> {
+        self.async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// How many async hooks are running right now. The intent-stop validator counts these
+    /// like background jobs: no trigger while one is in flight (ADR 0045 §5).
+    pub fn async_hooks_running(&self) -> usize {
+        self.async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len()
+    }
+
+    /// Resolves whenever one async hook finishes. A waiter re-checks its exit condition on
+    /// each one (tests and a host that wants to drain them).
+    pub fn async_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.async_signal)
+    }
+
+    /// Background work that makes the intent-stop validator stand down: the job registry
+    /// plus every running async hook (ADR 0045 §3/§5).
+    fn background_running(&self) -> usize {
+        self.jobs_running() + self.async_hooks_running()
     }
 
     /// Records one finished run: one `tracing` info line, then the in-memory ring (the
@@ -709,7 +794,18 @@ impl CommandHooks {
                 if !seen.insert(dedup_key(hook)) {
                     continue;
                 }
-                match self.execute(hook, &stdin, "Stop", None).await {
+                // `background_tasks` is read per hook, so a sync hook later in the chain
+                // sees an async hook that started just before it (ADR 0045 §5).
+                let mut hook_stdin = stdin.clone();
+                hook_stdin["background_tasks"] = serde_json::Value::Array(self.background_tasks());
+                // An async `Stop` hook is not part of this turn's continuation chain and
+                // is not counted by the idle-continuation counter (ADR 0045 §5): it starts
+                // and the chain continues at once, delivering its own result later.
+                if hook.is_async() {
+                    self.spawn_async(hook, hook_stdin, "Stop", None);
+                    continue;
+                }
+                match self.execute(hook, &hook_stdin, "Stop", None).await {
                     Ok(output) if output.code == Some(0) => {
                         if let Some(parsed) = self.parsed_output(&output.stdout, "Stop") {
                             reasons.extend(self.stop_output_reasons(parsed));
@@ -849,7 +945,7 @@ impl CommandHooks {
         let hit = self.intent_stop
             && !self.loop_active.load(Ordering::SeqCst)
             && !self.goal_active()
-            && self.jobs_running() == 0
+            && self.background_running() == 0
             && outcome
                 .final_message
                 .as_ref()
@@ -898,9 +994,10 @@ impl CommandHooks {
         )
     }
 
-    /// The background jobs running when `Stop` runs, as its `background_tasks` (ADR 0045
-    /// §2). A registry that was dropped, or never set, reads as no jobs running: the hook
-    /// still runs and the field is `[]`.
+    /// The background jobs and async hooks running when `Stop` runs, as its
+    /// `background_tasks` (ADR 0045 §2/§5). A registry that was dropped, or never set, reads
+    /// as no jobs running: the hook still runs and the field is `[]`. An async hook is
+    /// listed with `type: "hook"`, a job with `type: "shell"`.
     fn background_tasks(&self) -> Vec<serde_json::Value> {
         let jobs = {
             let slot = self
@@ -909,12 +1006,9 @@ impl CommandHooks {
                 .unwrap_or_else(|poison| poison.into_inner());
             slot.as_ref().and_then(Weak::upgrade)
         };
-        let Some(jobs) = jobs else {
-            return Vec::new();
-        };
-        jobs.running_tasks()
-            .into_iter()
-            .map(|task| {
+        let mut tasks: Vec<serde_json::Value> = Vec::new();
+        if let Some(jobs) = jobs {
+            tasks.extend(jobs.running_tasks().into_iter().map(|task| {
                 serde_json::json!({
                     "id": task.id,
                     "type": "shell",
@@ -922,8 +1016,18 @@ impl CommandHooks {
                     "description": task.description,
                     "command": task.command,
                 })
+            }));
+        }
+        tasks.extend(self.running_async_hooks().into_iter().map(|hook| {
+            serde_json::json!({
+                "id": hook.id,
+                "type": "hook",
+                "status": "running",
+                "description": first_line(&hook.command),
+                "command": hook.command,
             })
-            .collect()
+        }));
+        tasks
     }
 
     /// The session-level schedulers that open turns by themselves, as the `Stop` stdin
@@ -1048,6 +1152,157 @@ impl CommandHooks {
                     "the {event} hook timed out after {timeout_secs}s"
                 )))
             }
+        }
+    }
+
+    /// Starts one async hook and returns at once: the process is registered as running and
+    /// the run happens on the session runtime (ADR 0045 §5). The tool result or the `Stop`
+    /// chain never waits for it.
+    fn spawn_async(
+        &self,
+        hook: &HookCommand,
+        stdin_json: serde_json::Value,
+        event: &str,
+        tool: Option<&str>,
+    ) {
+        let seq = self.async_seq.fetch_add(1, Ordering::SeqCst);
+        let id = format!("hook-{}-{seq}", std::process::id());
+        let running = RunningHook {
+            id: id.clone(),
+            event: event.to_owned(),
+            tool: tool.map(str::to_owned),
+            command: hook.command.clone(),
+            started: Instant::now(),
+        };
+        self.async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(running);
+        let this = self.clone();
+        let hook = hook.clone();
+        let event = event.to_owned();
+        let tool = tool.map(str::to_owned);
+        self.runtime.spawn(async move {
+            let output = this
+                .execute(&hook, &stdin_json, &event, tool.as_deref())
+                .await;
+            this.deliver_async(&hook, &event, output).await;
+            this.finish_async(&id);
+        });
+    }
+
+    /// Removes one finished async hook from the running registry and wakes waiters.
+    fn finish_async(&self, id: &str) {
+        self.async_running
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .retain(|hook| hook.id != id);
+        self.async_signal.notify_waiters();
+    }
+
+    /// Delivers one finished async hook's result (ADR 0045 §5). Async hooks cannot change
+    /// the call or the turn: their control fields are ignored with one warning. Exit 0
+    /// `additionalContext` is an `inject`; exit 2 is an `inject` unless `asyncRewake` asks
+    /// for a `followup` wake; every other end is one warning line (the run record is
+    /// already in place). Nothing ever fails closed: the action the hook checked already
+    /// happened.
+    async fn deliver_async(
+        &self,
+        hook: &HookCommand,
+        event: &str,
+        output: Result<ProcOutput, HookError>,
+    ) {
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                (self.warn)(&format!("the {event} async hook failed: {error}"));
+                return;
+            }
+        };
+        match output.code {
+            Some(0) => {
+                let Some(parsed) = self.parsed_output(&output.stdout, event) else {
+                    return;
+                };
+                let specific = parsed.hookSpecificOutput;
+                let ignored = specific.as_ref().is_some_and(|specific| {
+                    specific.permissionDecision.is_some()
+                        || specific.updatedInput.is_some()
+                        || specific.updatedToolOutput.is_some()
+                        || specific.decision.is_some()
+                }) || parsed.decision.is_some();
+                if ignored {
+                    (self.warn)(&format!(
+                        "the {event} async hook returned permissionDecision, updatedInput, \
+                         updatedToolOutput or decision; an async hook cannot change the call \
+                         or the turn, so they are ignored"
+                    ));
+                }
+                if let Some(context) = specific.and_then(|specific| specific.additionalContext) {
+                    self.inject_async(format!("[{event} hook] {}", short(&context)))
+                        .await;
+                }
+            }
+            Some(2) => {
+                let reason = short(&output.stderr);
+                let reason = if reason.trim().is_empty() {
+                    format!("the {event} hook exited with code 2")
+                } else {
+                    reason
+                };
+                if hook.async_rewake {
+                    self.followup_async(reason).await;
+                } else {
+                    self.inject_async(reason).await;
+                }
+            }
+            code => {
+                (self.warn)(&format!(
+                    "the {event} async hook exited with code {}: {}",
+                    code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                    short(&output.stderr),
+                ));
+            }
+        }
+    }
+
+    /// An async result waits for the next model call without opening a turn (ADR 0045 §5):
+    /// the `inject` lane never wakes a driver, whether it is idle or busy when the hook
+    /// finishes.
+    async fn inject_async(&self, text: String) {
+        if let Err(error) = self
+            .inbox
+            .inject(Message::user(text), InputSource::System)
+            .await
+        {
+            (self.warn)(&format!("could not deliver an async hook result: {error}"));
+        }
+    }
+
+    /// An `asyncRewake` exit 2 takes the `followup` lane through the same wake gate as a
+    /// `Stop` continuation (ADR 0045 §5): inside the gate it counts one wake; past it the
+    /// result degrades to a marked `inject` with the wake-budget notice (the journal
+    /// `degraded` mark, one TUI notice, herdr `wake budget`).
+    async fn followup_async(&self, text: String) {
+        let message = Message::user(text);
+        if self.gate.wake_allowed() {
+            match self.inbox.followup(message, InputSource::System).await {
+                Ok(_) => {
+                    self.gate.note_wake();
+                    self.degraded.store(0, Ordering::SeqCst);
+                }
+                Err(error) => {
+                    (self.warn)(&format!("could not wake for an async hook result: {error}"));
+                }
+            }
+        } else if self
+            .inbox
+            .inject_degraded(message, InputSource::System)
+            .await
+            .is_ok()
+        {
+            let degraded = self.degraded.fetch_add(1, Ordering::SeqCst) + 1;
+            (self.wake)(&crate::job_notify::wake_budget_line(degraded));
         }
     }
 
@@ -1775,6 +2030,12 @@ impl Hooks for CommandHooks {
                     "cwd": self.workspace.to_string_lossy(),
                     "session_id": self.session_id,
                 });
+                // An async hook starts the same way and the result continues at once
+                // (ADR 0045 §5): its output is delivered through `inject`/`followup` later.
+                if hook.is_async() {
+                    self.spawn_async(hook, stdin, "PostToolUse", Some(&call.name));
+                    continue;
+                }
                 let output = self
                     .execute(hook, &stdin, "PostToolUse", Some(&call.name))
                     .await?;
@@ -1922,6 +2183,8 @@ mod tests {
             command: command.to_owned(),
             args: None,
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         }
     }
 
@@ -2614,6 +2877,8 @@ mod tests {
                 "*".to_owned(),
             ]),
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         });
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
@@ -2648,6 +2913,8 @@ mod tests {
             command: script.display().to_string(),
             args: Some(vec!["ignored".to_owned()]),
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         });
         let sandbox =
             radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
@@ -2687,6 +2954,8 @@ mod tests {
             command: script.display().to_string(),
             args: Some(vec![arg.to_owned()]),
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         };
         let project = pre_hook(hook("one"));
         let user = HooksConfig {
@@ -2716,6 +2985,8 @@ mod tests {
             command: root.ws.join("does-not-exist").display().to_string(),
             args: Some(Vec::new()),
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         });
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
@@ -2749,6 +3020,8 @@ mod tests {
             command: "/bin/sleep".to_owned(),
             args: Some(vec!["5".to_owned()]),
             timeout_secs: Some(1),
+            async_hook: false,
+            async_rewake: false,
         });
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
@@ -2776,6 +3049,8 @@ mod tests {
             command: "/bin/sh".to_owned(),
             args: Some(vec!["-c".to_owned(), "kill -KILL $$".to_owned()]),
             timeout_secs: None,
+            async_hook: false,
+            async_rewake: false,
         });
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
@@ -4892,5 +5167,383 @@ mod tests {
             1,
             "one run for two identical namings"
         );
+    }
+
+    // ---------- async hooks (ADR 0045 §5) ----------
+
+    fn async_hook(command: &str) -> HookCommand {
+        HookCommand {
+            command: command.to_owned(),
+            args: None,
+            timeout_secs: None,
+            async_hook: true,
+            async_rewake: false,
+        }
+    }
+
+    fn async_rewake_hook(command: &str) -> HookCommand {
+        HookCommand {
+            command: command.to_owned(),
+            args: None,
+            timeout_secs: None,
+            async_hook: true,
+            async_rewake: true,
+        }
+    }
+
+    fn post_hooks(hooks: Vec<HookCommand>) -> HooksConfig {
+        HooksConfig {
+            post_tool_use: vec![entry("patch", hooks)],
+            ..HooksConfig::default()
+        }
+    }
+
+    /// Waits until every spawned async hook has finished delivering its result.
+    async fn drain_async(fixture: &Fixture) {
+        let signal = fixture.hooks.async_signal();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while fixture.hooks.async_hooks_running() > 0 {
+            let notified = signal.notified();
+            if fixture.hooks.async_hooks_running() == 0 {
+                return;
+            }
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .expect("the async hook never finished");
+        }
+    }
+
+    async fn after_patch(fixture: &Fixture, path: &str) -> ToolResult {
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        fixture
+            .hooks
+            .after_tool_call(
+                &cx(),
+                &call("patch", serde_json::json!({"path": path})),
+                &mut result,
+            )
+            .await
+            .unwrap();
+        result
+    }
+
+    /// Edge case 1: an async `PostToolUse` hook that sleeps 2 s does not hold the tool
+    /// result, and its `additionalContext` waits in `next_step` for the next model call
+    /// (`inject`, never a wake). Running it synchronously fails the timing assertion.
+    #[tokio::test]
+    async fn an_async_post_hook_returns_at_once_and_injects_before_the_next_model_call() {
+        let script =
+            r#"sleep 2; printf '%s' '{"hookSpecificOutput":{"additionalContext":"linted"}}'"#;
+        let fixture = plain(&post_hooks(vec![async_hook(script)]));
+        let started = std::time::Instant::now();
+        let result = after_patch(&fixture, "src/a.rs").await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the tool result must not wait for the hook: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(result.text(), "patched", "the result is untouched");
+        assert_eq!(
+            fixture.hooks.running_async_hooks().len(),
+            1,
+            "the hook is listed as running"
+        );
+        drain_async(&fixture).await;
+        assert_eq!(fixture.hooks.running_async_hooks().len(), 0);
+        let injected = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("additionalContext injects");
+        assert_eq!(injected.message.text(), "[PostToolUse hook] linted");
+        assert_eq!(injected.source, InputSource::System);
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "inject must never wake a turn"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+    }
+
+    /// Edge case 2: three edits to three files in one turn, each matched by its own async
+    /// command, produce three separate injected messages (one per result, never merged).
+    #[tokio::test]
+    async fn three_async_edits_in_one_turn_inject_three_separate_messages() {
+        let hook_for = |file: &str, text: &str| {
+            async_hook(&format!(
+                "input=$(cat); case \"$input\" in *{file}*) printf '%s' \
+                 '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{text}\"}}}}';; esac"
+            ))
+        };
+        let fixture = plain(&post_hooks(vec![
+            hook_for("a.rs", "a-done"),
+            hook_for("b.rs", "b-done"),
+            hook_for("c.rs", "c-done"),
+        ]));
+        for path in ["a.rs", "b.rs", "c.rs"] {
+            after_patch(&fixture, path).await;
+        }
+        drain_async(&fixture).await;
+        let mut texts = Vec::new();
+        while let Some(entry) = fixture.inbox.claim_next_step().await {
+            texts.push(entry.message.text());
+        }
+        texts.sort();
+        assert_eq!(
+            texts,
+            vec![
+                "[PostToolUse hook] a-done",
+                "[PostToolUse hook] b-done",
+                "[PostToolUse hook] c-done"
+            ],
+            "one message per async command"
+        );
+    }
+
+    /// Edge case 3: `asyncRewake` exit 2 wakes an idle session through the `followup`
+    /// lane and counts one wake; past the gate it degrades to `inject_degraded` with the
+    /// degraded counter and the wake-budget notice (the three visible signals).
+    #[tokio::test]
+    async fn async_rewake_wakes_once_or_degrades_with_the_three_signals() {
+        let fixture = plain(&post_hooks(vec![async_rewake_hook(
+            "echo rewake-reason >&2; exit 2",
+        )]));
+        after_patch(&fixture, "a.rs").await;
+        drain_async(&fixture).await;
+        let entry = fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("an idle asyncRewake wakes a turn");
+        assert_eq!(entry.message.text(), "rewake-reason\n");
+        assert_eq!(fixture.hooks.stop_wakes(), 1);
+        assert_eq!(fixture.hooks.degraded(), 0);
+        assert!(fixture.inbox.claim_next_step().await.is_none());
+
+        let fixture = plain(&post_hooks(vec![async_rewake_hook(
+            "echo rewake-reason >&2; exit 2",
+        )]));
+        for _ in 0..MAX_WAKES_PER_WINDOW {
+            fixture.hooks.gate.note_wake();
+        }
+        after_patch(&fixture, "a.rs").await;
+        drain_async(&fixture).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "past the gate no turn opens"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the gated result injects");
+        assert_eq!(step.message.text(), "rewake-reason\n");
+        assert_eq!(
+            fixture.hooks.degraded(),
+            1,
+            "the degraded signal is the journal-visible count"
+        );
+        let notices = warned(&fixture.wake_notices);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("wake budget"), "{notices:?}");
+    }
+
+    /// An async exit 2 without `asyncRewake` injects its stderr like `additionalContext`:
+    /// it never opens a continuation and never wakes.
+    #[tokio::test]
+    async fn async_post_exit_2_injects_stderr_without_waking() {
+        let fixture = plain(&post_hooks(vec![async_hook(
+            "echo lint-failed >&2; exit 2",
+        )]));
+        let result = after_patch(&fixture, "a.rs").await;
+        assert_eq!(result.text(), "patched", "the result is untouched");
+        drain_async(&fixture).await;
+        let injected = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("exit 2 injects its stderr");
+        assert_eq!(injected.message.text(), "lint-failed\n");
+        assert_eq!(injected.source, InputSource::System);
+        assert!(fixture.inbox.claim_next_turn().await.is_none());
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+    }
+
+    /// Edge case 4: an async hook's `permissionDecision` (and the other control fields) is
+    /// ignored with one warning; the tool call and its result are unaffected and nothing
+    /// is delivered.
+    #[tokio::test]
+    async fn async_control_fields_are_ignored_with_one_warning() {
+        for field in [
+            r#""permissionDecision":"deny""#,
+            r#""updatedInput":{"path":"elsewhere"}"#,
+            r#""updatedToolOutput":"changed""#,
+            r#""decision":{"behavior":"deny"}"#,
+        ] {
+            let script = format!(r#"printf '%s' '{{"hookSpecificOutput":{{{field}}}}}'"#);
+            let fixture = plain(&post_hooks(vec![async_hook(&script)]));
+            let result = after_patch(&fixture, "a.rs").await;
+            assert_eq!(result.text(), "patched", "{field}: the result is untouched");
+            assert!(!result.is_error, "{field}");
+            drain_async(&fixture).await;
+            let warnings = warned(&fixture.warnings);
+            assert_eq!(warnings.len(), 1, "{field}: {warnings:?}");
+            assert!(
+                warnings[0].contains("ignored") && warnings[0].contains("async hook"),
+                "{field}: {warnings:?}"
+            );
+            assert!(fixture.inbox.claim_next_step().await.is_none());
+            assert!(fixture.inbox.claim_next_turn().await.is_none());
+        }
+    }
+
+    /// Edge case 6: a `workspace`-tier async hook runs inside the same sandbox, so a write
+    /// outside the workspace fails and lands nothing; the failure is one warning line and
+    /// never fails the session closed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_async_hook_runs_inside_the_workspace_sandbox() {
+        let root = TempRoot::new("sandbox-async");
+        let outside = root.outside("escaped.txt");
+        let config = post_hooks(vec![async_hook(&format!(
+            "echo escaped > {}; exit 1",
+            outside.display()
+        ))]);
+        let sandbox =
+            radian_sandbox::Sandbox::new(radian_sandbox::SandboxMode::WorkspaceWrite, &root.ws)
+                .expect("the workspace sandbox probes clean on this machine");
+        let fixture = layered_with_root(
+            root,
+            &config,
+            &HooksConfig::default(),
+            SandboxSlot::with(sandbox),
+        );
+        let result = after_patch(&fixture, "a.rs").await;
+        assert_eq!(
+            result.text(),
+            "patched",
+            "the denial never changes the result"
+        );
+        drain_async(&fixture).await;
+        assert!(
+            !outside.exists(),
+            "the write outside the workspace must not land"
+        );
+        let warnings = warned(&fixture.warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("async hook exited with code"),
+            "{warnings:?}"
+        );
+        let runs = fixture.hooks.hook_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].end, HookRunEnd::Status(1));
+    }
+
+    /// An async `Stop` hook is *not* part of the continuation chain when it exits 2: it is
+    /// spawned and the turn still ends with no new turn, and the idle-continuation counter
+    /// never sees it.
+    #[tokio::test]
+    async fn an_async_stop_hook_never_joins_the_continuation_chain() {
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![async_hook("echo more >&2; exit 2")],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        fixture.hooks.run_stop_once(&completed_quiet()).await;
+        drain_async(&fixture).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "an async Stop hook never opens the turn"
+        );
+        let injected = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("its exit 2 injects instead");
+        assert_eq!(injected.message.text(), "more\n");
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 0);
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+    }
+
+    /// Edge case 7: an async `Stop` hook is running when the validator decides, so the
+    /// validator does not trigger, and the sync hook's `background_tasks` lists the async
+    /// one as `type: "hook"`.
+    #[tokio::test]
+    async fn a_running_async_stop_hook_stands_the_validator_down_and_is_in_background_tasks() {
+        let root = TempRoot::new("async-stop-background");
+        let stdin_path = root.dir.join("stop-stdin.json");
+        let config = HooksConfig {
+            stop: vec![HookMatcher {
+                matcher: None,
+                hooks: vec![
+                    async_hook("sleep 2; exit 0"),
+                    hook(&format!("cat > {}", stdin_path.display())),
+                ],
+            }],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture
+            .hooks
+            .run_stop_once(&completed_text("Now the docs-only ADR updates."))
+            .await;
+        assert_eq!(
+            fixture.hooks.async_hooks_running(),
+            1,
+            "the async Stop hook is still running"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "a running async hook stands the validator down"
+        );
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
+        let tasks = stdin["background_tasks"].as_array().expect("an array");
+        assert_eq!(tasks.len(), 1, "{stdin}");
+        assert_eq!(tasks[0]["type"], "hook");
+        assert_eq!(tasks[0]["status"], "running");
+        assert_eq!(tasks[0]["command"], "sleep 2; exit 0");
+        drain_async(&fixture).await;
+    }
+
+    /// Edge case 8: an async `additionalContext` result never wakes, whether the session
+    /// is idle or a turn is in flight when the hook finishes; it waits in `next_step`.
+    #[tokio::test]
+    async fn async_results_never_wake_idle_or_busy() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"additionalContext":"done"}}'"#;
+        let fixture = plain(&post_hooks(vec![async_hook(script)]));
+
+        // A turn is in flight when the hook finishes (busy).
+        fixture
+            .inbox
+            .followup(Message::user("a turn"), InputSource::User)
+            .await
+            .unwrap();
+        let turn = fixture.inbox.claim_next_turn().await.expect("a turn");
+        after_patch(&fixture, "busy.rs").await;
+        drain_async(&fixture).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "busy: the result waits for the turn's next model call"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+        let injected = fixture.inbox.claim_next_step().await.expect("busy inject");
+        assert_eq!(injected.message.text(), "[PostToolUse hook] done");
+        fixture.inbox.turn_ended();
+        drop(turn);
+
+        // No turn in flight when the hook finishes (idle).
+        after_patch(&fixture, "idle.rs").await;
+        drain_async(&fixture).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "idle: no wake either"
+        );
+        assert_eq!(fixture.hooks.stop_wakes(), 0);
+        assert!(fixture.inbox.claim_next_step().await.is_some());
     }
 }

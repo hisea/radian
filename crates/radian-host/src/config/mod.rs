@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
 pub use hooks::{
-    DEFAULT_HOOK_TIMEOUT_SECS, DEFAULT_INTENT_STOP, HOOK_EVENTS, HookCommand, HookMatcher,
-    HooksConfig, POST_TOOL_USE, PRE_TOOL_USE, STOP, matcher_effective,
+    DEFAULT_ASYNC_HOOK_TIMEOUT_SECS, DEFAULT_HOOK_TIMEOUT_SECS, DEFAULT_INTENT_STOP, HOOK_EVENTS,
+    HookCommand, HookMatcher, HooksConfig, POST_TOOL_USE, PRE_TOOL_USE, STOP, matcher_effective,
 };
 pub use model::{ModelConfig, PROVIDER_KIND_ALIASES, PROVIDER_KINDS, SmolConfig};
 pub use sandbox::{SandboxConfig, resolve_allow_unix_sockets, unix_sockets_ignored_warning};

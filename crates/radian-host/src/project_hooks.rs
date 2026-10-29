@@ -3,13 +3,16 @@
 //! The same Claude/Codex command-hook subset as the user-level `[hooks]` section, spelled in
 //! JSON: event names (`PreToolUse`, `PostToolUse`, `Stop`, `PermissionRequest`) map to lists of
 //! `{ matcher, hooks }`
-//! entries, each hook a `{ type = "command", command, args, timeout }` object. `args` is
-//! optional: with it `command` is the program and the hook starts without a shell; without it
+//! entries, each hook a `{ type = "command", command, args, timeout, async, asyncRewake }`
+//! object. `args` is optional: with it `command` is the program and the hook starts without a shell; without it
 //! `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's
 //! case-sensitive pattern over **Radian** tool names, exactly like slice A; `Stop` ignores it.
 //! Anything outside the subset — an unknown event name, a malformed entry, a hook whose `type`
-//! is not `"command"`, or an entry carrying one of the non-command handler keys (`async`, `if`,
+//! is not `"command"`, or an entry carrying one of the non-command handler keys (`if`,
 //! `http`, `prompt`, `agent`) — is skipped with one warning line, never refusing the file.
+//! `async`/`asyncRewake` are fields of their own, accepted on `PostToolUse` and `Stop` only;
+//! on `PreToolUse` and `PermissionRequest` that hook is dropped with one warning line and the
+//! entry's other hooks still load.
 //!
 //! The file only loads when the directory is trusted (ADR 0031 T1). Like the project
 //! `.mcp.json`: an untrusted directory never reads it; `--trust` overrides for this process;
@@ -17,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{HookCommand, HookMatcher, HooksConfig};
+use crate::config::{HookCommand, HookMatcher, HooksConfig, POST_TOOL_USE, STOP};
 
 /// The file name inside `<workspace>/.radian/`.
 pub const FILE_NAME: &str = "hooks.json";
@@ -28,8 +31,9 @@ pub fn project_path(workspace: &Path) -> PathBuf {
 }
 
 /// Handler keys this slice does not implement (ADR 0045): an entry carrying any of them is
-/// skipped, never run. The same table as the user-level `[hooks]` reader.
-const NON_COMMAND_HANDLER_KEYS: [&str; 5] = ["async", "if", "http", "prompt", "agent"];
+/// skipped, never run. The same table as the user-level `[hooks]` reader; `async` is no
+/// longer one of them.
+const NON_COMMAND_HANDLER_KEYS: [&str; 4] = ["if", "http", "prompt", "agent"];
 
 /// The events the project file loads. The same table as the user-level reader: both
 /// come from one constant so the two readers cannot drift apart.
@@ -71,14 +75,16 @@ pub fn parse_project_value(
             warnings.push(format!("{origin}: skipped hooks.{event} (not a list)"));
             continue;
         };
+        let accepts_async = matches!(event.as_str(), POST_TOOL_USE | STOP);
         for (index, item) in items.iter().enumerate() {
-            let parsed = parse_entry(item);
-            // A bad `args` drops that hook only: the entry's other hooks still load (ADR
-            // 0045 §4). Each dropped hook is one line, named down to the hook.
-            for hook_index in &parsed.bad_args {
+            let parsed = parse_entry(item, accepts_async);
+            // A bad `args`, or `async` on an event that does not accept it, drops that hook
+            // only: the entry's other hooks still load (ADR 0045 §1/§4). Each dropped hook
+            // is one line, named down to the hook.
+            for hook_index in parsed.dropped_hooks() {
                 warnings.push(format!(
-                    "{origin}: skipped hooks.{event}[{index}].hooks[{hook_index}] (args is not \
-                     an array of strings)"
+                    "{origin}: skipped hooks.{event}[{index}].hooks[{hook_index}] (a bad `args` \
+                     or `async` on this event)"
                 ));
             }
             match parsed.entry {
@@ -89,10 +95,10 @@ pub fn parse_project_value(
                     "Stop" => config.stop.push(entry),
                     _ => unreachable!("the event list is checked above"),
                 },
-                None if parsed.bad_args.is_empty() => warnings.push(format!(
+                None if !parsed.dropped_any() => warnings.push(format!(
                     "{origin}: skipped hooks.{event}[{index}] (outside the command subset)"
                 )),
-                // Every hook was dropped for a bad `args`; the per-hook lines said so.
+                // Every hook was dropped one by one; the per-hook lines said so.
                 None => {}
             }
         }
@@ -100,14 +106,15 @@ pub fn parse_project_value(
     config
 }
 
-/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped only for a bad `args`.
+/// One parsed `{ matcher, hooks }` entry, plus the hooks dropped one by one.
 struct ParsedEntry {
-    /// The entry, `None` when it is skipped as a whole (then `bad_args` is empty) or when
-    /// every hook was dropped for a bad `args` (then `bad_args` names them).
+    /// The entry, `None` when it is skipped as a whole (then `dropped` is empty) or when
+    /// every hook was dropped individually (then `dropped` names them).
     entry: Option<HookMatcher>,
-    /// Indexes of hooks dropped because `args` is not an array of strings. The rest of the
-    /// entry still loads; each index is one warning line.
-    bad_args: Vec<usize>,
+    /// Indexes of hooks dropped for a bad `args`, or for `async`/`asyncRewake` on an event
+    /// that does not accept them. The rest of the entry still loads; each index is one
+    /// warning line.
+    dropped: Vec<usize>,
 }
 
 impl ParsedEntry {
@@ -115,15 +122,26 @@ impl ParsedEntry {
     fn skipped() -> Self {
         Self {
             entry: None,
-            bad_args: Vec::new(),
+            dropped: Vec::new(),
         }
+    }
+
+    /// The indexes of hooks dropped one by one.
+    fn dropped_hooks(&self) -> &[usize] {
+        &self.dropped
+    }
+
+    /// Whether any hook was dropped one by one (so the entry's own line would repeat it).
+    fn dropped_any(&self) -> bool {
+        !self.dropped.is_empty()
     }
 }
 
 /// Reads one `{ matcher, hooks }` entry. A structural defect skips the whole entry (one
 /// line): a hook whose `type` is not `"command"`, a hook carrying a non-command handler key,
-/// a missing or empty `command`, or a bad `timeout`. A bad `args` drops only that hook.
-fn parse_entry(item: &serde_json::Value) -> ParsedEntry {
+/// a missing or empty `command`, or a bad `timeout`. A bad `args`, or `async` on an event
+/// that does not accept it, drops only that hook.
+fn parse_entry(item: &serde_json::Value, accepts_async: bool) -> ParsedEntry {
     let Some(table) = item.as_object() else {
         return ParsedEntry::skipped();
     };
@@ -141,11 +159,11 @@ fn parse_entry(item: &serde_json::Value) -> ParsedEntry {
         return ParsedEntry::skipped();
     }
     let mut commands = Vec::new();
-    let mut bad_args = Vec::new();
+    let mut dropped = Vec::new();
     for (index, hook) in hooks.iter().enumerate() {
-        match parse_command(hook) {
+        match parse_command(hook, accepts_async) {
             CommandParse::Ok(command) => commands.push(command),
-            CommandParse::BadArgs => bad_args.push(index),
+            CommandParse::DropHook => dropped.push(index),
             CommandParse::Skip => return ParsedEntry::skipped(),
         }
     }
@@ -154,21 +172,22 @@ fn parse_entry(item: &serde_json::Value) -> ParsedEntry {
             matcher,
             hooks: commands,
         }),
-        bad_args,
+        dropped,
     }
 }
 
 /// One hook row's parse result.
 enum CommandParse {
     Ok(HookCommand),
-    /// `args` is present but is not an array of strings: drop this hook only.
-    BadArgs,
+    /// `args` is present but is not an array of strings, or `async`/`asyncRewake` is set on
+    /// an event that does not accept them: drop this hook only.
+    DropHook,
     /// Outside the command subset: drop the whole entry.
     Skip,
 }
 
-/// Reads one `{ type, command, args, timeout }` hook.
-fn parse_command(hook: &serde_json::Value) -> CommandParse {
+/// Reads one `{ type, command, args, timeout, async, asyncRewake }` hook.
+fn parse_command(hook: &serde_json::Value, accepts_async: bool) -> CommandParse {
     let Some(table) = hook.as_object() else {
         return CommandParse::Skip;
     };
@@ -205,18 +224,33 @@ fn parse_command(hook: &serde_json::Value) -> CommandParse {
             let mut args = Vec::with_capacity(items.len());
             for item in items {
                 let Some(arg) = item.as_str() else {
-                    return CommandParse::BadArgs;
+                    return CommandParse::DropHook;
                 };
                 args.push(arg.to_owned());
             }
             Some(args)
         }
-        Some(_) => return CommandParse::BadArgs,
+        Some(_) => return CommandParse::DropHook,
     };
+    let async_rewake = match table.get("asyncRewake") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(on)) => *on,
+        Some(_) => return CommandParse::DropHook,
+    };
+    let async_hook = match table.get("async") {
+        None | Some(serde_json::Value::Null) => async_rewake,
+        Some(serde_json::Value::Bool(on)) => *on || async_rewake,
+        Some(_) => return CommandParse::DropHook,
+    };
+    if (async_hook || async_rewake) && !accepts_async {
+        return CommandParse::DropHook;
+    }
     CommandParse::Ok(HookCommand {
         command: command.to_owned(),
         args,
         timeout_secs,
+        async_hook,
+        async_rewake,
     })
 }
 
@@ -532,7 +566,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "PreToolUse": [{"matcher": "read", "hooks": [{"type": "http", "command": "https://example.com/hook"}]}],
-                "PostToolUse": [{"matcher": "read", "hooks": [{"type": "command", "command": "echo hi", "async": true}]}],
+                "PostToolUse": [{"matcher": "read", "hooks": [{"type": "command", "command": "echo hi", "if": "true"}]}],
                 "SessionStart": [{"matcher": "read", "hooks": [{"type": "command", "command": "echo hi"}]}],
                 "Stop": [{"hooks": [{"type": "command", "command": ""}]}]
             }"#,
@@ -553,6 +587,46 @@ mod tests {
                 "{key}: {warnings:?}"
             );
         }
+    }
+
+    /// The async fields (ADR 0045 §5): `async` and `asyncRewake` parse on `PostToolUse` and
+    /// `Stop`, `asyncRewake` implies `async`, and the async default timeout is 600 s. On
+    /// `PreToolUse` that hook is dropped with one line while its sibling still loads.
+    #[test]
+    fn async_hooks_parse_on_post_and_stop_and_drop_on_pre() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "PostToolUse": [{"matcher": "patch", "hooks": [{"type": "command", "command": "make lint", "async": true}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "make verify", "asyncRewake": true}]}],
+                "PreToolUse": [{"matcher": "shell", "hooks": [
+                    {"type": "command", "command": "echo sync"},
+                    {"type": "command", "command": "echo async", "async": true}
+                ]}]
+            }"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let config = parse_project_value(&parsed, "test", &mut warnings);
+        assert!(config.post_tool_use[0].hooks[0].async_hook);
+        assert!(!config.post_tool_use[0].hooks[0].async_rewake);
+        assert_eq!(
+            config.post_tool_use[0].hooks[0].timeout().as_secs(),
+            crate::config::DEFAULT_ASYNC_HOOK_TIMEOUT_SECS,
+            "an async hook without `timeout` defaults to 600 s, not 60"
+        );
+        assert!(config.stop[0].hooks[0].async_rewake);
+        assert!(config.stop[0].hooks[0].is_async());
+        assert_eq!(
+            config.pre_tool_use[0].hooks.len(),
+            1,
+            "the async PreToolUse hook drops, its sibling still loads"
+        );
+        assert_eq!(config.pre_tool_use[0].hooks[0].command, "echo sync");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("hooks.PreToolUse[0].hooks[1]"),
+            "one line names the dropped async hook: {warnings:?}"
+        );
     }
 
     /// A non-object top level warns once and loads nothing.
