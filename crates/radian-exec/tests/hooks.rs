@@ -2,6 +2,11 @@
 //! observe-only hook once with its kind, a matcher outside the closed set never runs, a
 //! completed turn fires nothing, `exec -p` waits at most 5 s and then kills the run, and the
 //! run's exit code and output are unchanged.
+//!
+//! The `--output jsonl` block at the end pins the exit itself: the printer ends only once
+//! every tee sender is gone, so a hook layer that kept the session alive held the process
+//! open forever (an `Arc` cycle between the runtime-event sink and the hook chain). Those
+//! runs are a hang watchdog, not a performance assertion.
 
 mod common;
 
@@ -16,6 +21,9 @@ use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
 const EXIT_WATCHDOG: Duration = Duration::from_secs(60);
+/// The bound for the `--output jsonl` exit regression: the defect was "never exits", so a
+/// few seconds are plenty and a loaded machine is not a failure.
+const SHORT_EXIT_BOUND: Duration = Duration::from_secs(15);
 const USAGE_LIMIT_BODY: &str =
     r#"{"error":{"type":"GoUsageLimitError","message":"monthly quota"}}"#;
 
@@ -57,11 +65,16 @@ fn spawn(args: &[&str], env: &Env) -> Child {
 }
 
 async fn run(child: Child) -> (i32, String, String) {
-    let mut child = child;
+    run_within(child, EXIT_WATCHDOG).await
+}
+
+/// [`run`] with an explicit bound, so a regression that never exits fails on the short
+/// bound instead of the long watchdog.
+async fn run_within(mut child: Child, bound: Duration) -> (i32, String, String) {
     let _ = child.stdin.take().unwrap().write_all(b"").await;
-    let output = timeout(EXIT_WATCHDOG, child.wait_with_output())
+    let output = timeout(bound, child.wait_with_output())
         .await
-        .expect("the process did not exit within the watchdog")
+        .unwrap_or_else(|_| panic!("the process did not exit within {bound:?}"))
         .expect("wait");
     (
         output.status.code().unwrap_or(-1),
@@ -100,6 +113,43 @@ async fn wait_for_file(path: &Path, what: &str) -> String {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// The `--output jsonl` arguments for one run, with an optional config.
+fn jsonl_args(base_url: &str, session: &str, config: Option<&Path>) -> Vec<String> {
+    let mut args = vec![
+        "--model".to_owned(),
+        "m".to_owned(),
+        "--base-url".to_owned(),
+        base_url.to_owned(),
+        "--session-id".to_owned(),
+        session.to_owned(),
+        "--output".to_owned(),
+        "jsonl".to_owned(),
+    ];
+    if let Some(config) = config {
+        args.push("--config".to_owned());
+        args.push(config.to_string_lossy().into_owned());
+    }
+    args.push("-p".to_owned());
+    args.push("hi".to_owned());
+    args
+}
+
+/// The closing `Result` record of a `--output jsonl` run, parsed.
+fn result_record(stdout: &str) -> serde_json::Value {
+    let last = stdout
+        .lines()
+        .last()
+        .expect("jsonl stdout carries a Result line");
+    let value: serde_json::Value =
+        serde_json::from_str(last).expect("the last stdout line is one JSON object");
+    assert_eq!(
+        value.get("type"),
+        Some(&json!("Result")),
+        "the last line is the Result record: {value}"
+    );
+    value
 }
 
 /// Edge case 1: a provider `429` classified `usage_limit` fires `StopFailure` with
@@ -278,4 +328,110 @@ async fn a_completed_turn_fires_no_stop_failure() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(stdout, "done\n", "{err}");
     assert!(!out.exists(), "a completed turn fires no StopFailure");
+}
+
+/// Edge case 1, under `--output jsonl`: `exec -p` with no hooks exits as on main. The
+/// printer ends only after every tee sender is released, so this also proves the session
+/// (and its journal) is really dropped.
+#[tokio::test]
+async fn a_jsonl_run_with_no_hooks_exits() {
+    let env = Env::fresh("jsonl-no-hooks");
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let args = jsonl_args(&server.base_url, "jsonl-no-hooks", None);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, stdout, err) = run_within(spawn(&refs, &env), SHORT_EXIT_BOUND).await;
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(result_record(&stdout).get("exit_code"), Some(&json!(0)));
+}
+
+/// Edge case 2, under `--output jsonl`: a configured `Notification` hook never holds the
+/// process open — its 30 s sleep must not outlive the run. The session end kills it and
+/// releases the tee sender, so the run exits at once with the same code and output.
+#[tokio::test]
+async fn a_jsonl_run_with_a_notification_hook_exits() {
+    let env = Env::fresh("jsonl-notification");
+    let config = write_config(
+        &env,
+        "[[hooks.Notification]]\nmatcher = \"idle_prompt\"\n\
+         [[hooks.Notification.hooks]]\ntype = \"command\"\ncommand = \"sleep 30\"\n",
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let args = jsonl_args(&server.base_url, "jsonl-notification", Some(&config));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let started = std::time::Instant::now();
+    let (code, stdout, err) = run_within(spawn(&refs, &env), SHORT_EXIT_BOUND).await;
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(result_record(&stdout).get("exit_code"), Some(&json!(0)));
+    assert!(
+        started.elapsed() < SHORT_EXIT_BOUND,
+        "a Notification hook delayed the exit: {:?}",
+        started.elapsed()
+    );
+}
+
+/// Edge case 4, under `--output jsonl`: a `StopFailure` hook that finishes fast is waited
+/// for (its stdin reaches it) and the run then exits; the hook layer must not keep the
+/// printer's tee sender alive either way.
+#[tokio::test]
+async fn a_jsonl_run_with_a_fast_stop_failure_hook_exits() {
+    let env = Env::fresh("jsonl-fast-stop-failure");
+    let out = env.home.join("hook.json");
+    let config = write_config(
+        &env,
+        &format!(
+            "[[hooks.StopFailure]]\n[[hooks.StopFailure.hooks]]\ntype = \"command\"\n\
+             command = \"cat > '{}'\"\n",
+            out.display()
+        ),
+    );
+    let server = MockServer::start(vec![Reply::status(429, USAGE_LIMIT_BODY)]).await;
+    let args = jsonl_args(&server.base_url, "jsonl-fast-stop-failure", Some(&config));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, stdout, err) = run_within(spawn(&refs, &env), SHORT_EXIT_BOUND).await;
+
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(result_record(&stdout).get("exit_code"), Some(&json!(1)));
+    let stdin: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).expect("the hook wrote its stdin"))
+            .expect("the hook's stdin is one JSON object");
+    assert_eq!(stdin.get("error"), Some(&json!("usage_limit")));
+}
+
+/// Edge case 3, under `--output jsonl`: a `StopFailure` hook that sleeps 30 s still lets
+/// the process end, about 5 s after the run — `exec` gives the observer its bounded wait,
+/// kills its process group, and the tee sender is released so the printer finishes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_jsonl_run_exits_about_five_seconds_after_a_slow_stop_failure_hook() {
+    let env = Env::fresh("jsonl-slow-stop-failure");
+    let pidfile = env.home.join("hook.pid");
+    let config = write_config(
+        &env,
+        &format!(
+            "[[hooks.StopFailure]]\n[[hooks.StopFailure.hooks]]\ntype = \"command\"\n\
+             command = \"echo $$ > '{}'; sleep 30\"\n",
+            pidfile.display()
+        ),
+    );
+    let server = MockServer::start(vec![Reply::status(429, USAGE_LIMIT_BODY)]).await;
+    let args = jsonl_args(&server.base_url, "jsonl-slow-stop-failure", Some(&config));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let started = std::time::Instant::now();
+    let (code, stdout, err) = run_within(spawn(&refs, &env), SHORT_EXIT_BOUND).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(result_record(&stdout).get("exit_code"), Some(&json!(1)));
+    assert!(
+        elapsed >= Duration::from_secs(4),
+        "exec did not give the observer its 5 s: {elapsed:?}"
+    );
+    assert!(
+        elapsed < SHORT_EXIT_BOUND,
+        "exec waited for the whole sleep: {elapsed:?}"
+    );
+    // The hook did run: it wrote its pid before sleeping.
+    wait_for_file(&pidfile, "the StopFailure hook").await;
 }

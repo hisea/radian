@@ -408,7 +408,7 @@ pub async fn open_session(
     // ADR 0045 §6: the driver's model-error path fires `StopFailure` through this layer,
     // before the host's own sink sees the same event.
     let runtime_events: Arc<dyn RuntimeEvents> = Arc::new(HookRuntimeEvents {
-        hooks: Arc::clone(&command_hooks),
+        hooks: Arc::downgrade(&command_hooks),
         inner: runtime_events,
     });
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
@@ -819,8 +819,17 @@ pub async fn open_session(
 /// The runtime-event layer that fires the observe-only `StopFailure` hook (ADR 0045 §6)
 /// before forwarding the event to the host's own sink. It exists only for the driver: the
 /// host's sink keeps its old shape and ignores the extra callback.
+///
+/// The hook chain is held **weakly**: the driver installs this sink on the inbox as well
+/// (`Inbox::set_runtime_events`), the inbox is owned by the [`CommandHooks`] that held it,
+/// and a strong reference both ways is an `Arc` cycle that never drops the inbox, its
+/// journal, or `exec --output jsonl`'s tee sender. A leak there kept the printer from ever
+/// ending, so `radian exec --output jsonl` hung instead of exiting (found on this task's
+/// review). The session itself holds the hooks for the whole run, so the upgrade succeeds
+/// whenever the driver can report a turn; after the session end it is a no-op, exactly as
+/// `end_session` makes a late `StopFailure` a no-op.
 struct HookRuntimeEvents {
-    hooks: Arc<crate::CommandHooks>,
+    hooks: std::sync::Weak<crate::CommandHooks>,
     inner: Arc<dyn RuntimeEvents>,
 }
 
@@ -834,7 +843,9 @@ impl RuntimeEvents for HookRuntimeEvents {
     }
 
     fn on_stop_failure(&self, error: &radian_core::ModelError, last_assistant_message: &str) {
-        self.hooks.run_stop_failure(error, last_assistant_message);
+        if let Some(hooks) = self.hooks.upgrade() {
+            hooks.run_stop_failure(error, last_assistant_message);
+        }
         self.inner.on_stop_failure(error, last_assistant_message);
     }
 
