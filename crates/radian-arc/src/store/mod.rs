@@ -445,7 +445,10 @@ impl Store {
         let config_created = if config_path.is_file() {
             false
         } else {
-            write_atomic(&config_path, config::default_text(&main_branch).as_bytes())?;
+            write_atomic(
+                &config_path,
+                config::default_text_with_remote(&main_branch, &remote).as_bytes(),
+            )?;
             true
         };
         // The standing worker instructions (ADR 0048 decision 7). A file the owner edited is
@@ -1549,6 +1552,12 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.followup_pending != current.followup_pending {
                 touched.push("followup_pending");
+            }
+            if last.pending_hooks != current.pending_hooks {
+                touched.push("pending_hooks");
+            }
+            if last.merged_sha != current.merged_sha {
+                touched.push("merged_sha");
             }
             if last.retry_at != current.retry_at {
                 touched.push("retry_at");

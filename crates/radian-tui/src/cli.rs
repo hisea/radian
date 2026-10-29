@@ -3213,6 +3213,8 @@ mod tests {
             retry_count: 1,
             allow_noop: Some(false),
             followup_pending: true,
+            pending_hooks: vec!["after_merge".to_owned()],
+            merged_sha: Some("e".repeat(40)),
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),
             max_cost_usd: Some(1.0),

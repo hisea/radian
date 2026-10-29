@@ -80,6 +80,9 @@ pub struct Config {
     /// decisions 6 and 10).
     #[serde(default)]
     pub integration: Integration,
+    /// `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13).
+    #[serde(default)]
+    pub hooks: Hooks,
     /// Whether the file wrote a `[flows]` table. A file that did not keeps no per-flow
     /// concurrency for its implicit `default` flow, so it schedules as it did before flows
     /// existed (ADR 0048 decision 13). Set when the file is parsed, never read from it.
@@ -104,6 +107,7 @@ impl Default for Config {
             ids: Ids::default(),
             gate,
             integration: Integration::default(),
+            hooks: Hooks::default(),
             flows_configured: false,
         }
     }
@@ -348,6 +352,59 @@ impl Default for Integration {
             target_branch: None,
             method: IntegrationMethod::Push,
             style: IntegrationStyle::Merge,
+        }
+    }
+}
+
+/// `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13). Only
+/// `after_merge` is built; a file that sets any other point is refused as not built yet, and
+/// an unknown name is refused as an unknown key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hooks {
+    /// Shell command lines run in the repository root after a task reaches `done.merged`, in
+    /// order. Empty runs nothing.
+    pub after_merge: Vec<String>,
+    /// Decided but not built yet; a file that sets it is refused when the file is read.
+    pub after_fail: Option<Vec<String>>,
+    /// Decided but not built yet; a file that sets it is refused when the file is read.
+    pub after_rework: Option<Vec<String>>,
+    /// Decided but not built yet; a file that sets it is refused when the file is read.
+    pub after_awaiting_human: Option<Vec<String>>,
+    /// Decided but not built yet; a file that sets it is refused when the file is read.
+    pub after_proposed: Option<Vec<String>>,
+}
+
+impl Hooks {
+    /// The command lines of `point`, in order. A point this build does not run has none.
+    #[must_use]
+    pub fn commands(&self, point: &str) -> &[String] {
+        if crate::hooks::BUILT_HOOK_POINTS.contains(&point) {
+            self.value(point).unwrap_or(&[])
+        } else {
+            &[]
+        }
+    }
+
+    /// The first point this file sets whose value this build does not run, with its name. The
+    /// points come from the one list the manual's drift test reads.
+    fn unbuilt(&self) -> Option<&'static str> {
+        crate::hooks::HOOK_POINTS
+            .iter()
+            .copied()
+            .filter(|point| !crate::hooks::BUILT_HOOK_POINTS.contains(point))
+            .find(|point| self.value(point).is_some())
+    }
+
+    /// The value this file holds for `point`, when it holds one.
+    fn value(&self, point: &str) -> Option<&[String]> {
+        match point {
+            "after_merge" => Some(&self.after_merge),
+            "after_fail" => self.after_fail.as_deref(),
+            "after_rework" => self.after_rework.as_deref(),
+            "after_awaiting_human" => self.after_awaiting_human.as_deref(),
+            "after_proposed" => self.after_proposed.as_deref(),
+            _ => None,
         }
     }
 }
@@ -648,13 +705,21 @@ fn default_profile() -> Profile {
     }
 }
 
-/// The file `init` writes when none exists, with the main branch it found.
+/// The file `init` writes when none exists, with the main branch it found. The remote is the
+/// default `origin`; [`default_text_with_remote`] writes the remote `init` found.
 pub fn default_text(main_branch: &str) -> String {
+    default_text_with_remote(main_branch, &Repository::default().remote)
+}
+
+/// The file `init` writes, with the remote and main branch it found. The default `after_merge`
+/// lines name that remote, so a repository whose remote is not `origin` deletes its own task
+/// branch.
+pub fn default_text_with_remote(main_branch: &str, remote: &str) -> String {
     format!(
         r#"schema_version = 1
 
 [repository]
-remote = "origin"
+remote = "{remote}"
 main_branch = "{main_branch}"          # what init found
 
 [limits]
@@ -684,6 +749,13 @@ key_commands = []             # what the integration stage runs on the merge can
 # target_branch = "main"      # not set: the value of [repository] main_branch
 # method = "push"             # `push` is the only method this build runs
 # style = "merge"             # `merge` is the only style this build runs
+
+[hooks]
+after_merge = [                # shell command lines run after a task reaches done.merged
+  "git push {remote} --delete work/$ARC_TASK",
+  "git worktree remove --force $ARC_WORKTREE",
+  "git branch -D work/$ARC_TASK",
+]
 
 [gate]
 profile = "default"
@@ -716,12 +788,19 @@ pub fn parse(text: &str) -> Result<Config, String> {
     check_profile_key_commands(text)?;
     check_review_shape(text)?;
     check_worker_shape(text)?;
+    check_hooks_shape(text)?;
     // A bare `[flows]` table counts too: the manual and the ADR say the per-flow limit is on
     // once the file writes a `[flows]` section, so the table's presence is read from the
     // document, not inferred from the named sections the map holds.
     let flows_configured = check_flows_shape(text)?;
     let mut config: Config = toml::from_str(text).map_err(|error| error.to_string())?;
     config.flows_configured = flows_configured;
+    if let Some(point) = config.hooks.unbuilt() {
+        return Err(format!(
+            "`hooks.{point}` is set; it is not built yet (this build runs `{}`)",
+            crate::hooks::AFTER_MERGE
+        ));
+    }
     if config.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {} (this build reads {SCHEMA_VERSION})",
@@ -865,6 +944,31 @@ fn check_worker_shape(text: &str) -> Result<(), String> {
              arguments)"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+/// Every `hooks.<point>` must be an array of strings before the TOML deserializer reports a
+/// position without the key. A non-array value is refused by name, for every point the code
+/// knows; an unknown point name is the deserializer's unknown-key error.
+fn check_hooks_shape(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(hooks) = document.get("hooks").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for point in crate::hooks::HOOK_POINTS {
+        let Some(value) = hooks.get(*point) else {
+            continue;
+        };
+        if !value
+            .as_array()
+            .is_some_and(|items| items.iter().all(toml::Value::is_str))
+        {
+            return Err(format!(
+                "`hooks.{point}` must be an array of strings (shell command lines run in the \
+                 repository root)"
+            ));
+        }
     }
     Ok(())
 }
@@ -1059,9 +1163,10 @@ mod tests {
         assert!(error.contains("limits.git_remote_timeout_secs"), "{error}");
     }
 
-    /// The text `init` writes parses, and it equals the code's defaults: a changed default
-    /// must change the written file too. `key_commands` is written under `[integration]` and
-    /// not in the gate profile.
+    /// The text `init` writes parses, and it equals the code's defaults, except the three
+    /// `[hooks] after_merge` lines `init` starts a repository with: the code's default is an
+    /// empty array, so a repository that never configured hooks runs none. `key_commands` is
+    /// written under `[integration]` and not in the gate profile.
     #[test]
     fn the_default_text_parses_to_the_code_defaults() {
         let text = default_text("main");
@@ -1078,7 +1183,88 @@ mod tests {
             "the gate profile no longer writes key_commands:\n{profile}"
         );
         let parsed = parse(&text).expect("the default text parses");
-        assert_eq!(parsed, Config::default());
+        assert_eq!(
+            parsed.hooks.after_merge,
+            vec![
+                "git push origin --delete work/$ARC_TASK".to_owned(),
+                "git worktree remove --force $ARC_WORKTREE".to_owned(),
+                "git branch -D work/$ARC_TASK".to_owned(),
+            ],
+            "init writes the three default after_merge lines"
+        );
+        let mut expected = Config::default();
+        expected.hooks.after_merge = parsed.hooks.after_merge.clone();
+        assert_eq!(parsed, expected);
+    }
+
+    /// `[hooks]`: `after_merge` defaults to `[]`; `init` writes three lines that name the
+    /// configured remote; another point is refused as not built yet, and its value must be an
+    /// array of strings.
+    #[test]
+    fn the_hooks_section_defaults_to_an_empty_after_merge_and_refuses_unbuilt_points() {
+        assert!(Hooks::default().after_merge.is_empty());
+        assert!(
+            parse("schema_version = 1\n")
+                .expect("the minimum file")
+                .hooks
+                .after_merge
+                .is_empty()
+        );
+        let configured = parse(
+            "schema_version = 1\n[hooks]\nafter_merge = [\"git status\", \"git branch -D x\"]\n",
+        )
+        .expect("an after_merge list parses");
+        assert_eq!(
+            configured.hooks.after_merge,
+            vec!["git status".to_owned(), "git branch -D x".to_owned()]
+        );
+        assert_eq!(
+            configured.hooks.commands(crate::hooks::AFTER_MERGE),
+            configured.hooks.after_merge.as_slice()
+        );
+
+        for point in crate::hooks::HOOK_POINTS
+            .iter()
+            .filter(|point| !crate::hooks::BUILT_HOOK_POINTS.contains(point))
+        {
+            let text = format!("schema_version = 1\n[hooks]\n{point} = [\"true\"]\n");
+            let error = parse(&text).expect_err("an unbuilt point is refused");
+            assert!(
+                error.contains(&format!("hooks.{point}")),
+                "the error names the point: {error}"
+            );
+            assert!(error.contains("not built yet"), "{error}");
+            let empty = format!("schema_version = 1\n[hooks]\n{point} = []\n");
+            assert!(
+                parse(&empty)
+                    .expect_err("an empty unbuilt point is still set")
+                    .contains("not built yet")
+            );
+        }
+
+        let shape = parse("schema_version = 1\n[hooks]\nafter_merge = \"git status\"\n")
+            .expect_err("a string is not an array");
+        assert!(shape.contains("hooks.after_merge"), "{shape}");
+        assert!(shape.contains("array of strings"), "{shape}");
+        assert!(
+            parse("schema_version = 1\n[hooks]\nafter_nothing = []\n").is_err(),
+            "an unknown point is an unknown key"
+        );
+    }
+
+    /// The default text's `after_merge` lines name the remote `init` found, not a literal
+    /// `origin`, so a repository with another remote deletes its own task branch.
+    #[test]
+    fn the_default_hooks_name_the_configured_remote() {
+        let text = default_text_with_remote("trunk", "upstream");
+        assert!(
+            text.contains("git push upstream --delete work/$ARC_TASK"),
+            "{text}"
+        );
+        assert!(!text.contains("git push origin"), "{text}");
+        let parsed = parse(&text).expect("a custom remote parses");
+        assert_eq!(parsed.repository.remote, "upstream");
+        assert_eq!(parsed.repository.main_branch, "trunk");
     }
 
     /// `[integration]` defaults: `key_commands` empty, `target_branch` unset (the repository's

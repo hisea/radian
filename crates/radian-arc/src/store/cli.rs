@@ -688,6 +688,12 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 "followup_pending",
                 &item.followup_pending.to_string(),
             );
+            field(&mut out, "pending_hooks", &joined(&item.pending_hooks));
+            field(
+                &mut out,
+                "merged_sha",
+                &optional_text(item.merged_sha.as_deref()),
+            );
             field(&mut out, "extra_stages", &joined(&item.extra_stages));
             field(
                 &mut out,
@@ -921,6 +927,8 @@ fn task_json(
         "allow_noop": item.effective_allow_noop(config),
         "allow_noop_source": item.allow_noop_source(),
         "followup_pending": item.followup_pending,
+        "pending_hooks": item.pending_hooks,
+        "merged_sha": item.merged_sha,
         "extra_stages": item.extra_stages,
         "max_attempts": item.max_attempts,
         "max_cost_usd": item.max_cost_usd,
@@ -1188,6 +1196,14 @@ fn merge(task: &str) -> Result<u8, Error> {
     let mut text = format!("{}\n", merged.line());
     if let Some(warning) = &merged.warning {
         text.push_str(&format!("warning: {warning}\n"));
+    }
+    // This owner action runs the hooks it left pending when it can take `runner.lock` without
+    // waiting; a loop that holds the lock already runs them on its next pass, so the command
+    // leaves them for it (ADR 0048 decisions 10 and 13).
+    if let Ok(Some(_lock)) = store.try_runner_lock() {
+        for warning in crate::hooks::run_pending(&store)? {
+            text.push_str(&format!("warning: {warning}\n"));
+        }
     }
     Ok(emit(text))
 }

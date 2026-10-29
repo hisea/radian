@@ -636,9 +636,16 @@ fn one_pass(
     transitions: &mut Transitions,
     stop: Option<&AtomicBool>,
 ) -> Result<bool, Error> {
-    // Every pass that could claim a task checks the worker's line first, so a rejected line or
-    // a `worker.command` program that does not resolve refuses `run` before its first pass
-    // changes anything (ADR 0048 decision 7).
+    // 0. Hooks a transition owed run before the pass does anything else. The record is cleared
+    // after its commands ran, so a process killed mid-hook runs it again here (ADR 0048
+    // decisions 10 and 13). A failure is one `warning:` line; it never stops the pass.
+    for warning in crate::hooks::run_pending(store)? {
+        transitions.say(format!("warning: {warning}"));
+    }
+
+    // Before it can claim a task, a pass checks the worker's line, so a rejected line or a
+    // `worker.command` program that does not resolve refuses `run` before it changes anything
+    // (ADR 0048 decision 7).
     crate::worker_args::check_config(&store.config()?, store.repo())?;
     let mut changed = false;
 

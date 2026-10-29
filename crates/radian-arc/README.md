@@ -612,7 +612,10 @@ verification from before the record existed resolves the flow's current profile.
 path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<target>` without
 force. A target branch that moved after integration, or a rejected push, makes it integrate again
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
-success the task is `done.merged` and its worktree is removed; the branch stays.
+success the task is `done.merged`; the same write records the `after_merge` hook and the merged
+sha, and arc itself removes nothing. A process that holds `runner.lock` runs the pending hook:
+every pass runs it first, and `radian arc merge` runs it when it can take the lock without
+waiting (ADR 0048 decisions 10 and 13).
 
 `finish_integration` then asks `review::propose_followup` for the plan's review follow-up (ADR
 0048 decision 10): when no task of the plan is open (`todo.ready`, `doing.*` or `review.*`), it
@@ -654,8 +657,11 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 - The gate's verdict, reason and worker output paths all use the attempt id (`<task>-<n>`) as
   the run directory; the host-local `attempts/<task>/<n>/` records keep the numeric attempt
   (decision 7).
-- The merged task's worktree is removed with plain `git worktree remove`; a checkout with
-  uncommitted files is left in place and reported as a warning, never forced away.
+- The merged task's worktree and branches are the `[hooks] after_merge` default's job: `init`
+  writes `git push <remote> --delete work/$ARC_TASK`, `git worktree remove --force
+  $ARC_WORKTREE` and `git branch -D work/$ARC_TASK`. arc itself removes nothing, a failing
+  command is one `warning:` line, and a point is cleared only after its commands ran, so a
+  hook runs at least once.
 - The follow-up's slug is `<plan slug>-followups` cut to `SLUG_MAX_CHARS`, then a trailing `-`
   from the cut is removed so it stays a valid slug; a plan that already holds that slug gets
   `-2`, `-3`, … within the limit. A follow-up task gets none of its own: `is_followup` reads
