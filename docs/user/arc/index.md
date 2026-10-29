@@ -530,7 +530,7 @@ A plan paused by the automatic rework limit does not block `reverify` when the t
 
 A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once the target branch moved (see [A command failure and a moved target branch](gate.md#a-command-failure-and-a-moved-target-branch)). A task waiting on an unavailable review model is re-verified by `radian arc run` once its `retry_at` passes (see [A review wait on an unavailable model](gate.md#a-review-wait-on-an-unavailable-model)).
 A task of a `cancelled` plan is refused with exit `3`.
-`reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, main)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
+`reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, target branch)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
 
 A reverify claims a new attempt without a worker:
 

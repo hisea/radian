@@ -22,6 +22,18 @@ fn store(repo: &Repo) -> Store {
     Store::at(repo.clone.clone())
 }
 
+/// A store in the clone whose `[integration] target_branch` is `target`.
+fn store_with_target(repo: &Repo, target: &str) -> Store {
+    let text = config::default_text("main").replace(
+        "# target_branch = \"main\"      # not set: the value of [repository] main_branch",
+        &format!("target_branch = \"{target}\""),
+    );
+    let root = repo.arc();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("config.toml"), text).unwrap();
+    Store::at(repo.clone.clone())
+}
+
 /// Commits one file on the current branch and returns the commit id.
 fn commit(repo: &Repo, path: &str, content: &str, message: &str) -> String {
     write(&repo.clone.join(path), content);
@@ -146,7 +158,7 @@ fn the_diff_is_the_task_own_change_from_the_merge_base_with_main() {
     let fallback = read::task_diff(&store, &task, Some(1)).unwrap();
     assert_eq!(
         fallback.base,
-        DiffBase::NoRemoteMain,
+        DiffBase::NoRemoteTarget,
         "the fallback is marked for the source line"
     );
     assert_eq!(
@@ -157,8 +169,8 @@ fn the_diff_is_the_task_own_change_from_the_merge_base_with_main() {
     );
 }
 
-/// A task with no commit of its own and no remote main ref: the diff is empty, but the fallback
-/// is still reported, so the page draws `base..head · no remote main` under `no change yet`.
+/// A task with no commit of its own and no remote target ref: the diff is empty, but the fallback
+/// is still reported, so the page draws `base..head · no remote target` under `no change yet`.
 #[test]
 fn a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback() {
     let repo = Repo::new("read-diff-empty");
@@ -200,14 +212,14 @@ fn a_no_change_diff_without_a_remote_main_ref_keeps_the_fallback() {
     assert_eq!(diff.source, DiffSource::Range);
     assert_eq!(
         diff.base,
-        DiffBase::NoRemoteMain,
-        "the source line still says there is no remote main ref"
+        DiffBase::NoRemoteTarget,
+        "the source line still says there is no remote target ref"
     );
 }
 
-/// A remote main ref that exists but shares no ancestor with the attempt's head is not a missing
-/// ref: the diff falls back to the recorded base and says `no merge base with main`, so the page
-/// never claims a ref is absent while it is there.
+/// A remote target ref that exists but shares no ancestor with the attempt's head is not a
+/// missing ref: the diff falls back to the recorded base and says `no merge base with target`,
+/// so the page never claims a ref is absent while it is there.
 #[test]
 fn a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref() {
     let repo = Repo::new("read-diff-unrelated");
@@ -255,12 +267,81 @@ fn a_remote_main_ref_without_a_common_ancestor_is_not_a_missing_ref() {
     assert_eq!(
         diff.base,
         DiffBase::Unrelated,
-        "the ref exists, so the line must not say there is no remote main"
+        "the ref exists, so the line must not say there is no remote target"
     );
     assert_eq!(
         paths(&diff),
         ["y.rs"],
         "the recorded base is the fallback range: {:?}",
         paths(&diff)
+    );
+}
+
+/// With `[integration] target_branch = "release"` ahead of `main`, a task built on `release`
+/// is measured from the remote target branch: `release`'s own commit is not part of the task's
+/// change, in the diff or in the merge page's commit list. Reading `repository.main_branch`
+/// would list it.
+#[test]
+fn a_target_branch_ahead_of_main_is_the_task_diff_base() {
+    let repo = Repo::new("read-target-ahead");
+    let base = repo.main_sha();
+    // `release` moves ahead of `main`; the task branch starts from `release`.
+    repo.git(&["checkout", "-q", "-B", "release", &base]);
+    let release = commit(&repo, "release.txt", "release only\n", "release only");
+    repo.git(&["push", "-q", "origin", "release"]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["checkout", "-q", "-B", "work/T-read-target", &release]);
+    let head = commit(
+        &repo,
+        "feature.txt",
+        "the task's change\n",
+        "the task change",
+    );
+
+    let store = store_with_target(&repo, "release");
+    let plan = store
+        .add_plan("read", "the read plan", "a request\n")
+        .unwrap();
+    let task = store
+        .add_task(
+            &plan,
+            "target",
+            "the target task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.base_sha = Some(release.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .unwrap();
+    finish(&repo, &task, 1, &release, &head);
+
+    let diff = read::task_diff(&store, &task, Some(1)).unwrap();
+    assert_eq!(diff.base, DiffBase::MergeBase, "origin/release exists");
+    assert_eq!(
+        paths(&diff),
+        ["feature.txt"],
+        "release's own commit is not the task's change: {:?}",
+        paths(&diff)
+    );
+    let merge = read::merge_view(&store, &task, false).unwrap();
+    let subjects: Vec<&str> = merge
+        .commits
+        .iter()
+        .map(|commit| commit.subject.as_str())
+        .collect();
+    assert_eq!(
+        subjects,
+        ["the task change"],
+        "the merge page lists only the task's commits: {subjects:?}"
     );
 }

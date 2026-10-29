@@ -164,7 +164,7 @@ fn header_line(app: &ArcApp, width: usize) -> Line<'static> {
         }
     }
     let mut right = vec![
-        Span::styled("main ", theme.hint),
+        Span::styled(format!("{} ", app.target_branch), theme.hint),
         Span::styled(
             app.main_sha.clone().unwrap_or_else(|| "—".to_owned()),
             theme.text,
@@ -1227,7 +1227,7 @@ fn draw_diff(
     theme: &Theme,
 ) {
     // The source line: a running attempt's worktree, and why the range does not start at the
-    // merge base of the remote main and the head (ADR 0048 decision 13).
+    // merge base of the remote target branch and the head (ADR 0048 decision 13).
     let live = diff
         .diff
         .as_ref()
@@ -1238,16 +1238,18 @@ fn draw_diff(
         .map_or(radian_arc::read::DiffBase::MergeBase, |diff| diff.base);
     let source = match (live, base) {
         (true, radian_arc::read::DiffBase::MergeBase) => Some("live · worktree"),
-        (true, radian_arc::read::DiffBase::NoRemoteMain) => {
-            Some("live · worktree · no remote main")
+        (true, radian_arc::read::DiffBase::NoRemoteTarget) => {
+            Some("live · worktree · no remote target")
         }
         (true, radian_arc::read::DiffBase::Unrelated) => {
-            Some("live · worktree · no merge base with main")
+            Some("live · worktree · no merge base with target")
         }
         (false, radian_arc::read::DiffBase::MergeBase) => None,
-        (false, radian_arc::read::DiffBase::NoRemoteMain) => Some("base..head · no remote main"),
+        (false, radian_arc::read::DiffBase::NoRemoteTarget) => {
+            Some("base..head · no remote target")
+        }
         (false, radian_arc::read::DiffBase::Unrelated) => {
-            Some("base..head · no merge base with main")
+            Some("base..head · no merge base with target")
         }
     };
     if let Some(text) = source {
@@ -1602,7 +1604,7 @@ fn stage_line(stage: &radian_arc::read::StageView, moved: bool, theme: &Theme) -
             theme.notice_label,
         ));
         if let Some(main) = &stage.main {
-            spans.push(Span::styled(format!(" over main {main}"), theme.hint));
+            spans.push(Span::styled(format!(" over target {main}"), theme.hint));
         }
         spans.push(Span::styled("   ", theme.hint));
     }

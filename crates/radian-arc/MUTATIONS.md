@@ -1665,3 +1665,4 @@ identical.
 | TK0237-M3 | `parse` accepts a gate profile's `key_commands` (`check_profile_key_commands` dropped) | `store::config::tests::key_commands_in_a_gate_profile_is_refused_by_name` | ✅ 1 failed |
 | TK0237-M4 | `IntegrationMethod` accepts a value this build does not run (`command`, `pr`) | `store::config::tests::integration_method_and_style_are_closed_sets` | ✅ 1 failed |
 | TK0237-M5 | `IntegrationRun::run` skips the missing-target check and lets the fetch fail as a git error | `review::a_target_branch_missing_on_the_remote_fails_the_integration` (the merge returned an error instead of `review.rework_pending`) | ✅ 1 failed |
+| TK0237-M6 | `read::remote_target_base` takes its merge base from `[repository] main_branch` instead of `Config::target_branch()` | `read::a_target_branch_ahead_of_main_is_the_task_diff_base` (the diff listed `release.txt`, a target-branch commit, as the task's change) | ✅ 1 failed |

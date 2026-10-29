@@ -1476,7 +1476,7 @@ fn g_switches_between_the_tree_and_the_flat_list() {
 }
 
 #[test]
-fn the_header_reports_the_remote_main_and_the_loop_state() {
+fn the_header_reports_the_remote_target_and_the_loop_state() {
     use radian_tui::arc::looping::LoopStatus;
     let fixture = Fixture::new();
     let mut app = fixture.app();
@@ -1485,7 +1485,7 @@ fn the_header_reports_the_remote_main_and_the_loop_state() {
     // app never creates the file itself.
     assert!(!lock_path.exists());
     app.set_loop_status(LoopStatus::Stopped);
-    app.apply_main(Some("8a3ec2ba".to_owned()));
+    app.apply_target("main".to_owned(), Some("8a3ec2ba".to_owned()));
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("main 8a3ec2ba"), "{text}");
     assert!(text.contains("loop ○ stopped"), "{text}");
@@ -1500,6 +1500,25 @@ fn the_header_reports_the_remote_main_and_the_loop_state() {
     app.set_loop_status(LoopStatus::Starting);
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("loop ◌ starting"), "{text}");
+}
+
+#[test]
+fn the_header_names_the_configured_target_branch() {
+    let scratch = Scratch::new("target-header");
+    let dir = scratch.path("repo");
+    let store = store(&dir);
+    let text = config::default_text("main").replace(
+        "# target_branch = \"main\"      # not set: the value of [repository] main_branch",
+        "target_branch = \"release\"",
+    );
+    fs::write(store.root().join("config.toml"), text).unwrap();
+    let mut app = ArcApp::with_session_dir(store, Some(scratch.path("sessions")));
+    assert_eq!(app.target_branch, "release", "the header reads the config");
+    let text = screen(&mut app, 120, 30);
+    assert!(
+        text.contains("release —"),
+        "the header names the target: {text}"
+    );
 }
 
 #[test]
@@ -1795,14 +1814,14 @@ fn a_no_change_diff_still_names_the_fallback_range() {
         &id,
         attempt,
         Ok(TaskDiff {
-            base: DiffBase::NoRemoteMain,
+            base: DiffBase::NoRemoteTarget,
             ..TaskDiff::default()
         }),
     ));
 
     let text = screen(&mut app, 120, 40);
     assert!(
-        text.contains("base..head · no remote main"),
+        text.contains("base..head · no remote target"),
         "an empty diff keeps the source line:\n{text}"
     );
     assert!(text.contains("no change yet"), "{text}");
@@ -1831,11 +1850,11 @@ fn a_diff_without_a_merge_base_names_that_reason() {
 
     let text = screen(&mut app, 120, 40);
     assert!(
-        text.contains("base..head · no merge base with main"),
+        text.contains("base..head · no merge base with target"),
         "the range's own reason:\n{text}"
     );
     assert!(
-        !text.contains("no remote main"),
+        !text.contains("no remote target"),
         "the ref exists, so the line must not say it does not:\n{text}"
     );
 
@@ -1850,7 +1869,7 @@ fn a_diff_without_a_merge_base_names_that_reason() {
     ));
     let text = screen(&mut app, 120, 40);
     assert!(
-        text.contains("live · worktree · no merge base with main"),
+        text.contains("live · worktree · no merge base with target"),
         "the live line's own reason:\n{text}"
     );
 }
@@ -3487,11 +3506,11 @@ fn an_unmerged_task_shows_base_to_head() {
 }
 
 #[test]
-fn the_remote_main_is_the_short_sha_of_the_remote_tracking_ref() {
+fn the_remote_target_is_the_short_sha_of_its_tracking_ref() {
     let fixture = GitFixture::new();
-    let sha = read::remote_main_short(&fixture.store)
-        .unwrap()
-        .expect("origin/main exists");
+    let (branch, sha) = read::remote_target(&fixture.store).unwrap();
+    assert_eq!(branch, "main", "the header's target branch name");
+    let sha = sha.expect("origin/main exists");
     assert_eq!(sha.len(), 8, "{sha}");
     let full = git(&fixture.repo, &["rev-parse", "refs/remotes/origin/main"]);
     assert_eq!(sha, full[..8], "the header's 8-character sha");

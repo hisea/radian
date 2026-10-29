@@ -1922,7 +1922,7 @@ fn a_candidate_that_differs_is_named_over_main() {
     let candidate = short(&candidate_sha);
     let main = short(&fixture.base);
     assert!(
-        text.contains(&format!("→ candidate {candidate} over main {main}")),
+        text.contains(&format!("→ candidate {candidate} over target {main}")),
         "the candidate and the main it merged are named:\n{text}"
     );
 }

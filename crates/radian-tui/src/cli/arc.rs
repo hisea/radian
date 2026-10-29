@@ -82,8 +82,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// One worker-thread reply's value.
 enum GitReply {
-    /// The remote main's short sha (`None` when the ref does not exist).
-    Main(Option<String>),
+    /// The configured target branch's name and its short sha (`None` when the ref does not
+    /// exist).
+    Target { branch: String, sha: Option<String> },
     /// A task's diff.
     Diff {
         id: String,
@@ -189,8 +190,8 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
                 dirty = true;
             }
             match reply {
-                GitReply::Main(sha) => {
-                    app.apply_main(sha);
+                GitReply::Target { branch, sha } => {
+                    app.apply_target(branch, sha);
                     main_pending = false;
                     main_at = Some(Instant::now());
                     dirty = true;
@@ -289,18 +290,24 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
             );
             dirty = true;
         }
-        // The header's remote main: once at start, then every refresh. Never on the draw
+        // The header's target branch: once at start, then every refresh. Never on the draw
         // path.
         if !main_pending && main_at.is_none_or(|at: Instant| at.elapsed() >= ARC_REFRESH) {
             main_pending = true;
             let store = app.store.clone();
             spawn_reply(
                 tx.clone(),
-                move || {
-                    let sha = radian_arc::read::remote_main_short(&store).ok().flatten();
-                    GitReply::Main(sha)
+                move || match radian_arc::read::remote_target(&store) {
+                    Ok((branch, sha)) => GitReply::Target { branch, sha },
+                    Err(_) => GitReply::Target {
+                        branch: "main".to_owned(),
+                        sha: None,
+                    },
                 },
-                |_| GitReply::Main(None),
+                |_| GitReply::Target {
+                    branch: "main".to_owned(),
+                    sha: None,
+                },
             );
         }
         // The diff: the task page's selected attempt, or the merge page's. A request per

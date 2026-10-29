@@ -858,7 +858,8 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   (`m`): do the stage marks, the `on <sha>` column and the `summary` frame read at your width, is
   the command row's log legible in its float, and does a moved branch (push to `work/<task>`) make
   every mark weak with the moved row? Press `M` and check that the float says
-  `merge <task> onto main? y/n`; `n` must change nothing. Opening the TUI with no loop running
+  `merge <task> onto <target branch>? y/n` (`main` by default); `n` must change nothing. Opening
+  the TUI with no loop running
   starts one: does the header go from `loop ◌ starting` to `loop ● running (pid <n>)`, does a
   started task's line appear on the footer's ticker, and does `L` open the log with the same
   lines and the pass summaries? With a task in `doing.running`, does its diff tab say

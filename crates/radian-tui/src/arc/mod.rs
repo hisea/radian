@@ -775,7 +775,7 @@ impl LogView {
 /// A float on the merge page: it takes the keys until it closes (ADR 0035: floats only).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Float {
-    /// `merge TK… onto main? y/n`, carrying the action `y` runs.
+    /// `merge TK… onto <target branch>? y/n`, carrying the action `y` runs.
     Confirm {
         message: String,
         action: actions::Action,
@@ -985,6 +985,9 @@ pub struct ArcApp {
     log_pending: Option<LogRequest>,
     /// The confirmation or reject float, which takes the keys until it closes.
     pub float: Option<Float>,
+    /// The configured target branch's name, which the header writes before its sha.
+    pub target_branch: String,
+    /// The target branch's remote-tracking sha, as the header shows it.
     pub main_sha: Option<String>,
     /// What the scheduling loop is doing: another process holds `runner.lock`, this TUI has
     /// just started one, or none runs (ADR 0048 decision 13). The runner sets it from its
@@ -1047,6 +1050,10 @@ impl ArcApp {
         session_dir: Option<PathBuf>,
         theme: Theme,
     ) -> Self {
+        let target_branch = store
+            .config()
+            .map(|config| config.target_branch().to_owned())
+            .unwrap_or_else(|_| "main".to_owned());
         let mut app = Self {
             store,
             session_dir,
@@ -1076,6 +1083,7 @@ impl ArcApp {
             log_request: None,
             log_pending: None,
             float: None,
+            target_branch,
             main_sha: None,
             loop_status: LoopStatus::Stopped,
             ticker: None,
@@ -1884,8 +1892,9 @@ impl ArcApp {
         }
     }
 
-    /// Sets the header's remote-main sha (the git worker's reply).
-    pub fn apply_main(&mut self, sha: Option<String>) {
+    /// Sets the header's target branch name and remote-tracking sha (the git worker's reply).
+    pub fn apply_target(&mut self, branch: String, sha: Option<String>) {
+        self.target_branch = branch;
         self.main_sha = sha;
     }
 
@@ -2668,7 +2677,9 @@ impl ArcApp {
     /// A confirmation float carrying the action `y` runs (merge or the `merge` auto level).
     fn merge_float(&mut self, action: actions::Action) {
         let message = match &action {
-            actions::Action::Merge(task) => format!("merge {task} onto main?"),
+            actions::Action::Merge(task) => {
+                format!("merge {task} onto {}?", self.target_branch)
+            }
             actions::Action::Auto { plan, .. } => format!("set auto merge on {plan}?"),
             _ => return,
         };

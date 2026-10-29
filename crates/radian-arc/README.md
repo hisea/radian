@@ -93,7 +93,8 @@ Everything arc keeps for one repository is in `<repository>/.radian/arc/`. `Stor
 the repository from any directory inside it and refuses, naming `radian arc init`, when
 `config.toml` is missing or does not parse. `Store::repository_names()` returns the
 `[repository] remote` and `main_branch`; the internal `work` wrapper uses them when its own
-flags are absent.
+flags are absent. `Config::target_branch()` resolves the branch integration and first attempts
+use: `[integration] target_branch`, else `[repository] main_branch`.
 
 Every change is one transaction under `state.lock`: take the lock (waiting up to five seconds,
 then exit 4), compare the file with the ledger, write a temporary file, fsync, rename, fsync the
@@ -272,10 +273,11 @@ busy one is waited for. Slot `n` also names the checkout that session alone read
 ## `commands`
 
 `CommandRun` takes the exclusive lock, builds the verification candidate for `sha` in the
-`commands` checkout (fetching `remote` and its main), runs the profile's lines with `sh -c` on
-it in order, and stops at the first failure. The candidate is `sha` when the remote main is an
-ancestor of it; otherwise it is a `--no-ff` merge of `sha` onto the remote main, created in
-the checkout with the fixed identity `arc <arc@localhost>` and never pushed. A conflicted
+`commands` checkout (fetching `remote` and its target branch), runs the profile's lines with
+`sh -c` on it in order, and stops at the first failure. The candidate is `sha` when the remote
+target branch is an ancestor of it; otherwise it is a `--no-ff` merge of `sha` onto the remote
+target branch, created in the checkout with the fixed identity `arc <arc@localhost>` and never
+pushed. A conflicted
 merge aborts, writes a `fail` verdict with reason `conflict` and the sorted paths, and runs no
 command.
 
@@ -313,11 +315,11 @@ write for the same path is `GateError::VerdictExists`; a verdict is never change
 ```
 
 `result` is `pass` or `fail`; `reason` is always present and `null` on a pass. A verification
-stage's `sha` is the task's `verified_sha`; `main_sha` is the remote main its candidate was
-built on and `candidate_sha` is the commit the stage ran on (`sha` itself when main had not
-moved, a merge commit otherwise, absent when the merge conflicted). `conflict_paths` (sorted)
-is present when the candidate's merge conflicted. An `integration` verdict carries `base_sha`
-(the main it used) and `candidate_sha` instead. `Verdict::human` builds the owner's `human`
+stage's `sha` is the task's `verified_sha`; `main_sha` is the remote target branch its
+candidate was built on and `candidate_sha` is the commit the stage ran on (`sha` itself when
+the target branch had not moved, a merge commit otherwise, absent when the merge conflicted).
+`conflict_paths` (sorted) is present when the candidate's merge conflicted. An `integration`
+verdict carries `base_sha` (the target branch it used) and `candidate_sha` instead. `Verdict::human` builds the owner's `human`
 record; it has no commands and carries the owner's note as `reason`.
 
 `valid_verdicts(verdicts, head_sha)` keeps only verdicts for that commit, so a moved branch
@@ -338,13 +340,13 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 ## Integration
 
 `IntegrationRun` takes `gates/integration.lock`, fetches `remote` for the work branch and
-fetches the remote main with an explicit refspec
-(`+refs/heads/<main>:refs/remotes/<remote>/<main>`), then compares `main_ref` (for example
-`refs/remotes/<remote>/main`) with the task's `base_sha`:
+fetches the remote target branch with an explicit refspec
+(`+refs/heads/<target>:refs/remotes/<remote>/<target>`), then compares `main_ref` (for example
+`refs/remotes/<remote>/release`) with the task's `base_sha`:
 
 - still `base_sha`: the candidate is `head_sha`, and the key commands run in the
   `integration` checkout at `head_sha`;
-- moved: the checkout goes to the remote main and `git merge --no-ff` creates
+- moved: the checkout goes to the remote target branch and `git merge --no-ff` creates
   `Merge work/<task> (<short head>)` (the first seven characters of the head sha) with the
   fixed identity `arc <arc@localhost>`. The
   candidate is that merge commit. There is no rebase: a rebase changes the sha the gate
@@ -352,13 +354,14 @@ fetches the remote main with an explicit refspec
   the sorted paths, and no candidate.
 
 The key commands run on the candidate under the same rules as `commands` (order, stop at the
-first failure, own timeout, own logs). The verdict records the main it used as `base_sha`.
+first failure, own timeout, own logs). The verdict records the target branch it used as
+`base_sha`.
 
-`merge_ready(repository, remote, main_ref, verdict)` fetches the remote main with the same
-explicit refspec and is true only for a passing integration verdict with a candidate whose
-recorded `base_sha` is still the remote main. A main that moved after integration makes it
-false (ADR 0048 decision 6). A clone whose configured fetch refspec leaves main out therefore
-still reads the current main.
+`merge_ready(repository, remote, main_ref, verdict)` fetches the remote target branch with the
+same explicit refspec and is true only for a passing integration verdict with a candidate whose
+recorded `base_sha` is still the remote target branch. A target branch that moved after
+integration makes it false (ADR 0048 decision 6). A clone whose configured fetch refspec leaves
+the target out therefore still reads its current tip.
 
 ## `work`: the trusted worker wrapper
 
@@ -369,7 +372,8 @@ attempt of one task, the brief on stdin. It is an **internal** subcommand: arc r
 person does not. It is hidden from `--help` and has no manual page. `--remote`,
 `--main-branch` and the three limit flags are internal too: `radian-tui` takes the names from
 the repository's `[repository] remote` and `main_branch` when they are absent, and from
-`origin`/`main` when there is no `config.toml`; `--stall-timeout-secs` and
+`origin`/`main` when there is no `config.toml`; the caller passes the configured target branch
+(`[integration] target_branch`, else `[repository] main_branch`) as `--main-branch`. `--stall-timeout-secs` and
 `--max-wall-time-secs` of `0` mean no limit, while `--cancel-grace-secs` of `0` sends the
 worker SIGKILL right after SIGTERM.
 
@@ -387,7 +391,7 @@ One run:
 1. Creates or reuses the linked worktree `<repository>/.radian/arc/worktrees/<task>` on
    branch `work/<task>`. Creation takes a blocking flock on `worktrees/` itself, because two
    attempts that start together would otherwise both write `.git/config` (`config.lock`). A
-   first attempt fetches `<remote> <main-branch>` with an explicit refspec and starts from
+   first attempt fetches `<remote> <target-branch>` with an explicit refspec and starts from
    the fetched tip, recording `base_sha` in
    `<repository>/.radian/arc/attempts/<task>/base_sha`; a later attempt reuses that base. A
    flock on the worktree directory keeps two attempts of one task apart (a second wrapper
@@ -416,7 +420,8 @@ One run:
    brief (`## Where the previous attempt left off`): the newest earlier attempt's
    `Result.text` cut at 8,000 characters with a note (a worker-less `reverify` attempt writes
    none, so the section walks back and names the attempt it came from), `git log --oneline`
-   and `git diff --stat` of the task's own change from the merge base with the remote main. A
+   and `git diff --stat` of the task's own change from the merge base with the remote target
+   branch. A
    `merge-main` conflict section stays first. A hidden `--worker-command <shell command>`
    replaces the worker for the forwarding tests; it exists only for tests and is
    not a user input.
@@ -492,7 +497,7 @@ for. A `verify` `done` record also carries the profile the gate planned (its nam
 so a `config.toml` change while the gate runs cannot judge its verdicts by another one or
 expect a stage it did not run. A verification record also carries the `inputs` digest from
 `plan_verification` (config text, shas, extra stages, remote sha); an integration record
-carries a digest of the shas, the config text and the remote main; a pass reports a `refused`
+carries a digest of the shas, the config text and the remote target branch; a pass reports a `refused`
 record and starts no new gate while the digest is unchanged. A gate process that exits having
 written nothing leaves the `started` record: the pass rewrites it as `no_record` with those
 inputs, reports it in the summary and does not count the pass as changed, so a gate that fails
@@ -517,8 +522,8 @@ run` pass starts the same stages in a background gate and calls `review::apply_v
 when the gate's record says `done`. Either way the remote's `work/<task>` must still equal the
 task's `head_sha`, then the effective stages of the profile plus the task's extra stages run,
 except `human`, each through the gate on the verification candidate
-(`candidate_for`: `verified_sha` when the remote main is its ancestor, else a merge of
-`verified_sha` onto the remote main). When the list holds both `commands` and `review`, those
+(`candidate_for`: `verified_sha` when the remote target branch is its ancestor, else a merge of
+`verified_sha` onto the remote target branch). When the list holds both `commands` and `review`, those
 two start at the same time and the round's outcome follows the list's order (`commands`
 first); every other stage runs in the list's order. This build runs `commands` and `review`; a
 profile or task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`
@@ -555,8 +560,9 @@ gets the first review's prompt, though it reads `[gate.review]` rather than
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of a line the task's
 own change added or changed, or within 10 lines of a previous blocking item in the same file
-(`ReworkRound`). The task's own change is the whole diff from the merge base of the remote main
-and the head, not the rework's increment: a file it does not touch, or a line more than 3 lines
+(`ReworkRound`). The task's own change is the whole diff from the merge base of the remote
+target branch and the head, not the rework's increment: a file it does not touch, or a line
+more than 3 lines
 from any changed line in its file, is demoted. A `critical` item and an item without a `file` or
 a `line` are never moved; a moved item keeps its `level`.
 
@@ -596,14 +602,15 @@ nothing, and is not an automatic rework.
 the recorded one. A changed digest returns the task to `review.verifying` with the reason,
 like a moved branch, so `run` or `start` verifies it again. `prepare_merge` writes the owner's
 `human` pass verdict (`approver` absent, or `auto` when the loop approves) and moves to
-`review.integrating`; then `radian arc merge` runs `IntegrationRun` with the `key_commands` of
-the profile the attempt's verification recorded in `profile.json` and finishes the push in the
+`review.integrating`; then `radian arc merge` runs `IntegrationRun` with the `[integration]
+key_commands` of the current `config.toml` (never the profile the attempt's verification
+recorded in `profile.json`) and finishes the push in the
 same command, while `review::merge_step` starts the integration in a background gate and the
 next pass calls `finish_integration`. A flow removed or a `gate_profile` changed after the gate
 ran therefore changes neither the approval's required stages nor the integration; only a
 verification from before the record existed resolves the flow's current profile. Either
-path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<main>` without
-force. A main that moved after integration, or a rejected push, makes it integrate again
+path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<target>` without
+force. A target branch that moved after integration, or a rejected push, makes it integrate again
 (one round per pass in the loop; at most three runs per `radian arc merge` command). On
 success the task is `done.merged` and its worktree is removed; the branch stays.
 
@@ -629,7 +636,7 @@ follow-up is a warning after the merge, not a failed merge.
 
 Each integration run writes its own verdict, under
 `runs/<task>/attempts/<attempt id>[.i<n>]/verdicts/integration.json`, so no verdict is ever
-rewritten when main moves.
+rewritten when the target branch moves.
 
 `radian arc reject <task> --note <text>` requires `review.awaiting_human`, writes the note to
 the attempt's `reject.md`, and moves to `review.rework_pending`.
@@ -678,7 +685,7 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
   start time (a reused pid is never signalled); without a reported start time the recorded pid
   alone is signalled.
 - A merge that fails without conflicted paths writes reason `merge_failed: <git stderr>`; a
-  merge that already contains `head_sha` yields the current main as the candidate.
+  merge that already contains `head_sha` yields the current target branch as the candidate.
 - The newest verdict per stage is what both the digest and `required_passed` count, so passing
   every attempt's verdicts in any order is safe.
 - The integration stage has its own lock file, separate from the exclusive lock of `commands`
@@ -695,7 +702,8 @@ the attempt's `reject.md`, and moves to `review.rework_pending`.
 ## Not here yet
 
 The arc TUI lives in `radian-tui` (`src/arc/`, with its terminal loop in `src/cli/arc.rs`);
-this crate owns the read-only views it draws ([`read`](src/read.rs): the remote main, a
+this crate owns the read-only views it draws ([`read`](src/read.rs): the remote target branch,
+a
 task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
 commits). The owner's keys there are the same library calls as the CLI's subcommands. The
 gate stages `mutation` and `ci` are refused until they are built.
