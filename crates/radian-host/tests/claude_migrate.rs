@@ -1394,3 +1394,61 @@ fn a_hook_args_that_is_null_is_dropped_with_one_report_line() {
     );
     readable(home.path());
 }
+
+/// ADR 0045 §4 / ADR 0046: a Claude `PermissionRequest` entry is imported like the other
+/// events, with its matcher translated once (`Bash`→`shell`, `Edit`→`patch`). The project
+/// file it writes loads back through the runtime reader.
+#[test]
+fn a_claude_permission_request_hook_is_imported() {
+    let home = Temp::new("permission-request-home");
+    write(
+        home.path(),
+        "settings.json",
+        r#"{
+  "hooks": {
+    "PermissionRequest": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo answer" }] }
+    ]
+  }
+}"#,
+    );
+    let draft = import_claude(Some(home.path()), None).unwrap();
+    let config =
+        radian_host::parse_config(Path::new("/tmp/draft.toml"), &draft.config_toml).unwrap();
+    assert_eq!(config.hooks.permission_request.len(), 1);
+    assert_eq!(
+        config.hooks.permission_request[0].matcher.as_deref(),
+        Some("shell")
+    );
+    assert_eq!(
+        config.hooks.permission_request[0].hooks[0].command,
+        "echo answer"
+    );
+
+    let proj = Temp::new("permission-request-proj");
+    write(
+        proj.path(),
+        ".claude/settings.json",
+        r#"{
+  "hooks": {
+    "PermissionRequest": [
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "echo ask" }] }
+    ]
+  }
+}"#,
+    );
+    let draft = import_claude(None, Some(proj.path())).unwrap();
+    let json = draft
+        .project_hooks_json
+        .as_deref()
+        .expect("the project hooks file is rendered");
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+    let mut warnings = Vec::new();
+    let loaded = radian_host::project_hooks::parse_project_value(&parsed, "test", &mut warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(loaded.permission_request.len(), 1);
+    assert_eq!(
+        loaded.permission_request[0].matcher.as_deref(),
+        Some("patch")
+    );
+}

@@ -150,7 +150,7 @@ fn the_unknown_fields_are_ignored_but_reported() {
     assert!(config.skipped.contains(&"tui.theme".to_string()));
 }
 
-/// `hooks.toml` (ADR 0045 slice A): the three events parse with matchers and commands;
+/// `hooks.toml` (ADR 0045 slice A): the four events parse with matchers and commands;
 /// the non-subset entries (`http`, `async`, unknown event) are skipped, never refused.
 #[test]
 fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
@@ -160,6 +160,15 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     assert_eq!(
         config.hooks.pre_tool_use[0].matcher.as_deref(),
         Some("shell|write")
+    );
+    assert_eq!(config.hooks.permission_request.len(), 1);
+    assert_eq!(
+        config.hooks.permission_request[0].matcher.as_deref(),
+        Some("shell")
+    );
+    assert_eq!(
+        config.hooks.permission_request[0].hooks[0].command,
+        "/work/example/hooks/answer-ask.sh"
     );
     assert_eq!(config.hooks.pre_tool_use[0].hooks.len(), 1);
     assert_eq!(config.hooks.pre_tool_use[0].hooks[0].timeout_secs, Some(10));

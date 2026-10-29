@@ -1,8 +1,8 @@
 //! The `[hooks]` section (ADR 0045 slice A): the Claude/Codex command-hook subset in
 //! `config.toml`.
 //!
-//! Only three events exist — `PreToolUse`, `PostToolUse`, `Stop` — each a list of
-//! `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args, timeout }`
+//! Only four events exist — `PreToolUse`, `PostToolUse`, `Stop` and `PermissionRequest` — each
+//! a list of `{ matcher, hooks }` entries, each hook a `{ type = "command", command, args, timeout }`
 //! table. `args` is optional: with it `command` is the program and the hook starts without a
 //! shell; without it `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's case-sensitive pattern over **Radian** tool names
 //! (`shell`, `write`, `patch`, `read`, …): `*` or a missing/empty matcher matches every
@@ -24,9 +24,11 @@ use super::Config;
 /// The hook events this slice implements. The single source for the match arms below,
 /// the project hooks reader, and the manual's drift test: adding an event means adding
 /// it here first.
-pub const HOOK_EVENTS: &[&str] = &[PRE_TOOL_USE, POST_TOOL_USE, STOP];
+pub const HOOK_EVENTS: &[&str] = &[PRE_TOOL_USE, PERMISSION_REQUEST, POST_TOOL_USE, STOP];
 /// The tool-call hook that runs before the tool runs.
 pub const PRE_TOOL_USE: &str = "PreToolUse";
+/// The hook that answers an `ask` before anyone is asked (ADR 0045 §4).
+pub const PERMISSION_REQUEST: &str = "PermissionRequest";
 /// The tool-call hook that runs after the tool runs.
 pub const POST_TOOL_USE: &str = "PostToolUse";
 /// The hook that runs when the model stops.
@@ -78,6 +80,9 @@ pub struct HookMatcher {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HooksConfig {
     pub pre_tool_use: Vec<HookMatcher>,
+    /// The hooks that answer a permission `ask` (ADR 0045 §4). Matched by the same tool-name
+    /// pattern as `PreToolUse`.
+    pub permission_request: Vec<HookMatcher>,
     pub post_tool_use: Vec<HookMatcher>,
     pub stop: Vec<HookMatcher>,
     /// `[hooks] intent_stop`: the built-in intent-stop validator on the `Stop` path
@@ -90,7 +95,10 @@ pub struct HooksConfig {
 impl HooksConfig {
     /// Whether any hook is configured at all.
     pub fn is_empty(&self) -> bool {
-        self.pre_tool_use.is_empty() && self.post_tool_use.is_empty() && self.stop.is_empty()
+        self.pre_tool_use.is_empty()
+            && self.permission_request.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.stop.is_empty()
     }
 }
 
@@ -129,6 +137,7 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
         }
         let list = match event.as_str() {
             PRE_TOOL_USE => &mut config.hooks.pre_tool_use,
+            PERMISSION_REQUEST => &mut config.hooks.permission_request,
             POST_TOOL_USE => &mut config.hooks.post_tool_use,
             STOP => &mut config.hooks.stop,
             _ => {
@@ -381,9 +390,9 @@ mod tests {
         super::super::parse(Path::new("/tmp/test/config.toml"), text).unwrap()
     }
 
-    /// The subset parses: three events, matchers kept raw, commands with timeouts carried.
+    /// The subset parses: four events, matchers kept raw, commands with timeouts carried.
     #[test]
-    fn the_three_events_parse_with_matchers_and_timeouts() {
+    fn the_four_events_parse_with_matchers_and_timeouts() {
         let config = parse_str(concat!(
             "schema_version = 1\n",
             "[[hooks.PreToolUse]]\n",
@@ -392,6 +401,11 @@ mod tests {
             "type = \"command\"\n",
             "command = \"echo hi\"\n",
             "timeout = 10\n",
+            "[[hooks.PermissionRequest]]\n",
+            "matcher = \"shell\"\n",
+            "[[hooks.PermissionRequest.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"answer-ask\"\n",
             "[[hooks.PostToolUse]]\n",
             "matcher = \"patch\"\n",
             "[[hooks.PostToolUse.hooks]]\n",
@@ -412,6 +426,11 @@ mod tests {
         assert_eq!(
             config.hooks.pre_tool_use[0].hooks[0].timeout(),
             std::time::Duration::from_secs(10)
+        );
+        assert_eq!(config.hooks.permission_request.len(), 1);
+        assert_eq!(
+            config.hooks.permission_request[0].hooks[0].command,
+            "answer-ask"
         );
         assert_eq!(config.hooks.post_tool_use.len(), 1);
         assert_eq!(

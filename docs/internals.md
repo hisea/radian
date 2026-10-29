@@ -241,7 +241,8 @@ declaration can only **narrow**, never widen.
   prompt injection from an unfamiliar repository — a malicious skill, config or context file
   runs unimpeded. For a boundary use `workspace`, a container, or a dedicated OS user.
 - **Audit**: every decision writes one `PermissionResolved` event to the session file
-  (`approver` = `policy` for a rule or grant, `user` for an answered prompt).
+  (`approver` = `policy` for a rule or grant, `user` for an answered prompt or a
+  `PermissionRequest` hook).
 - Approval shows the tool and its **resolved** resource; `y` allows once, `a` allows for the
   session (in memory only, gone after a resume), anything else denies. `--allow-shell-command
   PREFIX` allows one *simple* command prefix without asking; a compound command is allowed

@@ -1701,3 +1701,21 @@ source was restored from `.radian/mut/` (`cmp` empty).
 |---|---|---|---|
 | TK0231-M10 | the project reader accepts a `null` `args` as absent again (the `None` arm also matches `Some(Value::Null)`) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_skips_only_that_hook` |
 | TK0231-M11 | import-claude accepts a `null` `args` as absent again (the `None` arm also matches `Some(Json::Null)`) | ✅ 1 failed (rc=100) | `claude_migrate::a_hook_args_that_is_null_is_dropped_with_one_report_line` |
+
+## TK0232: `PermissionRequest` in the command hooks (2026-10-29, branch `work/TK0232-permission-request-event`)
+
+ADR 0045 §4. Each mutation was applied in place to `crates/radian-host/src/hooks.rs` (and
+`src/session/open.rs` for M11), the named test ran with `cargo nextest run -p radian-host
+--locked --profile sandbox --no-fail-fast -E 'test(<name>)'`, and the source was restored
+from `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0232-M6 | exit-0 stdout that is not JSON is treated as no decision (the old `parsed_output` behavior) instead of failing closed | ✅ 1 failed (rc=100) | `hooks::tests::permission_request_hook_errors_fail_closed` |
+| TK0232-M7 | a hook `deny` no longer stops the chain (`PermissionVerdict::Deny(_) => {}`), so later hooks run and an allow can win | ✅ 1 failed (rc=100) | `hooks::tests::permission_request_layers_and_deny_stop_the_chain` |
+| TK0232-M8 | the layers swap order (user entries compiled before the project's) | ✅ 1 failed (rc=100) | `hooks::tests::permission_request_layers_and_deny_stop_the_chain` |
+| TK0232-M9 | `KillGroupOnDrop` no longer kills the group, so a dropped (cancelled) run leaves its child alive | ✅ 1 failed (rc=100) | `command_hooks::cancelling_the_turn_kills_the_permission_request_hook_group` |
+| TK0232-M10 | an unknown `decision.behavior` is read as `allow` instead of no decision | ✅ 1 failed (rc=100) | `hooks::tests::permission_request_undecided_outputs_follow_the_ordinary_path` |
+| TK0232-M11 | `open_session` no longer installs the command hooks as the permission layer's chain | ✅ 1 failed (rc=100) | `command_hooks::open_session_installs_the_permission_request_chain` |
+
+6/6 caught, no equivalent mutation.

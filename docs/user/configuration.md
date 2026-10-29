@@ -168,15 +168,17 @@ allow_env = ["MY_TOKEN_NAME"]
 
 ## `[hooks]`
 
-User-level command hooks: three events, each a list of `{ matcher, hooks }` entries.
+User-level command hooks: four events, each a list of `{ matcher, hooks }` entries.
 A matcher is a regular expression over Radian tool names, anchored to the whole name (`shell|write` names two tools); `*`, an empty matcher, or a missing matcher matches every tool.
 Each hook is `{ type = "command", command, args, timeout }`.
 Without `args`, the command runs as `/bin/sh -c` inside the session sandbox when one is enforced; with `args` (an array of strings), `command` is an executable started directly with exactly those arguments and no shell. `timeout` is seconds (`60` when unset or `0`).
 `PreToolUse` exit `2` denies the call; other failures fail closed.
+`PermissionRequest` fires when a rule asks and answers the prompt with `allow` or `deny`; its exit `2` denies too.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `hooks.PreToolUse` | array of entries | none | Gate a tool call before it runs. |
+| `hooks.PermissionRequest` | array of entries | none | Answer a permission `ask` before anyone is asked (`allow` or `deny`). |
 | `hooks.PostToolUse` | array of entries | none | React after a tool call. |
 | `hooks.Stop` | array of entries | none | React at stop. The matcher is ignored. |
 | `hooks.intent_stop` | boolean | `true` | The built-in stop validator. `false` turns it off; user `Stop` hooks still run. |

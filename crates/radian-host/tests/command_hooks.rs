@@ -579,3 +579,457 @@ async fn allow_output_does_not_bypass_the_permission_rules() {
         "the approver's denial stands: {decision:?}"
     );
 }
+
+// ---------- `PermissionRequest` (ADR 0045 §4) ----------
+
+use radian_host::pending::{PendingQueue, QueuedApprover};
+use radian_permissions::{PermissionRequestHooks, RecordingAudit, ResolvedDecision};
+use std::time::Duration;
+
+/// The `radian exec -p` approver: there is no terminal to ask in, so every `ask` is a
+/// denial. The counter proves the hook answered first when the call runs.
+struct NoTerminalApprover {
+    calls: AtomicUsize,
+}
+
+impl NoTerminalApprover {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Approver for NoTerminalApprover {
+    fn decide(
+        &self,
+        _request: ApprovalRequest,
+    ) -> BoxFuture<'_, Result<ApprovalOutcome, ApprovalError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Ok(ApprovalOutcome::Deny {
+                reason: Some(
+                    "not approved: this run has no terminal to ask in; \
+                     pass --yes to allow tool calls"
+                        .into(),
+                ),
+            })
+        })
+    }
+}
+
+fn asking_profile(ws: &std::path::Path) -> Profile {
+    // No rules: every call is `ask` (the conservative default).
+    Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::OnAsk,
+        ws,
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// One `PermissionRequest` entry for the `echo` tool, as the host reads it.
+fn request_commands(
+    ws: &std::path::Path,
+    project: Option<&str>,
+    user: &str,
+    timeout_secs: Option<u64>,
+) -> Arc<CommandHooks> {
+    let entry = |script: &str| radian_host::config::HookMatcher {
+        matcher: Some("*".into()),
+        hooks: vec![radian_host::config::HookCommand {
+            command: script.to_owned(),
+            args: None,
+            timeout_secs,
+        }],
+    };
+    let user = radian_host::config::HooksConfig {
+        permission_request: vec![entry(user)],
+        ..Default::default()
+    };
+    let project = radian_host::config::HooksConfig {
+        permission_request: project.map(entry).into_iter().collect(),
+        ..Default::default()
+    };
+    let inbox = radian_runtime::Inbox::new(64);
+    Arc::new(CommandHooks::new(
+        &user,
+        &project,
+        ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &inbox,
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ))
+}
+
+fn install_request_hooks(permissions: &Arc<PermissionHooks>, commands: &Arc<CommandHooks>) {
+    permissions.set_permission_request_hooks(Some(
+        Arc::clone(commands) as Arc<dyn PermissionRequestHooks>
+    ));
+}
+
+/// Runs one journaled turn whose model asks for one `echo` call, through the production
+/// chain, and returns the call's tool result.
+async fn run_echo_turn(
+    ws: &std::path::Path,
+    permissions: Arc<PermissionHooks>,
+    commands: Arc<CommandHooks>,
+) -> radian_core::ToolResult {
+    let model = ScriptedModel::new(vec![
+        ModelResponse {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: json!({}),
+            }],
+            provider_payload: None,
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            limits: no_limits(),
+        },
+        ModelResponse {
+            content: vec![ContentPart::text("done")],
+            reasoning: Vec::new(),
+            tool_calls: Vec::new(),
+            provider_payload: None,
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+            limits: no_limits(),
+        },
+    ]);
+    let hooks = production_chain(ws, permissions, commands);
+    let agent = Arc::new(Agent::new(model, EchoTool).with_hooks(hooks));
+    let journal = Arc::new(
+        SessionJournal::create(
+            ws.join("turn.jsonl"),
+            "sid",
+            SessionCreatedData::new("/work/example", json!({"provider": "example"})),
+        )
+        .unwrap(),
+    );
+    let mut chat = agent
+        .open_session_with_journal(Vec::new(), journal)
+        .await
+        .expect("a journaled session");
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .expect("the turn finishes");
+    let result = chat
+        .transcript()
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("a tool result");
+    chat.close().await.expect("the session closes");
+    result
+}
+
+const ALLOW_SCRIPT: &str =
+    r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#;
+const DENY_SCRIPT: &str = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no-writes-by-script"}}}'"#;
+
+/// §4 seam: `open_session` is the one place where the two sides meet — it installs the
+/// command hooks as the permission layer's `PermissionRequest` chain, so `radian-permissions`
+/// never depends on `radian-host`. Deleting the wiring leaves a headless or non-human ask on
+/// today's deny path; this structural check fails then (the behavior tests install the chain
+/// by hand, the way the host does).
+#[test]
+fn open_session_installs_the_permission_request_chain() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/session/open.rs"))
+            .expect("session/open.rs is readable");
+    assert!(
+        source.contains("set_permission_request_hooks("),
+        "open_session must install the command hooks as the PermissionRequest chain"
+    );
+    assert!(
+        source.contains("as Arc<dyn PermissionRequestHooks>"),
+        "the chain is the host's CommandHooks, through the trait only"
+    );
+}
+
+/// Edge case 1: `radian exec -p` has no terminal, so the approver would deny. The
+/// `PermissionRequest` hook answers first with `allow`, so the call runs. Asking the
+/// approver (the old path) leaves the call denied and fails every assertion here.
+#[tokio::test]
+async fn an_exec_without_a_terminal_lets_the_permission_request_hook_run_the_call() {
+    let ws = scratch("request-exec-allow");
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, ALLOW_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let result = run_echo_turn(&ws, permissions, commands).await;
+    assert!(
+        !result.is_error,
+        "the hook's allow runs the call: {result:?}"
+    );
+    assert_eq!(result.text(), "original");
+    assert_eq!(approver.calls(), 0, "the terminal approver is never asked");
+}
+
+/// Edge case 2: the hook's `deny` with `message` reaches the model as the call's error
+/// result, with reason code `denied`; the approver is never asked.
+#[tokio::test]
+async fn an_exec_without_a_terminal_returns_the_permission_request_deny_message() {
+    let ws = scratch("request-exec-deny");
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, DENY_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let result = run_echo_turn(&ws, permissions, commands).await;
+    assert!(
+        result.is_error,
+        "a hook deny is an error result: {result:?}"
+    );
+    assert_eq!(result.error_code.as_deref(), Some("denied"));
+    assert!(
+        result.text().contains("no-writes-by-script"),
+        "the denied result carries the message: {}",
+        result.text()
+    );
+    assert_eq!(approver.calls(), 0, "the terminal approver is never asked");
+}
+
+/// Edge case 3: a hook that times out, exits non-2, or prints non-JSON fails closed: the
+/// call gets a `hook_error` result, and no prompt is ever created for it (the approver is
+/// the prompt's only source, so `calls() == 0`).
+#[tokio::test]
+async fn a_failed_permission_request_hook_denies_with_hook_error_and_shows_no_prompt() {
+    for (n, (script, timeout)) in [
+        ("printf '%s' 'hello'", None),
+        ("exit 1", None),
+        ("sleep 30", Some(1)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ws = scratch(&format!("request-error-{n}"));
+        let approver = NoTerminalApprover::new();
+        let permissions = Arc::new(PermissionHooks::new(
+            asking_profile(&ws),
+            Some(Arc::clone(&approver) as Arc<dyn Approver>),
+            Arc::new(NoopAudit),
+        ));
+        permissions.set_turn_source(Some(InputSource::User));
+        let commands = request_commands(&ws, None, script, timeout);
+        install_request_hooks(&permissions, &commands);
+        let result = run_echo_turn(&ws, permissions, commands).await;
+        assert!(
+            result.is_error,
+            "{script}: a broken hook fails closed: {result:?}"
+        );
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("hook_error"),
+            "{script}: {}",
+            result.text()
+        );
+        assert_eq!(
+            approver.calls(),
+            0,
+            "{script}: a hook error never falls back to a prompt"
+        );
+    }
+}
+
+/// Edge case 4: a hook that prints nothing leaves today's path in place — the approver is
+/// asked (the TUI's modal is the approval queue's head); a hook `allow` answers it first,
+/// so no head ever appears.
+#[tokio::test]
+async fn an_undecided_permission_request_hook_falls_back_to_the_prompt() {
+    // (a) No decision: the queued approver is asked and the modal's head appears.
+    let ws = scratch("request-prompt");
+    let queue = Arc::new(PendingQueue::<ApprovalRequest, ApprovalOutcome>::new());
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::new(QueuedApprover::new(
+            Arc::clone(&queue),
+            "test-session",
+        ))),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, "exit 0", None);
+    install_request_hooks(&permissions, &commands);
+    let cx = context();
+    let task_permissions = Arc::clone(&permissions);
+    let task = tokio::spawn(async move {
+        Hooks::before_tool_call(&*task_permissions, &cx, &shell_call()).await
+    });
+    let view = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(view) = queue.head() {
+                break view;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an undecided hook leaves the ordinary prompt in place");
+    queue
+        .answer(
+            view.request_id,
+            ApprovalOutcome::Deny {
+                reason: Some("asked-the-human".into()),
+            },
+        )
+        .unwrap();
+    let decision = task.await.unwrap().unwrap();
+    assert!(
+        matches!(&decision, ToolDecision::Deny { reason } if reason.contains("asked-the-human")),
+        "the prompt's answer stands: {decision:?}"
+    );
+
+    // (b) A hook `allow`: no prompt is ever created.
+    let ws = scratch("request-allow-no-prompt");
+    let queue = Arc::new(PendingQueue::<ApprovalRequest, ApprovalOutcome>::new());
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::new(QueuedApprover::new(
+            Arc::clone(&queue),
+            "test-session",
+        ))),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, ALLOW_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let chain = production_chain(&ws, permissions, commands);
+    let decision = chain
+        .before_tool_call(&context(), &shell_call())
+        .await
+        .unwrap();
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    assert!(
+        queue.head().is_none(),
+        "an answered ask never shows the approval modal"
+    );
+}
+
+/// Edge case 9 (process half): cancelling the turn while the hook runs kills the hook's
+/// whole process group, and the call ends as a denial — never as the hook's late `allow`.
+/// Without the kill-on-drop guard the slept process writes its marker and the test fails.
+#[tokio::test]
+async fn cancelling_the_turn_kills_the_permission_request_hook_group() {
+    let ws = scratch("request-cancel-process");
+    let started = ws.join("started");
+    let late = ws.join("late");
+    let script = format!(
+        "touch {started}; sleep 1; echo late > {late}; \
+         printf '%s' '{{\"hookSpecificOutput\":{{\"decision\":{{\"behavior\":\"allow\"}}}}}}'",
+        started = started.display(),
+        late = late.display(),
+    );
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, &script, None);
+    install_request_hooks(&permissions, &commands);
+
+    let cx = context();
+    let token = cx.cancellation.clone();
+    let task_permissions = Arc::clone(&permissions);
+    let task = tokio::spawn(async move {
+        Hooks::before_tool_call(&*task_permissions, &cx, &shell_call()).await
+    });
+    // Wait for the hook's own marker, so the cancel lands while it sleeps.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the hook started");
+    token.cancel();
+    let decision = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("cancellation interrupts the hook")
+        .expect("the task joins");
+    assert!(
+        matches!(decision, Ok(ToolDecision::Deny { .. })),
+        "a cancelled ask is a denial: {decision:?}"
+    );
+    // Long enough that an un-killed hook would have reached its marker.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        !late.exists(),
+        "the hook's process group must be killed on cancellation"
+    );
+    assert_eq!(approver.calls(), 0);
+}
+
+/// §4 (layers through the production chain): the project entry runs first and a user
+/// `deny` still wins over a project `allow`.
+#[tokio::test]
+async fn a_user_permission_request_deny_beats_a_project_allow() {
+    let ws = scratch("request-layers");
+    let queue = Arc::new(PendingQueue::<ApprovalRequest, ApprovalOutcome>::new());
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::new(QueuedApprover::new(
+            Arc::clone(&queue),
+            "test-session",
+        ))),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, Some(ALLOW_SCRIPT), DENY_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let chain = production_chain(&ws, permissions, commands);
+    let decision = chain
+        .before_tool_call(&context(), &shell_call())
+        .await
+        .unwrap();
+    assert!(
+        matches!(&decision, ToolDecision::Deny { reason } if reason.contains("no-writes-by-script")),
+        "the user deny stands over the project allow: {decision:?}"
+    );
+    assert!(queue.head().is_none(), "no prompt for an answered ask");
+
+    // The audit says the hook answered as the user, once.
+    let audit = Arc::new(RecordingAudit::default());
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::clone(&audit) as Arc<dyn radian_permissions::AuditSink>,
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, DENY_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let _ = Hooks::before_tool_call(&*permissions, &context(), &shell_call())
+        .await
+        .unwrap();
+    let events = audit.events();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].decision, ResolvedDecision::Deny);
+    assert_eq!(events[0].approver, radian_permissions::AuditApprover::User);
+}

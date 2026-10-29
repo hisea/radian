@@ -12,6 +12,7 @@ use crate::approval::{ApprovalOutcome, ApprovalRequest, Approver};
 use crate::audit::{Approver as AuditApprover, AuditSink, PermissionResolved, ResolvedDecision};
 use crate::profile::{ApprovalPolicy, Preset, Profile};
 use crate::readonly::{self, ReadOnlyHit};
+use crate::request::{PermissionRequestDecision, PermissionRequestHooks};
 use crate::rule::{Action, Evaluated, Resource, evaluate, resolve, resource_of};
 use crate::shell;
 
@@ -67,6 +68,11 @@ pub struct PermissionHooks {
     /// The host's name gate (the host tool gate): a deny-only policy consulted before the rules.
     /// `None` in every existing host.
     tool_gate: RwLock<Option<ToolGate>>,
+    /// The host's `PermissionRequest` hook chain (ADR 0045 §4). It runs on an `ask` no
+    /// session grant covers, before the approver and the non-human denial; `None` keeps
+    /// today's path. `radian-host`'s `CommandHooks` implements it, and the host installs it,
+    /// so this crate never depends on the host.
+    permission_request: RwLock<Option<Arc<dyn PermissionRequestHooks>>>,
     audit: Arc<dyn AuditSink>,
     /// "Allow for this session", consulted on every call (ADR 0004: real-time state).
     grants: Mutex<HashSet<SessionGrant>>,
@@ -89,6 +95,7 @@ impl PermissionHooks {
             approver,
             task_approver: AtomicBool::new(false),
             tool_gate: RwLock::new(None),
+            permission_request: RwLock::new(None),
             audit,
             grants: Mutex::new(HashSet::new()),
             source: Mutex::new(None),
@@ -146,6 +153,16 @@ impl PermissionHooks {
     /// gate refuses is denied before the rules run, and nothing else can lift it. `None` clears it.
     pub fn set_tool_gate(&self, gate: Option<ToolGate>) {
         *self.tool_gate.write().unwrap_or_else(|e| e.into_inner()) = gate;
+    }
+
+    /// Installs the host's `PermissionRequest` hook chain (ADR 0045 §4). It answers an `ask`
+    /// that no session grant covers, before the approver and before the non-human-source
+    /// denial; `None` restores the ordinary path.
+    pub fn set_permission_request_hooks(&self, hooks: Option<Arc<dyn PermissionRequestHooks>>) {
+        *self
+            .permission_request
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = hooks;
     }
 
     /// The gate's verdict for one tool name, if a gate is installed.
@@ -446,6 +463,72 @@ impl PermissionHooks {
                 Some("allowed for this session".into()),
             );
             return Ok(ToolDecision::Allow);
+        }
+        // ADR 0045 §4: the host's `PermissionRequest` hooks answer the question here —
+        // after the rules, the policy and any session grant produced `ask`, and before the
+        // approver and the non-human-source denial. A rule `deny` returned long above, and
+        // an allowed call never reaches this point, so a hook can only answer a question.
+        // A hook error fails closed with `hook_error` and never falls back to a human.
+        let permission_request = self
+            .permission_request
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(resolver) = permission_request {
+            let decision = tokio::select! {
+                biased;
+                _ = cx.cancellation.cancelled() => {
+                    let reason = "the approval request was cancelled".to_string();
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Deny,
+                        AuditApprover::Policy,
+                        Some(reason.clone()),
+                    );
+                    return Ok(ToolDecision::Deny { reason });
+                }
+                decision = resolver.permission_request(call) => decision,
+            };
+            match decision {
+                Ok(PermissionRequestDecision::NoDecision) => {}
+                Ok(PermissionRequestDecision::Allow) => {
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Allow,
+                        AuditApprover::User,
+                        Some("allowed by the PermissionRequest hook".into()),
+                    );
+                    return Ok(ToolDecision::Allow);
+                }
+                Ok(PermissionRequestDecision::Deny { reason }) => {
+                    let reason = reason
+                        .filter(|reason| !reason.trim().is_empty())
+                        .unwrap_or_else(|| "the PermissionRequest hook denied the call".into());
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Deny,
+                        AuditApprover::User,
+                        Some(reason.clone()),
+                    );
+                    return Ok(ToolDecision::Deny { reason });
+                }
+                // Fail closed (ADR 0017 §4): a hook that did not finish its answer denies
+                // the call with `hook_error`, and no human is asked afterwards.
+                Err(error) => {
+                    let reason = error.to_string();
+                    self.record(
+                        &request_id,
+                        &call_id,
+                        ResolvedDecision::Deny,
+                        AuditApprover::Policy,
+                        Some(reason.clone()),
+                    );
+                    return Err(HookError::new(reason));
+                }
+            }
         }
         if !human && !self.task_approver.load(Ordering::SeqCst) {
             let reason = if self.turn_source().is_none() {

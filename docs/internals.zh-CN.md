@@ -170,7 +170,7 @@ theme = "dark"               # dark | light | mono; NO_COLOR forces mono
 - **在 `workspace` 档位下**，写入限制在工作区内；`.git` 保持可写，但 git 会执行的条目除外（`config`、`config.worktree`、`hooks/`，以及 submodule 和 worktree 的对应条目）；敏感目录（`~/.ssh`、`~/.aws`、`~/.gnupg`、浏览器配置目录等）默认不可读；网络打开（出站连接，以及本地回环的 connect/bind/listen），pty 设备可用，所以项目自己的测试能跑。这**不是**凭据隔离的承诺：macOS 后端没有关闭 `mach-lookup`，IPC 边界没有收紧。这个版本里 MCP 服务器进程在沙箱外启动，启动提示会说明这一点。
 - **`--yes` 不是"全部允许"。** 它把审批者换成一个不显示问题、直接回答"允许一次"的审批者；`deny` 规则照样拒绝，`allow` 规则照样允许，沙箱不变，每个决定照样审计。`radian` 还有 `--approval on-ask|always|never`（默认 `on-ask`）。
 - **`full` 信任你的环境。** 它不弹任何内置询问，也不防御来自陌生仓库的提示注入：恶意的 skill、配置或上下文文件会畅通无阻地运行。要边界就用 `workspace`、容器或专用的系统用户。
-- **审计**：每个决定都往会话文件写一个 `PermissionResolved` 事件（规则或授权时 `approver` = `policy`，用户回答询问时为 `user`）。
+- **审计**：每个决定都往会话文件写一个 `PermissionResolved` 事件（规则或授权时 `approver` = `policy`，用户回答询问或 `PermissionRequest` hook 作答时 `approver` = `user`）。
 - 审批显示工具和**解析后的**资源；`y` 允许一次，`a` 本会话内允许（只在内存里，恢复会话后失效），其他任何输入都是拒绝。`--allow-shell-command PREFIX` 不询问地允许一个*简单*命令前缀；复合命令只有在**每一段**都被允许时（用户规则或内置只读表）才允许，否则仍然询问。前缀要写到子命令一级，不要只写程序名。
 
 常用退出码（统一的一组，加上 `radian exec` 的轮次结果码）：0 成功（这一轮完成），1 这一轮或这次运行失败，2 用法、设置或启动被拒（clap 自己的错误、错误的配置、未知的按键绑定、启动被拒、沙箱探测失败），3 预算用完（`BudgetExceeded`、超过截止时间），4 回答没完成（`Incomplete`、`Refused`），101 程序 panic，143 收到 SIGTERM（128 + 15），130 请求取消或第二次 Ctrl-C 强制退出。`radian exec` 和 TUI 用同一组退出码。`radian exec --list | head`（以及每个打印后退出的模式）遇到断开的管道仍然静默以 0 退出。

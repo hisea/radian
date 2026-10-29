@@ -331,6 +331,9 @@ pub fn hook_entries(config: &radian_host::config::HooksConfig) -> Vec<HookEntry>
     for matcher in &config.pre_tool_use {
         push("PreToolUse", matcher);
     }
+    for matcher in &config.permission_request {
+        push("PermissionRequest", matcher);
+    }
     for matcher in &config.post_tool_use {
         push("PostToolUse", matcher);
     }

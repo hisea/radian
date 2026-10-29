@@ -204,10 +204,17 @@ drift apart. The rest of `.git` stays writable, and `full` has no such rules by 
   non-human turn cannot borrow a prefix grant either
   (`a_non_human_turn_cannot_borrow_a_prefix_grant`).
 - A turn whose source is not `User` cannot turn an `ask` into an `allow`, and cannot borrow a
-  session grant; an `ask` from such a turn is denied. An unset source is treated the same way
-  (fail safe). Explicit `allow`/`deny` **rules** still apply to every source — they are the
-  host's policy, not a borrowed user permission
-  (`a_non_human_source_cannot_ask_or_borrow_a_grant`).
+  session grant; an `ask` from such a turn is denied unless a `PermissionRequest` hook
+  answers it (ADR 0045 §4). An unset source is treated the same way (fail safe). Explicit
+  `allow`/`deny` **rules** still apply to every source — they are the host's policy, not a
+  borrowed user permission (`a_non_human_source_cannot_ask_or_borrow_a_grant`).
+- **`PermissionRequest` hooks** (ADR 0045 §4): the host installs a `PermissionRequestHooks`
+  chain with `PermissionHooks::set_permission_request_hooks`. It runs after a call resolves
+  to `ask` and no session grant covers it, before the approver and before the non-human
+  denial. `Allow` returns `ToolDecision::Allow` (audited as `user`), `Deny { reason }`
+  returns `ToolDecision::Deny` with that reason, `NoDecision` keeps the ordinary path, and
+  `Err` fails closed as `hook_error` (never a prompt). `radian-host`'s `CommandHooks`
+  implements the trait; this crate holds only the trait, so it never depends on the host.
 - Internal errors fail closed: a failed approver returns `Err` (Core denies) and still writes
   one policy denial (`an_internal_error_denies`).
 
@@ -260,6 +267,7 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 26 | a non-human turn cannot borrow a prefix grant | `tests/session_prefix.rs` |
 | 27 | a prefix grant never crosses the sandbox boundary | `tests/session_prefix.rs` |
 | 28 | `job` is fixed `allow` in every tier (sandboxed `workspace` too), `ask`/`deny` user rules still win, and `approval = never` keeps it (ADR 0037 decision 8) | `tests/job.rs`, `src/profile.rs` |
+| 29 | a `PermissionRequest` hook answers before the approver (and on non-human turns), its deny/error never prompts, rules/grants/auto never fire it, and cancellation interrupts it | `tests/hooks.rs` |
 
 ## Not verified / limits
 
@@ -268,6 +276,6 @@ transcript record, so it never appears in `journal_records`/`replay`.
 - Only the modelled tool argument shapes (`command`, `path`, else the name) are matched; a
   tool that carries its resource elsewhere would fall to `Name` (and thus typically to `ask`).
 - The `Mcp` matcher is `name.contains("__")`, not a registry lookup.
-- The layer is wired into `radian-exec` and `radian-tui` (see the top of this file), but those
-  hosts only ever produce `InputSource::User` turns; the non-human paths are covered by the
-  unit tests in `tests/hooks.rs`, not end to end.
+- The layer is wired into `radian-exec` and `radian-tui` (see the top of this file). A
+  non-human turn can be answered by a host-installed `PermissionRequest` hook; the other
+  non-human paths are covered by the unit tests in `tests/hooks.rs`, not end to end.

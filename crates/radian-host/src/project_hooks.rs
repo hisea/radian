@@ -1,7 +1,8 @@
 //! Project-level external command hooks (ADR 0045 slice B): `<workspace>/.radian/hooks.json`.
 //!
 //! The same Claude/Codex command-hook subset as the user-level `[hooks]` section, spelled in
-//! JSON: event names (`PreToolUse`, `PostToolUse`, `Stop`) map to lists of `{ matcher, hooks }`
+//! JSON: event names (`PreToolUse`, `PostToolUse`, `Stop`, `PermissionRequest`) map to lists of
+//! `{ matcher, hooks }`
 //! entries, each hook a `{ type = "command", command, args, timeout }` object. `args` is
 //! optional: with it `command` is the program and the hook starts without a shell; without it
 //! `command` runs through `/bin/sh -c` (ADR 0045 §4). `matcher` is Claude's
@@ -83,6 +84,7 @@ pub fn parse_project_value(
             match parsed.entry {
                 Some(entry) => match event.as_str() {
                     "PreToolUse" => config.pre_tool_use.push(entry),
+                    "PermissionRequest" => config.permission_request.push(entry),
                     "PostToolUse" => config.post_tool_use.push(entry),
                     "Stop" => config.stop.push(entry),
                     _ => unreachable!("the event list is checked above"),
@@ -235,6 +237,7 @@ fn hook_count(config: &HooksConfig) -> usize {
     config
         .pre_tool_use
         .iter()
+        .chain(config.permission_request.iter())
         .chain(config.post_tool_use.iter())
         .chain(config.stop.iter())
         .map(|entry| entry.hooks.len())
@@ -377,6 +380,7 @@ pub fn preview_project(workspace: &Path) -> Option<ProjectHooksPreview> {
         }
     };
     push("PreToolUse", &config.pre_tool_use);
+    push("PermissionRequest", &config.permission_request);
     push("PostToolUse", &config.post_tool_use);
     push("Stop", &config.stop);
     Some(ProjectHooksPreview {
@@ -468,12 +472,13 @@ mod tests {
         crate::test_support::TempDir::with_label("radian-host-project-hooks", tag)
     }
 
-    /// The subset parses: three events, matchers kept raw, commands with timeouts carried.
+    /// The subset parses: four events, matchers kept raw, commands with timeouts carried.
     #[test]
-    fn the_three_events_parse_with_matchers_and_timeouts() {
+    fn the_four_events_parse_with_matchers_and_timeouts() {
         let parsed: serde_json::Value = serde_json::from_str(
             r#"{
                 "PreToolUse": [{"matcher": "shell|write", "hooks": [{"type": "command", "command": "echo hi", "timeout": 10}]}],
+                "PermissionRequest": [{"matcher": "shell", "hooks": [{"type": "command", "command": "answer-ask"}]}],
                 "PostToolUse": [{"matcher": "patch", "hooks": [{"type": "command", "command": "make lint"}]}],
                 "Stop": [{"hooks": [{"type": "command", "command": "make check", "timeout": 30}]}]
             }"#,
@@ -492,6 +497,8 @@ mod tests {
             config.pre_tool_use[0].hooks[0].timeout(),
             std::time::Duration::from_secs(10)
         );
+        assert_eq!(config.permission_request.len(), 1);
+        assert_eq!(config.permission_request[0].hooks[0].command, "answer-ask");
         assert_eq!(config.post_tool_use.len(), 1);
         assert_eq!(
             config.post_tool_use[0].hooks[0].timeout(),

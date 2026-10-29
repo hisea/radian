@@ -14,10 +14,10 @@
 //!   `name`, the body keeps `$ARGUMENTS` verbatim).
 //! - `<claude-home>/skills` → one `[skills] extra_paths` entry pointing at it (never copied).
 //! - `<claude-home>/settings.json` `hooks` → the `[hooks]` subset (ADR 0045): only
-//!   `PreToolUse`/`PostToolUse`/`Stop`, only `type = "command"`, no `async`/`if`/`http`/
-//!   `prompt`/`agent`/`context: fork`. Claude tool names are translated once, here
-//!   (`Bash`→`shell`, `Edit`→`patch`, `Write`→`write`, `Read`→`read`); scripts that read
-//!   `.tool_input.file_path` must use `.path` (see the report line).
+//!   `PreToolUse`/`PostToolUse`/`Stop`/`PermissionRequest`, only `type = "command"`, no
+//!   `async`/`if`/`http`/`prompt`/`agent`/`context: fork`. Claude tool names are translated
+//!   once, here (`Bash`→`shell`, `Edit`→`patch`, `Write`→`write`, `Read`→`read`); scripts
+//!   that read `.tool_input.file_path` must use `.path` (see the report line).
 //! - `<claude-home>/CLAUDE.md` → `~/.radian/AGENTS.md` (verbatim).
 //! - `<project>/.claude/commands/*.md` → `<project>/.agents/skills/<name>/SKILL.md`.
 //! - `<project>/.claude/skills/<name>/SKILL.md` → `<project>/.agents/skills/<name>/SKILL.md`
@@ -292,16 +292,18 @@ pub fn import_claude(
             })?;
         let mut warnings = Vec::new();
         let loaded = crate::project_hooks::parse_project_value(&parsed, "<draft>", &mut warnings);
-        let mut want = [0usize; 3];
+        let mut want = [0usize; 4];
         for (event, _, _) in &draft.project_hooks {
             want[match event {
                 HookEvent::Pre => 0,
-                HookEvent::Post => 1,
-                HookEvent::Stop => 2,
+                HookEvent::PermissionRequest => 1,
+                HookEvent::Post => 2,
+                HookEvent::Stop => 3,
             }] += 1;
         }
         let got = [
             loaded.pre_tool_use.len(),
+            loaded.permission_request.len(),
             loaded.post_tool_use.len(),
             loaded.stop.len(),
         ];
@@ -642,6 +644,9 @@ fn merge_config(
                     };
                     match event.event {
                         "PreToolUse" => expected.hooks.pre_tool_use.push(matcher_entry),
+                        "PermissionRequest" => {
+                            expected.hooks.permission_request.push(matcher_entry)
+                        }
                         "PostToolUse" => expected.hooks.post_tool_use.push(matcher_entry),
                         _ => expected.hooks.stop.push(matcher_entry),
                     }
@@ -705,6 +710,7 @@ fn plan_merge(
     } else if let Some(table) = hooks.and_then(|hooks| hooks.as_table_like()) {
         for (event, entries) in [
             ("PreToolUse", &add_hooks.pre_tool_use),
+            ("PermissionRequest", &add_hooks.permission_request),
             ("PostToolUse", &add_hooks.post_tool_use),
             ("Stop", &add_hooks.stop),
         ] {
@@ -984,6 +990,7 @@ fn mcp_entry_table(server: &ClaudeMcpServer) -> Table {
 fn planned_hooks(hooks: &super::HooksConfig) -> Vec<PlannedHooks> {
     [
         ("PreToolUse", &hooks.pre_tool_use),
+        ("PermissionRequest", &hooks.permission_request),
         ("PostToolUse", &hooks.post_tool_use),
         ("Stop", &hooks.stop),
     ]
@@ -1682,8 +1689,9 @@ fn map_user_settings(home: &Path, draft: &mut Draft) -> Result<(), ClaudeMigrate
 }
 
 /// Maps one Claude `hooks` object (the value of `hooks` in a settings file) to importable
-/// entries. Only the ADR 0045 subset survives (`PreToolUse`/`PostToolUse`/`Stop`, only
-/// `type = "command"`, no `async`/`if`/`http`/`prompt`/`agent`/`context: fork`);
+/// entries. Only the ADR 0045 subset survives (`PreToolUse`/`PostToolUse`/`Stop`/
+/// `PermissionRequest`, only `type = "command"`, no
+/// `async`/`if`/`http`/`prompt`/`agent`/`context: fork`);
 /// everything else gets one report line each. `label` names the file in those lines
 /// (`` `settings.json` `` or `` `.claude/settings.json` ``). Returns the entries and
 /// whether any command hook survived (for the field-rename hint).
@@ -1697,12 +1705,13 @@ fn collect_hook_entries(
     for (event, items) in hooks {
         let target = match event.as_str() {
             "PreToolUse" => Some(HookEvent::Pre),
+            "PermissionRequest" => Some(HookEvent::PermissionRequest),
             "PostToolUse" => Some(HookEvent::Post),
             "Stop" => Some(HookEvent::Stop),
             _ => {
                 draft.note(format!(
                     "{label} hook event `{event}`: not imported (only \
-                     `PreToolUse`/`PostToolUse`/`Stop` are supported)"
+                     `PreToolUse`/`PostToolUse`/`Stop`/`PermissionRequest` are supported)"
                 ));
                 continue;
             }
@@ -1772,6 +1781,7 @@ fn collect_hook_entries(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HookEvent {
     Pre,
+    PermissionRequest,
     Post,
     Stop,
 }
@@ -2371,6 +2381,7 @@ fn render_project_hooks(entries: &[HookEntry]) -> Option<String> {
     for (event, matcher, commands) in entries {
         let key = match event {
             HookEvent::Pre => "PreToolUse",
+            HookEvent::PermissionRequest => "PermissionRequest",
             HookEvent::Post => "PostToolUse",
             HookEvent::Stop => "Stop",
         };
@@ -2455,6 +2466,7 @@ impl Draft {
             for (event, matcher, commands) in &self.hooks {
                 let key = match event {
                     HookEvent::Pre => "PreToolUse",
+                    HookEvent::PermissionRequest => "PermissionRequest",
                     HookEvent::Post => "PostToolUse",
                     HookEvent::Stop => "Stop",
                 };

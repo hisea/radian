@@ -111,3 +111,21 @@ Base `63fafba` · 工作树 `.radian-worktrees/orch-s5`。改前把 `src/profile
 deleted, rules match literal tool names, and calls to removed names never reach this layer. The
 AR-1 mutation below no longer applies; `rules_against_removed_names_match_only_the_literal_name`
 pins the new behaviour.)
+
+## TK0232: `PermissionRequest` answers an ask before anyone is asked (2026-10-29, branch `work/TK0232-permission-request-event`)
+
+ADR 0045 §4: the chain runs inside the permission layer's `ask` branch, after the session
+grant and before the approver and the non-human-source denial. Each mutation was applied in
+place to `crates/radian-permissions/src/hooks.rs`, the named test ran with `cargo nextest run
+-p radian-permissions --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`, and the
+source was restored from `.radian/mut/perm-hooks.rs` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0232-M1 | the hook is skipped for a non-human turn (`permission_request.filter(\|_\| human)`), so the old deny wins | ✅ 1 failed (rc=100) | `hooks.rs::a_non_human_turn_is_answered_by_the_permission_request_hook` |
+| TK0232-M2 | a session-granted call no longer short-circuits (`let granted = false && …`), so the hook runs again | ✅ 1 failed (rc=100) | `hooks.rs::a_session_grant_never_runs_the_permission_request_hook` |
+| TK0232-M3 | a hook `deny` is ignored (`Ok(Deny { .. }) => {}`), so the call falls through to the approver | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_deny_reaches_the_denied_result` |
+| TK0232-M4 | a hook error returns a `Deny` instead of `Err`, so Core never writes `hook_error` and a human could be asked | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_hook_error_never_asks_the_human` |
+| TK0232-M5 | the cancellation arm is removed from the hook `select!`, so a cancelled hook finishes instead of denying | ✅ 1 failed (rc=100, watchdog 2 s) | `hooks.rs::cancellation_interrupts_the_permission_request_hook` |
+
+5/5 caught, no equivalent mutation.

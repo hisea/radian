@@ -24,14 +24,20 @@
 //!   session (no turn-boundary wait), is never written into a profile, and is not restored on
 //!   resume (ADR 0004, ADR 0006 §5.9).
 //! - A turn whose source is not `User` cannot turn an `ask` into an `allow`, and cannot borrow
-//!   a session grant. `HookContext` has no source field, so the host sets the current turn's
-//!   source with [`PermissionHooks::set_turn_source`]; an unset source is treated as
-//!   non-human (fail safe).
+//!   a session grant; an `ask` from such a turn is denied unless a host-installed
+//!   [`PermissionRequestHooks`] chain answers it. `HookContext` has no source field, so the host
+//!   sets the current turn's source with [`PermissionHooks::set_turn_source`]; an unset source
+//!   is treated as non-human (fail safe).
+//! - A host may install a [`PermissionRequestHooks`] chain (ADR 0045 §4). It runs on every
+//!   `ask` no session grant covers, before the approver and before the non-human denial, so a
+//!   script can answer a question no human will see. It answers only the question: a `deny`
+//!   rule and the sandbox stay untouched.
 
 pub mod approval;
 pub mod audit;
 pub mod profile;
 pub mod readonly;
+pub mod request;
 pub mod rule;
 pub mod shell;
 
@@ -46,6 +52,7 @@ pub use hooks::{PermissionHooks, ToolGate, policy_change_event, runtime_event};
 pub use profile::{
     APPROVAL_POLICIES, ApprovalPolicy, Preset, Profile, ProfileError, TIER_ALIASES, TIER_NAMES,
 };
+pub use request::{PermissionRequestDecision, PermissionRequestHooks};
 pub use rule::{
     Action, Evaluated, Resource, ResourceMatcher, Rule, ToolMatcher, evaluate, resource_of,
 };

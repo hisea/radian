@@ -1,7 +1,7 @@
 //! User-level external command hooks (ADR 0045 slice A): the Claude/Codex subset as an
 //! [`radian_core::Hooks`] implementation.
 //!
-//! Three events, all shell commands from the user's own `config.toml` (`[hooks]`):
+//! Four events, all shell commands from the user's own `config.toml` (`[hooks]`):
 //!
 //! - `PreToolUse` runs before each matching tool call. Exit 0 continues (JSON stdout may
 //!   carry `hookSpecificOutput.permissionDecision: "deny"` or `updatedInput`); exit 2
@@ -10,6 +10,14 @@
 //!   `"allow"`/`"ask"` decisions are refused with a warning and treated as no decision —
 //!   a hook can only narrow what the permission rules already allowed (ADR 0012 P1).
 //!   `updatedInput` becomes [`ToolDecision::Rewrite`]: re-validated, hooks not re-run.
+//! - `PermissionRequest` runs inside the permission layer's `ask` branch (ADR 0045 §4),
+//!   after the rules, the policy and any session grant produced `ask`, before the approver
+//!   and before the non-human-source denial, so a script answers a prompt no human will
+//!   see. Exit 0 may print `hookSpecificOutput.decision.behavior` `"allow"` or `"deny"`
+//!   (with an optional `message`); no decision leaves today's path; exit 2 denies with
+//!   stderr; any other exit, timeout, or exit-0 stdout that is not JSON fails closed as
+//!   `hook_error` and never falls back to a prompt. `updatedPermissions` is ignored
+//!   silently in this version; `updatedInput`/`interrupt` warn once and are ignored.
 //! - `PostToolUse` runs after each matching call's result, before it is committed. Exit 0 may
 //!   carry `hookSpecificOutput.additionalContext` (non-error feedback appended to the
 //!   result), `decision: "block"` with `reason` (the JSON form of exit 2: the feedback
@@ -49,11 +57,16 @@
 //! (ADR 0045 §4). Every run leaves one in-memory record, newest kept (the manual's "Recent
 //! runs"), shown on the `/hooks` page and logged at info.
 
+use crate::config::{HookCommand, HookMatcher, HooksConfig};
+use crate::goal::SharedGoal;
+use crate::intent_stop;
+use crate::wake_gate::WakeGate;
 use radian_coding::Jobs;
 use radian_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageId, RunOutcome,
     RunStatus, ToolCall, ToolDecision, ToolResult,
 };
+use radian_permissions::{PermissionRequestDecision, PermissionRequestHooks};
 use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
@@ -61,15 +74,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Notify;
-
-use crate::config::{HookCommand, HookMatcher, HooksConfig};
-use crate::goal::SharedGoal;
-use crate::intent_stop;
-use crate::wake_gate::WakeGate;
-use std::sync::Weak;
 
 /// How many characters of a hook's feedback enter the transcript (deny reasons, PostToolUse
 /// feedback, `additionalContext`, `decision.reason`, `updatedToolOutput`, Stop
@@ -231,10 +239,16 @@ enum CompiledMatcher {
     Never,
 }
 
-/// The user-level command hooks: one [`Hooks`] implementation for all three events.
+/// The user-level command hooks: one [`Hooks`] implementation for every event, plus the
+/// `PermissionRequest` chain the permission layer calls through
+/// [`radian_permissions::PermissionRequestHooks`].
 #[derive(Clone)]
 pub struct CommandHooks {
     pre: Vec<CompiledEntry>,
+    /// The `PermissionRequest` chain (ADR 0045 §4): project entries first, then the user's.
+    /// Implemented as [`radian_permissions::PermissionRequestHooks`] so the permission layer
+    /// can call it without depending on this crate.
+    permission_request: Vec<CompiledEntry>,
     post: Vec<CompiledEntry>,
     stop: Vec<HookMatcher>,
     workspace: PathBuf,
@@ -394,6 +408,12 @@ impl CommandHooks {
                 "PreToolUse",
                 &warn,
             ),
+            permission_request: compile_layered(
+                &project.permission_request,
+                &config.permission_request,
+                "PermissionRequest",
+                &warn,
+            ),
             post: compile_layered(
                 &project.post_tool_use,
                 &config.post_tool_use,
@@ -435,7 +455,10 @@ impl CommandHooks {
 
     /// Whether no hook at all is configured in either layer.
     pub fn is_empty(&self) -> bool {
-        self.pre.is_empty() && self.post.is_empty() && self.stop.is_empty()
+        self.pre.is_empty()
+            && self.permission_request.is_empty()
+            && self.post.is_empty()
+            && self.stop.is_empty()
     }
 
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
@@ -959,6 +982,10 @@ impl CommandHooks {
             }
         };
         let pid = std_child.id();
+        // Dropping this future — a cancelled turn, a Core race — must kill the whole
+        // process group, not leave the hook running after nobody waits for its answer
+        // (ADR 0045 §4; edge case 9 of `hooks-permission-request`).
+        let mut group = KillGroupOnDrop::new(pid);
         let stdin = std_child.stdin.take();
         // `select!` (not `tokio::time::timeout`) keeps the join handle, so a timeout can
         // still reap the child after killing it instead of detaching the waiter.
@@ -981,6 +1008,8 @@ impl CommandHooks {
         };
         match finished {
             Some(Ok(Ok(output))) => {
+                // The child is reaped; never touch its (possibly reused) group again.
+                group.disarm();
                 // A process killed by a signal has no exit code; that run was cancelled
                 // (the timeout path below is the timed-out end).
                 let end = output
@@ -1011,6 +1040,7 @@ impl CommandHooks {
                 // The kill ends the child, so the waiter returns and reaps it; the
                 // result no longer matters.
                 let _ = waiter.await;
+                group.disarm();
                 self.record_run(event, tool, &hook.command, HookRunEnd::TimedOut, started);
                 Err(HookError::new(format!(
                     "the {event} hook timed out after {timeout_secs}s"
@@ -1288,6 +1318,89 @@ impl CommandHooks {
             }
         }
     }
+
+    /// One `PermissionRequest` hook's verdict (ADR 0045 §4). Unlike the other events, an
+    /// exit-0 stdout that is not JSON fails closed: a script that was meant to answer the
+    /// question and misspoke must not fall through to a prompt.
+    async fn run_permission_request_hook(
+        &self,
+        hook: &HookCommand,
+        tool: &str,
+        input: &serde_json::Value,
+    ) -> Result<PermissionVerdict, HookError> {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": tool,
+            "tool_input": input,
+            "cwd": self.workspace.to_string_lossy(),
+            "session_id": self.session_id,
+        });
+        let output = self
+            .execute(hook, &stdin, "PermissionRequest", Some(tool))
+            .await?;
+        match output.code {
+            Some(2) => {
+                let reason = short(&output.stderr);
+                Ok(PermissionVerdict::Deny(Some(if reason.trim().is_empty() {
+                    "the hook blocked the call with no message".to_owned()
+                } else {
+                    reason
+                })))
+            }
+            Some(0) => {
+                if output.stdout.trim().is_empty() {
+                    return Ok(PermissionVerdict::NoDecision);
+                }
+                let parsed: HookOutput = serde_json::from_str(&output.stdout).map_err(|_| {
+                    HookError::new(
+                        "the PermissionRequest hook exited 0 but its stdout was not JSON; \
+                             the call is denied",
+                    )
+                })?;
+                let Some(decision) = parsed
+                    .hookSpecificOutput
+                    .and_then(|specific| specific.decision)
+                else {
+                    // `updatedPermissions` alone is ignored silently (the next slice).
+                    return Ok(PermissionVerdict::NoDecision);
+                };
+                if decision.updatedInput.is_some() || decision.interrupt.is_some() {
+                    (self.warn)(
+                        "PermissionRequest hook returned updatedInput or interrupt, which this \
+                         version does not support; ignoring them",
+                    );
+                }
+                match decision.behavior.as_deref() {
+                    Some("allow") => Ok(PermissionVerdict::Allow),
+                    // Bounded like stderr: hook output enters the model's context.
+                    Some("deny") => Ok(PermissionVerdict::Deny(
+                        decision.message.map(|message| short(&message)),
+                    )),
+                    Some(other) => {
+                        (self.warn)(&format!(
+                            "PermissionRequest hook returned unknown decision.behavior \
+                             \"{other}\"; ignoring it"
+                        ));
+                        Ok(PermissionVerdict::NoDecision)
+                    }
+                    None => {
+                        (self.warn)(
+                            "PermissionRequest hook returned a decision without behavior; \
+                             ignoring it",
+                        );
+                        Ok(PermissionVerdict::NoDecision)
+                    }
+                }
+            }
+            _ => Err(HookError::new(format!(
+                "the PermissionRequest hook exited with code {}: {}",
+                output
+                    .code
+                    .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                short(&output.stderr),
+            ))),
+        }
+    }
 }
 
 /// One finished hook process.
@@ -1302,6 +1415,13 @@ enum PreVerdict {
     Continue,
     Updated(serde_json::Value),
     Deny(String),
+}
+
+/// One `PermissionRequest` hook's verdict (ADR 0045 §4).
+enum PermissionVerdict {
+    NoDecision,
+    Allow,
+    Deny(Option<String>),
 }
 
 /// An exit-0 hook stdout, Claude's field names (kept verbatim, hence non-snake-case).
@@ -1327,12 +1447,32 @@ struct HookSpecificOutput {
     updatedInput: Option<serde_json::Value>,
     #[serde(default)]
     additionalContext: Option<String>,
+    /// `PermissionRequest` only: `decision { behavior, message, … }`. Every other event
+    /// ignores the field.
+    #[serde(default)]
+    decision: Option<PermissionDecisionOutput>,
     /// `Option<Option<_>>` with [`present`]: `None` when the field is absent, `Some(None)`
     /// for a present JSON `null`, `Some(Some(value))` otherwise. The other option fields
     /// here may treat `null` as absence; only this one must fail closed on every
     /// non-string value.
     #[serde(default, deserialize_with = "present")]
     updatedToolOutput: Option<Option<serde_json::Value>>,
+}
+
+/// One `PermissionRequest` `hookSpecificOutput.decision` (ADR 0045 §4). `updatedPermissions`
+/// is deliberately not read: this version ignores it silently (the next slice). A present
+/// `null` counts as present for the two unsupported fields, so a warn is not lost.
+#[derive(Debug, Default, Deserialize)]
+#[allow(non_snake_case)]
+struct PermissionDecisionOutput {
+    #[serde(default)]
+    behavior: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    updatedInput: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "present")]
+    interrupt: Option<Option<serde_json::Value>>,
 }
 
 /// Deserializes a possibly-`null` field while keeping "present" apart from "absent"
@@ -1345,6 +1485,32 @@ where
     D: serde::Deserializer<'de>,
 {
     T::deserialize(deserializer).map(Some)
+}
+
+/// Kills a hook child's whole session group when dropped. `spawn_piped` puts the child in its
+/// own group (`setsid`), and the future that waits on it can be dropped — a cancelled turn
+/// drops it at an `await` — so a kill that only runs on the timeout path would leak a hook
+/// process nobody waits for. `kill_tree` is best effort; the spawn-blocking waiter still
+/// reaps the child.
+struct KillGroupOnDrop(Option<u32>);
+
+impl KillGroupOnDrop {
+    fn new(pid: u32) -> Self {
+        Self(Some(pid))
+    }
+
+    /// The run ended normally (or the caller kills it itself): never touch the group again.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            kill_tree(pid);
+        }
+    }
 }
 
 /// Kills a timed-out hook's whole session group (`setsid` in `spawn_piped` put it in one).
@@ -1428,6 +1594,52 @@ fn short(text: &str) -> String {
         format!("{kept}…[truncated]")
     } else {
         kept
+    }
+}
+
+impl PermissionRequestHooks for CommandHooks {
+    /// Runs the `PermissionRequest` chain (ADR 0045 §4): project entries first, the user's
+    /// after; any `deny` stops it; one `allow` stands unless a later hook denies; the same
+    /// `command` + `args` runs once. `Err` is a hook error and denies the call with
+    /// `hook_error`.
+    fn permission_request<'a>(
+        &'a self,
+        call: &'a ToolCall,
+    ) -> futures_util::future::BoxFuture<'a, Result<PermissionRequestDecision, HookError>> {
+        Box::pin(async move {
+            if self.permission_request.is_empty() {
+                return Ok(PermissionRequestDecision::NoDecision);
+            }
+            // One run per command string, like the other events (ADR 0045 slice B).
+            let mut seen = std::collections::HashSet::new();
+            let mut allowed = false;
+            for entry in &self.permission_request {
+                if !Self::matches(&entry.matcher, &call.name) {
+                    continue;
+                }
+                for hook in &entry.hooks {
+                    if !seen.insert(dedup_key(hook)) {
+                        continue;
+                    }
+                    match self
+                        .run_permission_request_hook(hook, &call.name, &call.arguments)
+                        .await?
+                    {
+                        PermissionVerdict::NoDecision => {}
+                        PermissionVerdict::Allow => allowed = true,
+                        // A deny only narrows: the rest of the chain never runs.
+                        PermissionVerdict::Deny(reason) => {
+                            return Ok(PermissionRequestDecision::Deny { reason });
+                        }
+                    }
+                }
+            }
+            Ok(if allowed {
+                PermissionRequestDecision::Allow
+            } else {
+                PermissionRequestDecision::NoDecision
+            })
+        })
     }
 }
 
@@ -4229,5 +4441,282 @@ mod tests {
             "tool turns never fill the idle cap"
         );
         assert_eq!(fixture.hooks.hook_idle_continuations(), 0);
+    }
+
+    // ---------- `PermissionRequest` (ADR 0045 §4) ----------
+
+    fn permission_request_config(matcher: &str, command: &str) -> HooksConfig {
+        HooksConfig {
+            permission_request: vec![entry(matcher, vec![hook(command)])],
+            ..HooksConfig::default()
+        }
+    }
+
+    async fn request(
+        fixture: &Fixture,
+        call: &ToolCall,
+    ) -> Result<PermissionRequestDecision, HookError> {
+        PermissionRequestHooks::permission_request(&fixture.hooks, call).await
+    }
+
+    /// §3: exit 0 with `decision.behavior` answers the ask; a deny carries its `message`.
+    #[tokio::test]
+    async fn permission_request_allow_and_deny_come_from_the_decision() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Allow
+        );
+
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no-writes"}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Deny {
+                reason: Some("no-writes".into())
+            }
+        );
+    }
+
+    /// §2: the stdin carries the tool fields and `cwd`/`session_id`, and never
+    /// `permission_suggestions` (radian has no text rule syntax).
+    #[tokio::test]
+    async fn permission_request_stdin_has_the_tool_fields_and_no_suggestions() {
+        let root = TempRoot::new("permission-stdin");
+        let stdin_path = root.dir.join("stdin.json");
+        let config = permission_request_config("shell", &format!("cat > {}", stdin_path.display()));
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let _ = request(
+            &fixture,
+            &call("shell", serde_json::json!({"command": "make check"})),
+        )
+        .await;
+        let stdin: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_path).unwrap()).unwrap();
+        assert_eq!(stdin["hook_event_name"], "PermissionRequest");
+        assert_eq!(stdin["tool_name"], "shell");
+        assert_eq!(stdin["tool_input"]["command"], "make check");
+        assert_eq!(stdin["session_id"], "test-session");
+        assert_eq!(stdin["cwd"], fixture._root.ws.to_string_lossy().as_ref());
+        assert!(
+            stdin.get("permission_suggestions").is_none(),
+            "there are no text suggestions: {stdin}"
+        );
+    }
+
+    /// §3: exit 2 denies with stderr as the reason (the `PreToolUse` caliber).
+    #[tokio::test]
+    async fn permission_request_exit_2_denies_with_the_stderr_reason() {
+        let fixture = plain(&permission_request_config(
+            "shell",
+            "echo blocked-by-script >&2; exit 2",
+        ));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Deny {
+                reason: Some("blocked-by-script\n".into())
+            }
+        );
+    }
+
+    /// §3: empty stdout, an unknown `behavior`, and a decision without `behavior` all mean
+    /// "no decision"; the last two warn one line and the ordinary path follows.
+    #[tokio::test]
+    async fn permission_request_undecided_outputs_follow_the_ordinary_path() {
+        let fixture = plain(&permission_request_config("shell", "exit 0"));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::NoDecision
+        );
+        assert!(warned(&fixture.warnings).is_empty());
+
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"maybe"}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::NoDecision
+        );
+        assert!(
+            warned(&fixture.warnings)
+                .iter()
+                .any(|warning| warning.contains("unknown decision.behavior")
+                    && warning.contains("maybe")),
+            "{:?}",
+            warned(&fixture.warnings)
+        );
+
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"message":"x"}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::NoDecision
+        );
+        assert!(
+            warned(&fixture.warnings)
+                .iter()
+                .any(|warning| warning.contains("without behavior")),
+            "{:?}",
+            warned(&fixture.warnings)
+        );
+    }
+
+    /// §3 / edge case 3: a non-zero non-2 exit, exit-0 stdout that is not JSON, and a
+    /// timeout are hook errors — denied with `hook_error`, never "no decision".
+    #[tokio::test]
+    async fn permission_request_hook_errors_fail_closed() {
+        for (command, timeout) in [
+            ("exit 1", None),
+            ("printf '%s' 'hello'", None),
+            ("sleep 30", Some(1)),
+        ] {
+            let mut config = permission_request_config("shell", command);
+            config.permission_request[0].hooks[0].timeout_secs = timeout;
+            let fixture = plain(&config);
+            let error = request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .expect_err("a broken hook must fail closed, not decide");
+            assert!(
+                error.to_string().contains("PermissionRequest hook"),
+                "{command}: {error}"
+            );
+        }
+    }
+
+    /// §3: `updatedPermissions` is ignored silently in this version; `updatedInput` and
+    /// `interrupt` are ignored with one warning line, and the decision still stands.
+    #[tokio::test]
+    async fn permission_request_ignores_unsupported_fields() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"session"}]}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Allow
+        );
+        assert!(
+            warned(&fixture.warnings).is_empty(),
+            "updatedPermissions is ignored silently for now: {:?}",
+            warned(&fixture.warnings)
+        );
+
+        for field in [r#""updatedInput":{"command":"x"}"#, r#""interrupt":true"#] {
+            let script = format!(
+                r#"printf '%s' '{{"hookSpecificOutput":{{"decision":{{"behavior":"allow",{field}}}}}}}'"#
+            );
+            let fixture = plain(&permission_request_config("shell", &script));
+            assert_eq!(
+                request(&fixture, &call("shell", serde_json::json!({})))
+                    .await
+                    .unwrap(),
+                PermissionRequestDecision::Allow
+            );
+            let warnings = warned(&fixture.warnings);
+            assert_eq!(warnings.len(), 1, "{field}: {warnings:?}");
+            assert!(
+                warnings[0].contains("updatedInput") && warnings[0].contains("interrupt"),
+                "{field}: {warnings:?}"
+            );
+        }
+    }
+
+    /// §4: the project layer runs first; a user `deny` beats a project `allow`; a project
+    /// `deny` stops the chain (the user's marker never appears); and a project `allow`
+    /// with a silent user layer allows. An identical command in both layers runs once.
+    #[tokio::test]
+    async fn permission_request_layers_and_deny_stop_the_chain() {
+        // Project allow, user deny: denied.
+        let project = permission_request_config(
+            "shell",
+            r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#,
+        );
+        let user = permission_request_config("shell", "echo user-deny >&2; exit 2");
+        let fixture = layered(&user, &project);
+        match request(&fixture, &call("shell", serde_json::json!({})))
+            .await
+            .unwrap()
+        {
+            PermissionRequestDecision::Deny { reason } => assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("user-deny")),
+                "the user deny stands: {reason:?}"
+            ),
+            other => panic!("the user deny stands: {other:?}"),
+        }
+
+        // Project deny: the user hook never starts.
+        let root = TempRoot::new("permission-deny-stops");
+        let marker = root.dir.join("user-ran");
+        let project = permission_request_config("shell", "echo project-deny >&2; exit 2");
+        let user =
+            permission_request_config("shell", &format!("touch {}; exit 0", marker.display()));
+        let fixture = layered_with_root(root, &user, &project, SandboxSlot::empty());
+        match request(&fixture, &call("shell", serde_json::json!({})))
+            .await
+            .unwrap()
+        {
+            PermissionRequestDecision::Deny { reason } => assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("project-deny")),
+                "the project deny stands: {reason:?}"
+            ),
+            other => panic!("the project deny stands: {other:?}"),
+        }
+        assert!(
+            !marker.exists(),
+            "a deny only narrows: the later layer must not run"
+        );
+
+        // Project allow, user silent: allowed.
+        let project = permission_request_config(
+            "shell",
+            r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow"}}}'"#,
+        );
+        let user = permission_request_config("shell", "exit 0");
+        let fixture = layered(&user, &project);
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Allow
+        );
+
+        // The same command in both layers runs once.
+        let root = TempRoot::new("permission-dedupe");
+        let counter = root.dir.join("runs");
+        let script = format!(
+            "echo ran >> {}; printf '%s' '{{\"hookSpecificOutput\":{{\"decision\":{{\"behavior\":\"allow\"}}}}}}'",
+            counter.display()
+        );
+        let project = permission_request_config("shell", &script);
+        let user = permission_request_config("shell", &script);
+        let fixture = layered_with_root(root, &user, &project, SandboxSlot::empty());
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Allow
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1,
+            "one run for two identical namings"
+        );
     }
 }

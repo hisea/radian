@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use agent_extensions::McpToolProvider;
 use radian_core::{Agent, AgentConfig, ModelUsage};
-use radian_permissions::{Approver, PermissionHooks};
+use radian_permissions::{Approver, PermissionHooks, PermissionRequestHooks};
 use radian_runtime::{Driver, Inbox, ModelRoute};
 use radian_sandbox::{Sandbox, SandboxSlot};
 
@@ -392,6 +392,13 @@ pub async fn open_session(
         Arc::clone(&wake_warning),
         intent_stop_warning,
         hook_stop_warning,
+    ));
+    // ADR 0045 §4: the permission layer asks the same command hooks to answer an `ask`
+    // before any approver (and before the non-human denial). The permission crate holds
+    // only the trait; this is the one place the two sides meet, so `radian-permissions`
+    // never depends on `radian-host`.
+    hooks.set_permission_request_hooks(Some(
+        Arc::clone(&command_hooks) as Arc<dyn PermissionRequestHooks>
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),

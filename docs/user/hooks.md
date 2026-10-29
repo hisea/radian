@@ -4,26 +4,33 @@ description: Run your own commands when a tool runs or the model stops.
 
 # Hooks
 
-Hooks run your own commands at three moments: before a tool runs, after a
-tool runs, and when the model stops. Use them to log, to format, to block, or
+Hooks run your own commands at four moments: before a tool runs, when a
+permission rule is about to ask you, after a tool runs, and when the model
+stops. Use them to log, to format, to block, to answer a prompt yourself, or
 to continue a turn with your own check.
 
-A hook never widens permissions. A hook that says `allow` or `ask` is
-refused with a warning and treated as no decision. The call still follows
-the permission rules in `permissions.md`.
+A hook never widens permissions. On `PreToolUse`, a hook that says `allow` or
+`ask` is refused with a warning and treated as no decision. The call still
+follows the permission rules in `permissions.md`. `PermissionRequest` is the
+one event that may say `allow`: it answers a call the rules already judged
+`ask`, so it removes a question and never lifts a `deny` rule or the sandbox.
 
 ## Events
 
-Three events exist. Their names are case-sensitive.
+Four events exist. Their names are case-sensitive.
 
 | Event | When it runs | The matcher |
 |---|---|---|
 | `PreToolUse` | Before each tool call | Filters by tool name |
+| `PermissionRequest` | Before a permission prompt, when the rules say `ask` | Filters by tool name |
 | `PostToolUse` | After each tool call | Filters by tool name |
 | `Stop` | After a completed turn | Ignored; every entry runs |
 
 Any other event name is skipped with one warning. Only a completed turn runs
 `Stop`: a cancelled, failed or otherwise unfinished turn runs nothing.
+`PermissionRequest` fires after the permission rules and an existing session
+grant resolved a call to `ask`, and before anyone is asked. A `deny` rule hit,
+an allowed call, and an `auto`-approved call never fire it.
 
 ## Where hooks live
 
@@ -38,6 +45,10 @@ At runtime the project entries run first, then the user entries, so user
 hooks see the final arguments. An identical hook — the same `command` and the
 same `args` — runs once per event. The same program with different `args` is
 two hooks and both run.
+
+`PermissionRequest` decides across both layers: any layer's `deny` ends the
+chain, later hooks do not run; with no `deny`, one layer's `allow` is enough;
+and when no layer gives a decision the ordinary prompt (or denial) follows.
 
 A missing file is empty, never an error. An unreadable project file warns
 once and loads nothing. A hook whose `type` is not `"command"`, an entry
@@ -176,6 +187,21 @@ working directory, and the session id:
 }
 ```
 
+`PermissionRequest` receives the `PreToolUse` fields: the event name, the tool
+name, the tool input, the working directory, and the session id. It has no
+`permission_suggestions` field: radian's permission rules are types, not text,
+so there is nothing to suggest.
+
+```json
+{
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "shell",
+  "tool_input": {"command": "git push"},
+  "cwd": "/path/to/workspace",
+  "session_id": "0193…"
+}
+```
+
 `Stop` receives the event name, the working directory, the session id, and
 the last assistant message's text:
 
@@ -210,11 +236,14 @@ already started keeps its value. A turn that ends without completing runs no
 
 The exit code decides.
 
-| Exit code | `PreToolUse` | `PostToolUse` | `Stop` |
-|---|---|---|---|
-| `0` | Continue. Stdout may carry JSON (below); empty stdout continues silently, and stdout that is not JSON warns and continues. | Continue. Stdout may carry JSON (below). | Continue. Stdout may carry JSON (below). |
-| `2` | Deny: stderr (at most 2000 characters) becomes the reason. Empty stderr denies with a default message. | The tool already ran, so there is nothing to deny: stderr is fed back to the model with the result, and the result is marked as an error. | Ask for more: the reasons join into one message that opens another turn. Past the wake budget, or past the consecutive idle-continuation cap, the turn still opens its message but does not wake: it waits visibly with the matching notice instead. |
-| other, timeout, or signal | Hook error: the call is denied and the turn ends. | Hook error: the turn ends. | The turn ends with a warning. |
+| Exit code | `PreToolUse` | `PermissionRequest` | `PostToolUse` | `Stop` |
+|---|---|---|---|---|
+| `0` | Continue. Stdout may carry JSON (below); empty stdout continues silently, and stdout that is not JSON warns and continues. | Decide. Stdout may carry a decision (below); empty stdout means no decision. Stdout that is not JSON is a hook error. | Continue. Stdout may carry JSON (below). | Continue. Stdout may carry JSON (below). |
+| `2` | Deny: stderr (at most 2000 characters) becomes the reason. Empty stderr denies with a default message. | Deny: stderr (at most 2000 characters) becomes the denied result's reason. Empty stderr denies with a default message. | The tool already ran, so there is nothing to deny: stderr is fed back to the model with the result, and the result is marked as an error. | Ask for more: the reasons join into one message that opens another turn. Past the wake budget, or past the consecutive idle-continuation cap, the turn still opens its message but does not wake: it waits visibly with the matching notice instead. |
+| other, timeout, or signal | Hook error: the call is denied and the turn ends. | Hook error: the call is denied with the reason code `hook_error`, and no prompt is shown. | Hook error: the turn ends. | The turn ends with a warning. |
+
+A `PermissionRequest` `deny`, or a hook error, is never a fallback to asking you:
+an answer that did not arrive is a denial.
 
 An exit-0 hook may print one JSON object to stdout:
 
@@ -277,8 +306,33 @@ is a hook error.
 These three fields, like stderr, keep at most 2000 characters; longer text
 ends with `…[truncated]`.
 
+### `PermissionRequest`
+
+`PermissionRequest` is the one event whose exit-0 JSON decides the call. Print
+one object with a `decision`:
+
+```json
+{"hookSpecificOutput": {"decision": {"behavior": "deny", "message": "no network writes"}}}
+```
+
+| Field | Type | Default | What it does |
+|---|---|---|---|
+| `decision.behavior` | string | none | `allow` or `deny`. Any other value, or a missing value, warns once and means no decision. |
+| `decision.message` | string | none | On `deny`, the text of the denied tool result (its error code is `denied`); at most 2000 characters. On `allow` it is ignored. Without it the denial carries a default message. |
+| `decision.updatedPermissions` | array | none | Ignored in this version. |
+| `decision.updatedInput` | object | none | Ignored with one warning line. |
+| `decision.interrupt` | boolean | none | Ignored with one warning line. |
+
+A decision is one layer's answer. Any layer's `deny` ends the chain; with no
+`deny`, one layer's `allow` allows the call; when no layer gives a decision,
+the ordinary path follows: the approval prompt on a turn from you, or a denial
+when nobody can be asked (a `Stop` continuation turn, a job-notice turn, or
+`radian exec` without a terminal). `allow` here answers a question the rules
+already asked. It does not lift a `deny` rule, and does not skip the sandbox.
+
 `permissionDecision` applies only to `PreToolUse`; on `PostToolUse` and
-`Stop` it is ignored with one warning line. `updatedInput` on `Stop` is
+`Stop` it is ignored with one warning line, and on `PermissionRequest` it has
+no effect (that event reads `decision` instead). `updatedInput` on `Stop` is
 ignored with one warning line too.
 
 ## Recent runs

@@ -669,3 +669,336 @@ fn rules_against_removed_names_match_only_the_literal_name() {
         Action::Allow
     );
 }
+
+// ---------- `PermissionRequest` (ADR 0045 §4) ----------
+
+use futures_util::future::BoxFuture;
+use radian_core::HookError;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// What the stub `PermissionRequest` chain answers.
+enum StubAnswer {
+    Decide(PermissionRequestDecision),
+    Fail(String),
+    SleepThenAllow(Duration),
+}
+
+/// A scripted `PermissionRequest` chain: the one answer, and a call counter.
+struct StubRequestHooks {
+    answer: StubAnswer,
+    calls: AtomicUsize,
+}
+
+impl StubRequestHooks {
+    fn new(answer: StubAnswer) -> Arc<Self> {
+        Arc::new(Self {
+            answer,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl PermissionRequestHooks for StubRequestHooks {
+    fn permission_request<'a>(
+        &'a self,
+        _call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<PermissionRequestDecision, HookError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match &self.answer {
+                StubAnswer::Decide(decision) => Ok(decision.clone()),
+                StubAnswer::Fail(message) => Err(HookError::new(message.clone())),
+                StubAnswer::SleepThenAllow(duration) => {
+                    tokio::time::sleep(*duration).await;
+                    Ok(PermissionRequestDecision::Allow)
+                }
+            }
+        })
+    }
+}
+
+fn with_request(hooks: &Arc<PermissionHooks>, answer: StubAnswer) -> Arc<StubRequestHooks> {
+    let stub = StubRequestHooks::new(answer);
+    hooks.set_permission_request_hooks(Some(Arc::clone(&stub) as Arc<dyn PermissionRequestHooks>));
+    stub
+}
+
+/// Edge case 1 and §1: the hook answers the ask before the approver, so a scripted `allow`
+/// runs the call without any prompt. Counting the approver proves it was not asked.
+#[tokio::test]
+async fn a_permission_request_allow_answers_before_the_approver() {
+    let dir = TempDir::new("request-allow");
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::Deny { reason: None }]);
+    let audit = Arc::new(RecordingAudit::default());
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::clone(&audit),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1);
+    assert_eq!(approver.calls(), 0, "the approver must not be asked");
+    let events = audit.events();
+    assert_eq!(events.len(), 1, "one audit record");
+    assert_eq!(events[0].decision, ResolvedDecision::Allow);
+    assert_eq!(events[0].approver, AuditApprover::User);
+}
+
+/// Edge case 2: a hook deny's `message` is the denied result's reason; no message uses the
+/// default. The approver is never asked.
+#[tokio::test]
+async fn a_permission_request_deny_reaches_the_denied_result() {
+    for (answer, expected) in [
+        (
+            PermissionRequestDecision::Deny {
+                reason: Some("no-writes".into()),
+            },
+            "no-writes",
+        ),
+        (
+            PermissionRequestDecision::Deny { reason: None },
+            "PermissionRequest hook denied the call",
+        ),
+    ] {
+        let dir = TempDir::new("request-deny");
+        let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowOnce]);
+        let hooks = make_hooks(
+            asking_profile(&dir),
+            Arc::clone(&approver),
+            Arc::new(RecordingAudit::default()),
+        );
+        hooks.set_turn_source(Some(InputSource::User));
+        with_request(&hooks, StubAnswer::Decide(answer));
+        match decide(&hooks, &ctx(), &shell()).await.unwrap() {
+            ToolDecision::Deny { reason } => assert!(reason.contains(expected), "{reason}"),
+            other => panic!("a hook deny must deny: {other:?}"),
+        }
+        assert_eq!(approver.calls(), 0, "a hook deny never asks the human");
+    }
+}
+
+/// §3: a hook error is `hook_error` (Core's fail-closed result) and never a prompt.
+#[tokio::test]
+async fn a_permission_request_hook_error_never_asks_the_human() {
+    let dir = TempDir::new("request-error");
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowOnce]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    with_request(&hooks, StubAnswer::Fail("the hook timed out".into()));
+    let error = decide(&hooks, &ctx(), &shell())
+        .await
+        .expect_err("a hook error must fail closed");
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert_eq!(
+        approver.calls(),
+        0,
+        "a hook error never falls back to a human"
+    );
+}
+
+/// Edge case 5: a `System` source turn (a `Stop` continuation, a job-notice wake) is
+/// answered by the hook. Without one this call is denied before any approver.
+#[tokio::test]
+async fn a_non_human_turn_is_answered_by_the_permission_request_hook() {
+    let dir = TempDir::new("request-system");
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::System));
+    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1);
+}
+
+/// Edge case 7: a `deny` rule answers first; the hook never starts.
+#[tokio::test]
+async fn a_deny_rule_never_runs_the_permission_request_hook() {
+    let dir = TempDir::new("request-deny-rule");
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::OnAsk,
+        dir.path(),
+        vec![Rule::new(
+            ToolMatcher::Name("shell".into()),
+            ResourceMatcher::Any,
+            Action::Deny,
+        )],
+    )
+    .unwrap();
+    let hooks = make_hooks(
+        profile,
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+    assert_eq!(stub.calls(), 0, "a deny rule never reaches the hook");
+}
+
+/// Edge case 8 (§1): an allowed call and an `auto`-allowed call never fire the hook: it
+/// only ever answers a question.
+#[tokio::test]
+async fn an_allowed_call_never_runs_the_permission_request_hook() {
+    let dir = TempDir::new("request-allow-rule");
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::OnAsk,
+        dir.path(),
+        vec![Rule::new(
+            ToolMatcher::Name("shell".into()),
+            ResourceMatcher::Any,
+            Action::Allow,
+        )],
+    )
+    .unwrap();
+    let hooks = make_hooks(
+        profile,
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Deny { reason: None }),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 0, "an allowed call never asks the hook");
+
+    let dir = TempDir::new("request-auto");
+    let profile = Profile::custom(
+        Preset::WorkspaceWrite,
+        ApprovalPolicy::Auto,
+        dir.path(),
+        Vec::new(),
+    )
+    .unwrap();
+    let hooks = make_hooks(
+        profile,
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Deny { reason: None }),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 0, "auto answers the ask before the hook");
+}
+
+/// §1: a session grant that already covers the call never fires the hook; the grant still
+/// applies to the next call after an answered prompt.
+#[tokio::test]
+async fn a_session_grant_never_runs_the_permission_request_hook() {
+    let dir = TempDir::new("request-grant");
+    let approver = ScriptedApprover::scripted(vec![ApprovalOutcome::AllowForSession]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::NoDecision),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1, "the first call is still a question");
+    assert_eq!(approver.calls(), 1);
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1, "a granted call never asks the hook again");
+    assert_eq!(approver.calls(), 1);
+}
+
+/// Edge case 9 (layer half): cancelling the turn while the hook runs ends the call as a
+/// denial — never as the hook's eventual allow.
+#[tokio::test]
+async fn cancellation_interrupts_the_permission_request_hook() {
+    let dir = TempDir::new("request-cancel");
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    with_request(&hooks, StubAnswer::SleepThenAllow(Duration::from_secs(10)));
+
+    let cx = ctx();
+    let token = cx.cancellation.clone();
+    let task_hooks = Arc::clone(&hooks);
+    let task = tokio::spawn(async move {
+        let call = shell();
+        Hooks::before_tool_call(&*task_hooks, &cx, &call).await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    token.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("cancellation must interrupt the hook")
+        .expect("the task joins");
+    assert!(
+        matches!(result, Ok(ToolDecision::Deny { .. })),
+        "a cancelled ask is a denial, never the hook's allow: {result:?}"
+    );
+}
+
+/// The audit's `user` approver means "the prompt was answered"; a hook answer is recorded
+/// the same way, with its own reason.
+#[tokio::test]
+async fn a_permission_request_answer_writes_one_audit_record() {
+    let dir = TempDir::new("request-audit");
+    let audit = Arc::new(RecordingAudit::default());
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        ScriptedApprover::scripted(vec![]),
+        Arc::clone(&audit),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Deny {
+            reason: Some("script says no".into()),
+        }),
+    );
+    let _ = decide(&hooks, &ctx(), &shell()).await.unwrap();
+    let events = audit.events();
+    assert_eq!(events.len(), 1, "one record per decision: {events:?}");
+    assert_eq!(events[0].decision, ResolvedDecision::Deny);
+    assert_eq!(events[0].approver, AuditApprover::User);
+    assert_eq!(events[0].reason.as_deref(), Some("script says no"));
+}

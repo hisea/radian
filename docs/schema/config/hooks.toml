@@ -1,7 +1,7 @@
 # ADR 0045 切片 A：用户级外部命令 hook（Claude/Codex 子集）。
-# 三个事件（`PreToolUse`/`PostToolUse`/`Stop`），每个是 `{ matcher, hooks }` 条目列
-# 表，每个 hook 是 `{ type = "command", command, args, timeout }`；`args` 是可选的
-# 字符串数组（有它是 exec 形式，不经 shell；ADR 0045 §4）。
+# 四个事件（`PreToolUse`/`PermissionRequest`/`PostToolUse`/`Stop`），每个是
+# `{ matcher, hooks }` 条目列表，每个 hook 是 `{ type = "command", command, args, timeout }`；
+# `args` 是可选的字符串数组（有它是 exec 形式，不经 shell；ADR 0045 §4）。
 # `matcher` 只认 Radian 工具名（`shell`/`write`/`patch`/`read`……），`|` 分隔多个。
 # 子集之外（`type = "http"`、`async = true`、未知事件名）只跳过、不拒绝。
 schema_version = 1
@@ -16,6 +16,13 @@ matcher = "shell|write"
 type = "command"
 command = "/work/example/hooks/check-shell.sh"
 timeout = 10
+
+# 判出 ask 之后、问人之前：脚本用 `decision.behavior` 回答（ADR 0045 §4）。
+[[hooks.PermissionRequest]]
+matcher = "shell"
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "/work/example/hooks/answer-ask.sh"
 
 [[hooks.PostToolUse]]
 matcher = "patch"
