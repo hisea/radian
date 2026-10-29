@@ -714,7 +714,9 @@ impl PermissionRequestHooks for StubRequestHooks {
                 StubAnswer::Fail(message) => Err(HookError::new(message.clone())),
                 StubAnswer::SleepThenAllow(duration) => {
                     tokio::time::sleep(*duration).await;
-                    Ok(PermissionRequestDecision::Allow)
+                    Ok(PermissionRequestDecision::Allow {
+                        session_grant: false,
+                    })
                 }
             }
         })
@@ -740,7 +742,12 @@ async fn a_permission_request_allow_answers_before_the_approver() {
         Arc::clone(&audit),
     );
     hooks.set_turn_source(Some(InputSource::User));
-    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: false,
+        }),
+    );
 
     assert!(matches!(
         decide(&hooks, &ctx(), &shell()).await.unwrap(),
@@ -821,7 +828,12 @@ async fn a_non_human_turn_is_answered_by_the_permission_request_hook() {
         Arc::new(RecordingAudit::default()),
     );
     hooks.set_turn_source(Some(InputSource::System));
-    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: false,
+        }),
+    );
     assert!(matches!(
         decide(&hooks, &ctx(), &shell()).await.unwrap(),
         ToolDecision::Allow
@@ -850,7 +862,12 @@ async fn a_deny_rule_never_runs_the_permission_request_hook() {
         Arc::new(RecordingAudit::default()),
     );
     hooks.set_turn_source(Some(InputSource::User));
-    let stub = with_request(&hooks, StubAnswer::Decide(PermissionRequestDecision::Allow));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: false,
+        }),
+    );
     assert!(matches!(
         decide(&hooks, &ctx(), &shell()).await.unwrap(),
         ToolDecision::Deny { .. }
@@ -943,6 +960,164 @@ async fn a_session_grant_never_runs_the_permission_request_hook() {
     ));
     assert_eq!(stub.calls(), 1, "a granted call never asks the hook again");
     assert_eq!(approver.calls(), 1);
+}
+
+/// Edge case 1 (layer half) and §3: an `updatedPermissions` `session` grant answers the
+/// next identical call before the hook, exactly like "allow for this session": the hook
+/// runs once and the approver is never asked. It also records the grant's audit reason.
+#[tokio::test]
+async fn a_permission_request_session_grant_covers_later_calls() {
+    let dir = TempDir::new("request-grant-session");
+    let audit = Arc::new(RecordingAudit::default());
+    let approver = ScriptedApprover::scripted(vec![]);
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        Arc::clone(&approver),
+        Arc::clone(&audit),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: true,
+        }),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1);
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1, "the grant never runs the hook again");
+    assert_eq!(approver.calls(), 0, "the approver is never asked");
+    let events = audit.events();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert!(
+        events
+            .iter()
+            .all(|event| event.reason.as_deref() == Some("allowed for this session")),
+        "the grant is recorded like allow-for-session: {events:?}"
+    );
+}
+
+/// Edge case 2: a `shell` grant from the hook widens to the command's prefix, exactly as
+/// the TUI's grant does — `cargo test -p a` covers `cargo test -p b` without running the
+/// hook again, while a different subcommand is a new question.
+#[tokio::test]
+async fn a_permission_request_shell_grant_widens_to_the_prefix() {
+    let dir = TempDir::new("request-grant-prefix");
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: true,
+        }),
+    );
+    let first = call("shell", json!({"command": "cargo test -p a"}));
+    let second = call("shell", json!({"command": "cargo test -p b"}));
+    let third = call("shell", json!({"command": "cargo build -p b"}));
+    assert!(matches!(
+        decide(&hooks, &ctx(), &first).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(stub.calls(), 1);
+    assert!(
+        matches!(
+            decide(&hooks, &ctx(), &second).await.unwrap(),
+            ToolDecision::Allow
+        ),
+        "the same prefix is covered"
+    );
+    assert_eq!(stub.calls(), 1, "`cargo test -p b` must not run the hook");
+    assert!(matches!(
+        decide(&hooks, &ctx(), &third).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(
+        stub.calls(),
+        2,
+        "a different subcommand is a fresh question"
+    );
+}
+
+/// §3: a hook grant answers asks on a non-human turn too (the `radian exec` and `Stop`
+/// continuation case). The human grant never does (see `a_non_human_source_cannot...`).
+#[tokio::test]
+async fn a_permission_request_grant_covers_a_non_human_turn() {
+    let dir = TempDir::new("request-grant-system");
+    let hooks = make_hooks(
+        asking_profile(&dir),
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::System));
+    let stub = with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: true,
+        }),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+    assert_eq!(
+        stub.calls(),
+        1,
+        "a System turn's hook grant must answer the next call without the hook"
+    );
+}
+
+/// Edge case 5: the grant is in this instance only. A new session (what resume is) has no
+/// grant, so the same call is a question again.
+#[tokio::test]
+async fn a_permission_request_grant_does_not_survive_a_new_session() {
+    let dir = TempDir::new("request-grant-new-session");
+    let profile = asking_profile(&dir);
+    let hooks = make_hooks(
+        profile.clone(),
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    hooks.set_turn_source(Some(InputSource::User));
+    with_request(
+        &hooks,
+        StubAnswer::Decide(PermissionRequestDecision::Allow {
+            session_grant: true,
+        }),
+    );
+    assert!(matches!(
+        decide(&hooks, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Allow
+    ));
+
+    let resumed = make_hooks(
+        profile,
+        ScriptedApprover::scripted(vec![]),
+        Arc::new(RecordingAudit::default()),
+    );
+    resumed.set_turn_source(Some(InputSource::User));
+    let stub = with_request(
+        &resumed,
+        StubAnswer::Decide(PermissionRequestDecision::Deny { reason: None }),
+    );
+    assert!(matches!(
+        decide(&resumed, &ctx(), &shell()).await.unwrap(),
+        ToolDecision::Deny { .. }
+    ));
+    assert_eq!(stub.calls(), 1, "a new session has no grant to carry over");
 }
 
 /// Edge case 9 (layer half): cancelling the turn while the hook runs ends the call as a

@@ -16,8 +16,10 @@
 //!   see. Exit 0 may print `hookSpecificOutput.decision.behavior` `"allow"` or `"deny"`
 //!   (with an optional `message`); no decision leaves today's path; exit 2 denies with
 //!   stderr; any other exit, timeout, or exit-0 stdout that is not JSON fails closed as
-//!   `hook_error` and never falls back to a prompt. `updatedPermissions` is ignored
-//!   silently in this version; `updatedInput`/`interrupt` warn once and are ignored.
+//!   `hook_error` and never falls back to a prompt. `updatedPermissions` may carry one
+//!   `{"type":"addRules","destination":"session","behavior":"allow"}` item, which records
+//!   the session grant "allow for this session" would; other items warn once and record
+//!   nothing. `updatedInput`/`interrupt` warn once and are ignored.
 //! - `PostToolUse` runs after each matching call's result, before it is committed. Exit 0 may
 //!   carry `hookSpecificOutput.additionalContext` (non-error feedback appended to the
 //!   result), `decision: "block"` with `reason` (the JSON form of exit 2: the feedback
@@ -1322,6 +1324,44 @@ impl CommandHooks {
     /// One `PermissionRequest` hook's verdict (ADR 0045 §4). Unlike the other events, an
     /// exit-0 stdout that is not JSON fails closed: a script that was meant to answer the
     /// question and misspoke must not fall through to a prompt.
+    ///
+    /// `updatedPermissions` is read only for a layer that decides `allow`: an item
+    /// `{ "type": "addRules", "destination": "session", "behavior": "allow" }`
+    /// asks for a session grant, exactly like the approval prompt's "allow for this
+    /// session" (ADR 0045 §4). The item's `rules` are not parsed. Any other `type`,
+    /// `destination` or `behavior` warns one line and records nothing.
+    fn session_grant_requested(&self, updated: Option<&serde_json::Value>) -> bool {
+        let Some(updated) = updated else {
+            return false;
+        };
+        let Some(items) = updated.as_array() else {
+            (self.warn)(
+                "the PermissionRequest hook returned updatedPermissions that is not an \
+                 array; ignoring it",
+            );
+            return false;
+        };
+        let mut granted = false;
+        for item in items {
+            let accepted = item.as_object().is_some_and(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("addRules")
+                    && item.get("destination").and_then(serde_json::Value::as_str)
+                        == Some("session")
+                    && item.get("behavior").and_then(serde_json::Value::as_str) == Some("allow")
+            });
+            if accepted {
+                granted = true;
+            } else {
+                (self.warn)(
+                    "the PermissionRequest hook returned an updatedPermissions item that \
+                     is ignored: only { \"type\": \"addRules\", \"destination\": \"session\", \
+                     \"behavior\": \"allow\" } is supported",
+                );
+            }
+        }
+        granted
+    }
+
     async fn run_permission_request_hook(
         &self,
         hook: &HookCommand,
@@ -1361,7 +1401,8 @@ impl CommandHooks {
                     .hookSpecificOutput
                     .and_then(|specific| specific.decision)
                 else {
-                    // `updatedPermissions` alone is ignored silently (the next slice).
+                    // No decision: `updatedPermissions` alone contributes nothing (items
+                    // count only from a layer that decides `allow`).
                     return Ok(PermissionVerdict::NoDecision);
                 };
                 if decision.updatedInput.is_some() || decision.interrupt.is_some() {
@@ -1371,7 +1412,10 @@ impl CommandHooks {
                     );
                 }
                 match decision.behavior.as_deref() {
-                    Some("allow") => Ok(PermissionVerdict::Allow),
+                    Some("allow") => Ok(PermissionVerdict::Allow {
+                        session_grant: self
+                            .session_grant_requested(decision.updatedPermissions.as_ref()),
+                    }),
                     // Bounded like stderr: hook output enters the model's context.
                     Some("deny") => Ok(PermissionVerdict::Deny(
                         decision.message.map(|message| short(&message)),
@@ -1418,9 +1462,14 @@ enum PreVerdict {
 }
 
 /// One `PermissionRequest` hook's verdict (ADR 0045 §4).
+#[derive(Debug, PartialEq, Eq)]
 enum PermissionVerdict {
     NoDecision,
-    Allow,
+    /// `session_grant` is the one supported `updatedPermissions` item: this call also
+    /// records a session grant, like the approval prompt's "allow for this session".
+    Allow {
+        session_grant: bool,
+    },
     Deny(Option<String>),
 }
 
@@ -1460,8 +1509,8 @@ struct HookSpecificOutput {
 }
 
 /// One `PermissionRequest` `hookSpecificOutput.decision` (ADR 0045 §4). `updatedPermissions`
-/// is deliberately not read: this version ignores it silently (the next slice). A present
-/// `null` counts as present for the two unsupported fields, so a warn is not lost.
+/// is read only for the one item shape this version acts on; a present `null` counts as
+/// present for the two unsupported fields, so a warn is not lost.
 #[derive(Debug, Default, Deserialize)]
 #[allow(non_snake_case)]
 struct PermissionDecisionOutput {
@@ -1469,6 +1518,10 @@ struct PermissionDecisionOutput {
     behavior: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// Parsed by [`CommandHooks::session_grant_requested`], so a malformed value warns
+    /// instead of failing the whole decision closed.
+    #[serde(default)]
+    updatedPermissions: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "present")]
     updatedInput: Option<Option<serde_json::Value>>,
     #[serde(default, deserialize_with = "present")]
@@ -1613,6 +1666,7 @@ impl PermissionRequestHooks for CommandHooks {
             // One run per command string, like the other events (ADR 0045 slice B).
             let mut seen = std::collections::HashSet::new();
             let mut allowed = false;
+            let mut session_grant = false;
             for entry in &self.permission_request {
                 if !Self::matches(&entry.matcher, &call.name) {
                     continue;
@@ -1626,7 +1680,14 @@ impl PermissionRequestHooks for CommandHooks {
                         .await?
                     {
                         PermissionVerdict::NoDecision => {}
-                        PermissionVerdict::Allow => allowed = true,
+                        PermissionVerdict::Allow {
+                            session_grant: granted,
+                        } => {
+                            allowed = true;
+                            // Items count only when the final decision is an allow; a
+                            // later `deny` returns before this ever leaves the chain.
+                            session_grant |= granted;
+                        }
                         // A deny only narrows: the rest of the chain never runs.
                         PermissionVerdict::Deny(reason) => {
                             return Ok(PermissionRequestDecision::Deny { reason });
@@ -1635,7 +1696,7 @@ impl PermissionRequestHooks for CommandHooks {
                 }
             }
             Ok(if allowed {
-                PermissionRequestDecision::Allow
+                PermissionRequestDecision::Allow { session_grant }
             } else {
                 PermissionRequestDecision::NoDecision
             })
@@ -4468,7 +4529,9 @@ mod tests {
             request(&fixture, &call("shell", serde_json::json!({})))
                 .await
                 .unwrap(),
-            PermissionRequestDecision::Allow
+            PermissionRequestDecision::Allow {
+                session_grant: false
+            }
         );
 
         let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no-writes"}}}'"#;
@@ -4557,6 +4620,23 @@ mod tests {
             warned(&fixture.warnings)
         );
 
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow"}]}}}'"#;
+        let fixture = plain(&permission_request_config("shell", script));
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::NoDecision,
+            "items count only from a layer that decides allow"
+        );
+        assert!(
+            warned(&fixture.warnings)
+                .iter()
+                .any(|warning| warning.contains("without behavior")),
+            "{:?}",
+            warned(&fixture.warnings)
+        );
+
         let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"message":"x"}}}'"#;
         let fixture = plain(&permission_request_config("shell", script));
         assert_eq!(
@@ -4596,24 +4676,10 @@ mod tests {
         }
     }
 
-    /// §3: `updatedPermissions` is ignored silently in this version; `updatedInput` and
-    /// `interrupt` are ignored with one warning line, and the decision still stands.
+    /// §3: `updatedInput` and `interrupt` are ignored with one warning line, and the
+    /// decision still stands.
     #[tokio::test]
-    async fn permission_request_ignores_unsupported_fields() {
-        let script = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"session"}]}}}'"#;
-        let fixture = plain(&permission_request_config("shell", script));
-        assert_eq!(
-            request(&fixture, &call("shell", serde_json::json!({})))
-                .await
-                .unwrap(),
-            PermissionRequestDecision::Allow
-        );
-        assert!(
-            warned(&fixture.warnings).is_empty(),
-            "updatedPermissions is ignored silently for now: {:?}",
-            warned(&fixture.warnings)
-        );
-
+    async fn permission_request_ignores_unsupported_decision_fields() {
         for field in [r#""updatedInput":{"command":"x"}"#, r#""interrupt":true"#] {
             let script = format!(
                 r#"printf '%s' '{{"hookSpecificOutput":{{"decision":{{"behavior":"allow",{field}}}}}}}'"#
@@ -4623,7 +4689,9 @@ mod tests {
                 request(&fixture, &call("shell", serde_json::json!({})))
                     .await
                     .unwrap(),
-                PermissionRequestDecision::Allow
+                PermissionRequestDecision::Allow {
+                    session_grant: false
+                }
             );
             let warnings = warned(&fixture.warnings);
             assert_eq!(warnings.len(), 1, "{field}: {warnings:?}");
@@ -4632,6 +4700,75 @@ mod tests {
                 "{field}: {warnings:?}"
             );
         }
+    }
+
+    /// §3: the one accepted `updatedPermissions` item asks for a session grant; other
+    /// `type`/`destination`/`behavior` values warn one line and record nothing, and the
+    /// allow still stands. `rules` inside an accepted item are not parsed.
+    #[tokio::test]
+    async fn permission_request_accepts_only_the_session_add_rules_item() {
+        let accepted = r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow","rules":["Bash(git push)"]}]}}}'"#;
+        for (script, session_grant, warnings) in [
+            // The one accepted shape: a session grant, whatever `rules` holds.
+            (accepted, true, 0usize),
+            // Another destination: a warning, and the allow is still one call only.
+            (
+                r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"projectSettings","behavior":"allow"}]}}}'"#,
+                false,
+                1,
+            ),
+            // Another type or behavior: a warning and no grant.
+            (
+                r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"setMode","destination":"session","behavior":"allow"}]}}}'"#,
+                false,
+                1,
+            ),
+            (
+                r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"session","behavior":"deny"}]}}}'"#,
+                false,
+                1,
+            ),
+        ] {
+            let fixture = plain(&permission_request_config("shell", script));
+            assert_eq!(
+                request(&fixture, &call("shell", serde_json::json!({})))
+                    .await
+                    .unwrap(),
+                PermissionRequestDecision::Allow { session_grant },
+                "{script}"
+            );
+            let warned = warned(&fixture.warnings);
+            assert_eq!(warned.len(), warnings, "{script}: {warned:?}");
+            if warnings > 0 {
+                assert!(
+                    warned[0].contains("updatedPermissions"),
+                    "{script}: {warned:?}"
+                );
+            }
+        }
+    }
+
+    /// §4: items count only from a layer that decides `allow`: a `deny` layer's
+    /// `updatedPermissions` is never read, and the chain's answer stays a denial.
+    #[tokio::test]
+    async fn a_denying_layer_never_records_an_updated_permissions_grant() {
+        let project = permission_request_config(
+            "shell",
+            r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow"}]}}}'"#,
+        );
+        let user = permission_request_config(
+            "shell",
+            r#"printf '%s' '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no-writes","updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow"}]}}}'"#,
+        );
+        let fixture = layered(&user, &project);
+        assert_eq!(
+            request(&fixture, &call("shell", serde_json::json!({})))
+                .await
+                .unwrap(),
+            PermissionRequestDecision::Deny {
+                reason: Some("no-writes".into())
+            }
+        );
     }
 
     /// §4: the project layer runs first; a user `deny` beats a project `allow`; a project
@@ -4694,7 +4831,9 @@ mod tests {
             request(&fixture, &call("shell", serde_json::json!({})))
                 .await
                 .unwrap(),
-            PermissionRequestDecision::Allow
+            PermissionRequestDecision::Allow {
+                session_grant: false
+            }
         );
 
         // The same command in both layers runs once.
@@ -4711,7 +4850,9 @@ mod tests {
             request(&fixture, &call("shell", serde_json::json!({})))
                 .await
                 .unwrap(),
-            PermissionRequestDecision::Allow
+            PermissionRequestDecision::Allow {
+                session_grant: false
+            }
         );
         assert_eq!(
             std::fs::read_to_string(&counter).unwrap().lines().count(),

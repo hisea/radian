@@ -1033,3 +1033,160 @@ async fn a_user_permission_request_deny_beats_a_project_allow() {
     assert_eq!(events[0].decision, ResolvedDecision::Deny);
     assert_eq!(events[0].approver, radian_permissions::AuditApprover::User);
 }
+
+/// Edge case 1 (process half) and §3: an allow with the one accepted `updatedPermissions`
+/// item records a session grant. The second identical call is allowed by the grant, so the
+/// hook never runs again — the marker counts one run — and the approver is never asked.
+#[tokio::test]
+async fn a_hook_session_grant_answers_the_next_call_without_running_the_hook() {
+    let ws = scratch("request-grant-session");
+    let marker = ws.join("runs");
+    let script = format!(
+        "echo ran >> {}\nprintf '%s' '{{\"hookSpecificOutput\":{{\"decision\":{{\"behavior\":\"allow\",\
+         \"updatedPermissions\":[{{\"type\":\"addRules\",\"destination\":\"session\",\
+         \"behavior\":\"allow\"}}]}}}}}}'",
+        marker.display()
+    );
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, None, &script, None);
+    install_request_hooks(&permissions, &commands);
+    let chain = production_chain(&ws, permissions, commands);
+
+    for n in 0..2 {
+        let decision = chain
+            .before_tool_call(&context(), &shell_call())
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Allow),
+            "call {n}: {decision:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().count(),
+        1,
+        "the grant answers the second call, so the hook runs once"
+    );
+    assert_eq!(approver.calls(), 0, "the terminal approver is never asked");
+}
+
+/// Edge case 3: `destination: "projectSettings"` warns one line and records no grant; the
+/// call is still allowed once, and the second identical call runs the hook again.
+#[tokio::test]
+async fn an_unsupported_updated_permissions_destination_allows_once_without_a_grant() {
+    let ws = scratch("request-grant-destination");
+    let marker = ws.join("runs");
+    let script = format!(
+        "echo ran >> {}\nprintf '%s' '{{\"hookSpecificOutput\":{{\"decision\":{{\"behavior\":\"allow\",\
+         \"updatedPermissions\":[{{\"type\":\"addRules\",\"destination\":\"projectSettings\",\
+         \"behavior\":\"allow\"}}]}}}}}}'",
+        marker.display()
+    );
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&warnings);
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let entry = radian_host::config::HookMatcher {
+        matcher: Some("*".into()),
+        hooks: vec![radian_host::config::HookCommand {
+            command: script,
+            args: None,
+            timeout_secs: None,
+        }],
+    };
+    let user = radian_host::config::HooksConfig {
+        permission_request: vec![entry],
+        ..Default::default()
+    };
+    let commands = Arc::new(CommandHooks::new(
+        &user,
+        &radian_host::config::HooksConfig::default(),
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &radian_runtime::Inbox::new(64),
+        &tokio::runtime::Handle::current(),
+        Arc::new(move |message: &str| sink.lock().unwrap().push(message.to_owned())),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ));
+    install_request_hooks(&permissions, &commands);
+    let chain = production_chain(&ws, permissions, commands);
+
+    for n in 0..2 {
+        let decision = chain
+            .before_tool_call(&context(), &shell_call())
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, ToolDecision::Allow),
+            "call {n}: {decision:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().count(),
+        2,
+        "an unsupported destination records no grant, so each call runs the hook"
+    );
+    assert_eq!(approver.calls(), 0, "the hook still allows each call");
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 2, "one warning per run: {warnings:?}");
+    assert!(
+        warnings[0].contains("updatedPermissions") && warnings[0].contains("session"),
+        "{warnings:?}"
+    );
+}
+
+/// Edge case 4: a project layer `allow` with an `addRules` grant, then a user layer
+/// `deny`: the final decision is a denial, so no grant is recorded and the next identical
+/// call runs both layers again (the project marker counts two runs).
+#[tokio::test]
+async fn a_user_deny_discards_a_project_updated_permissions_grant() {
+    let ws = scratch("request-grant-project-deny");
+    let marker = ws.join("project-runs");
+    let project_script = format!(
+        "echo ran >> {}\nprintf '%s' '{{\"hookSpecificOutput\":{{\"decision\":{{\"behavior\":\"allow\",\
+         \"updatedPermissions\":[{{\"type\":\"addRules\",\"destination\":\"session\",\
+         \"behavior\":\"allow\"}}]}}}}}}'",
+        marker.display()
+    );
+    let approver = NoTerminalApprover::new();
+    let permissions = Arc::new(PermissionHooks::new(
+        asking_profile(&ws),
+        Some(Arc::clone(&approver) as Arc<dyn Approver>),
+        Arc::new(NoopAudit),
+    ));
+    permissions.set_turn_source(Some(InputSource::User));
+    let commands = request_commands(&ws, Some(&project_script), DENY_SCRIPT, None);
+    install_request_hooks(&permissions, &commands);
+    let chain = production_chain(&ws, permissions, commands);
+
+    for n in 0..2 {
+        let decision = chain
+            .before_tool_call(&context(), &shell_call())
+            .await
+            .unwrap();
+        assert!(
+            matches!(&decision, ToolDecision::Deny { reason } if reason.contains("no-writes-by-script")),
+            "call {n}: the user deny stands: {decision:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().count(),
+        2,
+        "a denied call records no grant, so the project hook runs on each call"
+    );
+    assert_eq!(approver.calls(), 0, "the hooks answer every ask");
+}
