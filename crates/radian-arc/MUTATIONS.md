@@ -1722,4 +1722,5 @@ with `cargo nextest run -p radian-arc --locked --profile sandbox --test hooks -E
 | TK0239-M8 | the CLI `cancel` runs no hook of its own | `hooks::after_fail_fires_once_with_its_point_and_state` (the point stayed pending after the command) | ✅ 1 failed |
 | TK0239-M9 | `append_task_locked` writes the proposed phase without `TaskFile::enter` | `hooks::after_proposed_runs_on_the_next_pass_not_in_the_mcp_call` (the new task owed nothing) | ✅ 1 failed |
 | TK0239-M10 | `env_for` sets `ARC_STATE` to the literal `done.merged` | `hooks::after_fail_fires_once_with_its_point_and_state` (`after_fail done.merged` instead of `after_fail failed.cancelled`) | ✅ 1 failed |
+| TK0239-M11 | `point_state` reports the task's current state and phase for every point | `hooks::a_hook_that_runs_after_the_task_moved_reports_the_phase_it_fired_for` (`after_awaiting_human review.rework_pending` instead of `review.awaiting_human`) | ✅ 1 failed |
 
