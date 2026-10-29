@@ -127,5 +127,6 @@ source was restored from `.radian/mut/perm-hooks.rs` (`cmp` empty).
 | TK0232-M3 | a hook `deny` is ignored (`Ok(Deny { .. }) => {}`), so the call falls through to the approver | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_deny_reaches_the_denied_result` |
 | TK0232-M4 | a hook error returns a `Deny` instead of `Err`, so Core never writes `hook_error` and a human could be asked | ✅ 1 failed (rc=100) | `hooks.rs::a_permission_request_hook_error_never_asks_the_human` |
 | TK0232-M5 | the cancellation arm is removed from the hook `select!`, so a cancelled hook finishes instead of denying | ✅ 1 failed (rc=100, watchdog 2 s) | `hooks.rs::cancellation_interrupts_the_permission_request_hook` |
+| TK0232-M12 | the hook never runs (`permission_request.filter(\|_\| false)`), today's path on every ask | ✅ 2 failed (rc=100) | `command_hooks::an_exec_without_a_terminal_lets_the_permission_request_hook_run_the_call` and `command_hooks::an_exec_without_a_terminal_returns_the_permission_request_deny_message` |
 
-5/5 caught, no equivalent mutation.
+6/6 caught, no equivalent mutation.
