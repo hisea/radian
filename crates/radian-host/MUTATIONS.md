@@ -1631,7 +1631,7 @@ ADR 0045 §2/§5: `PostToolUse` and `Stop` parse exit-0 stdout for
 `hookSpecificOutput.updatedToolOutput`, each truncated to `REASON_CHAR_LIMIT`. Each mutation was
 applied in place to `crates/radian-host/src/hooks.rs`, the named tests ran with
 `cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast`, and the source was
-restored from `.radian/mut/hooks.rs.orig` (`cmp` empty).
+restored from a backup copy under `.radian/`.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
@@ -1643,3 +1643,4 @@ restored from `.radian/mut/hooks.rs.orig` (`cmp` empty).
 | TK0229-M6 | `additionalContext` enters untruncated | ✅ 1 failed (rc=100) | `hooks::tests::a_long_additional_context_is_truncated` |
 | TK0229-M7 | the `PostToolUse` layers are compiled user-first | ✅ 3 failed (rc=100) | `hooks::tests::{a_project_post_tool_use_runs_once_per_edit_with_its_feedback_first, the_user_hook_sees_the_project_replaced_result}` and `command_hooks::updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal` |
 | TK0229-M8 | `Stop` ignores `decision: "block"` | ✅ 1 failed (rc=100) | `hooks::tests::stop_block_decision_opens_the_same_continuation` |
+| TK0229-M9 | a present JSON `null` `updatedToolOutput` is accepted as an absent field (`None => {}` in `apply_post_output`) | ✅ 1 failed (rc=100) | `hooks::tests::a_null_updated_tool_output_is_a_hook_error` |

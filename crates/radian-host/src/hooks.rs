@@ -914,9 +914,11 @@ impl CommandHooks {
         }
         if let Some(updated) = specific.updatedToolOutput {
             match updated {
-                serde_json::Value::String(text) => {
+                Some(serde_json::Value::String(text)) => {
                     result.content = vec![ContentPart::text(short(&text))];
                 }
+                // A present `null` lands here too: `null` is a value, not an omitted field,
+                // and it is not a string.
                 _ => {
                     return Err(HookError::new(
                         "the PostToolUse hook returned a non-string updatedToolOutput",
@@ -1027,8 +1029,24 @@ struct HookSpecificOutput {
     updatedInput: Option<serde_json::Value>,
     #[serde(default)]
     additionalContext: Option<String>,
-    #[serde(default)]
-    updatedToolOutput: Option<serde_json::Value>,
+    /// `Option<Option<_>>` with [`present`]: `None` when the field is absent, `Some(None)`
+    /// for a present JSON `null`, `Some(Some(value))` otherwise. The other option fields
+    /// here may treat `null` as absence; only this one must fail closed on every
+    /// non-string value.
+    #[serde(default, deserialize_with = "present")]
+    updatedToolOutput: Option<Option<serde_json::Value>>,
+}
+
+/// Deserializes a possibly-`null` field while keeping "present" apart from "absent"
+/// ([`HookSpecificOutput::updatedToolOutput`]): a plain `Option` maps a present JSON `null`
+/// to `None`, so the field's own validation never runs. `T::deserialize` here is
+/// `Option<Value>`, so `null` becomes `Some(None)` and any value `Some(Some(value))`.
+fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Kills a timed-out hook's whole session group (`setsid` in `spawn_piped` put it in one).
@@ -1697,6 +1715,28 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("updatedToolOutput"), "{error}");
         }
+    }
+
+    /// Rework 2, item 1: a present `updatedToolOutput` of JSON `null` is a value, not an
+    /// absent field, and `null` is not a string, so it fails closed like any other
+    /// non-string. Deserializing the field into a plain `Option<Value>` conflates `null`
+    /// with absence and leaves the result unchanged instead.
+    #[tokio::test]
+    async fn a_null_updated_tool_output_is_a_hook_error() {
+        let script = r#"printf '%s' '{"hookSpecificOutput":{"updatedToolOutput":null}}'"#;
+        let config = HooksConfig {
+            post_tool_use: vec![entry("patch", vec![hook(script)])],
+            ..HooksConfig::default()
+        };
+        let fixture = plain(&config);
+        let mut result = ToolResult::success("c1", vec![ContentPart::text("patched")]);
+        let error = fixture
+            .hooks
+            .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("updatedToolOutput"), "{error}");
+        assert_eq!(result.text(), "patched", "the result is not replaced");
     }
 
     /// Edge case 7: a 10,000-character `additionalContext` keeps 2,000 characters and the
