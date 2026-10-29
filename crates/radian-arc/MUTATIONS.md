@@ -1724,3 +1724,22 @@ with `cargo nextest run -p radian-arc --locked --profile sandbox --test hooks -E
 | TK0239-M10 | `env_for` sets `ARC_STATE` to the literal `done.merged` | `hooks::after_fail_fires_once_with_its_point_and_state` (`after_fail done.merged` instead of `after_fail failed.cancelled`) | ✅ 1 failed |
 | TK0239-M11 | `point_state` reports the task's current state and phase for every point | `hooks::a_hook_that_runs_after_the_task_moved_reports_the_phase_it_fired_for` (`after_awaiting_human review.rework_pending` instead of `review.awaiting_human`) | ✅ 1 failed |
 
+## TK0239 rework 2: a pending point keeps the phase it entered (2026-10-29, branch `work/TK0239-hooks-four-more-points`)
+
+The review found that a task which entered `failed.exhausted`, then was cancelled before a pass ran
+its `after_fail`, reported `failed.cancelled`: `point_state` read the later task phase. The fix
+records the `<state>.<phase>` with the point, in the task's new optional `pending_hook_states`
+field, and `env_for` reads it (falling back to `point_state` for a file without the field). Each
+mutation was applied by hand, the `radian` binary was rebuilt with `cargo build -p radian-tui --bin
+radian` because the tests drive the CLI, the tests ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test hooks -E 'test(<name>)'` (the model one with `--lib`), and the
+file was restored from `.radian/backup/` with `cp` (`cmp` identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0239-M12 | `env_for` ignores the recorded state and always calls `point_state` | `hooks::after_fail_reports_the_failed_phase_it_entered_when_the_owner_cancels_it_later` (`after_fail failed.cancelled` instead of `failed.exhausted`) | ✅ 1 failed |
+| TK0239-M13 | `TaskFile::enter` records the point without its `pending_hook_states` entry | `hooks::after_fail_reports_the_failed_phase_it_entered_when_the_owner_cancels_it_later` (the fallback reported `failed.cancelled`) | ✅ 1 failed |
+| TK0239-M14 | `TaskFile::from_text` skips `valid_pending_hook_state` for `pending_hook_states` | `store::model::tests::a_bad_pending_hook_state_is_refused_by_name` (a malformed entry loaded) | ✅ 1 failed |
+| TK0239-M15 | `run_point` clears the point but not its recorded state entry | `hooks::after_awaiting_human_fires_once_with_its_point_and_state` (the file kept the state after the point was cleared) | ✅ 1 failed |
+
+
