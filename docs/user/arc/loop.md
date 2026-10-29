@@ -24,6 +24,7 @@ Before its first pass, and before each pass claims a task, it checks the worker'
 
 One pass repeats until a pass changes nothing, in this order:
 
+0. run every pending `[hooks]` point (see [Hooks](index.md#hooks)): the record is cleared after its commands ran, so a process killed mid-hook runs it again here, and a failing command prints one `warning:` line without stopping the pass;
 1. reconcile every task in `doing` (see [Reconcile](gate.md#reconcile)): apply an `AttemptFinished` that is there, leave a live attempt alone, apply the retry rules to a dead one. A `doing.reconciling` task of a `cancelled` plan is ended at `failed.cancelled` after the same process check `cancel` makes;
 2. move every `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`; this is also how a worker model wait ends (see [A worker wait on an unavailable model](gate.md#a-worker-wait-on-an-unavailable-model));
 3. re-verify, by itself, a task a `commands` or integration command failure blocked, once the target branch moved (see [A command failure and a moved target branch](gate.md#a-command-failure-and-a-moved-target-branch)), and a task waiting on an unavailable review model once its `retry_at` has passed (see [A review wait on an unavailable model](gate.md#a-review-wait-on-an-unavailable-model)): claim a new attempt without a worker. The two guards of the moved-target path apply to it, and the review wait uses no count; neither is a retry: they count toward neither `max_attempts` nor `auto_rework`;

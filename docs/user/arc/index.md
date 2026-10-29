@@ -149,7 +149,7 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
 The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `followup_pending`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `followup_pending`, `pending_hooks`, `merged_sha`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 `allow_noop` is the effective value: the task's own when its file carries the field, else its flow's. `allow_noop_source` is `task` or `flow`, the one it came from.
 `flow` is the task's flow name, and `default` when its file has no `flow` field.
 `queue_reason` is the slot reason the task line prints (`waiting for a free <flow> slot` or `waiting for a free concurrency slot`), or `null` when no limit holds the task.
@@ -220,7 +220,7 @@ It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`,
 
 It refuses with exit `3` when the id names both a plan and a task (see [Plan and task files](files.md#plan-and-task-files)), or when the outside change touched a field only arc (for a task) or the owner (for a plan) sets:
 
-- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
+- a task: `state`, `phase`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `followup_pending`, `pending_hooks`, `merged_sha`, `retry_at`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`;
 - a plan: `status`, `auto`, `priority`.
 
 A file that already matches the ledger is a no-op and prints so.
@@ -593,11 +593,11 @@ Then it:
    A passing integration moves the task to `review.ready_to_merge`.
 3. pushes the candidate to the remote target branch without force: `git push <remote> <candidate>:refs/heads/<target>`.
    When the target moved after integration (or the push is rejected as non-fast-forward), the task returns to `review.integrating` and `merge` integrates again, at most 3 times in one command. After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
-4. checks with `git ls-remote` that the remote target branch is the candidate and that the candidate contains `head_sha`, moves the task to `done.merged`, and removes the task's worktree (`.radian/arc/worktrees/<task>`).
-   The task's branch stays on the remote.
+4. checks with `git ls-remote` that the remote target branch is the candidate and that the candidate contains `head_sha`, and moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing; the default `[hooks] after_merge` lines remove the task's worktree (`.radian/arc/worktrees/<task>`) and its branches (see [Hooks](#hooks)).
+   The task's branch stays on the remote until a hook deletes it.
 
 `merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.
-On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A failed worktree removal is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added.
+On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A hook command that fails is a `warning:` line after it and does not undo the merge, and so is a follow-up task that could not be added. When a scheduling loop holds `runner.lock`, the command leaves its pending hook for the loop; otherwise it runs it itself before it prints.
 
 The exit codes are the command's own:
 
@@ -609,6 +609,46 @@ The exit codes are the command's own:
 | `1` | an error | A git or file error. |
 | `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), or 3 integration runs did not settle (the task stays in `review.integrating`). |
 | `4` | a lock is held by another process | Another process holds `state.lock`. |
+
+## Hooks
+
+`[hooks]` runs configured shell commands at fixed points in a task's life.
+The point names and their variables are fixed by the binary; only the command lines come from `config.toml`.
+This build runs one point, `after_merge`, a task reaching `done.merged`; the other points (`after_fail`, `after_rework`, `after_awaiting_human`, `after_proposed`) are not built yet, and a file that sets one is refused with a message naming it.
+
+`hooks.after_merge` is an array of shell command lines, run in the repository root, in order. Its default is `[]`, but [`radian arc init`](#radian-arc-init-track) writes these three lines (`init` replaces `origin` with the configured [`repository.remote`](files.md#configtoml) when it is not `origin`):
+
+```toml
+[hooks]
+after_merge = [
+  "git push origin --delete work/$ARC_TASK",
+  "git worktree remove --force $ARC_WORKTREE",
+  "git branch -D work/$ARC_TASK",
+]
+```
+
+Delete a line to keep that branch or the worktree; arc itself removes nothing.
+The commands read `[hooks]` when they run, not when the task merged.
+
+**At least once.** The write that moves the task to `done.merged` records `after_merge` in the task's [`pending_hooks`](files.md#task-fields) field. Only the process that holds `runner.lock` runs hooks: `radian arc run` and `radian arc serve` run every pending hook at the start of each pass, and `radian arc merge` runs it after its own transition when it can take `runner.lock` without waiting (with a loop running, it leaves the hook for that loop). A point is cleared only after its commands ran, success or failure. A process killed while a hook runs therefore runs the whole point again on the next pass: **a hook command must be safe to run twice**, and it must not assume a clean first run.
+
+**Failure and timeout.** Each command runs with [`gate.command_timeout_secs`](files.md#configtoml) as its limit (`0` waits forever); a timeout kills the command's whole process group. A command that exits non-zero, times out, or cannot start logs one `warning:` line, and the next command still runs. Hooks never undo a merge, change a task's state, or make the command exit non-zero.
+
+**Logs.** A command's stdout and stderr go to `runs/<task>/hooks/<point>-NN.log` in the run directory, where `NN` is the command's position from 1 (see [the `.radian/arc/` layout](files.md#the-radianarc-layout)).
+
+**Environment.** Every command receives these variables on top of arc's own environment:
+
+| Variable | Value |
+|---|---|
+| `ARC_TASK` | The task id. |
+| `ARC_PLAN` | The task's plan id. |
+| `ARC_ATTEMPT` | The task's current attempt, `<task>-<n>`, the same name and value a worker receives. |
+| `ARC_BRANCH` | The task's branch, `work/<task>`. |
+| `ARC_WORKTREE` | The task's worktree, absolute: `.radian/arc/worktrees/<task>` (the path as it is when it exists). |
+| `ARC_TARGET_BRANCH` | The branch the merge targeted: [`integration.target_branch`](files.md#configtoml), else [`repository.main_branch`](files.md#configtoml). |
+| `ARC_MERGED_SHA` | The sha the merge pushed to the target branch. `after_merge` only. |
+| `ARC_STATE` | The task's state and phase as `<state>.<phase>`; for `after_merge`, `done.merged`. |
+| `ARC_HOOK` | The point name, `after_merge`. |
 
 ## `radian arc reject <TASK> --note <TEXT>`
 
