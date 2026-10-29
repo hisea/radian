@@ -3311,3 +3311,18 @@ A `tool_call_update` may carry `diff` blocks and `content` text in one `content`
 | TK0225-M5 | a text-only update skips the built-in renderer: `result_text`'s empty-diff branch returns `cap_text(text.to_owned())` instead of `cap_text(tools::result_display_text(card, text))` | ✅ 1 failed | `arc::stdout::acp::tests::text_only_update_keeps_the_builtin_renderer_body` (the result was `wrote 5 bytes to a.txt` instead of the written `l1\nl2`); the rework's review item |
 
 5/5 caught (M5 is the review rework).
+
+## TK0230: a user message clears the idle-stop labels (2026-10-29, branch `work/TK0230-hook-idle-continuation-cap`)
+
+ADR 0034 H2 / ADR 0045 §3: a message on the `followup`, `steer`, or `inject` lane clears
+every idle stop at the same point the host resets its budgets; without it, herdr kept
+reporting `blocked` after a `!` command, which starts no turn. The mutations were applied in
+place to `crates/radian-tui/src/app.rs` and `app/transcript.rs`, backed up under
+`.radian/mut/` and restored (`cmp` identical). The named tests ran with `cargo nextest run -p
+radian-tui --locked --profile sandbox --lib -E 'test(app::bash::tests::a_bang_command_clears)
++ test(app::transcript::tests::a_typed_followup_and_a_steer_clear_the_stop_blocks)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0230-M6 | the user-lane clear is disabled (`if false && result.effects.iter().any(...)` in `App::update`) | ✅ 3 failed (rc=100) | `app::bash::tests::a_bang_command_clears_the_hook_stop_block`, `app::bash::tests::a_bang_command_clears_the_intent_stop_block`, `app::transcript::tests::a_typed_followup_and_a_steer_clear_the_stop_blocks` |
+| TK0230-M7 | `user_message_sent` clears only the hook-stop flag (the `intent_stop_waiting` reset removed), the twin gap | ✅ 2 failed (rc=100) | `app::bash::tests::a_bang_command_clears_the_intent_stop_block` and `app::transcript::tests::a_typed_followup_and_a_steer_clear_the_stop_blocks`; the hook-stop test still passed |

@@ -893,6 +893,19 @@ impl App {
     pub fn update(&mut self, input: Input) -> UpdateResult {
         let before = self.input.text();
         let mut result = self.update_inner(input);
+        // A message going out on the `followup`, `steer`, or `inject` lane is a user
+        // message to the host: it resets the wake budgets and the continuation counters
+        // there, so the TUI clears its idle stops at the same point. The `!` `inject` lane
+        // starts no turn, so its stop would otherwise never clear (ADR 0034 H2). The goal
+        // and `/loop` follow-ups share the lane and clear too, as the host does for them.
+        if result.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::SendFollowup(_) | Effect::Steer(_) | Effect::Inject(_)
+            )
+        }) {
+            self.user_message_sent();
+        }
         if self.input.text() != before {
             result.effects.extend(self.refresh_slash());
             result.dirty = true;

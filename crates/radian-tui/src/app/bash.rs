@@ -262,6 +262,67 @@ mod tests {
         ));
     }
 
+    /// The idle hook-continuation cap's `blocked` label ends when the user sends a message.
+    /// A `!` command is the `inject` lane: the host resets its continuation counters for it,
+    /// and it starts no turn, so only this clear can end the label. Mutation: clear only on
+    /// `TurnStarted` (drop the user-lane clear) → the label stays.
+    #[test]
+    fn a_bang_command_clears_the_hook_stop_block() {
+        let mut app = App::new("m", "s");
+        let _ = app.update(Input::HookStopBlocked(
+            radian_host::hooks::hook_stop_cap_line(),
+        ));
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::HookStop)
+        );
+
+        app.run_slash_command("!echo hi");
+        let result = app.update(Input::BashDone {
+            command: "echo hi".to_owned(),
+            exclude_from_context: false,
+            result: Ok(a_run(Some(0), "hi\n")),
+        });
+        assert!(
+            result
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::Inject(_))),
+            "the `!` message is the inject lane: {:?}",
+            result.effects
+        );
+        assert!(!app.session.hook_stop_waiting);
+        assert!(
+            app.session.wake_notice.is_none(),
+            "the stop's line is plain history now, so a later stop opens a new line"
+        );
+        assert_eq!(app.herdr_blocked(), None);
+    }
+
+    /// The intent-stop cap has the same gap and the same fix (ADR 0045 §3: the block lasts
+    /// until a user message or the next turn start). The same `!` message clears it.
+    /// Mutation: clear only the hook-stop flag → the label stays.
+    #[test]
+    fn a_bang_command_clears_the_intent_stop_block() {
+        let mut app = App::new("m", "s");
+        let _ = app.update(Input::IntentStopBlocked(
+            radian_host::intent_stop::intent_stop_cap_line(),
+        ));
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::IntentStop)
+        );
+
+        app.run_slash_command("!echo hi");
+        let _ = app.update(Input::BashDone {
+            command: "echo hi".to_owned(),
+            exclude_from_context: false,
+            result: Ok(a_run(Some(0), "hi\n")),
+        });
+        assert!(!app.session.intent_stop_waiting);
+        assert_eq!(app.herdr_blocked(), None);
+    }
+
     /// The `!` message is shown live as a block; when it comes back through the transcript it
     /// is not drawn a second time (ADR 0033).
     #[test]

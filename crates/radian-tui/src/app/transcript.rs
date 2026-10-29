@@ -303,6 +303,22 @@ impl App {
         result
     }
 
+    /// A message is about to enter the session on the user-input lanes (`followup`,
+    /// `steer`, or the `!` `inject` lane): every idle stop that waited for one ends here,
+    /// exactly as a new turn ends it. The host resets its wake budgets and continuation
+    /// counters for each of those commands (ADR 0037 decision 3, ADR 0045 §3), and the
+    /// `inject` lane starts no turn whose `TurnStarted` could clear the TUI's own state.
+    /// The stop's notice line becomes plain history, so a later stop opens a new line
+    /// instead of rewriting the old one. `!!` sends no message (audit only), so it clears
+    /// nothing.
+    pub fn user_message_sent(&mut self) {
+        self.session.wake_notice = None;
+        self.session.wake_waiting = false;
+        self.session.notice_lost_waiting = false;
+        self.session.intent_stop_waiting = false;
+        self.session.hook_stop_waiting = false;
+    }
+
     /// A wake-gate degrade fired: one visible notice line per burst. The first degrade of
     /// a burst pushes the line; a later one rewrites it with the latest count, so two
     /// degraded notices still show one line. The next turn start clears the burst (the
@@ -1399,5 +1415,58 @@ mod tests {
         );
         assert!(!app.herdr_state_inputs().3);
         assert_eq!(app.session.entries.len(), 1, "the line stays as history");
+    }
+
+    /// The other two user-input lanes end an idle stop the way a new turn does: a typed
+    /// message (`followup`) and a steer. Mutation: clear only on `TurnStarted` → both
+    /// labels stay after the message goes out.
+    #[test]
+    fn a_typed_followup_and_a_steer_clear_the_stop_blocks() {
+        let expansion = |text: &str| {
+            Ok(Expansion {
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                images: Vec::new(),
+                warnings: Vec::new(),
+            })
+        };
+
+        let mut app = App::new("m", "s");
+        let _ = app.update(Input::HookStopBlocked(
+            radian_host::hooks::hook_stop_cap_line(),
+        ));
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::HookStop)
+        );
+        app.input = "go".into();
+        let _ = app.update(Input::Action(Action::Send));
+        let sent = app.update(Input::MentionsExpanded(expansion("go")));
+        assert!(
+            matches!(sent.effects.as_slice(), [Effect::SendFollowup(_)]),
+            "{:?}",
+            sent.effects
+        );
+        assert_eq!(app.herdr_blocked(), None);
+        assert!(!app.session.hook_stop_waiting);
+
+        // While a turn runs the same Enter steers; the intent-stop cap clears just the same
+        // (ADR 0045 §3: the block lasts until a user message or the next turn start).
+        let _ = app.update(Input::IntentStopBlocked(
+            radian_host::intent_stop::intent_stop_cap_line(),
+        ));
+        app.session
+            .projection
+            .set_turn(radian_host::projection::TurnState::Running);
+        app.input = "wait".into();
+        let _ = app.update(Input::Action(Action::Send));
+        let sent = app.update(Input::MentionsExpanded(expansion("wait")));
+        assert!(
+            matches!(sent.effects.as_slice(), [Effect::Steer(_)]),
+            "{:?}",
+            sent.effects
+        );
+        assert_eq!(app.herdr_blocked(), None);
+        assert!(!app.session.intent_stop_waiting);
     }
 }
