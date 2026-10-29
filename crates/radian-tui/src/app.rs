@@ -703,6 +703,11 @@ pub struct SessionView {
     /// Shares the burst's one notice line with [`wake_waiting`](Self::wake_waiting): the
     /// latest stop owns it.
     pub(crate) intent_stop_waiting: bool,
+    /// The idle hook-continuation cap waits while the session is idle: herdr reports
+    /// `blocked` with the `hook stop` label until the next turn starts (which clears this).
+    /// Shares the burst's one notice line with [`wake_waiting`](Self::wake_waiting): the
+    /// latest stop owns it.
+    pub(crate) hook_stop_waiting: bool,
 }
 
 /// The whole TUI's state: the global chrome every session view shares, plus exactly one

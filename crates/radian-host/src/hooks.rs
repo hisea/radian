@@ -53,11 +53,11 @@ use radian_core::{
 use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 use crate::config::{HookCommand, HookMatcher, HooksConfig};
@@ -76,6 +76,58 @@ pub const REASON_CHAR_LIMIT: usize = 2000;
 /// intent-only turn end reports `blocked` instead of opening another turn (backlog
 /// `turn-end-continuation.md` §B.3).
 pub const MAX_INTENT_STOP_CONSECUTIVE: u32 = 2;
+
+/// How many hook-opened continuations may follow each other while their turns do no work:
+/// the continuation that would be the 8th in a row (a hook exit 2, `decision: "block"`,
+/// or `additionalContext`) degrades instead of opening a turn (backlog
+/// `hooks-stop-and-feedback.md` §3). A continued turn that called a tool resets the
+/// streak, so real work never counts like an idle continuation.
+pub const MAX_HOOK_IDLE_CONTINUATIONS: u32 = 8;
+
+/// The TUI notice line for the consecutive idle hook-continuation cap: no further hook
+/// continuation opens, herdr reports `blocked` with the `hook stop` label, and sending any
+/// message continues.
+pub fn hook_stop_cap_line() -> String {
+    format!(
+        "hook stop: {MAX_HOOK_IDLE_CONTINUATIONS} hook continuations in a row ended with no \
+         tool call — send any message to continue"
+    )
+}
+
+/// What opened the turn now running (ADR 0045 §2): nothing, the built-in intent-stop
+/// validator, or a user hook continuation (exit 2, `decision: "block"`,
+/// `additionalContext`). The hook idle-continuation counter only counts the last kind;
+/// the reset after real work covers every continuation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Continuation {
+    #[default]
+    None,
+    Validator,
+    Hook,
+}
+
+impl Continuation {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Validator => 1,
+            Self::Hook => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Validator,
+            2 => Self::Hook,
+            _ => Self::None,
+        }
+    }
+
+    /// Whether any `Stop` continuation opened this turn (`stop_hook_active`).
+    fn is_continuation(self) -> bool {
+        self != Self::None
+    }
+}
 
 /// The warning channel: the host routes it the way it routes its other startup/runtime
 /// lines (the CLI prints it, the TUI shows it as a notice).
@@ -139,17 +191,24 @@ pub struct CommandHooks {
     /// The TUI `/loop` mode owns the turn end while armed, so the validator stays off.
     /// The TUI loop syncs this after every update; `exec` never sets it (it has no loop).
     loop_active: Arc<AtomicBool>,
-    /// The message ids of `Stop` continuations sent and not yet claimed. Provenance
-    /// travels with the queued message: [`Inbox::claim_next_turn`]'s callback removes the
-    /// id and marks the turn it opens, so a slow `Stop` run for another turn can never
-    /// consume it. A user message clears the set ([`CommandHooks::reset_wakes`]): a
-    /// continuation still queued when the user speaks is no longer a continuation.
-    pending_continuations: Arc<std::sync::Mutex<HashSet<MessageId>>>,
-    /// Whether the turn now running was opened by a `Stop` continuation: set when the
-    /// inbox claims the continuation message, read once at that turn's own `on_turn_end`
-    /// (`stop_hook_active` on its `Stop` stdin). A non-completed turn clears it; a user
-    /// message does not touch a turn that already started.
-    turn_continuation: Arc<AtomicBool>,
+    /// The message ids of `Stop` continuations sent and not yet claimed, with the verdict
+    /// that drove each: `true` when a hook did (exit 2, `decision: "block"`,
+    /// `additionalContext`), `false` for the built-in validator alone. Provenance travels
+    /// with the queued message: [`Inbox::claim_next_turn`]'s callback removes the id and
+    /// marks the turn it opens, so a slow `Stop` run for another turn can never consume it.
+    /// A user message clears the map ([`CommandHooks::reset_wakes`]): a continuation still
+    /// queued when the user speaks is no longer a continuation.
+    pending_continuations: Arc<std::sync::Mutex<HashMap<MessageId, bool>>>,
+    /// What opened the turn now running, read once at that turn's own `on_turn_end`
+    /// (`stop_hook_active` on its `Stop` stdin, and the idle-continuation count). A
+    /// non-completed turn clears it; a user message does not touch a turn that already
+    /// started.
+    turn_continuation: Arc<AtomicU8>,
+    /// Consecutive hook-opened continuations whose turns ended `Completed` with no tool
+    /// call (`model_calls == 1`). A continued turn that called a tool, a non-`Completed`
+    /// turn, and a user message all reset it. At [`MAX_HOOK_IDLE_CONTINUATIONS`] the next
+    /// hook continuation degrades instead of opening a turn.
+    hook_idle: Arc<AtomicU32>,
     /// Consecutive validator-fired turn ends. The third consecutive hit reports `blocked`
     /// instead of continuing. A rule miss, a non-completed turn, or a user message
     /// ([`CommandHooks::reset_wakes`]) clears it.
@@ -160,6 +219,9 @@ pub struct CommandHooks {
     /// The two-in-a-row cap's notice line (its own transcript notice, so the TUI can mark
     /// the session `intent stop` for herdr until the next turn starts).
     intent_stop_warn: HooksWarning,
+    /// The idle-continuation cap's notice line (its own transcript notice, so the TUI can
+    /// mark the session `hook stop` for herdr until the next turn starts).
+    hook_stop_warn: HooksWarning,
 }
 /// A process-wide counter for continuation message ids. The wall clock alone is not
 /// enough (two calls can share a nanosecond, as in the inbox's own id nonce), so the
@@ -179,21 +241,26 @@ fn continuation_message_id() -> MessageId {
 }
 
 /// Installs the inbox's turn-claimed observer: the id of each message that opens a turn
-/// is looked up in the pending continuation set, and the answer becomes the running
-/// turn's provenance. A claim of any other input clears it (a new turn).
+/// is looked up in the pending continuation map, and the verdict that drove it becomes
+/// the running turn's provenance. A claim of any other input clears it (a new turn).
 fn install_turn_claimed_callback(
     inbox: &Arc<Inbox>,
-    pending: Arc<std::sync::Mutex<HashSet<MessageId>>>,
-    turn_continuation: Arc<AtomicBool>,
+    pending: Arc<std::sync::Mutex<HashMap<MessageId, bool>>>,
+    turn_continuation: Arc<AtomicU8>,
 ) {
     inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
-        let continuation = entry.message.meta().id.as_ref().is_some_and(|id| {
+        let continuation = entry.message.meta().id.as_ref().and_then(|id| {
             pending
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .remove(id)
         });
-        turn_continuation.store(continuation, Ordering::SeqCst);
+        let kind = match continuation {
+            Some(true) => Continuation::Hook,
+            Some(false) => Continuation::Validator,
+            None => Continuation::None,
+        };
+        turn_continuation.store(kind.as_u8(), Ordering::SeqCst);
     })));
 }
 
@@ -224,13 +291,14 @@ impl CommandHooks {
         warn: HooksWarning,
         wake: HooksWarning,
         intent_stop_warn: HooksWarning,
+        hook_stop_warn: HooksWarning,
     ) -> Self {
         // The continuation provenance rides on the claimed message, not on a session-global
         // pending flag: the inbox reports each turn-opening claim, and only the turn that
         // claims a continuation message reports `stop_hook_active: true` (ADR 0045 §2).
-        let pending_continuations: Arc<std::sync::Mutex<HashSet<MessageId>>> =
-            Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let turn_continuation = Arc::new(AtomicBool::new(false));
+        let pending_continuations: Arc<std::sync::Mutex<HashMap<MessageId, bool>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let turn_continuation = Arc::new(AtomicU8::new(Continuation::None.as_u8()));
         install_turn_claimed_callback(
             inbox,
             Arc::clone(&pending_continuations),
@@ -272,10 +340,12 @@ impl CommandHooks {
             loop_active: Arc::new(AtomicBool::new(false)),
             pending_continuations,
             turn_continuation,
+            hook_idle: Arc::new(AtomicU32::new(0)),
             consecutive: Arc::new(AtomicU32::new(0)),
             warn,
             wake,
             intent_stop_warn,
+            hook_stop_warn,
         }
     }
 
@@ -295,6 +365,7 @@ impl CommandHooks {
         self.gate.reset_wakes();
         self.degraded.store(0, Ordering::SeqCst);
         self.consecutive.store(0, Ordering::SeqCst);
+        self.hook_idle.store(0, Ordering::SeqCst);
         self.pending_continuations
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -337,10 +408,16 @@ impl CommandHooks {
         self.consecutive.load(Ordering::SeqCst)
     }
 
+    /// Consecutive hook-opened continuations whose turns did no work (tests): at
+    /// [`MAX_HOOK_IDLE_CONTINUATIONS`] the next hook continuation degrades.
+    pub fn hook_idle_continuations(&self) -> u32 {
+        self.hook_idle.load(Ordering::SeqCst)
+    }
+
     /// Whether the turn now running was opened by a `Stop` continuation (tests); its
     /// `Stop` stdin reports this as `stop_hook_active`.
     pub fn stop_hook_active(&self) -> bool {
-        self.turn_continuation.load(Ordering::SeqCst)
+        Continuation::from_u8(self.turn_continuation.load(Ordering::SeqCst)).is_continuation()
     }
 
     /// Background jobs running right now (tests). A missing or dropped registry reads
@@ -421,20 +498,42 @@ impl CommandHooks {
     /// turn's boundary (`run_stop_once_with`); tests drive this entry directly so there
     /// is no timing involved.
     pub async fn run_stop_once(&self, outcome: &RunOutcome) {
-        // The value says whether *this* turn was opened by a continuation; it is consumed
-        // once, by this turn's own `Stop` (ADR 0045 §2).
-        let stop_hook_active = self.turn_continuation.swap(false, Ordering::SeqCst);
-        self.run_stop_once_with(outcome, stop_hook_active).await;
+        // The value says what opened *this* turn (nothing, the built-in validator, or a
+        // hook); it is consumed once, by this turn's own `Stop` (ADR 0045 §2).
+        let continuation = self.take_turn_continuation();
+        self.run_stop_once_with(outcome, continuation).await;
+    }
+
+    /// Reads and clears the running turn's continuation provenance.
+    fn take_turn_continuation(&self) -> Continuation {
+        Continuation::from_u8(
+            self.turn_continuation
+                .swap(Continuation::None.as_u8(), Ordering::SeqCst),
+        )
+    }
+
+    /// Counts the turn that just ended: a hook-opened continuation with no tool call adds
+    /// one to the idle streak; a continued turn that called a tool resets it; any other
+    /// turn (not continued, or opened by the validator alone) ends the hook streak too.
+    fn count_idle_continuation(&self, outcome: &RunOutcome, continuation: Continuation) {
+        if continuation == Continuation::Hook && outcome.model_calls == 1 {
+            self.hook_idle.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.hook_idle.store(0, Ordering::SeqCst);
+        }
     }
 
     /// [`CommandHooks::run_stop_once`] with the provenance already captured: the turn-end
     /// hook reads it synchronously, before spawning, so a slow `Stop` run for an earlier
     /// turn can never consume this turn's value.
-    async fn run_stop_once_with(&self, outcome: &RunOutcome, stop_hook_active: bool) {
+    async fn run_stop_once_with(&self, outcome: &RunOutcome, continuation: Continuation) {
         // A non-completed turn runs no `Stop` and opens no turn of its own.
         if !matches!(outcome.status, RunStatus::Completed) {
             return;
         }
+        // The idle-continuation streak follows this turn's own outcome: a hook continuation
+        // whose turn did no work adds one; real work (a tool call) resets it.
+        self.count_idle_continuation(outcome, continuation);
         // Claude's field name: the last assistant message's text parts joined, so a user
         // script can run its own detection (backlog §B.6). Empty when the turn has none.
         let last_message = outcome
@@ -447,7 +546,7 @@ impl CommandHooks {
             "cwd": self.workspace.to_string_lossy(),
             "session_id": self.session_id,
             "last_assistant_message": last_message,
-            "stop_hook_active": stop_hook_active,
+            "stop_hook_active": continuation.is_continuation(),
             "background_tasks": self.background_tasks(),
             "session_crons": self.session_crons(),
         });
@@ -518,6 +617,26 @@ impl CommandHooks {
                 }
             }
         }
+        // THE IDLE-CONTINUATION CAP (backlog `hooks-stop-and-feedback.md` §3): the
+        // continuation that would be the 8th hook continuation in a row of no-work turns
+        // does not open one. It takes the validator's two-in-a-row treatment: a marked
+        // `inject` (journal-visible, no wake), one notice line through the host's
+        // `hook stop` channel, and the TUI's `blocked` label. A merged validator
+        // continuation rides the same single message, so it degrades with it.
+        let idle_capped =
+            hook_drove && self.hook_idle.load(Ordering::SeqCst) + 1 >= MAX_HOOK_IDLE_CONTINUATIONS;
+        if idle_capped {
+            if self
+                .inbox
+                .inject_degraded(message, InputSource::System)
+                .await
+                .is_ok()
+            {
+                self.degraded.fetch_add(1, Ordering::SeqCst);
+            }
+            (self.hook_stop_warn)(&hook_stop_cap_line());
+            return;
+        }
         // THE WAKE-GATE DEGRADE POINT (ADR 0037 decision 5): past the gate
         // the hook still runs, but an exit-2 verdict degrades to a marked
         // `inject` (no wake) with the wake-budget notice, the same degrade
@@ -537,7 +656,7 @@ impl CommandHooks {
             self.pending_continuations
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .insert(continuation.clone());
+                .insert(continuation.clone(), hook_drove);
             if self
                 .inbox
                 .followup(message, InputSource::System)
@@ -1233,12 +1352,14 @@ impl Hooks for CommandHooks {
         // Read the turn's provenance here, synchronously, at its own boundary: the value
         // belongs to this turn, so a `Stop` run for an earlier turn (still in flight) can
         // never consume it and a later claim can never overwrite it (ADR 0045 §2).
-        let stop_hook_active = self.turn_continuation.swap(false, Ordering::SeqCst);
+        let continuation = self.take_turn_continuation();
         if !matches!(outcome.status, RunStatus::Completed) {
-            // A non-completed turn breaks the validator's chain (like a rule miss), ends
-            // any `Stop` continuation it was opened by, and no Stop run will come for
-            // this turn: drop the turn-start count.
+            // A non-completed turn breaks the validator's chain (like a rule miss) and the
+            // hook idle-continuation streak (the same reset point), ends any `Stop`
+            // continuation it was opened by, and no Stop run will come for this turn: drop
+            // the turn-start count.
             self.consecutive.store(0, Ordering::SeqCst);
+            self.hook_idle.store(0, Ordering::SeqCst);
             // Saturating: sessions that never called `note_turn_started` (only the
             // hosts that read `pending_stops` wire it) must not wrap the counter.
             self.pending
@@ -1253,7 +1374,7 @@ impl Hooks for CommandHooks {
         let this = self.clone();
         let outcome = outcome.clone();
         self.runtime.spawn(async move {
-            this.run_stop_once_with(&outcome, stop_hook_active).await;
+            this.run_stop_once_with(&outcome, continuation).await;
             // Paired with `note_turn_started`; saturating for the same reason.
             this.pending
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -1311,6 +1432,7 @@ mod tests {
         warnings: Arc<Mutex<Vec<String>>>,
         wake_notices: Arc<Mutex<Vec<String>>>,
         intent_notices: Arc<Mutex<Vec<String>>>,
+        hook_stop_notices: Arc<Mutex<Vec<String>>>,
         inbox: Arc<Inbox>,
     }
 
@@ -1366,6 +1488,7 @@ mod tests {
         let (warn, warnings) = warnings_collector();
         let (wake, wake_notices) = warnings_collector();
         let (intent, intent_notices) = warnings_collector();
+        let (hook_stop, hook_stop_notices) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             user,
@@ -1378,6 +1501,7 @@ mod tests {
             warn,
             wake,
             intent,
+            hook_stop,
         );
         Fixture {
             _root: root,
@@ -1385,6 +1509,7 @@ mod tests {
             warnings,
             wake_notices,
             intent_notices,
+            hook_stop_notices,
             inbox,
         }
     }
@@ -1434,6 +1559,21 @@ mod tests {
     /// A completed turn ending with `text`.
     fn completed_text(text: &str) -> RunOutcome {
         completed_outcome(RunStatus::Completed, Some(text))
+    }
+
+    /// A completed turn that made `model_calls` model requests: `1` means the model only
+    /// spoke (no tool round trip), and anything above means at least one tool call.
+    fn completed_calls(text: Option<&str>, model_calls: u32) -> RunOutcome {
+        let mut outcome = completed_outcome(RunStatus::Completed, text);
+        outcome.model_calls = model_calls;
+        outcome
+    }
+
+    /// One hook continuation cycle at a turn end and the turn it opened, claimed so the
+    /// next `run_stop_once` sees it as a hook-opened turn. Returns whether a turn opened.
+    async fn hook_round(fixture: &Fixture, outcome: &RunOutcome) -> bool {
+        fixture.hooks.run_stop_once(outcome).await;
+        fixture.inbox.claim_next_turn().await.is_some()
     }
 
     fn warned(warnings: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
@@ -1934,6 +2074,7 @@ mod tests {
         let (warn, _) = warnings_collector();
         let (wake, _) = warnings_collector();
         let (intent, _) = warnings_collector();
+        let (hook_stop, _) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &config,
@@ -1946,6 +2087,7 @@ mod tests {
             warn,
             wake,
             intent,
+            hook_stop,
         );
         hooks
             .before_tool_call(&cx(), &call("shell", serde_json::json!({"command": "hi"})))
@@ -2323,6 +2465,7 @@ mod tests {
         let (warn, _) = warnings_collector();
         let (wake, wake_notices) = warnings_collector();
         let (intent, _) = warnings_collector();
+        let (hook_stop, _) = warnings_collector();
         let config = HooksConfig {
             stop: vec![HookMatcher {
                 matcher: None,
@@ -2341,6 +2484,7 @@ mod tests {
             warn,
             wake,
             intent,
+            hook_stop,
         );
         for _ in 0..MAX_WAKES_PER_WINDOW {
             hooks.run_stop_once(&completed_quiet()).await;
@@ -2523,6 +2667,7 @@ mod tests {
         let (warn, _) = warnings_collector();
         let (wake, _) = warnings_collector();
         let (intent, _) = warnings_collector();
+        let (hook_stop, _) = warnings_collector();
         let inbox = Inbox::new(64);
         let hooks = CommandHooks::new(
             &user,
@@ -2535,6 +2680,7 @@ mod tests {
             warn,
             wake,
             intent,
+            hook_stop,
         );
         hooks.run_stop_once(&completed_quiet()).await;
         let entry = inbox
@@ -3365,5 +3511,247 @@ mod tests {
             serde_json::json!([]),
             "a dropped registry reads as no jobs: {stdin}"
         );
+    }
+
+    /// Edge case 1: eight hook continuations in a row with text-only turns. The 7th still
+    /// opens a turn; the 8th does not — it injects marked degraded, fires one notice line,
+    /// and counts one degraded item. Dropping the cap opens the 8th and fails the inbox
+    /// assertions; dropping the notice fails the notice assertion.
+    #[tokio::test]
+    async fn eight_idle_hook_continuations_degrade_the_eighth_continuation() {
+        let fixture = plain(&stop_config("echo keep-going >&2; exit 2"));
+        for round in 0..7 {
+            assert!(
+                hook_round(&fixture, &completed_calls(None, 1)).await,
+                "continuation {round} still opens a turn"
+            );
+        }
+        assert_eq!(
+            fixture.hooks.hook_idle_continuations(),
+            6,
+            "the first turn end is not a continuation; six idle continued turns preceded"
+        );
+        // The eighth continuation request (the seventh continued turn's Stop) takes the cap.
+        fixture.hooks.run_stop_once(&completed_calls(None, 1)).await;
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 7);
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the eighth continuation opens no turn"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the capped continuation injects the verdict");
+        assert!(
+            step.message.text().contains("keep-going"),
+            "the reasons ride the inject: {}",
+            step.message.text()
+        );
+        assert_eq!(fixture.hooks.degraded(), 1, "the inject is marked degraded");
+        assert_eq!(
+            warned(&fixture.hook_stop_notices),
+            vec![hook_stop_cap_line()],
+            "exactly one notice line"
+        );
+        assert!(
+            warned(&fixture.wake_notices).is_empty(),
+            "the idle cap is not the wake budget: {:?}",
+            warned(&fixture.wake_notices)
+        );
+    }
+
+    /// Edge case 2: seven idle hook continuations, then a continued turn that calls a tool,
+    /// then seven more idle continuations — no degrade, because the tool call reset the
+    /// counter. Keeping the count across the tool turn caps the later streak and fails the
+    /// empty-notice assertion.
+    #[tokio::test]
+    async fn a_tool_calling_continued_turn_resets_the_idle_streak() {
+        tokio::time::pause();
+        let fixture = plain(&stop_config("echo keep-going >&2; exit 2"));
+        for round in 0..7 {
+            assert!(
+                hook_round(&fixture, &completed_calls(None, 1)).await,
+                "continuation {round} opens a turn"
+            );
+        }
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 6);
+        // The next continued turn did real work: its Stop sees model_calls > 1, resets the
+        // streak, and opens the next continuation.
+        fixture
+            .hooks
+            .run_stop_once_with(&completed_calls(None, 2), Continuation::Hook)
+            .await;
+        assert_eq!(
+            fixture.hooks.hook_idle_continuations(),
+            0,
+            "a tool call resets the streak"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "the tool turn's Stop still opens its continuation"
+        );
+        // The wake window is a hard cap independent of the idle streak; this test is about
+        // the reset, so let the first streak's wakes age out before the second.
+        tokio::time::advance(WAKE_WINDOW + std::time::Duration::from_secs(1)).await;
+        // Seven more continuation requests open; none takes the cap.
+        for round in 0..6 {
+            assert!(
+                hook_round(&fixture, &completed_calls(None, 1)).await,
+                "post-reset continuation {round} opens a turn"
+            );
+        }
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 6);
+        assert!(
+            warned(&fixture.hook_stop_notices).is_empty(),
+            "the reset streak does not cap: {:?}",
+            warned(&fixture.hook_stop_notices)
+        );
+    }
+
+    /// Edge case 3: a cancelled turn in the middle of a streak resets the count, at the same
+    /// place the validator's count resets. Keeping the count through the cancel caps the
+    /// rebuilt streak early.
+    #[tokio::test]
+    async fn a_cancelled_turn_resets_the_idle_streak() {
+        let fixture = plain(&stop_config("echo keep-going >&2; exit 2"));
+        assert!(hook_round(&fixture, &completed_calls(None, 1)).await);
+        assert!(hook_round(&fixture, &completed_calls(None, 1)).await);
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 1);
+        fixture.hooks.on_turn_end(
+            &cx(),
+            &completed_outcome(RunStatus::Cancelled(CancelReason::Requested), None),
+        );
+        assert_eq!(
+            fixture.hooks.hook_idle_continuations(),
+            0,
+            "a non-completed turn resets the streak"
+        );
+        assert!(
+            hook_round(&fixture, &completed_calls(None, 1)).await,
+            "the next completed continuation opens a turn"
+        );
+        assert_eq!(
+            fixture.hooks.hook_idle_continuations(),
+            0,
+            "the first plain turn end starts the rebuilt streak from zero"
+        );
+        assert!(hook_round(&fixture, &completed_calls(None, 1)).await);
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 1);
+    }
+
+    /// Edge case 4: a user message while the cap is degraded clears it, and the next hook
+    /// exit 2 opens a turn again. Keeping the streak after `reset_wakes` injects instead
+    /// and fails the second turn assertion.
+    #[tokio::test]
+    async fn a_user_message_clears_the_idle_cap() {
+        let fixture = plain(&stop_config("echo keep-going >&2; exit 2"));
+        for round in 0..7 {
+            assert!(
+                hook_round(&fixture, &completed_calls(None, 1)).await,
+                "{round}"
+            );
+        }
+        fixture.hooks.run_stop_once(&completed_calls(None, 1)).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the cap is degraded"
+        );
+        assert_eq!(warned(&fixture.hook_stop_notices).len(), 1);
+        // The same reset the user-message lanes call.
+        fixture.hooks.reset_wakes();
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 0);
+        assert_eq!(fixture.hooks.degraded(), 0);
+        assert!(
+            hook_round(&fixture, &completed_calls(None, 1)).await,
+            "after a user message the next hook exit 2 opens a turn"
+        );
+        assert_eq!(
+            warned(&fixture.hook_stop_notices).len(),
+            1,
+            "the user message fires no new notice"
+        );
+    }
+
+    /// Edge case 5: a merged validator and hook continuation counts once in each counter:
+    /// the continued turn's end advances the hook idle counter once and the validator's
+    /// streak once, and still opens a single turn. Incrementing either twice fails.
+    #[tokio::test]
+    async fn a_merged_continuation_counts_once_in_each_counter() {
+        let fixture = plain(&stop_config("echo hook-reason >&2; exit 2"));
+        let hit = "Now the docs-only ADR updates.";
+        fixture.hooks.run_stop_once(&completed_text(hit)).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "the merged continuation opens one turn"
+        );
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 0);
+        assert_eq!(fixture.hooks.consecutive_hits(), 1);
+        fixture
+            .hooks
+            .run_stop_once(&completed_calls(Some(hit), 1))
+            .await;
+        assert_eq!(
+            fixture.hooks.hook_idle_continuations(),
+            1,
+            "the hook counter advances once"
+        );
+        assert_eq!(
+            fixture.hooks.consecutive_hits(),
+            2,
+            "the validator counter advances once"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_some(),
+            "one merged continuation, one turn"
+        );
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "not two turns for the two counters"
+        );
+    }
+
+    /// Edge case 6: the 10-per-10-minute window still caps first when every continued turn
+    /// calls a tool (each resets the idle counter). The 11th wake degrades through the wake
+    /// budget, not the idle cap. Counting tool turns as idle would fire the hook-stop
+    /// notice instead.
+    #[tokio::test]
+    async fn the_wake_window_cap_triggers_first_when_continued_turns_call_tools() {
+        tokio::time::pause();
+        let fixture = plain(&stop_config("echo keep-going >&2; exit 2"));
+        for round in 0..MAX_WAKES_PER_WINDOW {
+            // The first turn end is plain; every later one is a continued turn that called
+            // a tool (model_calls > 1), which resets the idle streak each time.
+            let outcome = completed_calls(None, if round == 0 { 0 } else { 2 });
+            assert!(
+                hook_round(&fixture, &outcome).await,
+                "wake {round} still opens a turn"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        }
+        assert_eq!(fixture.hooks.stop_wakes(), MAX_WAKES_PER_WINDOW);
+        fixture.hooks.run_stop_once(&completed_calls(None, 2)).await;
+        assert!(
+            fixture.inbox.claim_next_turn().await.is_none(),
+            "the window gates the 11th continuation"
+        );
+        let step = fixture
+            .inbox
+            .claim_next_step()
+            .await
+            .expect("the gated continuation injects");
+        assert!(step.message.text().contains("keep-going"));
+        assert_eq!(fixture.hooks.degraded(), 1);
+        assert_eq!(
+            warned(&fixture.wake_notices).len(),
+            1,
+            "the wake notice fires, not the idle cap: {:?}",
+            warned(&fixture.hook_stop_notices)
+        );
+        assert!(
+            warned(&fixture.hook_stop_notices).is_empty(),
+            "tool turns never fill the idle cap"
+        );
+        assert_eq!(fixture.hooks.hook_idle_continuations(), 0);
     }
 }

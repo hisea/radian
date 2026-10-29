@@ -271,6 +271,7 @@ impl App {
         self.session.notice_lost_waiting = true;
         self.session.wake_waiting = false;
         self.session.intent_stop_waiting = false;
+        self.session.hook_stop_waiting = false;
         result
     }
 
@@ -284,6 +285,21 @@ impl App {
         self.session.intent_stop_waiting = true;
         self.session.wake_waiting = false;
         self.session.notice_lost_waiting = false;
+        self.session.hook_stop_waiting = false;
+        result
+    }
+
+    /// The idle hook-continuation cap fired (backlog `hooks-stop-and-feedback.md` §3): the
+    /// visible stop on the same notice slot. The first cap pushes the line; a later one
+    /// rewrites it, so repeated caps still show one line. The next turn start clears the
+    /// stop (the line stays as plain history) and herdr reports normal again.
+    pub fn hook_stop_blocked(&mut self, text: impl Into<String>) -> UpdateResult {
+        let result = self.push_stop_line(text.into());
+        // The slot holds one line: the latest stop owns it, so its flag stands alone.
+        self.session.hook_stop_waiting = true;
+        self.session.wake_waiting = false;
+        self.session.notice_lost_waiting = false;
+        self.session.intent_stop_waiting = false;
         result
     }
 
@@ -297,6 +313,7 @@ impl App {
         self.session.wake_waiting = true;
         self.session.notice_lost_waiting = false;
         self.session.intent_stop_waiting = false;
+        self.session.hook_stop_waiting = false;
         result
     }
 
@@ -346,6 +363,9 @@ impl App {
                 // The intent-stop cap ends the same way: the next turn is running, so
                 // herdr reports normal again (backlog `turn-end-continuation.md` §B.3).
                 self.session.intent_stop_waiting = false;
+                // The idle hook-continuation cap clears the same way (backlog
+                // `hooks-stop-and-feedback.md` §3).
+                self.session.hook_stop_waiting = false;
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -1282,14 +1302,15 @@ mod tests {
         assert!(!app.session.wake_waiting);
     }
 
-    /// Label priority across the four idle blocks: a lost notice first, then the
-    /// intent-stop cap, then the goal stop, then the wake budget.
+    /// Label priority across the five idle blocks: a lost notice first, then the
+    /// intent-stop cap, then the hook-stop cap, then the goal stop, then the wake budget.
     #[test]
-    fn idle_block_labels_report_lost_then_intent_then_goal_then_wake() {
+    fn idle_block_labels_report_lost_then_intent_then_hook_then_goal_then_wake() {
         let mut app = App::new("m", "s");
         app.session.wake_waiting = true;
         app.session.goal_mode.blocked = true;
         app.session.intent_stop_waiting = true;
+        app.session.hook_stop_waiting = true;
         app.session.notice_lost_waiting = true;
         assert!(app.herdr_state_inputs().3);
         assert_eq!(
@@ -1306,6 +1327,12 @@ mod tests {
         assert!(app.herdr_state_inputs().3);
         assert_eq!(
             app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::HookStop)
+        );
+        app.session.hook_stop_waiting = false;
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            app.herdr_blocked(),
             Some(radian_host::herdr::Blocked::GoalBudget)
         );
         app.session.goal_mode.blocked = false;
@@ -1317,5 +1344,60 @@ mod tests {
         app.session.wake_waiting = false;
         assert!(!app.herdr_state_inputs().3);
         assert_eq!(app.herdr_blocked(), None);
+    }
+
+    /// The idle hook-continuation cap is the same visible stop with its own herdr label:
+    /// one notice line with the cap text, `blocked` with `hook stop` until the next turn
+    /// starts, which clears it. Dropping the input wiring shows no line and no label.
+    #[test]
+    fn a_hook_stop_cap_shows_one_line_and_the_herdr_label_until_the_next_turn() {
+        let mut app = App::new("m", "s");
+        let _ = app.update(Input::HookStopBlocked(
+            radian_host::hooks::hook_stop_cap_line(),
+        ));
+        assert_eq!(app.session.entries.len(), 1, "one line for the stop");
+        assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
+        assert!(
+            app.session.entries[0].text.contains("hook stop:"),
+            "the line names the stop: {}",
+            app.session.entries[0].text
+        );
+        assert!(
+            app.session.entries[0]
+                .text
+                .contains("send any message to continue"),
+            "the line says how to continue: {}",
+            app.session.entries[0].text
+        );
+        assert!(app.session.hook_stop_waiting);
+        assert!(!app.session.intent_stop_waiting);
+        assert_eq!(
+            app.herdr_blocked(),
+            Some(radian_host::herdr::Blocked::HookStop)
+        );
+        assert!(app.herdr_state_inputs().3);
+        assert_eq!(
+            radian_host::herdr::blocked_message(app.herdr_blocked().as_ref(), false),
+            "hook stop"
+        );
+        assert_eq!(
+            radian_host::herdr::blocked_label(app.herdr_blocked().as_ref(), false),
+            Some("hook stop".to_owned())
+        );
+
+        // The next turn start ends the stop but keeps the line as history.
+        app.apply_event(&AgentEvent::TurnStarted);
+        assert!(!app.session.hook_stop_waiting);
+        assert!(!app.session.intent_stop_waiting);
+        assert!(!app.session.wake_waiting);
+        assert!(!app.session.notice_lost_waiting);
+        assert_eq!(app.session.wake_notice, None);
+        assert_eq!(
+            app.herdr_blocked(),
+            None,
+            "herdr is back to normal on the next turn start"
+        );
+        assert!(!app.herdr_state_inputs().3);
+        assert_eq!(app.session.entries.len(), 1, "the line stays as history");
     }
 }

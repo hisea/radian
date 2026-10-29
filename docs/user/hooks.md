@@ -94,6 +94,19 @@ hooks configured. It stays quiet while a goal or `/loop` owns the turn end
 or while any background job runs. After two consecutive continuations it
 stops opening turns and waits visibly instead; your next message clears it.
 
+A `Stop` continuation that keeps reopening turns where the model only talks
+is capped too. Radian counts consecutive hook continuations (exit 2,
+`decision: "block"`, or `additionalContext`) whose turn ended `Completed`
+with no tool call. At 8 in a row the continuation no longer opens a turn: its
+message waits visibly instead, the same degraded `inject` as a used-up wake
+budget. One notice line starts with `hook stop:` and says to send any
+message; herdr reports `blocked` with the category `hook stop`, never the
+hook's text. A continued turn that calls a tool resets the count, and so does
+a cancelled or otherwise unfinished turn and any message from you. The
+10-continuations-per-10-minutes wake budget still applies as a hard cap, and
+the built-in validator's own two-in-a-row rule stays separate from this
+count.
+
 ## The matcher
 
 The matcher filters by Radian tool name: `shell`, `write`, `patch`,
@@ -179,7 +192,7 @@ The exit code decides.
 | Exit code | `PreToolUse` | `PostToolUse` | `Stop` |
 |---|---|---|---|
 | `0` | Continue. Stdout may carry JSON (below); empty stdout continues silently, and stdout that is not JSON warns and continues. | Continue. Stdout may carry JSON (below). | Continue. Stdout may carry JSON (below). |
-| `2` | Deny: stderr (at most 2000 characters) becomes the reason. Empty stderr denies with a default message. | The tool already ran, so there is nothing to deny: stderr is fed back to the model with the result, and the result is marked as an error. | Ask for more: the reasons join into one message that opens another turn. Past the wake budget the turn still opens its message but does not wake: it waits visibly with a wake-budget notice instead. |
+| `2` | Deny: stderr (at most 2000 characters) becomes the reason. Empty stderr denies with a default message. | The tool already ran, so there is nothing to deny: stderr is fed back to the model with the result, and the result is marked as an error. | Ask for more: the reasons join into one message that opens another turn. Past the wake budget, or past the consecutive idle-continuation cap, the turn still opens its message but does not wake: it waits visibly with the matching notice instead. |
 | other, timeout, or signal | Hook error: the call is denied and the turn ends. | Hook error: the turn ends. | The turn ends with a warning. |
 
 An exit-0 hook may print one JSON object to stdout:

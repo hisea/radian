@@ -127,14 +127,19 @@ pub enum Blocked {
     /// user message wakes it. The last message's text never leaves the process — only
     /// the category.
     IntentStop,
+    /// The idle hook-continuation cap stopped after 8 hook continuations in a row ended
+    /// with no tool call (backlog `hooks-stop-and-feedback.md` §3); the session is idle
+    /// until a user message wakes it. The hook's stderr, additional context, and the
+    /// previous message's text never leave the process — only the category.
+    HookStop,
 }
 
 /// The pure state function (ADR H2): trust and pending `blocked` wins over `working`; a
 /// running turn reads `working`; background jobs keep an idle session `working` too — even
 /// past an idle block, whose waiting notices wait for a turn that may never come, so herdr
 /// does not read idle while jobs still run; an idle block — a used-up wake budget, a `/goal`
-/// budget stop, a lost job notice, or the intent-stop cap (the TUI folds all four into
-/// the one bit) — blocks
+/// budget stop, a lost job notice, the intent-stop cap, or the idle hook-continuation cap
+/// (the TUI folds all five into the one bit) — blocks
 /// only while idle and jobless — a started turn reads `working` again, so the report is back
 /// to normal on the next turn start.
 ///
@@ -173,6 +178,7 @@ pub fn blocked_message(blocked: Option<&Blocked>, trust_modal: bool) -> String {
         Some(Blocked::GoalBudget) => "goal budget".to_owned(),
         Some(Blocked::JobNoticeLost) => "job notice lost".to_owned(),
         Some(Blocked::IntentStop) => "intent stop".to_owned(),
+        Some(Blocked::HookStop) => "hook stop".to_owned(),
         None => "blocked".to_owned(),
     }
 }
@@ -347,6 +353,7 @@ pub fn blocked_label(blocked: Option<&Blocked>, trust_modal: bool) -> Option<Str
         Some(Blocked::GoalBudget) => Some("goal budget".to_owned()),
         Some(Blocked::JobNoticeLost) => Some("job notice lost".to_owned()),
         Some(Blocked::IntentStop) => Some("intent stop".to_owned()),
+        Some(Blocked::HookStop) => Some("hook stop".to_owned()),
         None => None,
     }
 }
@@ -770,6 +777,10 @@ mod tests {
         assert_eq!(
             blocked_message(Some(&Blocked::IntentStop), false),
             "intent stop"
+        );
+        assert_eq!(
+            blocked_message(Some(&Blocked::HookStop), false),
+            "hook stop"
         );
     }
 
@@ -1215,6 +1226,10 @@ mod tests {
         assert_eq!(
             blocked_label(Some(&Blocked::IntentStop), false),
             Some("intent stop".to_owned())
+        );
+        assert_eq!(
+            blocked_label(Some(&Blocked::HookStop), false),
+            Some("hook stop".to_owned())
         );
         assert_eq!(blocked_label(None, true), Some("trust".to_owned()));
         assert_eq!(blocked_label(None, false), None);

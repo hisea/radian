@@ -160,6 +160,10 @@ pub enum Input {
     /// cap line. `update` shows it as the burst's line and marks the session for
     /// herdr's `intent stop` label until the next turn starts.
     IntentStopBlocked(String),
+    /// The idle hook-continuation cap (backlog `hooks-stop-and-feedback.md` §3): the cap
+    /// line. `update` shows it as the burst's line and marks the session for herdr's
+    /// `hook stop` label until the next turn starts.
+    HookStopBlocked(String),
     /// A `/skill:<name> [args]` expansion finished (ADR 0025 S3): the message text to send, or
     /// a notice (an unknown skill or a file that can no longer be read). `steer` mirrors the
     /// turn state when the command was submitted.

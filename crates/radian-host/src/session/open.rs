@@ -51,6 +51,7 @@ pub async fn open_session(
         wake_warning,
         notice_lost_warning,
         intent_stop_warning,
+        hook_stop_warning,
     } = bindings;
     let runtime = tokio::runtime::Handle::current();
     let SessionSetup {
@@ -390,6 +391,7 @@ pub async fn open_session(
         hooks_warning,
         Arc::clone(&wake_warning),
         intent_stop_warning,
+        hook_stop_warning,
     ));
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
     // section is appended after the memory section, so the tuple below is ((perm, memory),

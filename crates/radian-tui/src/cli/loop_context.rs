@@ -1334,6 +1334,7 @@ mod tests {
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
         ));
         let journal = Arc::new(
             radian_session::SessionJournal::create(
@@ -1433,6 +1434,7 @@ mod tests {
             radian_sandbox::SandboxSlot::empty(),
             &inbox,
             rt.handle(),
+            Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
@@ -1551,6 +1553,7 @@ mod tests {
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
+            Arc::new(|_: &str| {}),
         ));
         let journal = Arc::new(
             radian_session::SessionJournal::create(
@@ -1660,6 +1663,7 @@ mod tests {
             radian_sandbox::SandboxSlot::empty(),
             &inbox,
             rt.handle(),
+            Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),
             Arc::new(|_: &str| {}),

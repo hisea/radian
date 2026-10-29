@@ -182,6 +182,7 @@ async fn open_switchable_inner(
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
             intent_stop_warning: Arc::new(|_message: &str| {}),
+            hook_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
@@ -329,6 +330,7 @@ async fn a_session_without_a_builder_refuses_set_access() {
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
             intent_stop_warning: Arc::new(|_message: &str| {}),
+            hook_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await

@@ -34,6 +34,9 @@ pub(super) struct SessionInputs {
     pub(super) wake_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     /// The intent-stop cap's notice line (backlog `turn-end-continuation.md` §B.3).
     pub(super) intent_stop_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    /// The idle hook-continuation cap's notice line: one transcript notice, plus the
+    /// herdr `hook stop` block while it waits (backlog `hooks-stop-and-feedback.md` §3).
+    pub(super) hook_stop_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     /// A lost job-notice's line: the burst's transcript notice, plus the herdr
     /// `job notice lost` block while it waits (ADR 0037 decision 5's failure rule).
     pub(super) notice_lost_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
@@ -312,6 +315,17 @@ pub(super) fn build_session_inputs(
             )));
         })
     };
+    // The consecutive idle hook-continuation cap (backlog `hooks-stop-and-feedback.md`
+    // §3): its own input, so `update` shows one notice line and marks the session for
+    // herdr's `hook stop` label until the next turn starts.
+    let hook_stop_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+        let tx = tx.clone();
+        Arc::new(move |message: &str| {
+            let _ = tx.send(UiEvent::Command(AppInput::HookStopBlocked(
+                message.to_owned(),
+            )));
+        })
+    };
     // A lost job notice (every enqueue attempt failed, ADR 0037 decision 5's failure
     // rule): its own input, so `update` shows the burst's line and marks the session
     // notice-lost for herdr (`job notice lost`) until the next turn starts.
@@ -383,6 +397,7 @@ pub(super) fn build_session_inputs(
             hooks_warning,
             wake_warning,
             intent_stop_warning,
+            hook_stop_warning,
             notice_lost_warning,
             trust_setup,
             project_hooks,
@@ -428,6 +443,7 @@ pub(super) fn open_session_and_refresh(
         hooks_warning,
         wake_warning,
         intent_stop_warning,
+        hook_stop_warning,
         notice_lost_warning,
         trust_setup,
         project_hooks,
@@ -533,6 +549,7 @@ pub(super) fn open_session_and_refresh(
                 hooks_warning,
                 wake_warning,
                 intent_stop_warning,
+                hook_stop_warning,
                 notice_lost_warning,
             },
         ))

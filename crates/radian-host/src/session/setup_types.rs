@@ -208,6 +208,10 @@ pub struct HostBindings {
     /// own line and reports `blocked` with the `intent stop` label until the next turn
     /// starts, backlog `turn-end-continuation.md` §B.3).
     pub intent_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The idle hook-continuation cap's notice line (one per cap report; the TUI shows it
+    /// as its own line and reports `blocked` with the `hook stop` label until the next turn
+    /// starts, backlog `hooks-stop-and-feedback.md` §3).
+    pub hook_stop_warning: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The facts the host renders its own way (the CLI's `eprintln!` lines, the TUI's notices).

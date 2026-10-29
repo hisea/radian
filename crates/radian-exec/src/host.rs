@@ -317,6 +317,7 @@ pub(crate) async fn open_host_session(
             wake_warning: Arc::new(|message: &str| eprintln!("[wake] {message}")),
             notice_lost_warning: Arc::new(|message: &str| eprintln!("[lost] {message}")),
             intent_stop_warning: Arc::new(|message: &str| eprintln!("[intent-stop] {message}")),
+            hook_stop_warning: Arc::new(|message: &str| eprintln!("[hook-stop] {message}")),
         },
     )
     .await

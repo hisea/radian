@@ -96,6 +96,7 @@ fn command_hooks(
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
     ))
 }
 
@@ -226,6 +227,7 @@ async fn a_late_stop_verdict_belongs_to_the_turn_it_opens() {
         radian_sandbox::SandboxSlot::empty(),
         &inbox,
         &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
@@ -436,6 +438,7 @@ async fn updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journ
         radian_sandbox::SandboxSlot::empty(),
         &inbox,
         &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),

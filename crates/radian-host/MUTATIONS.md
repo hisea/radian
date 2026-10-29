@@ -1644,3 +1644,21 @@ restored from a backup copy under `.radian/`.
 | TK0229-M7 | the `PostToolUse` layers are compiled user-first | ✅ 3 failed (rc=100) | `hooks::tests::{a_project_post_tool_use_runs_once_per_edit_with_its_feedback_first, the_user_hook_sees_the_project_replaced_result}` and `command_hooks::updated_tool_output_reaches_the_next_layer_the_transcript_and_the_journal` |
 | TK0229-M8 | `Stop` ignores `decision: "block"` | ✅ 1 failed (rc=100) | `hooks::tests::stop_block_decision_opens_the_same_continuation` |
 | TK0229-M9 | a present JSON `null` `updatedToolOutput` is accepted as an absent field (`None => {}` in `apply_post_output`) | ✅ 1 failed (rc=100) | `hooks::tests::a_null_updated_tool_output_is_a_hook_error` |
+
+## TK0230: the consecutive idle hook-continuation cap (2026-10-29, branch `work/TK0230-hook-idle-continuation-cap`)
+
+ADR 0045 §3/§2: a hook continuation whose turn ended `Completed` with no tool call
+(`model_calls == 1`) adds one to a streak; a continued turn that called a tool, a
+non-completed turn, and a user message reset it; the continuation that would be the 8th in
+the streak degrades to a marked `inject` with one `hook stop` notice line. Each mutation was
+applied in place to `crates/radian-host/src/hooks.rs`, the named tests ran with
+`cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E
+'test(/hooks::tests/)'`, and the source was restored from `.radian/mut/hooks.rs.orig` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0230-M1 | the idle cap is disabled (`let idle_capped = false`) | ✅ 2 failed (rc=100) | `hooks::tests::eight_idle_hook_continuations_degrade_the_eighth_continuation` (the 8th opened a turn) and `a_user_message_clears_the_idle_cap` (no degraded state to clear) |
+| TK0230-M2 | a hook continuation that called a tool does not reset the streak (only non-hook turns reset) | ✅ 1 failed (rc=100) | `hooks::tests::a_tool_calling_continued_turn_resets_the_idle_streak` |
+| TK0230-M3 | the cap fires no notice line (`hook_stop_warn` gets an empty string) | ✅ 1 failed (rc=100) | `hooks::tests::eight_idle_hook_continuations_degrade_the_eighth_continuation` (the notice list was not the cap line) |
+| TK0230-M4 | `on_turn_end` keeps the idle streak through a non-completed turn | ✅ 1 failed (rc=100) | `hooks::tests::a_cancelled_turn_resets_the_idle_streak` |

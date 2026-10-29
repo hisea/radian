@@ -167,6 +167,7 @@ async fn open_with_leftover(
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
             intent_stop_warning: Arc::new(|_message: &str| {}),
+            hook_stop_warning: Arc::new(|_message: &str| {}),
         },
     )
     .await
