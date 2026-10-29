@@ -341,21 +341,24 @@ not depend on input order, and a new attempt's verdict for the same sha and stag
 
 `IntegrationRun` takes `gates/integration.lock`, fetches `remote` for the work branch and
 fetches the remote target branch with an explicit refspec
-(`+refs/heads/<target>:refs/remotes/<remote>/<target>`), then compares `main_ref` (for example
-`refs/remotes/<remote>/release`) with the task's `base_sha`:
+(`+refs/heads/<target>:refs/remotes/<remote>/<target>`), then builds the candidate with the
+`[integration] style`:
 
-- still `base_sha`: the candidate is `head_sha`, and the key commands run in the
-  `integration` checkout at `head_sha`;
-- moved: the checkout goes to the remote target branch and `git merge --no-ff` creates
-  `Merge work/<task> (<short head>)` (the first seven characters of the head sha) with the
-  fixed identity `arc <arc@localhost>`. The
-  candidate is that merge commit. There is no rebase: a rebase changes the sha the gate
-  verified. A conflict aborts the merge and writes a `fail` verdict with reason `conflict`,
-  the sorted paths, and no candidate.
+- `merge` (the default): still `base_sha`, the candidate is `head_sha`, and the key commands
+  run in the `integration` checkout at `head_sha`; moved, the checkout goes to the remote
+  target branch and `git merge --no-ff` creates `Merge work/<task> (<short head>)` (the first
+  seven characters of the head sha) with the fixed identity `arc <arc@localhost>`.
+- `squash`: the checkout goes to the target branch, `git merge --squash` stages the task's
+  changes and `git commit --allow-empty` makes one commit with the message
+  `<task title> (<task id>)` and the fixed identity.
+- `rebase`: the checkout goes to `head_sha` and `git rebase <target>` replays the task's
+  commits on the target; a branch with a merge commit is linearized. When the target is
+  already an ancestor of `head_sha`, the candidate is `head_sha`.
 
-The key commands run on the candidate under the same rules as `commands` (order, stop at the
-first failure, own timeout, own logs). The verdict records the target branch it used as
-`base_sha`.
+A conflict aborts the merge or the rebase and writes a `fail` verdict with reason `conflict`,
+the sorted paths, and no candidate. The key commands run on the candidate under the same rules
+as `commands` (order, stop at the first failure, own timeout, own logs). The verdict records
+the target branch it used as `base_sha`, the candidate and its `integration_style`.
 
 `merge_ready(repository, remote, main_ref, verdict)` fetches the remote target branch with the
 same explicit refspec and is true only for a passing integration verdict with a candidate whose
@@ -611,7 +614,11 @@ ran therefore changes neither the approval's required stages nor the integration
 verification from before the record existed resolves the flow's current profile. Either
 path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<target>` without
 force. A target branch that moved after integration, or a rejected push, makes it integrate again
-(one round per pass in the loop; at most three runs per `radian arc merge` command). On
+(one round per pass in the loop; at most three runs per `radian arc merge` command). Before
+`done.merged`, `finish_integration` checks what landed: for `merge`, the remote target is the
+candidate and contains `head_sha`; for `squash` and `rebase`, the remote target's tree is the
+candidate's tree. A failed check records the reason and moves the task to
+`review.rework_pending`; it never reaches `done.merged`. On
 success the task is `done.merged`; the same write records the `after_merge` hook and the merged
 sha, and arc itself removes nothing. `TaskFile::enter` records the point of every move that
 reaches one of the five hook phases (`after_merge`, `after_fail`, `after_rework`,

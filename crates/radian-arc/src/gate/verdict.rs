@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use super::config::{Profile, Stage, StageSpec, effective_stages};
 use super::error::GateError;
+use crate::store::config::IntegrationStyle;
 
 /// The verdict schema version this crate writes and accepts.
 pub const VERDICT_SCHEMA_VERSION: u64 = 1;
@@ -316,6 +317,10 @@ pub struct Verdict {
     /// verdict written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Integration only: the `[integration] style` the candidate was built with. Absent on a
+    /// verdict written before the field existed, which is `merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_style: Option<IntegrationStyle>,
 }
 
 impl Verdict {
@@ -351,6 +356,7 @@ impl Verdict {
             review_pre_existing: None,
             review_settings: None,
             profile: None,
+            integration_style: None,
         }
     }
 

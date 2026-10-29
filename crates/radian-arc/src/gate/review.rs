@@ -383,6 +383,7 @@ impl ReviewRun<'_> {
             review_pre_existing: pre_existing,
             review_settings: Some(self.settings.clone()),
             profile: Some(self.profile.to_owned()),
+            integration_style: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,

@@ -254,17 +254,17 @@ impl<'de> Deserialize<'de> for IntegrationMethod {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IntegrationStyle {
-    /// A merge commit, never a rebase (the default, and the only style this build runs).
+    /// A merge commit of the task's head onto the target branch (the default).
     #[default]
     Merge,
-    /// One commit on the target branch (decided; not built yet).
+    /// One commit on top of the target branch with the task's changes applied.
     Squash,
-    /// The task's commits replayed on the target branch (decided; not built yet).
+    /// The task's commits replayed on the target branch.
     Rebase,
 }
 
 /// Every value `integration.style` names, in one list: the parser and the manual's drift test
-/// read it. Only [`IntegrationStyle::Merge`] is built.
+/// read it.
 pub const INTEGRATION_STYLES: &[IntegrationStyle] = &[
     IntegrationStyle::Merge,
     IntegrationStyle::Squash,
@@ -288,11 +288,6 @@ impl IntegrationStyle {
             .copied()
             .find(|value| value.as_str() == text)
     }
-
-    /// Whether this build runs the style.
-    pub fn is_built(self) -> bool {
-        matches!(self, IntegrationStyle::Merge)
-    }
 }
 
 impl std::fmt::Display for IntegrationStyle {
@@ -301,15 +296,14 @@ impl std::fmt::Display for IntegrationStyle {
     }
 }
 
-/// A value outside [`INTEGRATION_STYLES`] is refused by name when the file is read, and a
-/// value the list holds but this build does not run yet is refused as not built.
+/// A value outside [`INTEGRATION_STYLES`] is refused by name when the file is read.
 impl<'de> Deserialize<'de> for IntegrationStyle {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let text = String::deserialize(deserializer)?;
-        let value = Self::parse(&text).ok_or_else(|| {
+        Self::parse(&text).ok_or_else(|| {
             serde::de::Error::custom(format!(
                 "`integration.style` is `{text}`; it must be one of {}",
                 INTEGRATION_STYLES
@@ -318,13 +312,7 @@ impl<'de> Deserialize<'de> for IntegrationStyle {
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
-        })?;
-        if !value.is_built() {
-            return Err(serde::de::Error::custom(format!(
-                "`integration.style` is `{text}`; it is not built yet (this build runs `merge`)"
-            )));
-        }
-        Ok(value)
+        })
     }
 }
 
@@ -341,7 +329,7 @@ pub struct Integration {
     pub target_branch: Option<String>,
     /// How the candidate reaches the target branch. Only `push` is built.
     pub method: IntegrationMethod,
-    /// How the candidate is built. Only `merge` is built.
+    /// How the candidate is built: `merge`, `squash` or `rebase`.
     pub style: IntegrationStyle,
 }
 
@@ -733,7 +721,7 @@ task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of 
 key_commands = []             # what the integration stage runs on the merge candidate
 # target_branch = "main"      # not set: the value of [repository] main_branch
 # method = "push"             # `push` is the only method this build runs
-# style = "merge"             # `merge` is the only style this build runs
+# style = "merge"             # `merge`, `squash` or `rebase`: how the candidate is built
 
 [hooks]
 after_merge = [                # shell command lines run after a task reaches done.merged
@@ -1299,9 +1287,9 @@ mod tests {
         }
     }
 
-    /// `integration.method` and `integration.style` are closed sets. This build runs `push`
-    /// and `merge`; the values decided for later are refused as not built, and an unknown
-    /// value names every allowed one.
+    /// `integration.method` and `integration.style` are closed sets. Every style parses; the
+    /// methods `command` and `pr` are refused as not built, and an unknown value names every
+    /// allowed one.
     #[test]
     fn integration_method_and_style_are_closed_sets() {
         let methods: Vec<&str> = INTEGRATION_METHODS
@@ -1332,16 +1320,10 @@ mod tests {
         for value in INTEGRATION_STYLES {
             assert_eq!(IntegrationStyle::parse(value.as_str()), Some(*value));
             let text = format!("schema_version = 1\n[integration]\nstyle = \"{value}\"\n");
-            if value.is_built() {
-                assert_eq!(
-                    parse(&text).expect("a built style").integration.style,
-                    *value
-                );
-            } else {
-                let error = parse(&text).expect_err("an unbuilt style");
-                assert!(error.contains("not built yet"), "{error}");
-                assert!(error.contains(value.as_str()), "{error}");
-            }
+            assert_eq!(
+                parse(&text).expect("a built style").integration.style,
+                *value
+            );
         }
 
         for (key, text) in [

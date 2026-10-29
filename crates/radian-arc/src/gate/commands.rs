@@ -105,6 +105,7 @@ impl CommandRun<'_> {
             review_pre_existing: None,
             review_settings: None,
             profile: Some(self.profile.to_owned()),
+            integration_style: None,
         };
         verdict.write_new(&verdict_path(
             self.repository,

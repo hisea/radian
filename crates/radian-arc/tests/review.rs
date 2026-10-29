@@ -17,6 +17,7 @@ use radian_arc::gate::{
 };
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
+use radian_arc::store::config::IntegrationStyle;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Exit, FollowupTask, Store, plan_ops};
 use serde_json::{Value, json};
@@ -123,6 +124,11 @@ impl Fixture {
             .collect::<Vec<_>>()
             .join(", ");
         self.tune("\nkey_commands = []", &format!("\nkey_commands = [{list}]"));
+    }
+
+    /// Sets `[integration] style`.
+    fn style(&self, style: &str) {
+        self.tune("# style = \"merge\"", &format!("style = \"{style}\""));
     }
 
     /// Sets the profile's `before_attempt` steps.
@@ -1360,7 +1366,266 @@ fn a_conflict_makes_rework_pending() {
     );
 }
 
-// ---- the conflict rework arc writes (ADR 0048 decision 9) ------------------------------
+// ---- the integration styles (ADR 0048 decisions 6 and 10) ----------------------------
+
+/// A `squash` merge lands one commit on the target and reaches `done.merged`; the post-push
+/// check compares the target's tree with the candidate's.
+#[test]
+fn a_squash_merge_pushes_one_commit_and_reaches_done_merged() {
+    let fixture = Fixture::new("merge-squash");
+    fixture.style("squash");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    let candidate = merged.candidate_sha.clone().expect("a candidate");
+    assert_ne!(candidate, head, "squash pushed the head's sha");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(candidate.as_str())
+    );
+    let tree = fixture
+        .repo
+        .git(&["rev-parse", &format!("{candidate}^{{tree}}")]);
+    let head_tree = fixture
+        .repo
+        .git(&["rev-parse", &format!("{head}^{{tree}}")]);
+    assert_eq!(tree, head_tree, "the landed tree is not the head's");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert_eq!(verdict.integration_style, Some(IntegrationStyle::Squash));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(stored.merged_sha.as_deref(), Some(candidate.as_str()));
+}
+
+/// A `rebase` merge replays a 3-commit branch on the target and reaches `done.merged`; the
+/// post-push check compares the target's tree with the candidate's.
+#[test]
+fn a_rebase_merge_replays_the_branch_and_reaches_done_merged() {
+    let fixture = Fixture::new("merge-rebase");
+    fixture.style("rebase");
+    let branch = format!("work/{}", fixture.task);
+    let first = fixture
+        .repo
+        .commit_on(&branch, &fixture.base, "one.txt", "one\n");
+    let second = fixture.repo.commit_on(&branch, &first, "two.txt", "two\n");
+    let head = fixture
+        .repo
+        .commit_on(&branch, &second, "three.txt", "three\n");
+    fixture.repo.git(&["push", "origin", &branch]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    let moved = fixture.repo.advance_main("other.txt", "other\n");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    let candidate = merged.candidate_sha.clone().expect("a candidate");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(candidate.as_str())
+    );
+    assert_eq!(
+        fixture
+            .repo
+            .git(&["rev-list", "--count", &format!("{moved}..{candidate}")]),
+        "3"
+    );
+    assert!(
+        fixture
+            .repo
+            .git(&["rev-list", "--merges", &format!("{moved}..{candidate}")])
+            .is_empty()
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert_eq!(verdict.integration_style, Some(IntegrationStyle::Rebase));
+}
+
+/// A `rebase` conflict with `merge-main` off sends the task to `review.rework_pending` with
+/// the reason `conflict` and never moves main.
+#[test]
+fn a_rebase_conflict_sends_the_task_to_rework_pending() {
+    let fixture = Fixture::new("merge-rebase-conflict");
+    fixture.style("rebase");
+    fixture.before_attempt(&[]);
+    let branch = format!("work/{}", fixture.task);
+    let first = fixture
+        .repo
+        .commit_on(&branch, &fixture.base, "first.txt", "first\n");
+    let head = fixture
+        .repo
+        .commit_on(&branch, &first, "file.txt", "work side\n");
+    fixture.repo.git(&["push", "origin", &branch]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    let moved = fixture.repo.advance_main("file.txt", "main side\n");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = merged.reason.expect("a reason");
+    assert!(reason.contains("conflict"), "{reason}");
+    assert!(reason.contains("file.txt"), "{reason}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert_eq!(verdict.reason.as_deref(), Some("conflict"));
+    assert_eq!(verdict.conflict_paths, vec!["file.txt".to_owned()]);
+    assert!(verdict.candidate_sha.is_none());
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(moved.as_str()),
+        "a conflict never moves main"
+    );
+}
+
+/// A `rebase` conflict with `merge-main` on takes the merge's conflict path: the task returns
+/// to `todo.ready` with the brief arc writes itself.
+#[test]
+fn a_rebase_conflict_with_merge_main_writes_the_conflict_rework() {
+    let fixture = Fixture::new("merge-rebase-conflict-rework");
+    fixture.style("rebase");
+    let branch = format!("work/{}", fixture.task);
+    let first = fixture
+        .repo
+        .commit_on(&branch, &fixture.base, "first.txt", "first\n");
+    let head = fixture
+        .repo
+        .commit_on(&branch, &first, "file.txt", "work side\n");
+    fixture.repo.git(&["push", "origin", &branch]);
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    fixture.repo.advance_main("file.txt", "main side\n");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("todo", "ready"),
+        "{merged:?}"
+    );
+    let conflict = merged.conflict.clone().expect("the conflict");
+    assert_eq!(conflict.stage, Stage::Integration);
+    assert_eq!(conflict.paths, vec!["file.txt".to_owned()]);
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.body.contains("## Rework 2 (conflict with main)"),
+        "{}",
+        stored.body
+    );
+    assert!(stored.body.contains("in `integration`"), "{}", stored.body);
+}
+
+/// Edge 5: the target moves between the push and the check. The tree the target now holds is
+/// not the candidate's, so the task does not reach `done.merged`; it gets the reason and goes
+/// to `review.rework_pending`. The move is made by the bare remote's `post-receive` hook, to a
+/// commit made in a second clone.
+#[test]
+fn a_squash_merge_whose_landed_tree_differs_goes_to_rework_pending() {
+    let fixture = Fixture::new("merge-squash-tree");
+    fixture.style("squash");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let clone = fixture.repo.second_clone("squash-tree-side");
+    fixture
+        .repo
+        .git_in(&clone, &["config", "user.name", "Test"]);
+    fixture
+        .repo
+        .git_in(&clone, &["config", "user.email", "test@example.com"]);
+    write(&clone.join("other.txt"), "other\n");
+    fixture.repo.git_in(&clone, &["add", "other.txt"]);
+    fixture.repo.git_in(&clone, &["commit", "-m", "side"]);
+    let side = fixture.repo.git_in(&clone, &["rev-parse", "HEAD"]);
+    fixture
+        .repo
+        .git_in(&clone, &["push", "origin", "HEAD:refs/heads/side"]);
+    let hook = fixture.repo.origin.join("hooks").join("post-receive");
+    write(
+        &hook,
+        &format!("#!/bin/sh\ngit update-ref refs/heads/main {side}\n"),
+    );
+    make_executable(&hook);
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = merged.reason.expect("a reason");
+    assert!(reason.contains("tree"), "{reason}");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(side.as_str())
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_ne!(
+        stored.state,
+        TaskState::Done,
+        "the task reached done.merged"
+    );
+}
+
+/// A `merge` whose post-push sha check fails also never reaches `done.merged`: the reason is
+/// recorded and the task goes to `review.rework_pending`.
+#[test]
+fn a_merge_whose_landed_sha_differs_goes_to_rework_pending() {
+    let fixture = Fixture::new("merge-sha-tree");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let clone = fixture.repo.second_clone("merge-sha-side");
+    fixture
+        .repo
+        .git_in(&clone, &["config", "user.name", "Test"]);
+    fixture
+        .repo
+        .git_in(&clone, &["config", "user.email", "test@example.com"]);
+    write(&clone.join("other.txt"), "other\n");
+    fixture.repo.git_in(&clone, &["add", "other.txt"]);
+    fixture.repo.git_in(&clone, &["commit", "-m", "side"]);
+    let side = fixture.repo.git_in(&clone, &["rev-parse", "HEAD"]);
+    fixture
+        .repo
+        .git_in(&clone, &["push", "origin", "HEAD:refs/heads/side"]);
+    let hook = fixture.repo.origin.join("hooks").join("post-receive");
+    write(
+        &hook,
+        &format!("#!/bin/sh\ngit update-ref refs/heads/main {side}\n"),
+    );
+    make_executable(&hook);
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = merged.reason.expect("a reason");
+    assert!(reason.contains(", not "), "{reason}");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_ne!(
+        stored.state,
+        TaskState::Done,
+        "the task reached done.merged"
+    );
+}
+
+fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path).expect("the file").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("make it executable");
+    }
+}
 
 /// A verification-stage conflict with `merge-main` on: arc writes the next attempt's brief
 /// itself and returns the task to `todo.ready`, with the paths, and counts nothing in
@@ -4076,6 +4341,7 @@ fn write_passing_review_at(
         review_pre_existing: None,
         review_settings: None,
         profile: Some("default".to_owned()),
+        integration_style: None,
     }
     .write_new(&path)
     .expect("the review verdict is written once");

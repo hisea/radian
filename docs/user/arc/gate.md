@@ -103,7 +103,7 @@ A task whose brief allows it, such as the review's follow-up, may deliver nothin
 - `mutation` has nothing to mutate, so it passes; this build does not run it, and a profile that lists it is refused as unbuilt (see above), which is not a failure of the empty change.
 - `review` passes without starting a session. Its verdict is a pass whose `review` report has a summary saying that the task's change is empty and empty `blocking`, `suggestions` and `verified`, with no session ids and no cost.
 - `human` is your approval and does not change: it still binds to `verified_sha` and `verdict_set_digest`.
-- `integration` merges the empty change onto the current target branch (the candidate is the target branch when it moved) and runs the current `[integration] key_commands` on it as usual.
+- `integration` builds the candidate with the `[integration] style` (a merge commit, or the target branch when it did not move, for `merge`; one commit for `squash`; the replayed commits for `rebase`) and runs the current `[integration] key_commands` on it as usual.
 
 A task's `allow_noop` is its own value when its file carries one, else its flow's [`flows.<name>.allow_noop`](files.md#configtoml); the delivery check of each attempt reads it, at the attempt's claim (see [Task fields](files.md#task-fields)).
 

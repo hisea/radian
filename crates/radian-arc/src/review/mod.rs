@@ -40,6 +40,7 @@ use crate::gate::{
     merge_ready, required_passed, verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
+use crate::store::config::IntegrationStyle;
 use crate::store::{Error, Loaded, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
@@ -2373,7 +2374,8 @@ pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<
         if !verdict.is_pass() {
             return integration_failed(store, &context, &integration_label, &verdict, round);
         }
-        match finish_integration(store, &context, &verdict, round)? {
+        let verdict_file = integration_verdict(store, task_id, &integration_label)?;
+        match finish_integration(store, &context, &verdict, &verdict_file, round)? {
             Integration::Merged(merged) => return Ok(*merged),
             Integration::Again(reason) => last = reason,
         }
@@ -2391,6 +2393,8 @@ pub struct MergeContext {
     pub task_id: String,
     /// The attempt id that names the task's verdict directory.
     pub label: String,
+    /// The task's title, for a `squash` candidate's commit message.
+    pub title: String,
     pub head: String,
     pub base: String,
     pub remote: String,
@@ -2540,6 +2544,7 @@ fn prepare_merge(
     Ok(MergeContext {
         task_id: task_id.to_owned(),
         label,
+        title: task.title.clone(),
         head,
         base,
         remote,
@@ -2557,6 +2562,7 @@ fn run_integration(store: &Store, context: &MergeContext, label: &str) -> Result
         repository: store.repo(),
         remote: &context.remote,
         task: &context.task_id,
+        title: &context.title,
         attempt: label,
         head_sha: &context.head,
         base_sha: &context.base,
@@ -2564,6 +2570,7 @@ fn run_integration(store: &Store, context: &MergeContext, label: &str) -> Result
         // The integration always runs the current `[integration] key_commands`, never the list
         // an older attempt recorded in its `profile.json`.
         key_commands: &config.integration.key_commands,
+        style: config.integration.style,
         profile: &context.profile_name,
         timeout: config.gate.command_timeout(),
     }
@@ -2626,12 +2633,14 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
         repository: store.repo(),
         remote: &remote,
         task: task_id,
+        title: &task.title,
         attempt: &integration_label,
         head_sha: &head,
         base_sha: &base,
         main_ref: &main_ref,
         // The current `[integration] key_commands`; the recorded profile's list is not used.
         key_commands: &config.integration.key_commands,
+        style: config.integration.style,
         profile: &profile_name,
         timeout: config.gate.command_timeout(),
     }
@@ -2673,13 +2682,15 @@ fn task_change_paths(repo: &Path, main_sha: Option<&str>, base: &str, head: &str
         .collect()
 }
 
-/// Finishes a passing integration verdict: `review.ready_to_merge`, the fast-forward push to
-/// the remote target branch, `done.merged`, and the removal of the worktree (ADR 0048
-/// decisions 6 and 11).
+/// Finishes a passing integration verdict: `review.ready_to_merge`, the push to the remote
+/// target branch, the check that what landed is the candidate, and `done.merged` (ADR 0048
+/// decisions 6 and 11). A failed post-push check sends the task to `review.rework_pending`
+/// instead of `done.merged`.
 fn finish_integration(
     store: &Store,
     context: &MergeContext,
     verdict: &Verdict,
+    verdict_path: &Path,
     round: u32,
 ) -> Result<Integration, Error> {
     let task_id = context.task_id.as_str();
@@ -2726,21 +2737,71 @@ fn finish_integration(
             return Ok(Integration::Again(text));
         }
     }
-    let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.target_branch)?;
-    if remote_main.as_deref() != Some(candidate.as_str()) {
-        back_to_integrating(store, task_id)?;
-        return Ok(Integration::Again(format!(
-            "`{}` `{}` is {}, not {candidate}",
-            context.remote,
-            context.target_branch,
-            remote_main.as_deref().unwrap_or("missing")
-        )));
-    }
-    if !is_ancestor(store.repo(), &context.head, &candidate)? {
-        return Err(Error::Failed(format!(
-            "{candidate} does not contain the verified {}",
-            context.head
-        )));
+    let style = verdict.integration_style.unwrap_or(IntegrationStyle::Merge);
+    let landed = match style {
+        IntegrationStyle::Merge => {
+            // The sha does not change: the remote target must be the candidate, and the
+            // candidate must still contain the verified head (today's check).
+            let remote_main =
+                ls_remote_branch(store.repo(), &context.remote, &context.target_branch)?;
+            if remote_main.as_deref() != Some(candidate.as_str()) {
+                Some(format!(
+                    "`{}` `{}` is {}, not {candidate}",
+                    context.remote,
+                    context.target_branch,
+                    remote_main.as_deref().unwrap_or("missing")
+                ))
+            } else if !is_ancestor(store.repo(), &context.head, &candidate)? {
+                Some(format!(
+                    "{candidate} does not contain the verified {}",
+                    context.head
+                ))
+            } else {
+                None
+            }
+        }
+        IntegrationStyle::Squash | IntegrationStyle::Rebase => {
+            // The style rewrites the sha, so the check is the tree the target branch holds.
+            if landed_tree_matches(
+                store.repo(),
+                &context.remote,
+                &context.target_branch,
+                &candidate,
+            )? {
+                None
+            } else {
+                Some(format!(
+                    "the tree of `{}` `{}` is not the tree of candidate {candidate}",
+                    context.remote, context.target_branch
+                ))
+            }
+        }
+    };
+    if let Some(text) = landed {
+        // The push succeeded, but the target branch does not hold what the gate verified. The
+        // task never reaches `done.merged`; the reason is recorded for the lead (ADR 0048
+        // decisions 6 and 10).
+        let reason = Reason::with_verdict(
+            "merge",
+            Stage::Integration,
+            text,
+            verdict_path.to_path_buf(),
+        );
+        reason.record(store, task_id, &context.label);
+        reset_conflict_rework(store, task_id)?;
+        to_rework(store, task_id)?;
+        return Ok(Integration::Merged(Box::new(Merged {
+            task: task_id.to_owned(),
+            state: "review",
+            phase: "rework_pending".to_owned(),
+            reason: Some(reason.text()),
+            candidate_sha: None,
+            rounds: round,
+            warning: None,
+            conflict: None,
+            followup: None,
+            changed_paths: Vec::new(),
+        })));
     }
     store.change_task(task_id, |task| {
         // The pending hook and the sha it reads are recorded in this same write, so a crash
@@ -3053,7 +3114,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
                             integration_failed(store, &context, &record.attempt, &verdict, 1)?;
                         return Ok(MergeStep::line(merged.line()));
                     }
-                    return match finish_integration(store, &context, &verdict, 1)? {
+                    return match finish_integration(store, &context, &verdict, &path, 1)? {
                         Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
                         Integration::Again(reason) => Ok(MergeStep::line(format!(
                             "{task_id} integration -> review.integrating ({reason})"
@@ -3089,8 +3150,8 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
     // again when main moved under it.
     let context = prepare_merge(store, task_id, Some("auto"))?;
     match latest_integration_verdict(store, task_id, &context.head) {
-        Some((_, verdict)) if verdict.is_pass() => {
-            match finish_integration(store, &context, &verdict, 1)? {
+        Some((path, verdict)) if verdict.is_pass() => {
+            match finish_integration(store, &context, &verdict, &path, 1)? {
                 Integration::Merged(merged) => Ok(MergeStep::merged(*merged)),
                 Integration::Again(reason) => Ok(MergeStep::line(format!(
                     "{task_id} integration -> review.integrating ({reason})"
@@ -3596,6 +3657,57 @@ fn fetch_remote(dir: &Path, remote: &str) -> Result<(), Error> {
 fn remote_work_sha(repo: &Path, remote: &str, task: &str) -> Result<Option<String>, Error> {
     fetch_remote(repo, remote)?;
     remote_branch(repo, remote, &format!("work/{task}"))
+}
+
+/// Fetches the remote target branch into its tracking ref with an explicit refspec, under the
+/// repository's one fetch lock and the `[limits] git_remote_timeout_secs` limit. A clone
+/// whose fetch configuration leaves the branch out still reads the current target.
+fn fetch_target(dir: &Path, remote: &str, branch: &str) -> Result<(), Error> {
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    let args = ["fetch", remote, refspec.as_str()];
+    let limit = crate::git::remote_timeout(dir);
+    match crate::git::fetch(dir, &args, limit).map_err(|error| Error::Failed(error.to_string()))? {
+        crate::git::FetchRun::Done(out) if out.success() => Ok(()),
+        crate::git::FetchRun::Done(out) => Err(Error::Failed(format!(
+            "git fetch {remote} {refspec} failed: {}",
+            out.stderr.trim()
+        ))),
+        crate::git::FetchRun::TimedOut { limit } => {
+            Err(Error::Failed(crate::git::timeout_text(&args, limit)))
+        }
+        crate::git::FetchRun::LockTimedOut { limit, lock } => {
+            Err(Error::Failed(crate::git::lock_timeout_text(&lock, limit)))
+        }
+    }
+}
+
+/// Whether the remote target branch's tree is the candidate's tree (ADR 0048 decision 6). A
+/// `squash` or `rebase` candidate has a sha of its own, so the check reads the tree the
+/// target branch holds after the push, not its sha.
+fn landed_tree_matches(
+    repo: &Path,
+    remote: &str,
+    target_branch: &str,
+    candidate: &str,
+) -> Result<bool, Error> {
+    fetch_target(repo, remote, target_branch)?;
+    let reference = format!("refs/remotes/{remote}/{target_branch}");
+    let target = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{tree}}"),
+        ],
+    )?;
+    let target_tree = target.stdout.trim();
+    if !target.success() || target_tree.is_empty() {
+        return Ok(false);
+    }
+    let candidate_tree = crate::git::ok(repo, &["rev-parse", &format!("{candidate}^{{tree}}")])
+        .map_err(Error::Failed)?;
+    Ok(target_tree == candidate_tree)
 }
 
 /// The remote's branch after a fetch, when it exists.

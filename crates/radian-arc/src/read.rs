@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::gate::{Stage, Verdict};
 use super::store::attempt_ops;
+use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
 use super::store::{Error, Store};
 
@@ -350,11 +351,12 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 ///   ref, or a ref that shares no ancestor with the head); without a worktree or a base
 ///   the committed range below is used.
 /// - A **merged** task: its passing integration verdict's candidate (ADR 0048 decision 10).
-///   A merge candidate's first-parent diff (`<candidate>^1..<candidate>`) is the change the
-///   merge put on the target branch, not what it has gained since. When the candidate is the
-///   task head itself (the target had not moved, so it was fast-forwarded to the head), that
-///   range would be only the head's last commit: the task's own change is `base_sha..head_sha`
-///   instead.
+///   A `merge` or `squash` candidate's first-parent diff (`<candidate>^1..<candidate>`) is the
+///   change the merge put on the target branch, not what it has gained since. When the
+///   candidate is the task head itself (the target had not moved, so it was fast-forwarded to
+///   the head), that range would be only the head's last commit: the task's own change is
+///   `base_sha..head_sha` instead. A `rebase` candidate is the last replayed commit, so the
+///   task's own change is `base_sha..candidate`, every replayed commit.
 /// - Any other task: the task's own change, from the merge base of the remote target branch
 ///   and the attempt's head to that head — the range the review stage reads, so a branch that
 ///   merged a newer target branch does not show its changes. The head is the selected
@@ -702,9 +704,11 @@ fn attempt_end(store: &Store, task: &str, attempt: u32) -> Option<String> {
 
 /// The range of a merged task's own change, from its passing integration verdict.
 ///
-/// A merge candidate's first-parent diff is the task's change against the target branch it
-/// was built on. A candidate that is the task head was a fast-forward of the target: the
-/// branch may hold several commits, and only `base_sha..head_sha` covers all of them.
+/// A `merge` or `squash` candidate's first-parent diff is the task's change against the target
+/// branch it was built on. A candidate that is the task head was a fast-forward of the target:
+/// the branch may hold several commits, and only `base_sha..head_sha` covers all of them. A
+/// `rebase` candidate is only the last replayed commit, so the task's change is
+/// `base_sha..candidate`.
 fn merged_range(verdict: &Verdict) -> Option<(String, String)> {
     let candidate = verdict
         .candidate_sha
@@ -715,7 +719,15 @@ fn merged_range(verdict: &Verdict) -> Option<(String, String)> {
     {
         return Some((base, candidate));
     }
-    Some((format!("{candidate}^1"), candidate))
+    match verdict.integration_style.unwrap_or(IntegrationStyle::Merge) {
+        IntegrationStyle::Merge | IntegrationStyle::Squash => {
+            Some((format!("{candidate}^1"), candidate))
+        }
+        IntegrationStyle::Rebase => {
+            let base = verdict.base_sha.clone().filter(|sha| !sha.is_empty())?;
+            Some((base, candidate))
+        }
+    }
 }
 
 /// Runs the two git commands of a diff: `--numstat -z` for the paths and counts, then one
@@ -1216,5 +1228,40 @@ mod tests {
         assert_eq!(attempt_number(task, "TK0001-work"), None);
         assert_eq!(attempt_number("TK0002-other", "TK0001-work-1"), None);
         assert_eq!(attempt_number(task, "TK0001-work-x"), None);
+    }
+
+    /// A `rebase` merged task's diff is every replayed commit, `base_sha..candidate`, not the
+    /// candidate's first-parent diff (which is only its last commit). A `merge` or `squash`
+    /// candidate keeps the first-parent diff, and a candidate that is the head keeps
+    /// `base_sha..candidate`.
+    #[test]
+    fn a_rebase_merged_task_diffs_every_replayed_commit() {
+        let mut verdict = Verdict::human("head", true, None);
+        verdict.base_sha = Some("base".to_owned());
+        verdict.candidate_sha = Some("candidate".to_owned());
+
+        for style in [IntegrationStyle::Merge, IntegrationStyle::Squash] {
+            verdict.integration_style = Some(style);
+            assert_eq!(
+                merged_range(&verdict),
+                Some(("candidate^1".to_owned(), "candidate".to_owned())),
+                "{style:?} must keep the first-parent diff"
+            );
+        }
+
+        verdict.integration_style = Some(IntegrationStyle::Rebase);
+        assert_eq!(
+            merged_range(&verdict),
+            Some(("base".to_owned(), "candidate".to_owned())),
+            "a rebase candidate is only the last replayed commit"
+        );
+
+        // A rebase that was a no-op (the target was already an ancestor) keeps the head, so
+        // the range is `base_sha..head`.
+        verdict.sha = "candidate".to_owned();
+        assert_eq!(
+            merged_range(&verdict),
+            Some(("base".to_owned(), "candidate".to_owned()))
+        );
     }
 }
