@@ -580,7 +580,10 @@ fn hook_lines(repo: &Repo) -> Vec<String> {
 fn after_fail_fires_once_with_its_point_and_state() {
     let (repo, store, plan) = setup("hooks-after-fail");
     let task = add_ready_task(&store, &plan, "fail");
-    set_hooks(&repo, &[("after_fail", &[HOOK_LINE])]);
+    set_hooks(
+        &repo,
+        &[("after_fail", &[HOOK_LINE, "env > after-fail-env.txt"])],
+    );
 
     let run = repo.radian(&["arc", "cancel", &task]);
     assert_eq!(run.code, 0, "cancel: {}\n{}", run.stderr, run.stdout);
@@ -590,6 +593,11 @@ fn after_fail_fires_once_with_its_point_and_state() {
     );
     assert!(pending(&store, &task).is_empty(), "the record is cleared");
     assert_eq!(hook_lines(&repo), vec!["after_fail failed.cancelled"]);
+    let env = env_map(&repo.clone.join("after-fail-env.txt"));
+    assert!(
+        !env.contains_key("ARC_MERGED_SHA"),
+        "only `after_merge` receives ARC_MERGED_SHA"
+    );
 }
 
 /// `after_rework` fires once after a failed verification enters `review.rework_pending`, with
