@@ -2928,6 +2928,41 @@ mod tests {
         );
     }
 
+    /// `integration.method` and `integration.style`'s values are one closed list each in the
+    /// code, and the config table's rows name exactly them, in order. A value added to either
+    /// list fails here until the row lists it, and so does a row that names a value the parser
+    /// refuses.
+    #[test]
+    fn every_integration_method_and_style_value_appears_in_arc_files_md() {
+        let doc = arc_files_md();
+        let table = arc_table(&doc, "arc/files.md", "## `config.toml`");
+        for (key, values) in [
+            (
+                "integration.method",
+                radian_arc::store::config::INTEGRATION_METHODS
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "integration.style",
+                radian_arc::store::config::INTEGRATION_STYLES
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let row = config_key_row(&table, key)
+                .unwrap_or_else(|| panic!("arc/files.md's config table has a `{key}` row"));
+            let allowed = row.get(3).expect("the row has an Allowed values cell");
+            let documented: Vec<&str> = allowed.split('`').skip(1).step_by(2).collect();
+            assert_eq!(
+                documented, values,
+                "arc/files.md's `{key}` row lists the code's closed list: {row:?}"
+            );
+        }
+    }
+
     /// Every environment variable the wrapper adds for a command worker appears in the
     /// environment table under `## Another agent as the worker` on `arc/worker.md`. The source
     /// is `radian_arc::work::WORKER_ENV`, so a new variable fails here until the manual names

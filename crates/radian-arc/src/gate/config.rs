@@ -2,7 +2,9 @@
 //!
 //! These are the one set of types for the `[gate]` table: the store parses `config.toml`
 //! into them (and supplies the file's defaults), and the gate's stages read them. The names
-//! of the profile fields (`stages`, `commands`, `key_commands`) are the file's names.
+//! of the profile fields (`stages`, `commands`, `before_attempt`) are the file's names.
+//! `key_commands` is a legacy field: a `config.toml` that writes it is refused (it lives in
+//! `[integration]`), but an attempt's `profile.json` still reads it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -252,8 +254,11 @@ pub struct Profile {
     /// Shell command lines the `commands` stage runs, in order.
     #[serde(default)]
     pub commands: Vec<String>,
-    /// Shell command lines the `integration` stage runs on the merge candidate, in order.
-    #[serde(default)]
+    /// The gate profile's old `key_commands`. A `config.toml` that still writes it is refused
+    /// (the key lives in `[integration] key_commands`), but an attempt's `profile.json` from an
+    /// older arc still reads it; integration uses the current `[integration]` list, never this
+    /// value. A new profile record does not write it.
+    #[serde(default, skip_serializing)]
     pub key_commands: Vec<String>,
 }
 

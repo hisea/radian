@@ -55,6 +55,7 @@ pub const OPTIONAL_KEYS: &[&str] = &[
     "gate.review.prompt_file",
     "gate.review.first.exec_args",
     "gate.review.first.timeout_secs",
+    "integration.target_branch",
 ];
 
 /// The whole file.
@@ -75,6 +76,10 @@ pub struct Config {
     pub ids: Ids,
     #[serde(default = "default_gate")]
     pub gate: GateConfig,
+    /// `[integration]`: how the merge puts the candidate on the target branch (ADR 0048
+    /// decisions 6 and 10).
+    #[serde(default)]
+    pub integration: Integration,
     /// Whether the file wrote a `[flows]` table. A file that did not keeps no per-flow
     /// concurrency for its implicit `default` flow, so it schedules as it did before flows
     /// existed (ADR 0048 decision 13). Set when the file is parsed, never read from it.
@@ -98,6 +103,7 @@ impl Default for Config {
             flows,
             ids: Ids::default(),
             gate,
+            integration: Integration::default(),
             flows_configured: false,
         }
     }
@@ -148,6 +154,201 @@ impl Config {
             ));
         };
         Ok((name, profile))
+    }
+
+    /// The branch integration fetches, builds the candidate on, pushes to, and the branch a
+    /// first attempt starts from: `[integration] target_branch`, else `[repository]
+    /// main_branch` (ADR 0048 decisions 6 and 10).
+    pub fn target_branch(&self) -> &str {
+        self.integration
+            .target_branch
+            .as_deref()
+            .unwrap_or(&self.repository.main_branch)
+    }
+}
+
+/// How the integration puts the candidate on the target branch (`[integration] method`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IntegrationMethod {
+    /// Push the candidate to the target branch (the default, and the only method this build
+    /// runs).
+    #[default]
+    Push,
+    /// Run `[integration] command` and let it merge (decided; not built yet).
+    Command,
+    /// The built-in `command` preset that opens a pull request (decided; not built yet).
+    Pr,
+}
+
+/// Every value `integration.method` names, in one list: the parser and the manual's drift test
+/// read it. Only [`IntegrationMethod::Push`] is built.
+pub const INTEGRATION_METHODS: &[IntegrationMethod] = &[
+    IntegrationMethod::Push,
+    IntegrationMethod::Command,
+    IntegrationMethod::Pr,
+];
+
+impl IntegrationMethod {
+    /// The stored spelling: the TOML value and the word the manual uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntegrationMethod::Push => "push",
+            IntegrationMethod::Command => "command",
+            IntegrationMethod::Pr => "pr",
+        }
+    }
+
+    /// The value `text` names, if any.
+    pub fn parse(text: &str) -> Option<Self> {
+        INTEGRATION_METHODS
+            .iter()
+            .copied()
+            .find(|value| value.as_str() == text)
+    }
+
+    /// Whether this build runs the method.
+    pub fn is_built(self) -> bool {
+        matches!(self, IntegrationMethod::Push)
+    }
+}
+
+impl std::fmt::Display for IntegrationMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A value outside [`INTEGRATION_METHODS`] is refused by name when the file is read, and a
+/// value the list holds but this build does not run yet is refused as not built.
+impl<'de> Deserialize<'de> for IntegrationMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let value = Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`integration.method` is `{text}`; it must be one of {}",
+                INTEGRATION_METHODS
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        if !value.is_built() {
+            return Err(serde::de::Error::custom(format!(
+                "`integration.method` is `{text}`; it is not built yet (this build runs `push`)"
+            )));
+        }
+        Ok(value)
+    }
+}
+
+/// How the integration builds the candidate commit (`[integration] style`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IntegrationStyle {
+    /// A merge commit, never a rebase (the default, and the only style this build runs).
+    #[default]
+    Merge,
+    /// One commit on the target branch (decided; not built yet).
+    Squash,
+    /// The task's commits replayed on the target branch (decided; not built yet).
+    Rebase,
+}
+
+/// Every value `integration.style` names, in one list: the parser and the manual's drift test
+/// read it. Only [`IntegrationStyle::Merge`] is built.
+pub const INTEGRATION_STYLES: &[IntegrationStyle] = &[
+    IntegrationStyle::Merge,
+    IntegrationStyle::Squash,
+    IntegrationStyle::Rebase,
+];
+
+impl IntegrationStyle {
+    /// The stored spelling: the TOML value and the word the manual uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IntegrationStyle::Merge => "merge",
+            IntegrationStyle::Squash => "squash",
+            IntegrationStyle::Rebase => "rebase",
+        }
+    }
+
+    /// The value `text` names, if any.
+    pub fn parse(text: &str) -> Option<Self> {
+        INTEGRATION_STYLES
+            .iter()
+            .copied()
+            .find(|value| value.as_str() == text)
+    }
+
+    /// Whether this build runs the style.
+    pub fn is_built(self) -> bool {
+        matches!(self, IntegrationStyle::Merge)
+    }
+}
+
+impl std::fmt::Display for IntegrationStyle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A value outside [`INTEGRATION_STYLES`] is refused by name when the file is read, and a
+/// value the list holds but this build does not run yet is refused as not built.
+impl<'de> Deserialize<'de> for IntegrationStyle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let value = Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`integration.style` is `{text}`; it must be one of {}",
+                INTEGRATION_STYLES
+                    .iter()
+                    .map(|value| format!("`{value}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        if !value.is_built() {
+            return Err(serde::de::Error::custom(format!(
+                "`integration.style` is `{text}`; it is not built yet (this build runs `merge`)"
+            )));
+        }
+        Ok(value)
+    }
+}
+
+/// `[integration]`: the key commands and the branch the merge puts the candidate on (ADR 0048
+/// decisions 6 and 10). `key_commands` lives here and nowhere else; a gate profile that still
+/// writes it is a config error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Integration {
+    /// Shell command lines the integration stage runs on the merge candidate, in order.
+    pub key_commands: Vec<String>,
+    /// The branch integration merges into and pushes to. `None` is `[repository]
+    /// main_branch`.
+    pub target_branch: Option<String>,
+    /// How the candidate reaches the target branch. Only `push` is built.
+    pub method: IntegrationMethod,
+    /// How the candidate is built. Only `merge` is built.
+    pub style: IntegrationStyle,
+}
+
+impl Default for Integration {
+    fn default() -> Self {
+        Self {
+            key_commands: Vec::new(),
+            target_branch: None,
+            method: IntegrationMethod::Push,
+            style: IntegrationStyle::Merge,
+        }
     }
 }
 
@@ -478,6 +679,12 @@ rework_session = "fresh"       # `fresh`: a session per attempt; `resume`: the t
 plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
 task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of a new task id
 
+[integration]
+key_commands = []             # what the integration stage runs on the merge candidate
+# target_branch = "main"      # not set: the value of [repository] main_branch
+# method = "push"             # `push` is the only method this build runs
+# style = "merge"             # `merge` is the only style this build runs
+
 [gate]
 profile = "default"
 command_timeout_secs = 3600
@@ -497,7 +704,6 @@ propose_followups = true        # add the plan's review follow-up once it has no
 stages = [{{ stage = "commands", required = true }}, {{ stage = "human", required = true }}]
 before_attempt = ["merge-main"]   # steps the wrapper runs in the worktree before the worker; [] runs none
 commands = []                 # shell command lines, run in order on the gate checkout
-key_commands = []             # what the integration stage runs on the merge candidate
 "#
     )
 }
@@ -507,6 +713,7 @@ key_commands = []             # what the integration stage runs on the merge can
 /// no profile, and an id prefix that is not 1 to 4 uppercase letters (or is the same for
 /// both kinds) are errors that name the offender.
 pub fn parse(text: &str) -> Result<Config, String> {
+    check_profile_key_commands(text)?;
     check_review_shape(text)?;
     check_worker_shape(text)?;
     // A bare `[flows]` table counts too: the manual and the ADR say the per-flow limit is on
@@ -583,6 +790,30 @@ pub fn parse(text: &str) -> Result<Config, String> {
         );
     }
     Ok(config)
+}
+
+/// Names a `gate.profiles.<name>.key_commands` before the TOML deserializer accepts it: the
+/// key moved to `[integration] key_commands`, so a profile that still writes it is refused.
+/// The check reads the document, so an empty array is refused too: the key itself is the
+/// mistake, not its value.
+fn check_profile_key_commands(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(profiles) = document
+        .get("gate")
+        .and_then(|gate| gate.get("profiles"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+    for (name, profile) in profiles {
+        if profile.get("key_commands").is_some() {
+            return Err(format!(
+                "`gate.profiles.{name}.key_commands` is set; `key_commands` moved to \
+                 `[integration] key_commands`, so set it there and remove it from the gate profile"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Names a `gate.review.exec_args` or `gate.review.first.exec_args` that is not an array of
@@ -829,11 +1060,128 @@ mod tests {
     }
 
     /// The text `init` writes parses, and it equals the code's defaults: a changed default
-    /// must change the written file too.
+    /// must change the written file too. `key_commands` is written under `[integration]` and
+    /// not in the gate profile.
     #[test]
     fn the_default_text_parses_to_the_code_defaults() {
-        let parsed = parse(&default_text("main")).expect("the default text parses");
+        let text = default_text("main");
+        assert!(
+            text.contains("[integration]\nkey_commands = []"),
+            "init writes the integration key commands:\n{text}"
+        );
+        let profile = text
+            .split("[gate.profiles.default]")
+            .nth(1)
+            .expect("the default profile is in the text");
+        assert!(
+            !profile.contains("key_commands"),
+            "the gate profile no longer writes key_commands:\n{profile}"
+        );
+        let parsed = parse(&text).expect("the default text parses");
         assert_eq!(parsed, Config::default());
+    }
+
+    /// `[integration]` defaults: `key_commands` empty, `target_branch` unset (the repository's
+    /// `main_branch`), `method` `push`, `style` `merge`.
+    #[test]
+    fn the_integration_section_defaults_to_push_and_merge() {
+        let integration = Integration::default();
+        assert!(integration.key_commands.is_empty());
+        assert_eq!(integration.target_branch, None);
+        assert_eq!(integration.method, IntegrationMethod::Push);
+        assert_eq!(integration.style, IntegrationStyle::Merge);
+        assert!(
+            OPTIONAL_KEYS.contains(&"integration.target_branch"),
+            "the manual's table names it as not set"
+        );
+
+        let parsed = parse("schema_version = 1\n").expect("the minimum file parses");
+        assert_eq!(parsed.integration, Integration::default());
+        assert_eq!(parsed.target_branch(), "main");
+
+        let custom = parse("schema_version = 1\n[repository]\nmain_branch = \"trunk\"\n")
+            .expect("a custom main branch");
+        assert_eq!(custom.target_branch(), "trunk");
+
+        let target = parse("schema_version = 1\n[integration]\ntarget_branch = \"release\"\n")
+            .expect("a target branch");
+        assert_eq!(target.target_branch(), "release");
+    }
+
+    /// A gate profile that still writes `key_commands` is refused, naming the profile and the
+    /// place the key moved to. The key itself is the mistake, so an empty array is refused too.
+    #[test]
+    fn key_commands_in_a_gate_profile_is_refused_by_name() {
+        for value in ["key_commands = [\"false\"]\n", "key_commands = []\n"] {
+            let text = format!("schema_version = 1\n[gate.profiles.default]\n{value}");
+            let error = parse(&text).expect_err("a profile key_commands must fail");
+            assert!(error.contains("[integration] key_commands"), "{error}");
+            assert!(
+                error.contains("gate.profiles.default.key_commands"),
+                "the error names the profile key: {error}"
+            );
+        }
+    }
+
+    /// `integration.method` and `integration.style` are closed sets. This build runs `push`
+    /// and `merge`; the values decided for later are refused as not built, and an unknown
+    /// value names every allowed one.
+    #[test]
+    fn integration_method_and_style_are_closed_sets() {
+        let methods: Vec<&str> = INTEGRATION_METHODS
+            .iter()
+            .map(|value| value.as_str())
+            .collect();
+        assert_eq!(methods, ["push", "command", "pr"]);
+        let styles: Vec<&str> = INTEGRATION_STYLES
+            .iter()
+            .map(|value| value.as_str())
+            .collect();
+        assert_eq!(styles, ["merge", "squash", "rebase"]);
+
+        for value in INTEGRATION_METHODS {
+            assert_eq!(IntegrationMethod::parse(value.as_str()), Some(*value));
+            let text = format!("schema_version = 1\n[integration]\nmethod = \"{value}\"\n");
+            if value.is_built() {
+                assert_eq!(
+                    parse(&text).expect("a built method").integration.method,
+                    *value
+                );
+            } else {
+                let error = parse(&text).expect_err("an unbuilt method");
+                assert!(error.contains("not built yet"), "{error}");
+                assert!(error.contains(value.as_str()), "{error}");
+            }
+        }
+        for value in INTEGRATION_STYLES {
+            assert_eq!(IntegrationStyle::parse(value.as_str()), Some(*value));
+            let text = format!("schema_version = 1\n[integration]\nstyle = \"{value}\"\n");
+            if value.is_built() {
+                assert_eq!(
+                    parse(&text).expect("a built style").integration.style,
+                    *value
+                );
+            } else {
+                let error = parse(&text).expect_err("an unbuilt style");
+                assert!(error.contains("not built yet"), "{error}");
+                assert!(error.contains(value.as_str()), "{error}");
+            }
+        }
+
+        for (key, text) in [
+            (
+                "method",
+                "schema_version = 1\n[integration]\nmethod = \"merge\"\n",
+            ),
+            (
+                "style",
+                "schema_version = 1\n[integration]\nstyle = \"push\"\n",
+            ),
+        ] {
+            let error = parse(text).expect_err("a value from the other set");
+            assert!(error.contains(&format!("integration.{key}")), "{error}");
+            assert!(error.contains("must be one of"), "{error}");
+        }
     }
 
     /// A file with no `[gate]` table gets the profile `init` would have written.
@@ -853,6 +1201,7 @@ mod tests {
             "schema_version = 1\n[limits]\nbudget = 1\n",
             "schema_version = 1\n[gate]\nkeys = []\n",
             "schema_version = 1\n[gate.profiles.default]\nrunner = \"x\"\n",
+            "schema_version = 1\n[integration]\nmode = \"x\"\n",
         ] {
             let error = parse(text).expect_err("an unknown key must fail");
             assert!(!error.is_empty(), "{error}");

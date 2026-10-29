@@ -1,13 +1,14 @@
 //! The `integration` stage (ADR 0048 decisions 6 and 10).
 //!
-//! Integration builds the commit that would be merged. When the remote main is still the
-//! task's `base_sha`, the candidate is `head_sha`. Otherwise the candidate is a merge commit
-//! of `head_sha` onto the current remote main, created in `gates/integration/`. arc never
+//! Integration builds the commit that would be merged. When the target branch (the remote
+//! `[integration] target_branch`, else `[repository] main_branch`) is still the task's
+//! `base_sha`, the candidate is `head_sha`. Otherwise the candidate is a merge commit of
+//! `head_sha` onto the current target branch, created in `gates/integration/`. arc never
 //! rebases a task branch: a rebase changes the sha the gate verified.
 //!
-//! The key commands run on the candidate. The verdict records the main it used (`base_sha`)
-//! and the candidate. [`merge_ready`] re-reads the remote main: the merge may only fast
-//! forward main when main is still that `base_sha`.
+//! The key commands run on the candidate. The verdict records the target branch it used
+//! (`base_sha`) and the candidate. [`merge_ready`] re-reads the target branch: the merge may
+//! only fast forward it when it is still that `base_sha`.
 //!
 //! [`candidate_for`] builds the same kind of candidate for a verification stage: `sha` itself
 //! when the remote main is an ancestor of it, else a merge of `sha` onto the remote main. A
@@ -36,12 +37,12 @@ pub(crate) const INTEGRATION_LOCK: &str = "integration.lock";
 /// The `integration` stage for one attempt.
 ///
 /// `remote` is the repository's remote name and `main_ref` the ref that names the remote
-/// main after a fetch, typically `refs/remotes/<remote>/main`.
+/// target branch after a fetch, typically `refs/remotes/<remote>/main`.
 #[derive(Debug, Clone)]
 pub struct IntegrationRun<'a> {
     /// The repository root.
     pub repository: &'a Path,
-    /// The repository's remote name, for the fetches and the main ref.
+    /// The repository's remote name, for the fetches and the target ref.
     pub remote: &'a str,
     /// The task id (one path component); it names the merged branch `work/<task>`.
     pub task: &'a str,
@@ -49,11 +50,11 @@ pub struct IntegrationRun<'a> {
     pub attempt: &'a str,
     /// The commit the gate verified and that worker pushed.
     pub head_sha: &'a str,
-    /// The main commit the task's branch started from.
+    /// The target-branch commit the task's branch started from.
     pub base_sha: &'a str,
-    /// The ref that names the remote main after a fetch.
+    /// The ref that names the remote target branch after a fetch.
     pub main_ref: &'a str,
-    /// The profile's merge-candidate command lines.
+    /// The `[integration] key_commands` the stage runs on the candidate.
     pub key_commands: &'a [String],
     /// The gate profile the stage runs under, for the verdict (ADR 0048 decisions 10 and 15).
     pub profile: &'a str,
@@ -71,56 +72,47 @@ impl IntegrationRun<'_> {
     pub fn run(&self) -> Result<Verdict, GateError> {
         let _lock = DirLock::acquire(self.repository, INTEGRATION_LOCK)?;
         let started_at = now_utc();
-        // The fetch and the checkout prepare update the shared repository, so they take turns
-        // with every other stage preparation (ADR 0048 decision 10); the stage work after the
-        // prepare runs unlocked, next to another task's stage.
-        let prepare = DirLock::acquire(self.repository, PREPARE_LOCK)?;
-        let main_branch = git::main_branch_of(self.remote, self.main_ref)?;
-        // The work branch comes with the ordinary fetch; main needs its own refspec so a
-        // clone whose fetch configuration leaves main out still reads the current main.
-        git::fetch_remote(self.repository, self.remote)?;
-        git::fetch_main(self.repository, self.remote, main_branch)?;
+        // The branch the merge puts the candidate on: `[integration] target_branch`, else
+        // `[repository] main_branch`. A branch the remote does not have is a failed
+        // integration with a reason, not a git error: the task goes to `review.rework_pending`
+        // and nothing is pushed.
+        let target_branch = git::main_branch_of(self.remote, self.main_ref)?;
         let head = git::resolve_commit(self.repository, self.head_sha)?;
-        let task_base = git::resolve_commit(self.repository, self.base_sha)?;
-        let remote_main = git::resolve_commit(self.repository, self.main_ref)?;
-        let checkout = GateCheckout::new(self.repository, Stage::Integration, self.remote);
-        let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
-
         let mut commands = Vec::new();
         let mut conflict_paths = Vec::new();
         let mut reason = None;
         let mut result = VerdictResult::Pass;
+        let mut target_sha = None;
         let candidate;
-
-        if remote_main == task_base {
-            // Main has not moved: the merge result is the verified head itself.
-            checkout.prepare(&head)?;
-            drop(prepare);
-            candidate = Some(head.clone());
-            let (records, outcome) = run_series(
-                &checkout.path(),
-                self.key_commands,
-                self.timeout,
-                &log_dir,
-                Stage::Integration,
-            )?;
-            commands = records;
-            if outcome != SeriesOutcome::Passed {
-                result = VerdictResult::Fail;
-                reason = outcome.reason();
-            }
+        if git::ls_remote_branch(self.repository, self.remote, target_branch)?.is_none() {
+            candidate = None;
+            result = VerdictResult::Fail;
+            reason = Some(format!(
+                "target branch `{target_branch}` does not exist on `{}`",
+                self.remote
+            ));
         } else {
-            // Main moved: merge head onto the current main, never the other way around.
-            checkout.prepare(&remote_main)?;
-            drop(prepare);
-            let outcome = merge_onto(&checkout, self.task, &head)?;
-            conflict_paths = outcome.conflict_paths;
-            candidate = outcome.candidate_sha;
-            if let Some(failure) = outcome.failure {
-                result = VerdictResult::Fail;
-                reason = Some(failure);
-            } else {
-                let (records, series) = run_series(
+            // The fetch and the checkout prepare update the shared repository, so they take
+            // turns with every other stage preparation (ADR 0048 decision 10); the stage work
+            // after the prepare runs unlocked, next to another task's stage.
+            let prepare = DirLock::acquire(self.repository, PREPARE_LOCK)?;
+            // The work branch comes with the ordinary fetch; the target branch needs its own
+            // refspec so a clone whose fetch configuration leaves it out still reads the
+            // current target.
+            git::fetch_remote(self.repository, self.remote)?;
+            git::fetch_main(self.repository, self.remote, target_branch)?;
+            let task_base = git::resolve_commit(self.repository, self.base_sha)?;
+            let remote_main = git::resolve_commit(self.repository, self.main_ref)?;
+            target_sha = Some(remote_main.clone());
+            let checkout = GateCheckout::new(self.repository, Stage::Integration, self.remote);
+            let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
+
+            if remote_main == task_base {
+                // The target has not moved: the merge result is the verified head itself.
+                checkout.prepare(&head)?;
+                drop(prepare);
+                candidate = Some(head.clone());
+                let (records, outcome) = run_series(
                     &checkout.path(),
                     self.key_commands,
                     self.timeout,
@@ -128,9 +120,33 @@ impl IntegrationRun<'_> {
                     Stage::Integration,
                 )?;
                 commands = records;
-                if series != SeriesOutcome::Passed {
+                if outcome != SeriesOutcome::Passed {
                     result = VerdictResult::Fail;
-                    reason = series.reason();
+                    reason = outcome.reason();
+                }
+            } else {
+                // The target moved: merge head onto it, never the other way around.
+                checkout.prepare(&remote_main)?;
+                drop(prepare);
+                let outcome = merge_onto(&checkout, self.task, &head)?;
+                conflict_paths = outcome.conflict_paths;
+                candidate = outcome.candidate_sha;
+                if let Some(failure) = outcome.failure {
+                    result = VerdictResult::Fail;
+                    reason = Some(failure);
+                } else {
+                    let (records, series) = run_series(
+                        &checkout.path(),
+                        self.key_commands,
+                        self.timeout,
+                        &log_dir,
+                        Stage::Integration,
+                    )?;
+                    commands = records;
+                    if series != SeriesOutcome::Passed {
+                        result = VerdictResult::Fail;
+                        reason = series.reason();
+                    }
                 }
             }
         }
@@ -145,7 +161,7 @@ impl IntegrationRun<'_> {
             started_at,
             ended_at: now_utc(),
             main_sha: None,
-            base_sha: Some(remote_main),
+            base_sha: target_sha,
             candidate_sha: candidate,
             conflict_paths,
             approver: None,
@@ -167,12 +183,13 @@ impl IntegrationRun<'_> {
     }
 }
 
-/// Whether the merge may proceed: the remote main (`remote`'s `main_ref`) must still equal
-/// the integration verdict's recorded `base_sha` (ADR 0048 decision 6, "Main is still
+/// Whether the merge may proceed: the remote target branch (`remote`'s `main_ref`) must still
+/// equal the integration verdict's recorded `base_sha` (ADR 0048 decision 6, "Main is still
 /// `base_sha`").
 ///
-/// It fetches `remote` and compares the ref again, so a main that moved after integration
-/// makes this false. A verdict that is not a passing integration verdict is never ready.
+/// It fetches `remote` and compares the ref again, so a target branch that moved after
+/// integration makes this false. A verdict that is not a passing integration verdict is never
+/// ready.
 ///
 /// # Errors
 ///
@@ -202,7 +219,7 @@ pub fn merge_ready(
 pub(crate) struct Candidate {
     /// The resolved `verified_sha`.
     pub sha: String,
-    /// The remote main the candidate was built on.
+    /// The remote target branch the candidate was built on.
     pub main_sha: String,
     /// The commit the stage runs on, or `None` when the merge failed.
     pub candidate_sha: Option<String>,
@@ -214,10 +231,10 @@ pub(crate) struct Candidate {
 
 /// Builds the verification candidate for `sha` in `checkout` (ADR 0048 decision 10).
 ///
-/// It fetches `remote` and its main branch first. When the remote main is an ancestor of
-/// `sha`, the candidate is `sha` itself. Otherwise `checkout` goes to the remote main, where
-/// a `--no-ff` merge of `sha` builds the candidate with arc's own identity; that commit is
-/// never pushed. The checkout is left on the candidate.
+/// It fetches `remote` and its target branch first. When the remote target branch is an
+/// ancestor of `sha`, the candidate is `sha` itself. Otherwise `checkout` goes to the remote
+/// target, where a `--no-ff` merge of `sha` builds the candidate with arc's own identity; that
+/// commit is never pushed. The checkout is left on the candidate.
 ///
 /// A conflict aborts the merge, leaves no candidate, and reports reason `conflict` with the
 /// sorted paths. A merge that fails for another reason reports `merge_failed: <message>`.
@@ -272,8 +289,8 @@ struct MergeOutcome {
 
 /// Merges `sha` onto the checkout's current HEAD, with arc's fixed identity.
 ///
-/// The checkout must already be prepared at the main commit. A conflict aborts the merge and
-/// leaves the checkout on that main commit, so the next run can reuse it.
+/// The checkout must already be prepared at the target-branch commit. A conflict aborts the
+/// merge and leaves the checkout on that commit, so the next run can reuse it.
 fn merge_onto(checkout: &GateCheckout, task: &str, sha: &str) -> Result<MergeOutcome, GateError> {
     let message = merge_message(task, sha);
     let mut args = crate::git::IDENTITY.to_vec();

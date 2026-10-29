@@ -894,8 +894,8 @@ fn recorded_reason(fixture: &Fixture, attempt: u32) -> Value {
 fn reverify_accepts_an_integration_command_failure() {
     let fixture = Fixture::new("reverify-integration-command");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
-    // The integration of an attempt runs with the profile its verification ran under, so the
-    // failing key command is part of that profile before the gate runs.
+    // The integration runs the current `[integration] key_commands`, so the failing key
+    // command is in the config before the merge runs.
     fixture.key_commands(&["false"]);
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
@@ -946,9 +946,9 @@ fn reverify_accepts_an_integration_command_failure() {
 fn reverify_accepts_an_integration_timeout() {
     let fixture = Fixture::new("reverify-integration-timeout");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
-    // The integration of an attempt runs with the profile its verification ran under, so the
-    // timing-out key command is part of that profile before the gate runs; the timeout itself
-    // is read when the integration runs.
+    // The integration runs the current `[integration] key_commands`, so the timing-out key
+    // command is in the config before the merge; the timeout itself is read when the
+    // integration runs.
     fixture.key_commands(&["sleep 5"]);
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
     fixture.tune("command_timeout_secs = 3600", "command_timeout_secs = 1");
@@ -1249,7 +1249,7 @@ fn merge_integrates_again_when_main_moves_during_the_integration() {
          && git push origin HEAD:refs/heads/main; fi",
         marker = marker.display()
     );
-    // The integration of an attempt runs with the profile its verification ran under.
+    // The integration runs the current `[integration] key_commands`.
     fixture.key_commands(&[command.as_str()]);
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
@@ -1902,7 +1902,7 @@ fn a_main_that_keeps_moving_is_never_overwritten() {
          && echo moved >> {}",
         marker.display()
     );
-    // The integration of an attempt runs with the profile its verification ran under.
+    // The integration runs the current `[integration] key_commands`.
     fixture.key_commands(&[command.as_str()]);
     assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
 
@@ -5632,8 +5632,8 @@ fn merge_across_a_switch_change(from: &str, to: &str, label: &str) -> (bool, Opt
         .repo
         .repo
         .with_file_name(format!("{label}-at-write.toml"));
-    // The integration of an attempt runs with the profile its verification ran under, so the
-    // key command that installs the new setting is part of that profile before the gate runs.
+    // The integration runs the current `[integration] key_commands`, so the key command that
+    // installs the new setting is in the config before the merge.
     let copy = format!("cp '{}' '{}'", at_write.display(), config.display());
     fixture.key_commands(&[copy.as_str()]);
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
@@ -7106,5 +7106,160 @@ fn a_review_wait_caps_at_an_hour_and_doubles_from_ten_minutes() {
     assert!(
         (waited - 600).abs() <= 5,
         "the second wait in a row is 10 minutes: {waited} seconds"
+    );
+}
+
+// ---- the `[integration]` section ----------------------------------------------------
+
+/// Integration runs the current `[integration] key_commands`, never the list an attempt
+/// recorded in its `profile.json`: a recorded `["false"]` beside the current empty list
+/// passes the merge.
+#[test]
+fn integration_ignores_the_key_commands_an_attempt_recorded() {
+    let fixture = Fixture::new("integration-recorded-key-commands");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let path = fixture
+        .store
+        .root()
+        .join("runs")
+        .join(&fixture.task)
+        .join("attempts")
+        .join(fixture.attempt_label())
+        .join("profile.json");
+    let text = fs::read_to_string(&path).expect("profile.json");
+    let mut profile: Value = serde_json::from_str(&text).expect("profile.json parses");
+    profile["profile"]["key_commands"] = json!(["false"]);
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&profile).expect("profile.json encodes"),
+    )
+    .expect("write profile.json");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    let integration = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert!(integration.is_pass(), "{:?}", integration.reason);
+    assert!(
+        integration.commands.is_empty(),
+        "the current [integration] key_commands is empty"
+    );
+}
+
+/// `[integration] target_branch` is the branch the candidate is built on and pushed to; the
+/// repository's `main_branch` is untouched.
+#[test]
+fn a_target_branch_is_built_on_and_pushed_to() {
+    let fixture = Fixture::new("integration-target-release");
+    // `release` moves ahead of `main`; `main` stays where it is.
+    let release =
+        fixture
+            .repo
+            .commit_on("release", &fixture.base.clone(), "release.txt", "release\n");
+    fixture.repo.push("release");
+    fixture.repo.git(&["checkout", "main"]);
+    fixture.tune(
+        "[integration]\n",
+        "[integration]\ntarget_branch = \"release\"\n",
+    );
+
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    let candidate = merged.candidate_sha.clone().expect("a candidate");
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/release").as_deref(),
+        Some(candidate.as_str()),
+        "the candidate was pushed to release"
+    );
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(fixture.base.as_str()),
+        "main is untouched"
+    );
+    let integration = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert_eq!(
+        integration.base_sha.as_deref(),
+        Some(release.as_str()),
+        "the candidate was built on release"
+    );
+    assert!(
+        fixture.repo.is_ancestor(&release, &candidate),
+        "the candidate contains release"
+    );
+}
+
+/// A target branch the remote does not have fails the integration with a reason: the task goes
+/// to `review.rework_pending` and nothing is pushed.
+#[test]
+fn a_target_branch_missing_on_the_remote_fails_the_integration() {
+    let fixture = Fixture::new("integration-target-missing");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+    // The branch exists when the gate runs; it is missing at merge time.
+    fixture.tune(
+        "[integration]\n",
+        "[integration]\ntarget_branch = \"release\"\n",
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge returns");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("review", "rework_pending"),
+        "{merged:?}"
+    );
+    let reason = merged.reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("release") && reason.contains("does not exist"),
+        "the reason names the missing target: {reason}"
+    );
+    assert_eq!(
+        fixture.repo.ls_remote("refs/heads/main").as_deref(),
+        Some(fixture.base.as_str()),
+        "nothing was pushed"
+    );
+    assert!(
+        fixture.repo.ls_remote("refs/heads/release").is_none(),
+        "the missing branch was not created"
+    );
+}
+
+/// A `[integration] key_commands` change between the gate and the merge is used by the merge,
+/// and `integration_inputs` reflects it.
+#[test]
+fn a_key_commands_change_between_the_gate_and_the_merge_is_used() {
+    let fixture = Fixture::new("integration-key-commands-changed");
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let before = review::integration_inputs(&fixture.store, &fixture.task).expect("the inputs");
+    fixture.key_commands(&["true"]);
+    let after = review::integration_inputs(&fixture.store, &fixture.task).expect("the inputs");
+    assert_ne!(
+        before, after,
+        "a changed config changes the integration inputs"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    let integration = fixture.verdict(&fixture.attempt_label(), Stage::Integration);
+    assert_eq!(
+        integration.commands.len(),
+        1,
+        "the merge ran the current [integration] key_commands"
     );
 }

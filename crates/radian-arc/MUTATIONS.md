@@ -1649,3 +1649,19 @@ passed.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0222-M6 | `attempt_cost` takes the session delta for the `radian` worker too (the `if false` branch) | ✅ 1 failed | `attempt::a_radian_workers_resumed_attempt_counts_its_own_prompt_turn` (`cost_usd` was 0.5, the increase over the previous attempt, instead of 1.5, the prompt turn's fee) |
+
+## TK0237: the `[integration]` section (2026-10-29, branch `work/TK0237-integration-section`)
+
+`key_commands` moved from the gate profile to `[integration] key_commands`, and
+`[integration] target_branch` now names the branch integration builds on and pushes to.
+Each mutation was applied by hand, the tests ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox`, and the file was restored from `.radian/mut/` with `cp`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0237-M1 | `run_integration` reads the recorded profile's `key_commands` instead of the current `[integration]` list | `review::integration_ignores_the_key_commands_an_attempt_recorded`, `review::a_key_commands_change_between_the_gate_and_the_merge_is_used` | ✅ 2 failed |
+| TK0237-M2 | `Config::target_branch` ignores `[integration] target_branch` and always returns `[repository] main_branch` | `review::a_target_branch_is_built_on_and_pushed_to`, `review::a_target_branch_missing_on_the_remote_fails_the_integration` | ✅ 2 failed |
+| TK0237-M3 | `parse` accepts a gate profile's `key_commands` (`check_profile_key_commands` dropped) | `store::config::tests::key_commands_in_a_gate_profile_is_refused_by_name` | ✅ 1 failed |
+| TK0237-M4 | `IntegrationMethod` accepts a value this build does not run (`command`, `pr`) | `store::config::tests::integration_method_and_style_are_closed_sets` | ✅ 1 failed |
+| TK0237-M5 | `IntegrationRun::run` skips the missing-target check and lets the fetch fail as a git error | `review::a_target_branch_missing_on_the_remote_fails_the_integration` (the merge returned an error instead of `review.rework_pending`) | ✅ 1 failed |

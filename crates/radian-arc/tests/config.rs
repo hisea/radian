@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use radian_arc::gate::{
-    BeforeAttempt, BeforeAttemptCommand, GateConfig, Stage, StageSpec, effective_stages,
+    BeforeAttempt, BeforeAttemptCommand, GateConfig, Profile, Stage, StageSpec, effective_stages,
 };
 
 #[derive(Deserialize)]
@@ -17,7 +17,6 @@ command_timeout_secs = 3600
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
 commands = ["cargo fmt --all -- --check"]
-key_commands = ["cargo test"]
 
 [gate.profiles.radian]
 stages = [
@@ -27,7 +26,6 @@ stages = [
   { stage = "human", required = true },
 ]
 commands = []
-key_commands = []
 "#;
 
 #[test]
@@ -53,7 +51,10 @@ fn the_gate_table_has_the_config_file_shape() {
         ]
     );
     assert_eq!(default.commands, vec!["cargo fmt --all -- --check"]);
-    assert_eq!(default.key_commands, vec!["cargo test"]);
+    assert!(
+        default.key_commands.is_empty(),
+        "the profile record no longer carries the key"
+    );
     assert!(default.validate().is_ok());
 
     let radian = &gate.profiles["radian"];
@@ -84,6 +85,15 @@ fn the_gate_table_defaults_match_the_adr() {
     assert!(default.stages[0].required);
     assert!(default.commands.is_empty());
     assert!(default.key_commands.is_empty());
+}
+
+/// A profile record written by an older arc still reads its `key_commands`, even though a
+/// `config.toml` that writes one is refused: a merge of that attempt reads the record.
+#[test]
+fn a_legacy_profile_key_commands_still_reads() {
+    let profile: Profile = toml::from_str("stages = []\nkey_commands = [\"false\"]\n")
+        .expect("a legacy profile record reads");
+    assert_eq!(profile.key_commands, vec!["false"]);
 }
 
 #[test]

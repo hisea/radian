@@ -201,7 +201,8 @@ fn spawn_claim_with(
     executable: &std::path::Path,
 ) -> Result<Spawned, Error> {
     let task_id = claim.task.as_str();
-    let (remote, main_branch) = store.repository_names()?;
+    let remote = config.repository.remote.clone();
+    let target_branch = config.target_branch().to_owned();
     let run_dir = attempt_ops::run_dir(store, task_id, claim.attempt);
     fs::create_dir_all(&run_dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", run_dir.display())))?;
@@ -223,7 +224,7 @@ fn spawn_claim_with(
         .arg("--remote")
         .arg(&remote)
         .arg("--main-branch")
-        .arg(&main_branch);
+        .arg(&target_branch);
     if claim.resume {
         command.arg("--resume");
     }
@@ -962,9 +963,11 @@ mod tests {
             "the claim resolved the program from the repository root"
         );
 
-        // The configuration a different reader loaded afterwards: no command, other args.
+        // The configuration a different reader loaded afterwards: no command, other args, and
+        // a target branch the wrapper must start from.
         let mut later = config::Config::default();
         later.worker.exec_args = vec!["--model".to_owned(), "later".to_owned()];
+        later.integration.target_branch = Some("release".to_owned());
 
         let recorded = dir.path().join("wrapper-args.txt");
         let recorder = dir.path().join("recorder.sh");
@@ -999,6 +1002,15 @@ mod tests {
         assert!(
             !args.contains(&"--model"),
             "the later configuration did not reach the wrapper: {args:?}"
+        );
+        let at = args
+            .iter()
+            .position(|arg| *arg == "--main-branch")
+            .expect("the target branch is on the wrapper line");
+        assert_eq!(
+            args[at + 1],
+            "release",
+            "the wrapper starts from [integration] target_branch: {args:?}"
         );
     }
 

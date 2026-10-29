@@ -498,8 +498,9 @@ fn plan_verification_with(
         .filter(|sha| !sha.is_empty())
         .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `head_sha`")))?;
     let config = store.config()?;
-    let (remote, main_branch) = store.repository_names()?;
-    let main_ref = format!("refs/remotes/{remote}/{main_branch}");
+    let remote = config.repository.remote.clone();
+    let target_branch = config.target_branch().to_owned();
+    let main_ref = format!("refs/remotes/{remote}/{target_branch}");
     // A gate that already ran keeps the profile it recorded, even when its flow, its
     // `gate_profile`, or the profile itself changed since (ADR 0048 decisions 10 and 15).
     let (profile_name, profile, stages) = match planned {
@@ -583,16 +584,18 @@ fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) 
 }
 
 /// A digest of what an integration depends on: `config.toml`, the task's `head_sha` and
-/// `base_sha`, and the remote main over the wire. A pass records it when it starts an
+/// `base_sha`, and the remote target branch over the wire. A pass records it when it starts an
 /// integration gate, so a gate that exits without a record is not started again while these
-/// inputs are unchanged, and a new head, a new main or a changed profile allows one new start
+/// inputs are unchanged, and a new head, a new target or a changed profile allows one new start
 /// (ADR 0048 decision 10). `None` when the config, the task or the remote cannot be read.
 #[must_use]
 pub fn integration_inputs(store: &Store, task_id: &str) -> Option<String> {
     let task = store.load_task(task_id).ok()?.item;
     let config = fs::read(store.root().join(crate::store::CONFIG_FILE)).unwrap_or_default();
-    let (remote, main_branch) = store.repository_names().ok()?;
-    let main = ls_remote_branch(store.repo(), &remote, &main_branch).ok()??;
+    let parsed = store.config().ok()?;
+    let remote = parsed.repository.remote.clone();
+    let target_branch = parsed.target_branch().to_owned();
+    let main = ls_remote_branch(store.repo(), &remote, &target_branch).ok()??;
     let fields = json!({
         "kind": "integration",
         "head": task.head_sha,
@@ -1372,9 +1375,9 @@ fn auto_reverify_stored_cause(
     Ok(Some((task, recorded_main)))
 }
 
-/// The task and the remote main, when an automatic reverify applies to `task_id` (ADR 0048
-/// decision 9): the stored side holds, and the remote main is no longer the main that failing
-/// verdict recorded.
+/// The task and the remote target branch, when an automatic reverify applies to `task_id`
+/// (ADR 0048 decision 9): the stored side holds, and the target branch is no longer the one
+/// the failing verdict recorded.
 fn auto_reverify_cause(
     store: &Store,
     task_id: &str,
@@ -1382,8 +1385,14 @@ fn auto_reverify_cause(
     let Some((task, recorded_main)) = auto_reverify_stored_cause(store, task_id)? else {
         return Ok(None);
     };
-    let (remote, main_branch) = store.repository_names()?;
-    let Some(main_sha) = ls_remote_branch(store.repo(), &remote, &main_branch)? else {
+    let (remote, target_branch) = {
+        let config = store.config()?;
+        (
+            config.repository.remote.clone(),
+            config.target_branch().to_owned(),
+        )
+    };
+    let Some(main_sha) = ls_remote_branch(store.repo(), &remote, &target_branch)? else {
         return Ok(None);
     };
     if main_sha == recorded_main {
@@ -2331,7 +2340,7 @@ fn extra_stages(task: &model::TaskFile) -> Vec<StageSpec> {
 // ---- merge ---------------------------------------------------------------------------
 
 /// `radian arc merge <task>`: the owner's approval, the integration candidate, the push to
-/// the remote main and `done.merged` (ADR 0048 decisions 6 and 11).
+/// the remote target branch and `done.merged` (ADR 0048 decisions 6 and 11).
 ///
 /// The task must be `review.awaiting_human`, or `review.integrating`/`review.ready_to_merge`
 /// from an earlier `merge` that main moved under. The remote `work/<task>` must still be
@@ -2340,7 +2349,8 @@ fn extra_stages(task: &model::TaskFile) -> Vec<StageSpec> {
 /// `review.verifying`.
 ///
 /// A passing integration writes `review.ready_to_merge`; the push is
-/// `git push <remote> <candidate>:refs/heads/<main>` with no force. A main that moved makes
+/// `git push <remote> <candidate>:refs/heads/<target>` with no force, where `<target>` is
+/// `[integration] target_branch` (else `[repository] main_branch`). A target that moved makes
 /// the task integrate again, at most [`MAX_INTEGRATION_ROUNDS`] runs per command.
 ///
 /// # Errors
@@ -2387,7 +2397,9 @@ pub struct MergeContext {
     pub head: String,
     pub base: String,
     pub remote: String,
-    pub main_branch: String,
+    /// The branch integration merges into and pushes to (`[integration] target_branch`, else
+    /// `[repository] main_branch`).
+    pub target_branch: String,
     pub main_ref: String,
     pub profile: crate::gate::Profile,
     /// The name of the profile, which every integration verdict records.
@@ -2440,8 +2452,10 @@ fn prepare_merge(
             "`verified_sha` {verified} is not `head_sha` {head}; verify the task again"
         )));
     }
-    let (remote, main_branch) = store.repository_names()?;
-    let main_ref = format!("refs/remotes/{remote}/{main_branch}");
+    let config = store.config()?;
+    let remote = config.repository.remote.clone();
+    let target_branch = config.target_branch().to_owned();
+    let main_ref = format!("refs/remotes/{remote}/{target_branch}");
     // The attempt keeps the profile its gate ran under: a flow removed, or a `gate_profile`
     // that changed, since the gate ran does not change the approval or the integration of its
     // verdicts (ADR 0048 decisions 10 and 15). A verification from before the record existed
@@ -2449,7 +2463,6 @@ fn prepare_merge(
     let (profile_name, profile, stages) = match attempt_profile(store, task_id, &label) {
         Some(recorded) => (recorded.name, recorded.profile, recorded.stages),
         None => {
-            let config = store.config()?;
             let flow = task
                 .flow
                 .as_deref()
@@ -2533,7 +2546,7 @@ fn prepare_merge(
         head,
         base,
         remote,
-        main_branch,
+        target_branch,
         main_ref,
         profile,
         profile_name,
@@ -2551,7 +2564,9 @@ fn run_integration(store: &Store, context: &MergeContext, label: &str) -> Result
         head_sha: &context.head,
         base_sha: &context.base,
         main_ref: &context.main_ref,
-        key_commands: &context.profile.key_commands,
+        // The integration always runs the current `[integration] key_commands`, never the list
+        // an older attempt recorded in its `profile.json`.
+        key_commands: &config.integration.key_commands,
         profile: &context.profile_name,
         timeout: config.gate.command_timeout(),
     }
@@ -2591,11 +2606,12 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
         .filter(|sha| !sha.is_empty())
         .ok_or_else(|| Error::Refused(format!("task `{task_id}` has no `base_sha`")))?;
     let config = store.config()?;
-    let (remote, main_branch) = store.repository_names()?;
-    let main_ref = format!("refs/remotes/{remote}/{main_branch}");
+    let remote = config.repository.remote.clone();
+    let target_branch = config.target_branch().to_owned();
+    let main_ref = format!("refs/remotes/{remote}/{target_branch}");
     // As the approval: the integration of an attempt runs with the profile its verification
     // ran under, not with a flow profile that changed since (ADR 0048 decisions 10 and 15).
-    let (profile_name, profile) = match attempt_profile(store, task_id, &label) {
+    let (profile_name, _profile) = match attempt_profile(store, task_id, &label) {
         Some(recorded) => (recorded.name, recorded.profile),
         None => {
             let flow = task
@@ -2617,7 +2633,8 @@ pub fn gate_integration(store: &Store, task_id: &str) -> Result<String, Error> {
         head_sha: &head,
         base_sha: &base,
         main_ref: &main_ref,
-        key_commands: &profile.key_commands,
+        // The current `[integration] key_commands`; the recorded profile's list is not used.
+        key_commands: &config.integration.key_commands,
         profile: &profile_name,
         timeout: config.gate.command_timeout(),
     }
@@ -2660,8 +2677,8 @@ fn task_change_paths(repo: &Path, main_sha: Option<&str>, base: &str, head: &str
 }
 
 /// Finishes a passing integration verdict: `review.ready_to_merge`, the fast-forward push to
-/// the remote main, `done.merged`, and the removal of the worktree (ADR 0048 decisions 6 and
-/// 11).
+/// the remote target branch, `done.merged`, and the removal of the worktree (ADR 0048
+/// decisions 6 and 11).
 fn finish_integration(
     store: &Store,
     context: &MergeContext,
@@ -2695,14 +2712,14 @@ fn finish_integration(
         store.repo(),
         &context.remote,
         &candidate,
-        &context.main_branch,
+        &context.target_branch,
     )? {
         Push::Pushed => {}
         Push::Rejected(stderr) => {
             back_to_integrating(store, task_id)?;
             return Ok(Integration::Again(format!(
                 "the push to `{}` `{}` was rejected: {stderr}",
-                context.remote, context.main_branch
+                context.remote, context.target_branch
             )));
         }
         Push::TimedOut(text) => {
@@ -2712,13 +2729,13 @@ fn finish_integration(
             return Ok(Integration::Again(text));
         }
     }
-    let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.main_branch)?;
+    let remote_main = ls_remote_branch(store.repo(), &context.remote, &context.target_branch)?;
     if remote_main.as_deref() != Some(candidate.as_str()) {
         back_to_integrating(store, task_id)?;
         return Ok(Integration::Again(format!(
             "`{}` `{}` is {}, not {candidate}",
             context.remote,
-            context.main_branch,
+            context.target_branch,
             remote_main.as_deref().unwrap_or("missing")
         )));
     }
@@ -3613,10 +3630,10 @@ fn push_candidate(
     repo: &Path,
     remote: &str,
     candidate: &str,
-    main_branch: &str,
+    target_branch: &str,
 ) -> Result<Push, Error> {
-    // Never `--force`: a main that moved must reject the push, not lose its commits.
-    let refspec = format!("{candidate}:refs/heads/{main_branch}");
+    // Never `--force`: a target branch that moved must reject the push, not lose its commits.
+    let refspec = format!("{candidate}:refs/heads/{target_branch}");
     let out = match crate::git::run_remote(repo, &["push", remote, &refspec], None) {
         Ok(crate::git::RemoteRun::Done(out)) => out,
         Ok(crate::git::RemoteRun::TimedOut { limit }) => {

@@ -521,14 +521,14 @@ radian arc reverify <TASK>
 It applies only when the task's `rework_reason`, if there is one, is one a re-run can fix:
 
 - a failed verification stage: `commands`, `mutation`, `review`, or `ci`, with any reason;
-- the integration stage failed with reason `command_failed` or `timeout`, the same stage and reason pair the automatic reverify of a moved main accepts (see [A command failure and a moved main](gate.md#a-command-failure-and-a-moved-main)); main does not need to have moved.
+- the integration stage failed with reason `command_failed` or `timeout`, the same stage and reason pair the automatic reverify of a moved target branch accepts (see [A command failure and a moved target branch](gate.md#a-command-failure-and-a-moved-target-branch)); the target branch does not need to have moved.
 
-A reject note, a failed delivery check, an integration failure with any other reason (a `conflict` has its own rework path, in [A conflict with main](gate.md#a-conflict-with-main)), and every other state are refused with exit `3`.
+A reject note, a failed delivery check, an integration failure with any other reason (a `conflict` has its own rework path, in [A conflict with the target branch](gate.md#a-conflict-with-the-target-branch)), and every other state are refused with exit `3`.
 A task in `review.verifying` is accepted when its gate is stuck: its `runs/<task>/gate.json` record names the task's current attempt with status `no_record` or `died` (see [the gate run](gate.md#the-gate-run)), and no gate process holds the task's gate lock.
 Any other `review.verifying` task, including one whose gate is still running, is refused with exit `3`.
 A plan paused by the automatic rework limit does not block `reverify` when the task's own reason is one of the failures above.
 
-A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once main moved (see [A command failure and a moved main](gate.md#a-command-failure-and-a-moved-main)). A task waiting on an unavailable review model is re-verified by `radian arc run` once its `retry_at` passes (see [A review wait on an unavailable model](gate.md#a-review-wait-on-an-unavailable-model)).
+A task whose `commands` or integration stage failed with `command_failed` or `timeout` is also re-verified by `radian arc run` once the target branch moved (see [A command failure and a moved target branch](gate.md#a-command-failure-and-a-moved-target-branch)). A task waiting on an unavailable review model is re-verified by `radian arc run` once its `retry_at` passes (see [A review wait on an unavailable model](gate.md#a-review-wait-on-an-unavailable-model)).
 A task of a `cancelled` plan is refused with exit `3`.
 `reverify` ignores the automatic path's two guards: it runs whether or not the `(head_sha, main)` pair was re-verified before, and whether or not `limits.max_auto_reverify` is used up; it does not use up the count.
 
@@ -564,7 +564,7 @@ A gate stage that fails again is a normal result: the task moves to `review.rewo
 
 ## `radian arc merge <TASK>`
 
-`merge` takes your approval, builds the integration candidate, pushes it to the remote main, and finishes the task.
+`merge` takes your approval, builds the integration candidate, pushes it to the remote target branch, and finishes the task.
 It is the owner's action (there is no MCP tool for it).
 At auto level `merge`, `radian arc run` takes the same approval and starts the integration in the background; a later pass reads its verdict and pushes.
 
@@ -588,12 +588,12 @@ Then it:
 
 1. writes your `human` pass verdict for `verified_sha` (`runs/<task>/attempts/<attempt id>/verdicts/human.json`) and moves the task to `review.integrating`.
    The verdict has no `approver` when you ran `merge`, and `approver` `auto` when `radian arc run` merged it at auto level `merge`.
-2. runs the integration stage against the current remote main. The candidate is `head_sha` when main is still the task's `base_sha`; otherwise it is a merge commit of `head_sha` onto main (arc never rebases). The profile's `key_commands` run on the candidate.
+2. runs the integration stage against the current remote target branch (`[integration] target_branch`, else `[repository] main_branch`). The candidate is `head_sha` when the target is still the task's `base_sha`; otherwise it is a merge commit of `head_sha` onto the target (arc never rebases). The current `[integration] key_commands` run on the candidate.
    A conflict or a failing key command moves the task to `review.rework_pending` with the reason, and `merge` exits `0`.
    A passing integration moves the task to `review.ready_to_merge`.
-3. pushes the candidate to the remote main without force: `git push <remote> <candidate>:refs/heads/<main>`.
-   When main moved after integration (or the push is rejected as non-fast-forward), the task returns to `review.integrating` and `merge` integrates again, at most 3 times in one command. After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
-4. checks with `git ls-remote` that the remote main is the candidate and that the candidate contains `head_sha`, moves the task to `done.merged`, and removes the task's worktree (`.radian/arc/worktrees/<task>`).
+3. pushes the candidate to the remote target branch without force: `git push <remote> <candidate>:refs/heads/<target>`.
+   When the target moved after integration (or the push is rejected as non-fast-forward), the task returns to `review.integrating` and `merge` integrates again, at most 3 times in one command. After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
+4. checks with `git ls-remote` that the remote target branch is the candidate and that the candidate contains `head_sha`, moves the task to `done.merged`, and removes the task's worktree (`.radian/arc/worktrees/<task>`).
    The task's branch stays on the remote.
 
 `merge` never checks out or updates the main checkout's working tree: it fetches, pushes, and reads refs only.

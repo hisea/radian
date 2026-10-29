@@ -85,8 +85,8 @@ fn verdict_names(store: &Store, task: &str) -> Vec<String> {
 
 /// One flow's profile has `commands`, the other's has `review` instead. Each task's gate
 /// runs only its own profile's stages, and every verdict names that profile. The image task
-/// then merges, so the approval's required-stage check and the integration stage read the
-/// same profile: its `key_commands` runs, which the default profile does not have.
+/// then merges, so the approval's required-stage check reads the same profile and the
+/// integration stage runs the current `[integration] key_commands`.
 #[test]
 fn each_flow_gates_with_its_own_profile() {
     let (repo, store) = setup("gate-profile-two-flows");
@@ -95,12 +95,12 @@ fn each_flow_gates_with_its_own_profile() {
         "[gate.profiles.image]\n\
          stages = [{ stage = \"review\", required = true }, \
          { stage = \"human\", required = true }]\n\
-         key_commands = [\"true\"]\n\
          before_attempt = []\n\
          \n\
          [flows.image]\n\
          gate_profile = \"image\"\n",
     );
+    tune(&store, "key_commands = []", "key_commands = [\"true\"]");
     let plan = store
         .add_plan("p", "A plan", "the request\n")
         .expect("add a plan");
@@ -190,12 +190,12 @@ fn each_flow_gates_with_its_own_profile() {
     assert_eq!(
         integration.commands.len(),
         1,
-        "the image profile's `key_commands` ran on the merge candidate"
+        "the current [integration] key_commands ran on the merge candidate"
     );
 }
 
-/// The background integration command reads the task's profile too: it runs the image
-/// profile's `key_commands`, not the default profile's empty list.
+/// The background integration command reads the task's profile and the current
+/// `[integration] key_commands`.
 #[test]
 fn the_background_integration_uses_the_tasks_profile() {
     let (repo, store) = setup("gate-profile-integration");
@@ -204,11 +204,11 @@ fn the_background_integration_uses_the_tasks_profile() {
         "[gate.profiles.image]\n\
          stages = [{ stage = \"review\", required = true }, \
          { stage = \"human\", required = true }]\n\
-         key_commands = [\"true\"]\n\
          \n\
          [flows.image]\n\
          gate_profile = \"image\"\n",
     );
+    tune(&store, "key_commands = []", "key_commands = [\"true\"]");
     let plan = store
         .add_plan("p", "A plan", "the request\n")
         .expect("add a plan");
@@ -254,7 +254,8 @@ fn the_background_integration_uses_the_tasks_profile() {
 }
 
 /// The background integration reads the profile the attempt's verification ran under, not the
-/// flow's profile after a change: the started gate's `key_commands` run on the candidate.
+/// flow's profile after a change: the verdict names the recorded profile and the current
+/// `[integration] key_commands` run on the candidate.
 #[test]
 fn a_background_integration_keeps_the_verifications_profile() {
     let (repo, store) = setup("gate-profile-integration-changed");
@@ -263,7 +264,6 @@ fn a_background_integration_keeps_the_verifications_profile() {
         "[gate.profiles.image]\n\
          stages = [{ stage = \"review\", required = true }, \
          { stage = \"human\", required = true }]\n\
-         key_commands = [\"true\"]\n\
          \n\
          [gate.profiles.after]\n\
          stages = [{ stage = \"review\", required = true }, \
@@ -272,6 +272,7 @@ fn a_background_integration_keeps_the_verifications_profile() {
          [flows.image]\n\
          gate_profile = \"image\"\n",
     );
+    tune(&store, "key_commands = []", "key_commands = [\"true\"]");
     let plan = store
         .add_plan("p", "A plan", "the request\n")
         .expect("add a plan");
@@ -626,7 +627,6 @@ fn a_changed_flow_profile_still_merges_the_started_gates_verdicts() {
          stages = [{ stage = \"commands\", required = true }, \
          { stage = \"human\", required = true }]\n\
          commands = [\"true\"]\n\
-         key_commands = [\"true\"]\n\
          \n\
          [gate.profiles.after]\n\
          stages = [{ stage = \"review\", required = true }, \
@@ -635,6 +635,7 @@ fn a_changed_flow_profile_still_merges_the_started_gates_verdicts() {
          [flows.art]\n\
          gate_profile = \"running\"\n",
     );
+    tune(&store, "key_commands = []", "key_commands = [\"true\"]");
     let plan = store
         .add_plan("p", "A plan", "the request\n")
         .expect("add a plan");
@@ -700,7 +701,7 @@ fn a_changed_flow_profile_still_merges_the_started_gates_verdicts() {
     assert_eq!(
         integration.commands.len(),
         1,
-        "the started gate's profile `key_commands` ran on the merge candidate"
+        "the current [integration] key_commands ran on the merge candidate"
     );
 }
 
@@ -717,11 +718,11 @@ fn a_flow_removed_after_apply_still_merges_the_started_gates_verdicts() {
          stages = [{ stage = \"commands\", required = true }, \
          { stage = \"human\", required = true }]\n\
          commands = [\"true\"]\n\
-         key_commands = [\"true\"]\n\
          \n\
          [flows.art]\n\
          gate_profile = \"art\"\n",
     );
+    tune(&store, "key_commands = []", "key_commands = [\"true\"]");
     let plan = store
         .add_plan("p", "A plan", "the request\n")
         .expect("add a plan");

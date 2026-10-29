@@ -13,7 +13,7 @@ The command that starts it, its arguments and its exit codes are in [`radian arc
 The worker runs in a session of its own: with [`worker.rework_session`](files.md#configtoml) at `fresh`, which is the default, each attempt gets the session `<task>-<attempt>`.
 With `resume` the task has one session instead, the task id, and every attempt after the first continues it.
 The claim records the attempt's session id in its `start.json` before the worker starts, and the wrapper records the same id in its `identity.json` and `execution.json`; `show` prints it as `session_id` from the first of those records that names one, so a running attempt's session is known from the claim on.
-A fresh attempt after the first cannot see the earlier conversation, so the brief it receives opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote main and the branch tip.
+A fresh attempt after the first cannot see the earlier conversation, so the brief it receives opens with a hand-off section, `## Where the previous attempt left off`: the newest earlier attempt's final report (cut at 8,000 characters, with a note when it is cut; a `reverify` attempt runs no worker and writes none, so the section walks back to the attempt before it and names it), the `git log --oneline` of the task's own commits, and the `git diff --stat` of the task's own change, both from the merge base of the remote target branch and the branch tip.
 The section says the full history is on the branch and to read the files rather than assume.
 The brief follows it, and a `merge-main` conflict section still comes first.
 When [`worker-brief.md`](files.md#worker-briefmd) exists, its content is the last section of every brief, so the order is: the `merge-main` conflict section, the hand-off, the task's brief, then the standing worker instructions.
@@ -47,8 +47,8 @@ The wrapper writes that line itself, as for any ACP worker, and the cost, budget
 
 Before the worker starts, the wrapper runs the profile's `before_attempt` entries in the worktree, in the order listed (see the [`before_attempt` row](files.md#configtoml)).
 An entry is `merge-main` or a table `{ run = "<command line>", timeout_secs = <integer> }`.
-`merge-main` fetches the remote main and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; it does nothing on a first attempt, whose worktree already starts from the fetched main.
-A conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with main](gate.md#a-conflict-with-main)).
+`merge-main` fetches the remote target branch (`[integration] target_branch`, else `[repository] main_branch`) and merges it with `git merge --no-ff --no-edit` unless it is already an ancestor; it does nothing on a first attempt, whose worktree already starts from the fetched target branch.
+A conflict leaves the worktree mid-merge and the worker's brief opens with the conflicted paths (see [A conflict with the target branch](gate.md#a-conflict-with-the-target-branch)).
 A failed fetch or merge ends the attempt with git's message.
 
 A command entry runs in the worktree with no sandbox before every attempt, the first included, after any entry listed before it:

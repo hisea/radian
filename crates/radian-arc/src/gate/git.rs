@@ -107,6 +107,36 @@ pub(crate) fn main_branch_of<'a>(remote: &str, main_ref: &'a str) -> Result<&'a 
         .ok_or_else(|| GateError::MainRef(main_ref.to_owned()))
 }
 
+/// The sha `remote` has for `branch`, read over the wire (`git ls-remote`), when the branch
+/// exists. The call is bounded by `[limits] git_remote_timeout_secs`.
+pub(crate) fn ls_remote_branch(
+    repository: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<String>, GateError> {
+    let reference = format!("refs/heads/{branch}");
+    let args = ["ls-remote", remote, reference.as_str()];
+    let output = match crate::git::run_remote(repository, &args, None)
+        .map_err(|error| run_error(repository, &args, error))?
+    {
+        crate::git::RemoteRun::Done(output) => output,
+        crate::git::RemoteRun::TimedOut { limit } => {
+            return Err(GateError::RemoteTimeout(crate::git::timeout_text(
+                &args, limit,
+            )));
+        }
+    };
+    if !output.success() {
+        return Err(GateError::Git {
+            dir: repository.to_path_buf(),
+            command: command_line(&args),
+            stderr: output.stderr.trim().to_string(),
+        });
+    }
+    let sha = output.stdout.split_whitespace().next().unwrap_or_default();
+    Ok((!sha.is_empty()).then(|| sha.to_owned()))
+}
+
 /// Resolves `revision` to a full commit id, or fails with [`GateError::UnknownCommit`].
 pub(crate) fn resolve_commit(repository: &Path, revision: &str) -> Result<String, GateError> {
     let object = format!("{revision}^{{commit}}");

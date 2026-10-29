@@ -102,8 +102,9 @@ pub struct Options {
     /// Internal: `arc` sets it from the repository configuration (default `origin`); a
     /// person does not.
     pub remote: String,
-    /// The main branch a first attempt starts from. Internal: `arc` sets it (default
-    /// `main`); a person does not.
+    /// The branch a first attempt starts from and `merge-main` merges: `[integration]
+    /// target_branch`, else `[repository] main_branch`. Internal: `arc` sets it; a person does
+    /// not.
     pub main_branch: String,
     /// Extra worker arguments after `--`: the flow's `exec_args` (the model route in tests:
     /// `--model`, `--base-url`). They reach `radian acp` for a `radian` worker and the
@@ -1235,9 +1236,9 @@ fn repo_root(started: Instant, wall: Duration) -> Result<PathBuf, Failure> {
     Ok(root)
 }
 
-/// Creates the worktree from the configured remote's main branch when it is missing, or
+/// Creates the worktree from the configured remote's target branch when it is missing, or
 /// reuses it. Returns whether this run created it (the first attempt records `base_sha` from
-/// the fetched main branch and starts there).
+/// the fetched target branch and starts there).
 fn ensure_worktree(
     repo: &Path,
     worktree: &Path,
@@ -1375,9 +1376,9 @@ fn ensure_worktree(
     Ok(true)
 }
 
-/// The task's base commit: the fetched remote main branch when this run created the
+/// The task's base commit: the fetched remote target branch when this run created the
 /// worktree, else the value the first attempt recorded. A worktree made outside the wrapper
-/// falls back to the merge-base with the configured remote's main branch.
+/// falls back to the merge-base with the configured remote's target branch.
 fn base_sha(
     repo: &Path,
     arc: &Path,
@@ -1632,20 +1633,21 @@ fn before_attempt_entries(
     }
 }
 
-/// One merge of the remote main that conflicted: what the section of the brief reports.
+/// One merge of the remote target branch that conflicted: what the section of the brief
+/// reports.
 struct MergeConflict {
-    /// The ref that was merged, `<remote>/<main>`.
+    /// The ref that was merged, `<remote>/<target>`.
     main_ref: String,
-    /// The remote main commit the merge started from.
+    /// The remote target commit the merge started from.
     main_sha: String,
     /// The conflicted paths, sorted.
     paths: Vec<String>,
 }
 
-/// `merge-main`: fetch the remote main with the worktree setup's explicit refspec and merge it
-/// into the branch with `--no-ff` (the repository sets `merge.ff=only`, and arc never
-/// rebases). `None` when main is already an ancestor or the merge was clean; `Some` when the
-/// merge conflicted and the worktree stays mid-merge. A fetch, or a merge that fails for
+/// `merge-main`: fetch the remote target branch with the worktree setup's explicit refspec and
+/// merge it into the branch with `--no-ff` (the repository sets `merge.ff=only`, and arc never
+/// rebases). `None` when the target is already an ancestor or the merge was clean; `Some` when
+/// the merge conflicted and the worktree stays mid-merge. A fetch, or a merge that fails for
 /// another reason, fails the attempt with git's message, the way a failed worktree setup does.
 fn merge_main(
     repo: &Path,
@@ -1667,9 +1669,9 @@ fn merge_main(
             )));
         }
     }
-    // `merge-base --is-ancestor` answers with its exit code: 0 when main is already in the
-    // branch, and anything else means a merge is needed (or the ref could not be read, which
-    // the merge below then reports).
+    // `merge-base --is-ancestor` answers with its exit code: 0 when the target branch is
+    // already in the branch, and anything else means a merge is needed (or the ref could not
+    // be read, which the merge below then reports).
     let ancestor = git_raw(
         worktree,
         &["merge-base", "--is-ancestor", &main_ref, branch],
@@ -2280,9 +2282,9 @@ fn handoff_section(
         return Ok(None);
     }
     let main = format!("refs/remotes/{}/{}", o.remote, o.main_branch);
-    // The task's own change, from the merge base with the remote main: a merge of main brings
-    // main's files in and is not the task's change (ADR 0048 decision 8). The recorded base
-    // covers a repository whose main ref cannot be read.
+    // The task's own change, from the merge base with the remote target branch: a merge of the
+    // target brings its files in and is not the task's change (ADR 0048 decision 8). The
+    // recorded base covers a repository whose target ref cannot be read.
     let own_base =
         merge_base(&s.repo, &main, head, &s.clock)?.unwrap_or_else(|| base_sha.to_owned());
     let range = format!("{own_base}..{head}");

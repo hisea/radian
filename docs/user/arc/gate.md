@@ -23,11 +23,11 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   When the profile lists both `commands` and `review`, those two start at the same time; every other stage keeps its order.
 - Every stage runs against the verification candidate, in its own checkout under `.radian/arc/gates/<stage>/`.
   The review stage's checkouts are one per concurrency slot, `.radian/arc/gates/review-<n>/`.
-  The candidate is `verified_sha` when the remote main is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote main, built in that checkout and never pushed.
+  The candidate is `verified_sha` when the remote target branch is an ancestor of it; otherwise it is a merge commit of `verified_sha` onto the remote target branch, built in that checkout and never pushed.
   The merge uses arc's own commit identity, so the same inputs build the same tree.
   `verified_sha` stays the task's commit: the approval, the digest and `merge` bind to it, and the candidate is evidence only.
   A stage's commands run in order and stop at the first failure; each has its own log and the profile's timeout.
-- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote main the candidate was built on), `candidate_sha` (the commit the stage ran on; absent when the merge conflicted) and `profile` (the profile the stage ran under).
+- A verification stage's verdict records `sha` (the task's `verified_sha`), `main_sha` (the remote target branch the candidate was built on), `candidate_sha` (the commit the stage ran on; absent when the merge conflicted) and `profile` (the profile the stage ran under).
 - A merge conflict is a failed stage: the verdict's reason is `conflict`, its `conflict_paths` lists the paths, the task goes to `review.rework_pending`, and `show` prints `conflict: <paths>`.
   Nothing is pushed.
 - `review` is a read-only radian session, not the worker session.
@@ -38,7 +38,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   It reads `[gate.review.first] exec_args` and `[gate.review.first] timeout_secs` when they are set; an unset key falls back to the same `[gate.review]` key and, for `exec_args`, then to `worker.exec_args`.
   A rework review never reads `[gate.review.first]`.
   Both keys are read when the stage starts, so a change takes effect at the next review.
-  The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own change, not main's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
+  The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote target branch and `verified_sha` to `verified_sha` (the task's own change, not the target branch's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   A rework round's prompt holds the increment instead of the full diff (see [A rework round](#a-rework-round)).
   `[gate.review] prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
@@ -96,14 +96,14 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
 
 ### An empty change
 
-A task's own change is empty when the diff from the merge base of the remote main and `verified_sha` to `verified_sha` names no path; a commit that adds no content on top of main is empty too.
+A task's own change is empty when the diff from the merge base of the remote target branch and `verified_sha` to `verified_sha` names no path; a commit that adds no content on top of the target branch is empty too.
 A task whose brief allows it, such as the review's follow-up, may deliver nothing, and no stage fails it for being empty:
 
-- `commands` runs the profile's commands on the candidate; when main has not moved the candidate is the remote main, and nothing about the empty change fails it.
+- `commands` runs the profile's commands on the candidate; when the target branch has not moved the candidate is the remote target branch, and nothing about the empty change fails it.
 - `mutation` has nothing to mutate, so it passes; this build does not run it, and a profile that lists it is refused as unbuilt (see above), which is not a failure of the empty change.
 - `review` passes without starting a session. Its verdict is a pass whose `review` report has a summary saying that the task's change is empty and empty `blocking`, `suggestions` and `verified`, with no session ids and no cost.
 - `human` is your approval and does not change: it still binds to `verified_sha` and `verdict_set_digest`.
-- `integration` merges the empty change onto the current main (the candidate is the remote main when main moved) and runs the profile's `key_commands` on it as usual.
+- `integration` merges the empty change onto the current target branch (the candidate is the target branch when it moved) and runs the current `[integration] key_commands` on it as usual.
 
 A task's `allow_noop` is its own value when its file carries one, else its flow's [`flows.<name>.allow_noop`](files.md#configtoml); the delivery check of each attempt reads it, at the attempt's claim (see [Task fields](files.md#task-fields)).
 
@@ -121,13 +121,13 @@ A rework round's prompt holds the brief, the previous review's blocking items, t
 It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
 
 The increment is the task's own diff restricted to the hunks that hold a line the rework changed.
-A line is an increment line when it is a new-side line of `git diff <previous sha> <sha>` and also a new-side line of the task's own diff, which starts at the merge base of the remote main and `sha`.
+A line is an increment line when it is a new-side line of `git diff <previous sha> <sha>` and also a new-side line of the task's own diff, which starts at the merge base of the remote target branch and `sha`.
 A line that came in only with a merge of main is not in the task's own diff, so it drops out.
 
 arc, not the session, decides whether a blocking item is pre-existing.
 After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless one of these holds:
 
-- its `file:line` is within 3 lines of a line the task's own change added or changed in that file (the new side of `git diff <the merge base of the remote main and the head>..<head>`): a problem in code the task itself wrote in an earlier attempt is the task's, not pre-existing, so the rework's increment does not decide this;
+- its `file:line` is within 3 lines of a line the task's own change added or changed in that file (the new side of `git diff <the merge base of the remote target branch and the head>..<head>`): a problem in code the task itself wrote in an earlier attempt is the task's, not pre-existing, so the rework's increment does not decide this;
 - it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking;
 - its `level` is `critical`: a `critical` item blocks in every round, wherever it is;
 - it has no `file` or no `line`: it stays in `blocking` at its level, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
@@ -195,9 +195,9 @@ With `propose_followups` `false` arc adds none (see the [`propose_followups` row
 A follow-up arc cannot add (the plan's file changed outside arc) does not undo the merge: `radian arc merge` prints it as a `warning:` line after the merge, and `radian arc run` reports it in the summary.
 The plan keeps the state it had.
 
-### A conflict with main
+### A conflict with the target branch
 
-A verification stage (`commands`, `mutation`, `review`) or the integration stage can fail with reason `conflict`: the task's commit or branch does not merge with main.
+A verification stage (`commands`, `mutation`, `review`) or the integration stage can fail with reason `conflict`: the task's commit or branch does not merge with the target branch (`[integration] target_branch`, else `[repository] main_branch`).
 With `merge-main` on, the next attempt starts mid-merge, so arc writes its brief and moves the task to `todo.ready`.
 The heading is `## Rework <n> (conflict with main)`, with the lead's `add_rework` numbering.
 The text names the main commit (short sha) and the stage, lists the conflicted paths, says the next attempt starts mid-merge, and asks the worker to resolve the conflict keeping both sides' intent, commit the merge, rebuild, run the touched tests, and change nothing else.
@@ -212,22 +212,22 @@ An attempt that does not end in a conflict sets the run back to `0`, and so does
 `show` prints the task's `retry_count`, not this run.
 `auto` decides whether the next attempt starts by itself.
 
-### A command failure and a moved main
+### A command failure and a moved target branch
 
-A `commands` stage, or an integration key command, can fail because of the tree rather than the task: a flaky test, or a main that is broken itself.
-When the remote main is no longer the main the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](loop.md#radian-arc-run)).
+A `commands` stage, or an integration key command, can fail because of the tree rather than the task: a flaky test, or a target branch that is broken itself.
+When the remote target branch is no longer the one the failing verdict recorded, `radian arc run` re-verifies the task by itself, the way `radian arc reverify` does: it claims a new attempt without a worker and starts its gate in the background ([`run`](loop.md#radian-arc-run)).
 
 It applies only when all of these hold:
 
 - the task's plan has `auto` other than `off`;
 - the task is `review.rework_pending` because a `commands` or integration stage failed with reason `command_failed` or `timeout`;
-- the remote main is not the `main_sha` the failing verdict recorded; an integration verdict records that main as `base_sha`.
+- the remote target branch is not the `main_sha` the failing verdict recorded; an integration verdict records it as `base_sha`.
 
 A review stage failure, a conflict, a reject note, a failed delivery check, and a task the lead returned to `todo.ready` are never re-verified by themselves.
 
 Two guards stop a loop:
 
-- each `(head_sha, remote main)` pair is re-verified by itself at most once, and the pairs are kept in `runs/<task>/auto_reverify.json`. A main that does not move runs nothing again.
+- each `(head_sha, remote target branch)` pair is re-verified by itself at most once, and the pairs are kept in `runs/<task>/auto_reverify.json`. A target branch that does not move runs nothing again.
 - [`limits.max_auto_reverify`](files.md#configtoml) counts the automatic reverifies of one task. When the count is used up, the task stays in `review.rework_pending`, `radian arc run` prints one line with the reason, and `show` prints the same text as the `rework_reason`. The plan is not paused.
 
 An automatic reverify starts no worker, is not a retry (it changes neither `retry_count` nor `max_attempts`), and does not count toward `auto_rework`.
