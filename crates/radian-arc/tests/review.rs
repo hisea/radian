@@ -1155,7 +1155,11 @@ fn merge_with_main_unchanged_pushes_the_head_and_leaves_the_worktree_to_the_hook
         .store
         .load_task(&fixture.task)
         .expect("the task reads");
-    assert_eq!(stored.item.pending_hooks, vec!["after_merge".to_owned()]);
+    assert_eq!(
+        stored.item.pending_hooks,
+        vec!["after_awaiting_human".to_owned(), "after_merge".to_owned()],
+        "verification and the merge each recorded their point"
+    );
     assert_eq!(stored.item.merged_sha.as_deref(), Some(head.as_str()));
     let human = fixture.verdict(&fixture.attempt_label(), Stage::Human);
     assert!(human.is_pass());

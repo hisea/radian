@@ -130,7 +130,7 @@ fn confirm_with(store: &Store, id: &str, write: bool) -> Result<Confirmation, Er
             if write {
                 store.change_task(id, |task| {
                     check_task(task)?;
-                    task.phase = "ready".to_owned();
+                    task.enter_phase("ready");
                     Ok(())
                 })?;
             } else {
@@ -485,8 +485,7 @@ pub fn add_rework_with(
         }
         let number = task.attempt + 1;
         append_rework(&mut task.body, number, brief, heading_suffix);
-        task.state = TaskState::Todo;
-        task.phase = "ready".to_owned();
+        task.enter(TaskState::Todo, "ready");
         // The lead's and the review's new instructions get their own retries (ADR 0048
         // decision 9). A conflict rework continues the same line of work, so it keeps the
         // count: `max_attempts` then bounds a task whose conflicts keep returning it to

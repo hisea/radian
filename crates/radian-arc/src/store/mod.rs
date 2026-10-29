@@ -994,7 +994,7 @@ impl Store {
         );
         task.flow = flow;
         if proposed {
-            task.phase = model::PROPOSED_PHASE.to_owned();
+            task.enter(model::TaskState::Todo, model::PROPOSED_PHASE);
         }
         // The task file comes first: a crash between the two writes leaves an unlisted task
         // file, which is visible, instead of a plan that names a file that does not exist.
@@ -1570,6 +1570,9 @@ fn protected_changes(kind: Kind, last: &str, current: &str) -> Result<Vec<&'stat
             }
             if last.pending_hooks != current.pending_hooks {
                 touched.push("pending_hooks");
+            }
+            if last.pending_hook_states != current.pending_hook_states {
+                touched.push("pending_hook_states");
             }
             if last.merged_sha != current.merged_sha {
                 touched.push("merged_sha");

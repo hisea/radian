@@ -1,7 +1,8 @@
 //! `[hooks]`: the commands arc runs at fixed points (ADR 0048 decisions 10 and 13).
 //!
-//! A transition that owes a hook records its point in the task's `pending_hooks` field in the
-//! same transaction that moves the task. The process that holds `runner.lock` runs the pending
+//! A transition that owes a hook records its point in the task's `pending_hooks` field and the
+//! `<state>.<phase>` it fires for in `pending_hook_states`, in the same transaction that moves
+//! the task. The process that holds `runner.lock` runs the pending
 //! points: every scheduling pass runs them before its steps, and the owner's `merge` command
 //! runs them when it can take the lock without waiting. A point is cleared only after its
 //! commands have run, success or failure, so a process killed mid-hook runs it again on the
@@ -22,18 +23,27 @@ use crate::store::{Error, Store};
 /// The point a task reaching `done.merged` owes.
 pub const AFTER_MERGE: &str = "after_merge";
 
-/// Every hook point, built or not, in the order the manual lists them. A task file's
-/// `pending_hooks` list may name any of them; the parser accepts the set and refuses another.
+/// The point a task entering any `failed.*` phase owes.
+pub const AFTER_FAIL: &str = "after_fail";
+
+/// The point a task entering `review.rework_pending` owes.
+pub const AFTER_REWORK: &str = "after_rework";
+
+/// The point a task entering `review.awaiting_human` owes.
+pub const AFTER_AWAITING_HUMAN: &str = "after_awaiting_human";
+
+/// The point a new task entering `todo.proposed` owes.
+pub const AFTER_PROPOSED: &str = "after_proposed";
+
+/// Every hook point, in the order the manual lists them. A task file's `pending_hooks` list may
+/// name any of them; the parser accepts the set and refuses another.
 pub const HOOK_POINTS: &[&str] = &[
     AFTER_MERGE,
-    "after_fail",
-    "after_rework",
-    "after_awaiting_human",
-    "after_proposed",
+    AFTER_FAIL,
+    AFTER_REWORK,
+    AFTER_AWAITING_HUMAN,
+    AFTER_PROPOSED,
 ];
-
-/// The points this build runs. `Config::parse` refuses a section that sets any other one.
-pub const BUILT_HOOK_POINTS: &[&str] = &[AFTER_MERGE];
 
 /// The environment every hook command receives, in the order the manual lists it. One list for
 /// the code and the manual's drift test. They are set with `Command::env` by name, so the source
@@ -84,68 +94,62 @@ fn run_point(
     task: &TaskFile,
     point: &str,
 ) -> Result<Vec<String>, Error> {
-    let built = BUILT_HOOK_POINTS.contains(&point);
-    let commands = if built {
-        config.hooks.commands(point)
-    } else {
-        &[]
-    };
+    let commands = config.hooks.commands(point);
     let mut warnings = Vec::new();
-    if !built {
-        warnings.push(format!(
-            "{} hook `{point}` is not built yet; it ran no command",
-            task.id
-        ));
-    } else {
-        let log_dir = store.root().join("runs").join(&task.id).join("hooks");
-        if let Err(error) = std::fs::create_dir_all(&log_dir) {
-            return Err(Error::Failed(format!(
-                "cannot create {}: {error}",
-                log_dir.display()
-            )));
-        }
-        let env = env_for(store, config, task, point);
-        let timeout = Duration::from_secs(config.gate.command_timeout_secs);
-        for (index, line) in commands.iter().enumerate() {
-            let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
-            match run_shell(store.repo(), line, timeout, &log, &env, None) {
-                Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
-                Ok(outcome) => {
-                    let reason = if outcome.outcome == SeriesOutcome::TimedOut {
-                        format!("timed out after {} s", config.gate.command_timeout_secs)
-                    } else {
-                        format!(
-                            "exited {}",
-                            outcome
-                                .exit_code
-                                .map(|code| code.to_string())
-                                .unwrap_or_else(|| "on a signal".to_owned())
-                        )
-                    };
-                    warnings.push(format!(
-                        "{} hook `{point}` command {} {reason}: {line}",
-                        task.id,
-                        index + 1
-                    ));
-                }
-                Err(error) => warnings.push(format!(
-                    "{} hook `{point}` command {} could not run: {error}",
+    let log_dir = store.root().join("runs").join(&task.id).join("hooks");
+    if !commands.is_empty()
+        && let Err(error) = std::fs::create_dir_all(&log_dir)
+    {
+        return Err(Error::Failed(format!(
+            "cannot create {}: {error}",
+            log_dir.display()
+        )));
+    }
+    let env = env_for(store, config, task, point);
+    let timeout = Duration::from_secs(config.gate.command_timeout_secs);
+    for (index, line) in commands.iter().enumerate() {
+        let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
+        match run_shell(store.repo(), line, timeout, &log, &env, None) {
+            Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
+            Ok(outcome) => {
+                let reason = if outcome.outcome == SeriesOutcome::TimedOut {
+                    format!("timed out after {} s", config.gate.command_timeout_secs)
+                } else {
+                    format!(
+                        "exited {}",
+                        outcome
+                            .exit_code
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "on a signal".to_owned())
+                    )
+                };
+                warnings.push(format!(
+                    "{} hook `{point}` command {} {reason}: {line}",
                     task.id,
                     index + 1
-                )),
+                ));
             }
+            Err(error) => warnings.push(format!(
+                "{} hook `{point}` command {} could not run: {error}",
+                task.id,
+                index + 1
+            )),
         }
     }
     let point = point.to_owned();
     store.change_task(&task.id, move |task| {
         task.pending_hooks.retain(|pending| pending != &point);
+        let recorded = format!("{point}=");
+        task.pending_hook_states
+            .retain(|entry| !entry.starts_with(&recorded));
         Ok(())
     })?;
     Ok(warnings)
 }
 
 /// The environment one point receives (decision 10). `ARC_MERGED_SHA` belongs to
-/// [`AFTER_MERGE`] only.
+/// [`AFTER_MERGE`] only, and `ARC_STATE` is the state and phase the point fires for, which the
+/// write that recorded the point stored with it, not the task's later state.
 fn env_for(
     store: &Store,
     config: &Config,
@@ -163,7 +167,8 @@ fn env_for(
         ("ARC_TARGET_BRANCH", config.target_branch().to_owned()),
         (
             "ARC_STATE",
-            format!("{}.{}", task.state.as_str(), task.phase),
+            task.pending_hook_state(point)
+                .map_or_else(|| point_state(task, point), str::to_owned),
         ),
         ("ARC_HOOK", point.to_owned()),
     ];
@@ -173,6 +178,22 @@ fn env_for(
         env.push(("ARC_MERGED_SHA", sha.clone()));
     }
     env
+}
+
+/// The `<state>.<phase>` a point fires for when the task file records none with it. A file from
+/// before `pending_hook_states` reports the phase its point names; `after_fail` reports the
+/// failed phase the task is in.
+fn point_state(task: &TaskFile, point: &str) -> String {
+    match point {
+        AFTER_MERGE => "done.merged".to_owned(),
+        AFTER_FAIL if task.state == crate::store::model::TaskState::Failed => {
+            format!("failed.{}", task.phase)
+        }
+        AFTER_REWORK => "review.rework_pending".to_owned(),
+        AFTER_AWAITING_HUMAN => "review.awaiting_human".to_owned(),
+        AFTER_PROPOSED => format!("todo.{}", crate::store::model::PROPOSED_PHASE),
+        _ => format!("{}.{}", task.state.as_str(), task.phase),
+    }
 }
 
 /// The point a task file may name, when it is one of [`HOOK_POINTS`]. The task reader uses this

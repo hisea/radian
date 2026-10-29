@@ -3214,6 +3214,7 @@ mod tests {
             allow_noop: Some(false),
             followup_pending: true,
             pending_hooks: vec!["after_merge".to_owned()],
+            pending_hook_states: vec!["after_merge=done.merged".to_owned()],
             merged_sha: Some("e".repeat(40)),
             extra_stages: vec!["mutation".to_owned()],
             max_attempts: Some(2),
