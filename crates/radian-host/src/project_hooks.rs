@@ -242,7 +242,13 @@ fn parse_command(hook: &serde_json::Value, accepts_async: bool) -> CommandParse 
         Some(serde_json::Value::Bool(on)) => *on || async_rewake,
         Some(_) => return CommandParse::DropHook,
     };
-    if (async_hook || async_rewake) && !accepts_async {
+    // Presence, not value: a pre-call hook that writes `"async": false` still asked for a
+    // field those events do not accept and is dropped like an async one (ADR 0045 §5).
+    // JSON `null` is absence, like `matcher` and `timeout`.
+    let declares_async = ["async", "asyncRewake"]
+        .iter()
+        .any(|key| table.get(*key).is_some_and(|value| !value.is_null()));
+    if !accepts_async && declares_async {
         return CommandParse::DropHook;
     }
     CommandParse::Ok(HookCommand {
@@ -627,6 +633,49 @@ mod tests {
             warnings[0].contains("hooks.PreToolUse[0].hooks[1]"),
             "one line names the dropped async hook: {warnings:?}"
         );
+    }
+
+    /// A pre-call hook that writes `"async": false` or `"asyncRewake": false` still carries
+    /// a field those events do not accept: presence, not the effective value, drops it with
+    /// one line, and its siblings still load (ADR 0045 §5).
+    #[test]
+    fn an_explicitly_false_async_field_on_pre_is_still_dropped() {
+        let parsed: serde_json::Value = serde_json::from_str(
+            r#"{
+                "PreToolUse": [{"matcher": "shell", "hooks": [
+                    {"type": "command", "command": "echo async-off", "async": false},
+                    {"type": "command", "command": "echo rewake-off", "asyncRewake": false},
+                    {"type": "command", "command": "echo keep"}
+                ]}],
+                "PermissionRequest": [{"hooks": [
+                    {"type": "command", "command": "echo ask", "async": false}
+                ]}]
+            }"#,
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let config = parse_project_value(&parsed, "test", &mut warnings);
+        assert_eq!(
+            config.pre_tool_use[0].hooks.len(),
+            1,
+            "the false-valued fields still drop their hooks: {config:?}"
+        );
+        assert_eq!(config.pre_tool_use[0].hooks[0].command, "echo keep");
+        assert!(
+            config.permission_request.is_empty(),
+            "PermissionRequest drops it too: {config:?}"
+        );
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        for key in [
+            "hooks.PreToolUse[0].hooks[0]",
+            "hooks.PreToolUse[0].hooks[1]",
+            "hooks.PermissionRequest[0].hooks[0]",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(key)),
+                "{key}: {warnings:?}"
+            );
+        }
     }
 
     /// A non-object top level warns once and loads nothing.

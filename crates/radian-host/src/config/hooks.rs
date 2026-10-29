@@ -328,7 +328,10 @@ fn parse_command(hook: &Value, accepts_async: bool) -> CommandParse {
         Some(Value::Boolean(on)) => *on || async_rewake,
         Some(_) => return CommandParse::DropHook,
     };
-    if (async_hook || async_rewake) && !accepts_async {
+    // Presence, not value: the fields belong to `PostToolUse` and `Stop` alone, so a hook
+    // that writes `async = false` on a pre-call event still asked for a field those events
+    // do not accept and is dropped like an `async = true` one (ADR 0045 §5).
+    if !accepts_async && (table.contains_key("async") || table.contains_key("asyncRewake")) {
         return CommandParse::DropHook;
     }
     CommandParse::Ok(HookCommand {
@@ -604,5 +607,56 @@ mod tests {
             vec!["hooks.PreToolUse[0].hooks[1]".to_owned()],
             "one line names the dropped async hook"
         );
+    }
+
+    /// A pre-call hook that writes `async = false` or `asyncRewake = false` still carries a
+    /// field those events do not accept: presence, not the effective value, drops it with
+    /// one line, and its siblings still load (ADR 0045 §5).
+    #[test]
+    fn an_explicitly_false_async_field_on_pre_is_still_dropped() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.PreToolUse]]\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo async-off\"\n",
+            "async = false\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo rewake-off\"\n",
+            "asyncRewake = false\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo keep\"\n",
+            "[[hooks.PermissionRequest]]\n",
+            "[[hooks.PermissionRequest.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"echo ask\"\n",
+            "async = false\n",
+        ));
+        assert_eq!(
+            config.hooks.pre_tool_use[0].hooks.len(),
+            1,
+            "the false-valued fields still drop their hooks: {:?}",
+            config.hooks.pre_tool_use
+        );
+        assert_eq!(config.hooks.pre_tool_use[0].hooks[0].command, "echo keep");
+        assert!(
+            config.hooks.permission_request.is_empty(),
+            "PermissionRequest drops it too: {:?}",
+            config.hooks.permission_request
+        );
+        assert_eq!(config.skipped.len(), 3, "one line per dropped hook");
+        for key in [
+            "hooks.PreToolUse[0].hooks[0]",
+            "hooks.PreToolUse[0].hooks[1]",
+            "hooks.PermissionRequest[0].hooks[0]",
+        ] {
+            assert!(
+                config.skipped.iter().any(|line| line == key),
+                "{key}: {:?}",
+                config.skipped
+            );
+        }
     }
 }

@@ -466,6 +466,7 @@ usually has a matcher that
 does not compile (the hooks page says so) or a tool name that is not a
 Radian tool name (MCP tools carry their `server__` prefix). A hook that
 denies everything usually exits non-zero by accident: check the timeout
-(a slow synchronous command past 60 seconds, or an async one past 600, fails
-closed) and check stderr. A project
+(a slow synchronous command past 60 seconds fails closed; an async one past
+600 only warns and records the run, because the action it checked already
+happened) and check stderr. A project
 file that never loads is in an untrusted directory: trust it first.

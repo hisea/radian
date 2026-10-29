@@ -15,7 +15,9 @@
 //! - `<claude-home>/skills` → one `[skills] extra_paths` entry pointing at it (never copied).
 //! - `<claude-home>/settings.json` `hooks` → the `[hooks]` subset (ADR 0045): only
 //!   `PreToolUse`/`PostToolUse`/`Stop`/`PermissionRequest`, only `type = "command"`, no
-//!   `async`/`if`/`http`/`prompt`/`agent`/`context: fork`. Claude tool names are translated
+//!   `if`/`http`/`prompt`/`agent`/`context: fork`. `async`/`asyncRewake` are carried on
+//!   `PostToolUse` and `Stop`; a pre-call hook carrying either field is dropped with one
+//!   report line. Claude tool names are translated
 //!   once, here (`Bash`→`shell`, `Edit`→`patch`, `Write`→`write`, `Read`→`read`); scripts
 //!   that read `.tool_input.file_path` must use `.path` (see the report line).
 //! - `<claude-home>/CLAUDE.md` → `~/.radian/AGENTS.md` (verbatim).
@@ -38,8 +40,9 @@
 //! - `<project>/.mcp.json`: never translated; the runtime reads it when the project
 //!   is trusted (ADR 0031 T1).
 //!
-//! Every other dropped item (`if`, `async`, http hooks, `context: fork`, agents, plugins,
-//! LSP, `.claude/rules`, `CLAUDE.local.md`, memory, sessions) gets one report line each.
+//! Every other dropped item (`if`, `async` on a pre-call event, http hooks, `context: fork`,
+//! agents, plugins, LSP, `.claude/rules`, `CLAUDE.local.md`, memory, sessions) gets one
+//! report line each.
 //!
 //! Safety rules this module is built around (each one has a test):
 //!
@@ -1904,7 +1907,10 @@ fn hook_command(
         Some(Json::Bool(on)) => *on || async_rewake,
         Some(_) => return Err("a hook with a non-boolean `async` is not supported".into()),
     };
-    if (async_hook || async_rewake) && !event.accepts_async() {
+    // Presence, not value: Claude's pre-call events must not carry the fields at all, so a
+    // hook that writes `"async": false` is dropped and reported like an async one (ADR 0045
+    // §5).
+    if !event.accepts_async() && (hook.contains_key("async") || hook.contains_key("asyncRewake")) {
         return Err("`async`/`asyncRewake` is only supported on `PostToolUse` and `Stop`".into());
     }
     if let Some(context) = hook.get("context").and_then(Json::as_str)
@@ -1940,13 +1946,10 @@ fn hook_command(
     };
     let timeout = match hook.get("timeout") {
         None => None,
-        Some(Json::Number(timeout)) => timeout.as_u64().map(|secs| {
-            if secs == 0 {
-                super::DEFAULT_HOOK_TIMEOUT_SECS
-            } else {
-                secs
-            }
-        }),
+        // Zero is kept, not rewritten: in Radian zero means "the default", and the default
+        // of an async hook is 600 s, not the synchronous 60 s that freezing zero into
+        // `Some(60)` would impose on the imported hook (ADR 0045 §5).
+        Some(Json::Number(timeout)) => timeout.as_u64(),
         Some(_) => return Err("a hook with a bad `timeout` is not supported".into()),
     };
     Ok(HookCommandDraft {

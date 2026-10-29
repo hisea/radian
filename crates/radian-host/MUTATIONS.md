@@ -1755,3 +1755,22 @@ the source was restored from a backup under `.radian/` (`cmp` empty).
 | TK0234-M8 | the ignored exit-0 control fields are no longer reported | ✅ 1 failed (rc=100) | `hooks::tests::async_control_fields_are_ignored_with_one_warning` (no warning line) |
 
 8/8 caught, no equivalent mutation.
+
+## TK0234 (rework): async field presence and the imported zero timeout (2026-10-29, branch `work/TK0234-async-hooks`)
+
+Review rework: a pre-call hook that writes `async = false`/`asyncRewake = false` is dropped
+on presence, and an imported `timeout: 0` stays zero so the 600 s async default applies.
+Each mutation was applied in place to `crates/radian-host/src/config/hooks.rs`,
+`src/project_hooks.rs` and `src/config/migrate_claude.rs`, the named test ran with
+`cargo nextest run -p radian-host --locked --profile sandbox --no-fail-fast` (the lib or
+`claude_migrate` binary named below), and the source was restored from `.radian/mut/`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0234-M9 | the user-level reader drops on the effective value again (`(async_hook \|\| async_rewake) && !accepts_async`) | ✅ 1 failed (rc=100) | `config::hooks::tests::an_explicitly_false_async_field_on_pre_is_still_dropped` (three hooks loaded instead of one) |
+| TK0234-M10 | the project reader drops on the effective value again (the same condition in `project_hooks.rs`) | ✅ 1 failed (rc=100) | `project_hooks::tests::an_explicitly_false_async_field_on_pre_is_still_dropped` (three hooks loaded instead of one) |
+| TK0234-M11 | import-claude drops on the effective value again (`(async_hook \|\| async_rewake) && !event.accepts_async()`) | ✅ 1 failed (rc=100) | `claude_migrate::an_explicitly_false_async_field_on_pre_is_not_imported` (0 report lines instead of 3) |
+| TK0234-M12 | import-claude rewrites an imported `timeout: 0` to 60 again | ✅ 1 failed (rc=100) | `claude_migrate::an_imported_zero_timeout_keeps_the_async_default` (the draft said `timeout = 60`) |
+
+4/4 caught, no equivalent mutation.
