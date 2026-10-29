@@ -1601,3 +1601,25 @@ empty).
 | TK0228-M7 | the `Stop` stdin drops an empty `session_crons` (the fields must always be present) | ✅ 1 failed (rc=100) | `hooks::tests::stop_stdin_always_carries_the_three_new_fields` (`session_crons` read as `Null`) |
 | TK0228-M8 | the continued turn's `Stop` reads the flag without clearing it (`load` instead of `swap`) | ✅ 1 failed (rc=100) | `hooks::tests::the_continued_turn_reports_stop_hook_active` (the turn after the continuation was still `true`) |
 | TK0228-M9 | `session_crons` never lists an armed `/loop` | ✅ 1 failed (rc=100) | `hooks::tests::session_crons_lists_the_loop_and_the_goal` (only the goal entry remained) |
+
+## 追加（TK0228 rework: the continuation's provenance rides on the claimed message）
+
+The review found that one session-global pending boolean let whichever completed turn reached
+`run_stop_once` first consume `stop_hook_active`. The rework keys the provenance by the
+continuation message's own id: the inbox reports each turn-opening claim
+(`Inbox::set_turn_claimed_callback`), the claim removes the id from
+`CommandHooks::pending_continuations` and sets `turn_continuation`, and `on_turn_end` captures
+that value at the turn's own boundary before spawning the `Stop` run. Mutations ran against
+`crates/radian-host/src/hooks.rs` and `crates/radian-runtime/src/inbox.rs` with
+`cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E '<filter>'`
+and `cargo nextest run -p radian-runtime --locked --profile sandbox --no-fail-fast -E
+'test(turn_claimed)'`; each file was restored from `.radian/mut/hooks.rs.orig` /
+`.radian/mut/inbox.rs.orig` and `cmp` was empty.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0228-M10 | the `Stop` cycle re-derives the provenance at run time from "any continuation queued" (one session-global pending value) instead of the turn's own captured value | ✅ 2 failed (rc=100) | `hooks::tests::a_late_stop_verdict_does_not_leak_into_a_users_turn` (the user's turn reported `true`) and `hooks::tests::the_continued_turn_reports_stop_hook_active` |
+| TK0228-M11 | the claim observer ignores the pending set (every claimed message marks a continuation) | ✅ 2 failed (rc=100) | `hooks::tests::a_user_message_clears_stop_hook_active` and `hooks::tests::a_late_stop_verdict_does_not_leak_into_a_users_turn` |
+| TK0228-M12 | `reset_wakes` leaves a queued continuation's id in the pending set | ✅ 1 failed (rc=100) | `hooks::tests::a_user_message_clears_stop_hook_active` |
+| TK0228-M13 | a queued continuation's id is never added to the pending set | ✅ 1 failed (rc=100) | `hooks::tests::the_continued_turn_reports_stop_hook_active` |
+| TK0228-M14 | `claim_next_turn` does not fire the turn-claimed callback (mutation in `crates/radian-runtime/src/inbox.rs`) | ✅ 1 failed (rc=100) | `queue::the_turn_claimed_callback_fires_for_every_opened_turn` |

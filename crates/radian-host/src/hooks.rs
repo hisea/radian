@@ -42,12 +42,13 @@
 
 use radian_coding::Jobs;
 use radian_core::{
-    ContentPart, HookContext, HookError, Hooks, InputSource, Message, RunOutcome, RunStatus,
-    ToolCall, ToolDecision, ToolResult,
+    ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageId, RunOutcome,
+    RunStatus, ToolCall, ToolDecision, ToolResult,
 };
-use radian_runtime::Inbox;
+use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -132,12 +133,17 @@ pub struct CommandHooks {
     /// The TUI `/loop` mode owns the turn end while armed, so the validator stays off.
     /// The TUI loop syncs this after every update; `exec` never sets it (it has no loop).
     loop_active: Arc<AtomicBool>,
-    /// Whether the turn now running was opened by a `Stop` continuation (ADR 0045 §2). It
-    /// is set when the continuation followup is sent, stays `true` for that turn's own
-    /// `Stop` run (`stop_hook_active` on its stdin), and is cleared when that run ends
-    /// without opening another, on a non-completed turn, and by any user message
-    /// ([`CommandHooks::reset_wakes`]).
-    stop_hook_active: Arc<AtomicBool>,
+    /// The message ids of `Stop` continuations sent and not yet claimed. Provenance
+    /// travels with the queued message: [`Inbox::claim_next_turn`]'s callback removes the
+    /// id and marks the turn it opens, so a slow `Stop` run for another turn can never
+    /// consume it. A user message clears the set ([`CommandHooks::reset_wakes`]): a
+    /// continuation still queued when the user speaks is no longer a continuation.
+    pending_continuations: Arc<std::sync::Mutex<HashSet<MessageId>>>,
+    /// Whether the turn now running was opened by a `Stop` continuation: set when the
+    /// inbox claims the continuation message, read once at that turn's own `on_turn_end`
+    /// (`stop_hook_active` on its `Stop` stdin). A non-completed turn clears it; a user
+    /// message does not touch a turn that already started.
+    turn_continuation: Arc<AtomicBool>,
     /// Consecutive validator-fired turn ends. The third consecutive hit reports `blocked`
     /// instead of continuing. A rule miss, a non-completed turn, or a user message
     /// ([`CommandHooks::reset_wakes`]) clears it.
@@ -149,6 +155,51 @@ pub struct CommandHooks {
     /// the session `intent stop` for herdr until the next turn starts).
     intent_stop_warn: HooksWarning,
 }
+/// A process-wide counter for continuation message ids. The wall clock alone is not
+/// enough (two calls can share a nanosecond, as in the inbox's own id nonce), so the
+/// sequence keeps ids unique within a process; the pid keeps them unique across runs.
+static CONTINUATION_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The id of a `Stop` continuation message. The host must know it before the inbox
+/// accepts the message: the id is what ties the queued followup to the turn it opens
+/// (`stop_hook_active`, ADR 0045 §2). A caller-supplied id is kept by the inbox.
+fn continuation_message_id() -> MessageId {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let seq = CONTINUATION_SEQ.fetch_add(1, Ordering::Relaxed);
+    MessageId(format!("stop-{:x}{:x}{:x}", std::process::id(), nanos, seq))
+}
+
+/// Installs the inbox's turn-claimed observer: the id of each message that opens a turn
+/// is looked up in the pending continuation set, and the answer becomes the running
+/// turn's provenance. A claim of any other input clears it (a new turn).
+fn install_turn_claimed_callback(
+    inbox: &Arc<Inbox>,
+    pending: Arc<std::sync::Mutex<HashSet<MessageId>>>,
+    turn_continuation: Arc<AtomicBool>,
+) {
+    inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
+        let continuation = entry.message.meta().id.as_ref().is_some_and(|id| {
+            pending
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(id)
+        });
+        turn_continuation.store(continuation, Ordering::SeqCst);
+    })));
+}
+
+/// Writes `id` into `message`'s host metadata (the inbox keeps a caller-supplied id).
+fn set_message_id(message: &mut Message, id: MessageId) {
+    match message {
+        Message::User { meta, .. }
+        | Message::Assistant { meta, .. }
+        | Message::Tool { meta, .. } => meta.id = Some(id),
+    }
+}
+
 impl CommandHooks {
     /// Builds the hooks from the user `[hooks]` section layered over the project hooks
     /// (`<workspace>/.radian/hooks.json`, empty when untrusted). Each event compiles the
@@ -168,6 +219,17 @@ impl CommandHooks {
         wake: HooksWarning,
         intent_stop_warn: HooksWarning,
     ) -> Self {
+        // The continuation provenance rides on the claimed message, not on a session-global
+        // pending flag: the inbox reports each turn-opening claim, and only the turn that
+        // claims a continuation message reports `stop_hook_active: true` (ADR 0045 §2).
+        let pending_continuations: Arc<std::sync::Mutex<HashSet<MessageId>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let turn_continuation = Arc::new(AtomicBool::new(false));
+        install_turn_claimed_callback(
+            inbox,
+            Arc::clone(&pending_continuations),
+            Arc::clone(&turn_continuation),
+        );
         Self {
             pre: compile_layered(
                 &project.pre_tool_use,
@@ -202,7 +264,8 @@ impl CommandHooks {
             jobs: Arc::new(std::sync::Mutex::new(None)),
             goal: Arc::new(std::sync::Mutex::new(None)),
             loop_active: Arc::new(AtomicBool::new(false)),
-            stop_hook_active: Arc::new(AtomicBool::new(false)),
+            pending_continuations,
+            turn_continuation,
             consecutive: Arc::new(AtomicU32::new(0)),
             warn,
             wake,
@@ -218,13 +281,18 @@ impl CommandHooks {
     /// A user message arrived: the `Stop` continuation budget starts over (the same reset
     /// the background-job notifier gets, ADR 0037 decision 3). A degraded continuation
     /// still runs the hook (its exit-2 verdict degrades); only the *wake* is gated. The
-    /// validator's consecutive-hit count starts over too, and no continuation is pending
-    /// any more: the next `Stop` reports `stop_hook_active: false` (ADR 0045 §2).
+    /// validator's consecutive-hit count starts over too, and a continuation still queued
+    /// is no longer one: its message id leaves the pending set, so if a turn claims it
+    /// later that turn reports `stop_hook_active: false` (ADR 0045 §2). A turn that
+    /// already started keeps the provenance it was claimed with.
     pub fn reset_wakes(&self) {
         self.gate.reset_wakes();
         self.degraded.store(0, Ordering::SeqCst);
         self.consecutive.store(0, Ordering::SeqCst);
-        self.stop_hook_active.store(false, Ordering::SeqCst);
+        self.pending_continuations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
     }
 
     /// The background-job registry for the "no background job running" rule. The host
@@ -266,7 +334,7 @@ impl CommandHooks {
     /// Whether the turn now running was opened by a `Stop` continuation (tests); its
     /// `Stop` stdin reports this as `stop_hook_active`.
     pub fn stop_hook_active(&self) -> bool {
-        self.stop_hook_active.load(Ordering::SeqCst)
+        self.turn_continuation.load(Ordering::SeqCst)
     }
 
     /// Background jobs running right now (tests). A missing or dropped registry reads
@@ -343,13 +411,22 @@ impl CommandHooks {
     /// runs the hooks: a cancelled, failed, or otherwise non-completed turn runs nothing
     /// (an exit-2 hook after a user interrupt would otherwise open a turn the user just
     /// asked to end).
-    /// [`Hooks::on_turn_end`] spawns this with the outcome; tests drive it directly so
-    /// there is no timing involved.
+    /// [`Hooks::on_turn_end`] runs this cycle with the provenance it captured at that
+    /// turn's boundary (`run_stop_once_with`); tests drive this entry directly so there
+    /// is no timing involved.
     pub async fn run_stop_once(&self, outcome: &RunOutcome) {
-        // A non-completed turn ends the continuation: no Stop runs for it and no turn of
-        // its own is starting, so the next Stop starts from `false`.
+        // The value says whether *this* turn was opened by a continuation; it is consumed
+        // once, by this turn's own `Stop` (ADR 0045 §2).
+        let stop_hook_active = self.turn_continuation.swap(false, Ordering::SeqCst);
+        self.run_stop_once_with(outcome, stop_hook_active).await;
+    }
+
+    /// [`CommandHooks::run_stop_once`] with the provenance already captured: the turn-end
+    /// hook reads it synchronously, before spawning, so a slow `Stop` run for an earlier
+    /// turn can never consume this turn's value.
+    async fn run_stop_once_with(&self, outcome: &RunOutcome, stop_hook_active: bool) {
+        // A non-completed turn runs no `Stop` and opens no turn of its own.
         if !matches!(outcome.status, RunStatus::Completed) {
-            self.stop_hook_active.store(false, Ordering::SeqCst);
             return;
         }
         // Claude's field name: the last assistant message's text parts joined, so a user
@@ -359,10 +436,6 @@ impl CommandHooks {
             .as_ref()
             .map(Message::text)
             .unwrap_or_default();
-        // Read this turn's status before running the hooks: the value says whether *this*
-        // turn was opened by a continuation. It stays false unless this run opens another
-        // one (ADR 0045 §2).
-        let stop_hook_active = self.stop_hook_active.swap(false, Ordering::SeqCst);
         let stdin = serde_json::json!({
             "hook_event_name": "Stop",
             "cwd": self.workspace.to_string_lossy(),
@@ -445,10 +518,16 @@ impl CommandHooks {
         // validator rides this same point: its continuation counts one wake.
         if self.gate.wake_allowed() {
             // The woken turn absorbs the waiting injects, so a wake also
-            // ends the degrade burst. Set the flag before the enqueue so a turn that
-            // starts immediately already reads `stop_hook_active: true`; a failed
-            // enqueue opened nothing and leaves it false.
-            self.stop_hook_active.store(true, Ordering::SeqCst);
+            // ends the degrade burst. The continuation carries its own message id, and
+            // that id is what the claim consumes (ADR 0045 §2): the turn it opens is the
+            // only one that reports `stop_hook_active: true`, however late this run
+            // finishes. A failed enqueue opened nothing and drops the id.
+            let continuation = continuation_message_id();
+            set_message_id(&mut message, continuation.clone());
+            self.pending_continuations
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(continuation.clone());
             if self
                 .inbox
                 .followup(message, InputSource::System)
@@ -458,7 +537,10 @@ impl CommandHooks {
                 self.gate.note_wake();
                 self.degraded.store(0, Ordering::SeqCst);
             } else {
-                self.stop_hook_active.store(false, Ordering::SeqCst);
+                self.pending_continuations
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&continuation);
             }
         } else if self
             .inbox
@@ -1034,12 +1116,15 @@ impl Hooks for CommandHooks {
     /// nothing. A hook asking for more (exit 2) opens another turn through the inbox. The
     /// work spawns onto the session runtime so this sync callback never blocks a turn.
     fn on_turn_end(&self, _cx: &HookContext, outcome: &RunOutcome) {
+        // Read the turn's provenance here, synchronously, at its own boundary: the value
+        // belongs to this turn, so a `Stop` run for an earlier turn (still in flight) can
+        // never consume it and a later claim can never overwrite it (ADR 0045 §2).
+        let stop_hook_active = self.turn_continuation.swap(false, Ordering::SeqCst);
         if !matches!(outcome.status, RunStatus::Completed) {
             // A non-completed turn breaks the validator's chain (like a rule miss), ends
             // any `Stop` continuation it was opened by, and no Stop run will come for
             // this turn: drop the turn-start count.
             self.consecutive.store(0, Ordering::SeqCst);
-            self.stop_hook_active.store(false, Ordering::SeqCst);
             // Saturating: sessions that never called `note_turn_started` (only the
             // hosts that read `pending_stops` wire it) must not wrap the counter.
             self.pending
@@ -1054,7 +1139,7 @@ impl Hooks for CommandHooks {
         let this = self.clone();
         let outcome = outcome.clone();
         self.runtime.spawn(async move {
-            this.run_stop_once(&outcome).await;
+            this.run_stop_once_with(&outcome, stop_hook_active).await;
             // Paired with `note_turn_started`; saturating for the same reason.
             this.pending
                 .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -2429,6 +2514,144 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// Releases a blocked `Stop` hook even when an assertion fails first, so a broken
+    /// test fails instead of waiting for the running child. `disarm` is called once the
+    /// hook is known to have exited; until then, a failure writes the release file and
+    /// waits long enough for the blocked child to observe it before the fixture's temp
+    /// directory (and the file) goes away.
+    struct Release {
+        path: PathBuf,
+        armed: bool,
+    }
+
+    impl Release {
+        fn new(path: PathBuf) -> Self {
+            Self { path, armed: true }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = std::fs::write(&self.path, b"go");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+
+    /// Waits for a file a hook creates (polled: the hook is a child process).
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..600 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    async fn wait_for_json(path: &Path) -> serde_json::Value {
+        wait_for_file(path).await;
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Waits until a `Stop` continuation was actually queued (the gate records the wake
+    /// after the enqueue lands).
+    async fn wait_until_continuation(fixture: &Fixture) {
+        for _ in 0..600 {
+            if fixture.hooks.stop_wakes() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the continuation was never queued");
+    }
+
+    /// A `Stop` run for an earlier turn finishes late (exit 2) while a user's turn B is
+    /// open, and B ends after that verdict. B's own `Stop` must report `false`; only the
+    /// continuation the late verdict queued may report `true` (ADR 0045 §2). A
+    /// session-global pending flag is consumed by whichever turn ends first, so B reports
+    /// `true` and the real continuation reports `false` there.
+    #[tokio::test]
+    async fn a_late_stop_verdict_does_not_leak_into_a_users_turn() {
+        let root = TempRoot::new("stop-late-verdict");
+        let a_stdin = root.dir.join("a.json");
+        let b_stdin = root.dir.join("b.json");
+        let c_stdin = root.dir.join("c.json");
+        let started = root.dir.join("a-started");
+        let release = root.dir.join("release");
+        let script = format!(
+            "stdin=$(cat); case \"$stdin\" in \
+             *'\"last_assistant_message\":\"A\"'*) printf '%s' \"$stdin\" > '{a}'; \
+             touch '{started}'; while [ ! -f '{release}' ]; do sleep 0.01; done; \
+             echo keep-going >&2; exit 2 ;; \
+             *'\"last_assistant_message\":\"B\"'*) printf '%s' \"$stdin\" > '{b}' ;; \
+             *) printf '%s' \"$stdin\" > '{c}' ;; esac",
+            a = a_stdin.display(),
+            b = b_stdin.display(),
+            c = c_stdin.display(),
+            started = started.display(),
+            release = release.display(),
+        );
+        let config = stop_config(&script);
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        let mut release_guard = Release::new(release.clone());
+
+        // Turn A ends; its Stop hook blocks before exiting 2.
+        fixture.hooks.on_turn_end(&cx(), &completed_text("A"));
+        wait_for_file(&started).await;
+
+        // The user speaks while A's hook still runs: turn B opens and is not a
+        // continuation.
+        fixture.hooks.reset_wakes();
+        fixture
+            .inbox
+            .followup("B", InputSource::User)
+            .await
+            .unwrap();
+        let b = fixture.inbox.claim_next_turn().await.expect("B opens");
+        assert_eq!(b.message.text(), "B");
+        assert!(
+            !fixture.hooks.stop_hook_active(),
+            "a user message opens a turn that is not a continuation"
+        );
+
+        // A's hook now exits 2 and queues its continuation; B ends after that verdict.
+        std::fs::write(&release, b"go").unwrap();
+        wait_until_continuation(&fixture).await;
+        release_guard.disarm();
+        fixture.hooks.on_turn_end(&cx(), &completed_text("B"));
+        let b_stdin = wait_for_json(&b_stdin).await;
+        assert_eq!(
+            b_stdin["stop_hook_active"],
+            serde_json::json!(false),
+            "the user's turn must not consume the other turn's continuation: {b_stdin}"
+        );
+
+        // Only the continuation the late verdict queued is one.
+        fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the late verdict queued a continuation");
+        assert!(
+            fixture.hooks.stop_hook_active(),
+            "claiming the continuation marks its turn"
+        );
+        fixture.hooks.on_turn_end(&cx(), &completed_text("C"));
+        let c_stdin = wait_for_json(&c_stdin).await;
+        assert_eq!(
+            c_stdin["stop_hook_active"],
+            serde_json::json!(true),
+            "the continuation itself says so: {c_stdin}"
+        );
+    }
+
     /// Edge case 1: with no job, no `/loop` and no goal the three fields are present — not
     /// omitted — as `stop_hook_active: false`, `background_tasks: []`, `session_crons: []`.
     /// Inserting an array only when it is non-empty fails this.
@@ -2483,7 +2706,9 @@ mod tests {
 
     /// Edge case 3: the turn a `Stop` exit-2 continuation opens reports
     /// `stop_hook_active: true`; the turn after it, which opens nothing, reports `false`.
-    /// Never setting the flag fails the middle assertion; never clearing it fails the last.
+    /// The provenance travels with the queued message: the claim is what makes the turn a
+    /// continuation. Never setting it fails the middle assertion; never clearing it fails
+    /// the last.
     #[tokio::test]
     async fn the_continued_turn_reports_stop_hook_active() {
         let root = TempRoot::new("stop-active");
@@ -2505,19 +2730,24 @@ mod tests {
             "{first}"
         );
         assert!(
-            fixture.hooks.stop_hook_active(),
-            "the exit 2 sets the flag for the turn it opens"
+            !fixture.hooks.stop_hook_active(),
+            "nothing is claimed yet, so no running turn is a continuation"
         );
+        fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the exit 2 opens the continued turn");
         assert!(
-            fixture.inbox.claim_next_turn().await.is_some(),
-            "the exit 2 opens the continued turn"
+            fixture.hooks.stop_hook_active(),
+            "claiming the continuation message marks the turn it opens"
         );
 
-        let continued = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
+        let second = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
         assert_eq!(
-            continued["stop_hook_active"],
+            second["stop_hook_active"],
             serde_json::json!(true),
-            "the continued turn says so: {continued}"
+            "the continued turn says so: {second}"
         );
         assert!(
             fixture.inbox.claim_next_turn().await.is_none(),
@@ -2532,9 +2762,9 @@ mod tests {
         );
     }
 
-    /// Edge case 4: a user message while a continuation is pending clears the flag, so the
-    /// next `Stop` reports `false`. Dropping the clear from `reset_wakes` (the
-    /// followup/steer/inject reset) fails this.
+    /// Edge case 4: a user message while a continuation is queued drops its provenance,
+    /// so the turn that later claims it reports `false`. Dropping the pending-set clear
+    /// from `reset_wakes` (the followup/steer/inject reset) fails this.
     #[tokio::test]
     async fn a_user_message_clears_stop_hook_active() {
         let root = TempRoot::new("stop-active-user");
@@ -2546,21 +2776,29 @@ mod tests {
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
         stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
-        assert!(fixture.hooks.stop_hook_active(), "the exit 2 set the flag");
-        assert!(fixture.inbox.claim_next_turn().await.is_some());
-        // The same reset the three user-message lanes (followup, steer, inject) call.
+        // The same reset the three user-message lanes (followup, steer, inject) call,
+        // before the queued continuation is claimed.
         fixture.hooks.reset_wakes();
+        fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the exit 2 queued a continuation");
+        assert!(
+            !fixture.hooks.stop_hook_active(),
+            "a user message ends the queued continuation"
+        );
         let next = stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
         assert_eq!(
             next["stop_hook_active"],
             serde_json::json!(false),
-            "a user message ends the continuation: {next}"
+            "the continuation turn is no longer one: {next}"
         );
     }
 
-    /// Edge case 5: a non-completed (cancelled) turn after a continuation clears the flag;
-    /// the next completed turn's `Stop` reports `false`. Keeping the flag through a
-    /// non-completed turn fails this.
+    /// Edge case 5: a non-completed (cancelled) turn after a continuation clears the
+    /// provenance; the next completed turn's `Stop` reports `false`. Keeping the claimed
+    /// continuation's flag through a non-completed turn fails this.
     #[tokio::test]
     async fn a_cancelled_turn_clears_stop_hook_active() {
         let root = TempRoot::new("stop-active-cancel");
@@ -2572,8 +2810,15 @@ mod tests {
         let fixture =
             layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
         stop_stdin_at(&fixture, &stdin_path, &completed_quiet()).await;
-        assert!(fixture.hooks.stop_hook_active(), "the exit 2 set the flag");
-        assert!(fixture.inbox.claim_next_turn().await.is_some());
+        fixture
+            .inbox
+            .claim_next_turn()
+            .await
+            .expect("the exit 2 queued a continuation");
+        assert!(
+            fixture.hooks.stop_hook_active(),
+            "the claimed continuation marked this turn"
+        );
         fixture.hooks.on_turn_end(
             &cx(),
             &completed_outcome(

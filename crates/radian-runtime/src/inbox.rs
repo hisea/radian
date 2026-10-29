@@ -169,6 +169,12 @@ impl State {
 /// next turn (ADR 0011). The host installs its wake-gate counter here.
 pub type PendingWakeCallback = Arc<dyn Fn(MessageId) + Send + Sync>;
 
+/// Fired with every entry [`Inbox::claim_next_turn`] takes to open a turn. The host
+/// attributes the turn to the input that opened it here (a `Stop` continuation's
+/// `stop_hook_active`, ADR 0045 §2): the provenance travels with the queued message,
+/// not with a session-global flag. Runs without the queue lock held.
+pub type TurnClaimedCallback = Arc<dyn Fn(&InboxEntry) + Send + Sync>;
+
 /// The bounded, two-lane input queue. Share it with `Arc`: the host enqueues, the driver
 /// claims.
 pub struct Inbox {
@@ -218,6 +224,10 @@ pub struct Inbox {
     /// wake-gate wake here: an entry absorbed mid-turn never fires, so only a turn the
     /// notice actually opened counts.
     pending_wake_callback: std::sync::Mutex<Option<PendingWakeCallback>>,
+    /// Fired (once per entry, without holding the queue lock) with every entry
+    /// [`Inbox::claim_next_turn`] takes. The host reads the claimed message's own
+    /// provenance here (ADR 0045 §2).
+    turn_claimed_callback: std::sync::Mutex<Option<TurnClaimedCallback>>,
     /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
     control: Mutex<VecDeque<ControlRequest>>,
 }
@@ -274,6 +284,7 @@ impl Inbox {
             journal,
             runtime_events: std::sync::Mutex::new(None),
             pending_wake_callback: std::sync::Mutex::new(None),
+            turn_claimed_callback: std::sync::Mutex::new(None),
             control: Mutex::new(VecDeque::new()),
         })
     }
@@ -294,6 +305,17 @@ impl Inbox {
     pub fn set_pending_wake_callback(&self, callback: Option<PendingWakeCallback>) {
         *self
             .pending_wake_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = callback;
+    }
+
+    /// Fires `callback` with each entry [`Inbox::claim_next_turn`] takes, so a host can
+    /// attribute the turn to the input that opened it (a `Stop` continuation carries its
+    /// provenance here, ADR 0045 §2). `None` keeps the behavior a host that never
+    /// installed one had before.
+    pub fn set_turn_claimed_callback(&self, callback: Option<TurnClaimedCallback>) {
+        *self
+            .turn_claimed_callback
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = callback;
     }
@@ -578,9 +600,10 @@ impl Inbox {
     /// relative order: an `inject` pushed before the chosen steer stays in `next_step` in
     /// front of the later entries.
     ///
-    /// Firing the pending-wake callback (when the third branch claims) happens after the
-    /// queue lock is dropped, like the runtime-events forward: the pop and the in-flight
-    /// count still move together.
+    /// The turn-claimed callback fires for every claim (the host attributes the turn to
+    /// the message); the pending-wake callback fires only when the third branch claims.
+    /// Both fire after the queue lock is dropped, like the runtime-events forward: the pop
+    /// and the in-flight count still move together.
     ///
     /// The pop and the in-flight count move together, under the queue lock: when this
     /// returns an entry, [`Inbox::inflight_turns`] already counts it. A host checking
@@ -607,6 +630,14 @@ impl Inbox {
                 state.next_step.remove(index).expect("claimed entry")
             }
         };
+        if let Some(callback) = self
+            .turn_claimed_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            callback(&entry);
+        }
         if entry.pending_wake
             && let Some(callback) = self
                 .pending_wake_callback

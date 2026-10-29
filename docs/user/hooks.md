@@ -161,14 +161,16 @@ the last assistant message's text:
 
 | Field | Type | Value when it does not apply | When it is filled |
 |---|---|---|---|
-| `stop_hook_active` | boolean | `false` | `true` when this turn was opened by a `Stop` continuation: a hook exit 2, or the built-in stop validator. |
+| `stop_hook_active` | boolean | `false` | `true` only on the turn that claims a `Stop` continuation: a hook exit 2, or the built-in stop validator. |
 | `background_tasks` | array | `[]` | The background jobs running when `Stop` runs. An entry is `{"id": "job-…", "type": "shell", "status": "running", "description": "make check", "command": "make check\necho done"}`: `description` is the command's first line, `command` the full command. A host with no job registry reports `[]`. |
 | `session_crons` | array | `[]` | The session-level schedulers that open turns by themselves: `{"id": "loop", "type": "loop"}` while `/loop` is on, and `{"id": "goal", "type": "goal", "status": "active"}` or `{"id": "goal", "type": "goal", "status": "paused"}` while a goal is active or paused. `radian exec` has no `/loop`, so it can carry only the goal entry. |
 
-`stop_hook_active` becomes `true` when radian sends the continuation. It is
-cleared once that continued turn's own `Stop` ran, by any turn that ends
-without completing (cancelled, failed, and the other unfinished ends), and at
-once by any user message (`followup`, `steer` or `inject`).
+`stop_hook_active` describes the turn the hook runs for. It is `true` when that
+turn claimed a continuation radian sent, and `false` for every other turn. A user
+message (`followup`, `steer` or `inject`) drops a continuation that is still
+waiting to start, so the turn that later claims it reports `false`; a turn that
+already started keeps its value. A turn that ends without completing runs no
+`Stop` hook and clears the value.
 
 ## What a hook returns
 

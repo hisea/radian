@@ -120,6 +120,163 @@ fn production_chain(
     session_hooks(role, permissions, commands, memory, skills, goal, facts)
 }
 
+/// ADR 0045 §2: `stop_hook_active` belongs to the turn the continuation opened, not to
+/// whichever turn's `Stop` happens to reach the cycle next. A `Stop` for an earlier turn
+/// that exits 2 while a user's turn is open must not make the user's turn report `true`,
+/// and the continuation that verdict queued must still report `true`. A session-global
+/// pending flag fails both: the user's turn consumes the value and the continuation sees
+/// `false`.
+#[tokio::test]
+async fn a_late_stop_verdict_belongs_to_the_turn_it_opens() {
+    use radian_core::{Message, RunOutcome, RunStatus};
+
+    fn completed(text: &str) -> RunOutcome {
+        RunOutcome {
+            status: RunStatus::Completed,
+            final_message: Some(Message::assistant(text)),
+            unapplied_steering: Vec::new(),
+            model_calls: 0,
+        }
+    }
+
+    async fn wait_for(path: &std::path::Path) {
+        for _ in 0..600 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    async fn wait_for_json(path: &std::path::Path) -> serde_json::Value {
+        wait_for(path).await;
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// Releases a blocked `Stop` hook on the failure path (see the unit test's copy).
+    struct Release {
+        path: std::path::PathBuf,
+        armed: bool,
+    }
+
+    impl Release {
+        fn new(path: std::path::PathBuf) -> Self {
+            Self { path, armed: true }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for Release {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = std::fs::write(&self.path, b"go");
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+
+    let ws = scratch("late-verdict");
+    let a_stdin = ws.join("a.json");
+    let b_stdin = ws.join("b.json");
+    let c_stdin = ws.join("c.json");
+    let started = ws.join("a-started");
+    let release = ws.join("release");
+    let script = format!(
+        "stdin=$(cat); case \"$stdin\" in \
+         *'\"last_assistant_message\":\"A\"'*) printf '%s' \"$stdin\" > '{a}'; \
+         touch '{started}'; while [ ! -f '{release}' ]; do sleep 0.01; done; \
+         echo keep-going >&2; exit 2 ;; \
+         *'\"last_assistant_message\":\"B\"'*) printf '%s' \"$stdin\" > '{b}' ;; \
+         *) printf '%s' \"$stdin\" > '{c}' ;; esac",
+        a = a_stdin.display(),
+        b = b_stdin.display(),
+        c = c_stdin.display(),
+        started = started.display(),
+        release = release.display(),
+    );
+    let config = radian_host::config::HooksConfig {
+        stop: vec![radian_host::config::HookMatcher {
+            matcher: None,
+            hooks: vec![radian_host::config::HookCommand {
+                command: script,
+                timeout_secs: None,
+            }],
+        }],
+        ..Default::default()
+    };
+    let inbox = radian_runtime::Inbox::new(64);
+    let mut release_guard = Release::new(release.clone());
+    let hooks = Arc::new(CommandHooks::new(
+        &config,
+        &radian_host::config::HooksConfig::default(),
+        &ws,
+        "test-session",
+        radian_sandbox::SandboxSlot::empty(),
+        &inbox,
+        &tokio::runtime::Handle::current(),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+        Arc::new(|_message: &str| {}),
+    ));
+
+    // Turn A ends; its Stop hook blocks before exiting 2.
+    hooks.on_turn_end(&context(), &completed("A"));
+    wait_for(&started).await;
+
+    // The user speaks while A's hook still runs: turn B opens, opened by the user.
+    hooks.reset_wakes();
+    inbox.followup("B", InputSource::User).await.unwrap();
+    let b = inbox.claim_next_turn().await.expect("B opens");
+    assert_eq!(b.message.text(), "B");
+    assert!(
+        !hooks.stop_hook_active(),
+        "a user turn is not a continuation"
+    );
+
+    // A's hook now exits 2 and queues its continuation; B ends after that verdict.
+    std::fs::write(&release, b"go").unwrap();
+    for _ in 0..600 {
+        if hooks.stop_wakes() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        hooks.stop_wakes(),
+        1,
+        "the late verdict queued a continuation"
+    );
+    release_guard.disarm();
+    hooks.on_turn_end(&context(), &completed("B"));
+    let b_stdin = wait_for_json(&b_stdin).await;
+    assert_eq!(
+        b_stdin["stop_hook_active"],
+        json!(false),
+        "the user's turn must not consume the other turn's continuation: {b_stdin}"
+    );
+
+    // The continuation the late verdict queued is the one that reports true.
+    inbox
+        .claim_next_turn()
+        .await
+        .expect("the late verdict queued a continuation");
+    assert!(
+        hooks.stop_hook_active(),
+        "the claimed continuation marks its turn"
+    );
+    hooks.on_turn_end(&context(), &completed("C"));
+    let c_stdin = wait_for_json(&c_stdin).await;
+    assert_eq!(
+        c_stdin["stop_hook_active"],
+        json!(true),
+        "the continuation itself says so: {c_stdin}"
+    );
+}
+
 /// A denied call never reaches the command hooks: the hook's marker stays absent and the
 /// verdict is the permission layer's `Deny`. Moving `commands` before `permissions` runs
 /// the hook first, so the marker appears and this fails.

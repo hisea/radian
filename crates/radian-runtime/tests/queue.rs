@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::{TempDir, created};
 use radian_core::{InputSource, Message, MessageId, MessageMeta, OpaqueJson};
-use radian_runtime::{CancelCause, Inbox, InboxError, Lane};
+use radian_runtime::{CancelCause, Inbox, InboxEntry, InboxError, Lane};
 use radian_session::{EventData, Session, SessionJournal};
 
 // ---------- 1. concurrent followup: nothing lost, FIFO by enqueue order ----------
@@ -489,6 +489,41 @@ async fn the_pending_wake_callback_fires_only_for_a_promoted_open() {
         vec![notice.0.clone()],
         "absorbing {absorbed:?} mid-turn fires nothing"
     );
+}
+
+/// The turn-claimed callback fires with every entry `claim_next_turn` takes — the input
+/// that opens the turn — and never for an entry absorbed mid-turn through
+/// `claim_next_step`. The host attributes `stop_hook_active` from this (ADR 0045 §2).
+#[tokio::test]
+async fn the_turn_claimed_callback_fires_for_every_opened_turn() {
+    use std::sync::Mutex;
+    let inbox = Inbox::new(8);
+    let fired: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let fired_in = Arc::clone(&fired);
+    inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
+        fired_in
+            .lock()
+            .unwrap()
+            .push((entry.id.0.clone(), entry.message.text()));
+    })));
+
+    let first = inbox.followup("first", InputSource::User).await.unwrap();
+    inbox.inject("absorbed", InputSource::System).await.unwrap();
+    let claimed = inbox.claim_next_turn().await.unwrap();
+    assert_eq!(claimed.id, first);
+    assert_eq!(
+        *fired.lock().unwrap(),
+        vec![(first.0.clone(), "first".to_owned())],
+        "a turn-opening claim reports its message"
+    );
+
+    // Absorbed mid-turn: not a turn opener, so nothing fires.
+    inbox.claim_next_step().await.unwrap();
+    assert_eq!(fired.lock().unwrap().len(), 1);
+
+    // An empty queue claims nothing and fires nothing.
+    assert!(inbox.claim_next_turn().await.is_none());
+    assert_eq!(fired.lock().unwrap().len(), 1);
 }
 
 /// A pending-wake enqueue notifies the driver (like a steer), so an enqueue that lands
