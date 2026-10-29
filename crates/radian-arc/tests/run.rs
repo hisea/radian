@@ -233,6 +233,28 @@ fn run_until(repo: &Repo, limit: Duration, done: impl Fn() -> bool) -> String {
     }
 }
 
+/// [`run_until`] whose `done` also sees everything the runs printed so far. `run` repeats its
+/// passes while one changed something, so a pass inside the same call can already undo what an
+/// earlier pass in that call printed (a wrapper that exits at once is reconciled again); a
+/// state alone then never holds, but the printed start still does.
+fn run_until_output(repo: &Repo, limit: Duration, done: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + limit;
+    let mut output = String::new();
+    loop {
+        let run = repo.radian(&["arc", "run"]);
+        assert_eq!(run.code, 0, "run failed: {}", run.stderr);
+        output.push_str(&run.stdout);
+        if done(&output) {
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the loop did not settle within {limit:?}:\n{output}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// [`run_until`] with extra environment variables on every pass (the gate child inherits them).
 fn run_until_env(
     repo: &Repo,
@@ -3224,8 +3246,10 @@ fn reverify_refuses_a_verifying_task_whose_gate_runs() {
 
 /// A wrapper that refuses an argument from `config.toml` fails after the attempt directory
 /// exists, so it leaves its record and the next pass applies it: the slot is free at once and
-/// the task waits for its retry. Mutation: let such a failure leave no record and the slot
-/// stays held until the stall window.
+/// the task waits for its retry. B's own wrapper exits at once too, and `run` repeats a pass
+/// while one changed something, so the same call can reconcile B before it returns: the wait
+/// settles on B's printed start, not on catching B in `doing`. Mutation: let such a failure
+/// leave no record and the slot stays held until the stall window.
 #[test]
 fn a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass() {
     let repo = Repo::new("run-wrapper-usage");
@@ -3238,9 +3262,9 @@ fn a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass() {
     // A remote name the wrapper refuses: it never reaches a worker, and it never fetches.
     tune(&repo, "remote = \"origin\"", "remote = \"orig in\"");
 
-    let output = run_until(&repo, Duration::from_secs(30), || {
-        state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
-            && state(&store, &b).0 == "doing"
+    let output = run_until_output(&repo, Duration::from_secs(30), |output| {
+        output.contains(&format!("{b}-1 started -> doing.running"))
+            && state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
     });
     assert_eq!(
         state(&store, &a),
@@ -3251,6 +3275,24 @@ fn a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass() {
         output.contains(&format!("{b}-1 started -> doing.running")),
         "the freed slot did not start B: {output}"
     );
+    // The slot went to B only because A's own reconcile freed it: B's start follows that line,
+    // and no second attempt of A got the slot first.
+    let a_reconciled = output
+        .find(&format!("reconciled: {a}-1 "))
+        .unwrap_or_else(|| panic!("A's reconcile is not in the output: {output}"));
+    let b_started = output
+        .find(&format!("{b}-1 started -> doing.running"))
+        .unwrap_or_else(|| panic!("B's start is not in the output: {output}"));
+    assert!(
+        a_reconciled < b_started,
+        "B started before A's reconcile freed the slot: {output}"
+    );
+    if let Some(a_retried) = output.find(&format!("{a}-2 started")) {
+        assert!(
+            b_started < a_retried,
+            "A's second attempt started before the freed slot went to B: {output}"
+        );
+    }
     let result: Value = serde_json::from_str(
         &fs::read_to_string(repo.run_dir(&a, 1).join("attempt_result.json"))
             .expect("A's attempt result"),
@@ -3304,9 +3346,11 @@ fn a_wrapper_whose_worktree_lock_is_held_frees_the_slot_in_the_next_pass() {
     let lock = fs::File::open(&worktree).expect("the worktree opens");
     lock.lock_exclusive().expect("hold the worktree lock");
 
-    let output = run_until(&repo, Duration::from_secs(30), || {
-        state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
-            && state(&store, &b).0 == "doing"
+    // B's attempt can finish before `run` returns: the same call reconciles it in a repeated
+    // pass, so settle on what it printed, not on catching it in `doing`.
+    let output = run_until_output(&repo, Duration::from_secs(30), |output| {
+        output.contains(&format!("{b}-1 started -> doing.running"))
+            && state(&store, &a) == ("todo".to_owned(), "retry_wait".to_owned())
     });
     assert_eq!(
         state(&store, &a),

@@ -1687,3 +1687,12 @@ which `cmp` found identical.
 | TK0238-M4 | the CLI `merge` runs its hooks even when another process holds `runner.lock` | `hooks::the_cli_leaves_the_hook_pending_while_a_loop_holds_runner_lock` (the CLI cleared the point the loop should have run) | ✅ 1 failed |
 | TK0238-M5 | the default `after_merge` lines use the literal `origin` instead of the configured remote | `store::config::tests::the_default_hooks_name_the_configured_remote` | ✅ 1 failed |
 | TK0238-M6 | `Hooks::unbuilt` accepts every unbuilt point (`None`) | `store::config::tests::the_hooks_section_defaults_to_an_empty_after_merge_and_refuses_unbuilt_points` | ✅ 1 failed |
+| TK0238-M7 | `record_failure` leaves no record for a recorded failure (`write_finish` dropped from its body) | `run::a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass` (A stayed in `doing.running`, so the loop never settled: no reconcile freed the slot) | ✅ 1 failed |
+
+M7 covers the settle change in `crates/radian-arc/tests/run.rs`: the test now settles on B's printed
+start plus A's `todo.retry_wait` instead of catching B in `doing`, because a repeated pass inside
+the same `run` call can already reconcile a wrapper that exits at once. It ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test run -E
+'test(a_wrapper_that_refuses_its_arguments_frees_the_slot_in_the_next_pass)'` after
+`cargo build -p radian-tui --bin radian`, and the file was restored from `.radian/mut/work_mod.rs`
+(`cmp` identical).
