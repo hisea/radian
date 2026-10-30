@@ -1021,3 +1021,18 @@ test ran alone with
 | TK0248-M2 | `cap_failure` drops `manual.name()`, so the message says "the manual is ..." | ✅ 1 failed (rc=100) | `a_manual_over_its_cap_fails_alone` (the message did not name the radian manual) |
 | TK0248-M3 | `pages_of` returns every page for either manual | ✅ 1 failed (rc=100) | `the_two_manuals_partition_the_embedded_table` (the two manuals' page count was twice the table's) |
 | TK0248-M4 | `pages_missing_from_index` always returns nothing | ✅ 1 failed (rc=100) | `an_unlisted_page_fails_naming_it` (the check named no missing page) |
+
+## TK0254: manual-split follow-ups (2026-10-30, branch `work/TK0254-manual-split-followups`)
+
+`cli.md`'s `radian arc` pointer now names the pages that hold the flag tables, not only the
+overview: `arc/planning.md`, `arc/running.md`, `arc/owner.md` and `arc/hooks.md` are linked
+before the other arc pages. TK0247-M1's anchor test was removed here because it duplicated
+the site renderer's check (see `crates/radian-tui/MUTATIONS.md`). The mutation was applied by
+hand to `docs/user/cli.md` (the `arc/hooks` link was deleted), backed up under
+`.radian/cli.md.fixed` and restored from that copy (never `git checkout`), confirmed
+byte-identical with `shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test docs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0254-M2 | `cli.md`'s `radian arc` pointer drops its `arc/hooks` link | ✅ 1 failed (rc=100) | `the_cli_arc_pointer_names_the_arc_flag_pages` (it named the missing `arc/hooks.md` link) |

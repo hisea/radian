@@ -294,6 +294,32 @@ fn the_radian_index_links_the_arc_manual_once() {
     );
 }
 
+/// `cli.md`'s `radian arc` pointer names the pages that hold the flag tables, not only the
+/// overview: `arc/index` has the subcommand list and the exit codes, while the arguments and
+/// flags are on `arc/planning`, `arc/running`, `arc/owner` and `arc/hooks`. A reader who
+/// follows the pointer must reach all four.
+#[test]
+fn the_cli_arc_pointer_names_the_arc_flag_pages() {
+    let cli = radian_coding::docs::find("cli.md").expect("cli.md exists");
+    let section: String = cli
+        .lines()
+        .skip_while(|line| *line != "## `radian arc`")
+        .skip(1)
+        .take_while(|line| !line.starts_with("## "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !section.is_empty(),
+        "cli.md has a `## `radian arc`` section"
+    );
+    for page in ["arc/planning", "arc/running", "arc/owner", "arc/hooks"] {
+        assert!(
+            section.contains(&format!("]({page}.md)")),
+            "cli.md's `radian arc` section links `{page}.md`, which holds its flag tables: {section}"
+        );
+    }
+}
+
 /// A page a manual's index leaves off is named by the check, for both manuals.
 #[test]
 fn an_unlisted_page_fails_naming_it() {
@@ -816,124 +842,6 @@ fn every_relative_link_in_the_manual_resolves() {
         "manual links do not resolve:\n{}",
         broken.join("\n")
     );
-}
-
-/// Every `*.md` fragment link in the manual names a heading on the page it resolves to. The
-/// slug is the site renderer's (`radian_tui::site_docs`): ASCII letters and digits, runs of
-/// separators become one `-`, and a repeated heading gets `-1`, `-2`, … So a moved section
-/// that leaves a link behind fails here with the page and the line, naming the anchor.
-#[test]
-fn every_page_anchor_in_the_manual_resolves() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = manifest.join("../../docs/user");
-    let mut pages: Vec<(String, String)> = Vec::new();
-    collect_pages(&dir, &dir, &mut pages);
-    let ids: std::collections::HashMap<&str, std::collections::HashSet<String>> = pages
-        .iter()
-        .map(|(name, text)| (name.as_str(), heading_ids(text)))
-        .collect();
-    let mut broken: Vec<String> = Vec::new();
-    for (name, text) in &pages {
-        let from = std::path::Path::new(name)
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-        for (index, line) in text.lines().enumerate() {
-            for target in link_targets(line) {
-                let (path, anchor) = match target.split_once('#') {
-                    Some((path, anchor)) => (path, anchor),
-                    None => continue,
-                };
-                if anchor.is_empty() || path.contains("://") {
-                    continue;
-                }
-                let page = if path.is_empty() {
-                    name.clone()
-                } else if path.ends_with(".md") {
-                    let joined = from.join(path);
-                    let joined = joined.to_string_lossy();
-                    let mut parts: Vec<&str> = Vec::new();
-                    for part in joined.split('/') {
-                        match part {
-                            "" | "." => {}
-                            ".." => {
-                                parts.pop();
-                            }
-                            other => parts.push(other),
-                        }
-                    }
-                    parts.join("/")
-                } else {
-                    // The footer's inline-format syntax `[text](style)`: not a page link.
-                    continue;
-                };
-                let Some(headings) = ids.get(page.as_str()) else {
-                    broken.push(format!(
-                        "docs/user/{name}:{} links `{target}`, which names no page",
-                        index + 1
-                    ));
-                    continue;
-                };
-                if !headings.contains(anchor) {
-                    broken.push(format!(
-                        "docs/user/{name}:{} links `{target}`, but docs/user/{page} has no heading `#{anchor}`",
-                        index + 1
-                    ));
-                }
-            }
-        }
-    }
-    assert!(
-        broken.is_empty(),
-        "manual anchors do not resolve:\n{}",
-        broken.join("\n")
-    );
-}
-
-/// The heading ids of one page, by the site renderer's slug convention.
-fn heading_ids(text: &str) -> std::collections::HashSet<String> {
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut ids = std::collections::HashSet::new();
-    for line in text.lines() {
-        let heading = line.trim_start();
-        let hashes = heading.chars().take_while(|ch| *ch == '#').count();
-        if !(1..=6).contains(&hashes) {
-            continue;
-        }
-        let rest = &heading[hashes..];
-        if !rest.starts_with(' ') {
-            continue;
-        }
-        let base = heading_slug(rest);
-        let seen = counts.entry(base.clone()).or_insert(0);
-        let id = if *seen == 0 {
-            base
-        } else {
-            format!("{base}-{seen}")
-        };
-        *seen += 1;
-        ids.insert(id);
-    }
-    ids
-}
-
-/// The site renderer's slug (`radian_tui::site_docs::slugify`).
-fn heading_slug(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.trim().chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if matches!(ch, ' ' | '-' | '_' | '\t') && !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push_str("section");
-    }
-    out
 }
 
 /// Every `](...)` target on one line of Markdown, in order.

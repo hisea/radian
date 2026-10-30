@@ -3389,3 +3389,19 @@ confirmed byte-identical with `shasum -a 256`; the named test ran with
 |---|---|---|---|
 | TK0248-M5 | `list_manual` prints every page for either manual instead of the manual's own pages | ✅ 1 failed (rc=100) | `radian_docs_prints_the_radian_manual_and_the_arc_entry` (the listing included every arc page) |
 | TK0248-M6 | the `arc: ...` line is deleted from the documented `radian docs` listing in `docs/user/cli.md` | ✅ 1 failed (rc=100) | `the_manual_states_the_exact_radian_docs_output` (the documented block no longer matched stdout) |
+
+## TK0254: manual-split follow-ups (2026-10-30, branch `work/TK0254-manual-split-followups`)
+
+The hand-rolled anchor check in `crates/radian-coding/tests/docs.rs` is gone: it reimplemented
+the site slug, counted H1 titles and `#` lines inside fenced blocks as ids, and duplicated
+`every_link_resolves_to_a_page_and_heading` here, which checks every fragment with the
+renderer's real headings. TK0247-M1's mutation, a link to a heading that does not exist, now
+lands in that test. It was applied by hand to `docs/user/arc/files.md` (one
+`config.md#configtoml` link became `config.md#gone`), backed up under `.radian/files.md.bak`
+and restored from that copy (never `git checkout`), confirmed byte-identical with
+`shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test site_docs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0254-M1 | a moved link points at `config.md#gone`, a heading `arc/config.md` does not have | ✅ 1 failed (rc=100) | `every_link_resolves_to_a_page_and_heading` (the site render failed: `config.md` has no heading `#gone`) |
