@@ -20,9 +20,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
-const EXIT_WATCHDOG: Duration = Duration::from_secs(60);
-/// The bound for the `--output jsonl` exit regression: the defect was "never exits", so a
-/// few seconds are plenty and a loaded machine is not a failure.
+/// The bound for every exit regression here: the defect was "never exits", so a few
+/// seconds are plenty and a loaded machine is not a failure. The plain and `--output jsonl`
+/// runs share it, so a hang fails the bound instead of a long watchdog.
 const SHORT_EXIT_BOUND: Duration = Duration::from_secs(15);
 const USAGE_LIMIT_BODY: &str =
     r#"{"error":{"type":"GoUsageLimitError","message":"monthly quota"}}"#;
@@ -64,12 +64,8 @@ fn spawn(args: &[&str], env: &Env) -> Child {
         .expect("spawn radian")
 }
 
-async fn run(child: Child) -> (i32, String, String) {
-    run_within(child, EXIT_WATCHDOG).await
-}
-
-/// [`run`] with an explicit bound, so a regression that never exits fails on the short
-/// bound instead of the long watchdog.
+/// Runs one `radian exec` child with an explicit bound, so a regression that never exits
+/// fails on the short bound instead of a long watchdog.
 async fn run_within(mut child: Child, bound: Duration) -> (i32, String, String) {
     let _ = child.stdin.take().unwrap().write_all(b"").await;
     let output = timeout(bound, child.wait_with_output())
@@ -87,6 +83,18 @@ fn text_reply(text: &str) -> Reply {
     Reply::sse(&[
         chunk(json!({"role": "assistant", "content": text}), None),
         chunk(json!({}), Some("stop")),
+    ])
+}
+
+/// One assistant turn that declares a tool call (the same shape as `cli.rs`'s helper).
+fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
+    Reply::sse(&[
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}}]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
     ])
 }
 
@@ -172,21 +180,24 @@ async fn a_usage_limit_turn_fires_only_the_matching_stop_failure() {
         ),
     );
     let server = MockServer::start(vec![Reply::status(429, USAGE_LIMIT_BODY)]).await;
-    let (code, out, err) = run(spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--session-id",
-            "usage-limit",
-            "--config",
-            config.to_str().unwrap(),
-            "-p",
-            "hi",
-        ],
-        &env,
-    ))
+    let (code, out, err) = run_within(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "usage-limit",
+                "--config",
+                config.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        SHORT_EXIT_BOUND,
+    )
     .await;
     assert!(out.is_empty(), "stdout carries only model text: {out}");
     assert_eq!(code, 1, "a failed turn exits 1: {err}");
@@ -205,21 +216,24 @@ async fn a_usage_limit_turn_fires_only_the_matching_stop_failure() {
     let baseline = Env::fresh("usage-limit-baseline");
     let baseline_config = write_config(&baseline, "");
     let server = MockServer::start(vec![Reply::status(429, USAGE_LIMIT_BODY)]).await;
-    let (baseline_code, baseline_out, baseline_err) = run(spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--session-id",
-            "usage-limit-baseline",
-            "--config",
-            baseline_config.to_str().unwrap(),
-            "-p",
-            "hi",
-        ],
-        &baseline,
-    ))
+    let (baseline_code, baseline_out, baseline_err) = run_within(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "usage-limit-baseline",
+                "--config",
+                baseline_config.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &baseline,
+        ),
+        SHORT_EXIT_BOUND,
+    )
     .await;
     assert_eq!(
         (code, out),
@@ -250,7 +264,7 @@ async fn p_waits_about_five_seconds_then_kills_a_slow_stop_failure_hook() {
     );
     let server = MockServer::start(vec![Reply::status(429, USAGE_LIMIT_BODY)]).await;
     let started = std::time::Instant::now();
-    let mut child = spawn(
+    let child = spawn(
         &[
             "--model",
             "m",
@@ -265,24 +279,20 @@ async fn p_waits_about_five_seconds_then_kills_a_slow_stop_failure_hook() {
         ],
         &env,
     );
-    child.stdin.take().unwrap().write_all(b"").await.unwrap();
     let pid: u32 = wait_for_file(&pidfile, "the StopFailure hook")
         .await
         .trim()
         .parse()
         .expect("the hook wrote its pid");
-    let output = timeout(EXIT_WATCHDOG, child.wait_with_output())
-        .await
-        .expect("exec did not exit within the watchdog")
-        .expect("wait");
+    let (code, _, err) = run_within(child, SHORT_EXIT_BOUND).await;
     let elapsed = started.elapsed();
-    assert_eq!(output.status.code(), Some(1), "{:?}", output);
+    assert_eq!(code, 1, "{err}");
     assert!(
         elapsed >= Duration::from_secs(4),
         "exec did not give the observer its 5 s: {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(15),
+        elapsed < SHORT_EXIT_BOUND,
         "exec waited for the whole sleep: {elapsed:?}"
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -309,25 +319,70 @@ async fn a_completed_turn_fires_no_stop_failure() {
         ),
     );
     let server = MockServer::start(vec![text_reply("done")]).await;
-    let (code, stdout, err) = run(spawn(
-        &[
-            "--model",
-            "m",
-            "--base-url",
-            &server.base_url,
-            "--session-id",
-            "completed",
-            "--config",
-            config.to_str().unwrap(),
-            "-p",
-            "hi",
-        ],
-        &env,
-    ))
+    let (code, stdout, err) = run_within(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "completed",
+                "--config",
+                config.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        SHORT_EXIT_BOUND,
+    )
     .await;
     assert_eq!(code, 0, "{err}");
     assert_eq!(stdout, "done\n", "{err}");
     assert!(!out.exists(), "a completed turn fires no StopFailure");
+}
+
+/// Edge case 2, plain text output: a configured `Notification` hook never holds a plain
+/// `exec -p` run open either. Its 30 s sleep must not outlive the run, so the run exits at
+/// once with the same code and output. The `--output jsonl` counterpart pins the tee
+/// sender; this one pins the plain path.
+#[tokio::test]
+async fn a_notification_hook_does_not_delay_a_plain_run() {
+    let env = Env::fresh("plain-notification");
+    let config = write_config(
+        &env,
+        "[[hooks.Notification]]\nmatcher = \"idle_prompt\"\n\
+         [[hooks.Notification.hooks]]\ntype = \"command\"\ncommand = \"sleep 30\"\n",
+    );
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let started = std::time::Instant::now();
+    let (code, stdout, err) = run_within(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--session-id",
+                "plain-notification",
+                "--config",
+                config.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        SHORT_EXIT_BOUND,
+    )
+    .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(stdout, "done\n", "{err}");
+    assert!(
+        started.elapsed() < SHORT_EXIT_BOUND,
+        "a Notification hook delayed the exit: {:?}",
+        started.elapsed()
+    );
 }
 
 /// Edge case 1, under `--output jsonl`: `exec -p` with no hooks exits as on main. The
@@ -434,4 +489,114 @@ async fn a_jsonl_run_exits_about_five_seconds_after_a_slow_stop_failure_hook() {
     );
     // The hook did run: it wrote its pid before sleeping.
     wait_for_file(&pidfile, "the StopFailure hook").await;
+}
+
+/// Edge case 5 end to end (ADR 0045 §4): a `Stop` hook opens a continuation turn; that
+/// turn's model call asks to leave the sandbox, and the `PermissionRequest` hook answers the
+/// ask with `allow`, so the call runs even though `exec -p` has no terminal to ask in. The
+/// existing `radian-permissions` test sets `InputSource::System` directly; this one drives
+/// the continuation through the real host/runtime path. Without the continuation the second
+/// model call never happens; without the hook the no-terminal approver denies and the
+/// marker is never written.
+#[tokio::test]
+async fn a_stop_continuation_ask_is_answered_by_the_permission_request_hook() {
+    let env = Env::fresh("stop-continuation-ask");
+    let ws = env.home.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let marker = env.home.join("ran");
+    // The first completed turn asks for one more; the continuation turn reports
+    // `stop_hook_active: true`, so the second end is final.
+    let stop = env.home.join("stop.sh");
+    std::fs::write(
+        &stop,
+        "#!/bin/sh\nstdin=$(cat)\ncase \"$stdin\" in\n  *'\"stop_hook_active\":true'*) exit 0 ;;\n  *) echo continue-now >&2; exit 2 ;;\nesac\n",
+    )
+    .unwrap();
+    let allow = env.home.join("allow.sh");
+    std::fs::write(
+        &allow,
+        "printf '%s' '{\"hookSpecificOutput\":{\"decision\":{\"behavior\":\"allow\"}}}'\n",
+    )
+    .unwrap();
+    let config = write_config(
+        &env,
+        &format!(
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = \"sh '{}'\"\n\
+             [[hooks.PermissionRequest]]\nmatcher = \"shell\"\n\
+             [[hooks.PermissionRequest.hooks]]\ntype = \"command\"\ncommand = \"sh '{}'\"\n",
+            stop.display(),
+            allow.display(),
+        ),
+    );
+    let server = MockServer::start(vec![
+        text_reply("first"),
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({
+                "command": format!("printf ran > '{}'", marker.display()),
+                "outside_sandbox": true,
+                "outside_sandbox_reason": "the test leaves the sandbox on purpose",
+            })
+            .to_string(),
+        ),
+        text_reply("finished"),
+    ])
+    .await;
+    let started = std::time::Instant::now();
+    let (code, stdout, err) = run_within(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "--session-id",
+                "stop-continuation-ask",
+                "--config",
+                config.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &env,
+        ),
+        SHORT_EXIT_BOUND,
+    )
+    .await;
+
+    assert_eq!(code, 0, "{err}");
+    assert!(stdout.contains("first"), "{stdout}");
+    assert!(
+        stdout.contains("finished"),
+        "the continuation ran: {stdout}"
+    );
+    assert!(
+        marker.exists(),
+        "the PermissionRequest hook allowed the continuation's ask: {err}"
+    );
+    assert!(!err.contains("not approved"), "{err}");
+    // The continuation is a `System` input (ADR 0045 §2/§4), not a human turn: the ask it
+    // made had no human to answer it, which is why the hook's `allow` matters.
+    let history = radian_session::Session::open(env.sessions.join("stop-continuation-ask.jsonl"))
+        .expect("the session journal")
+        .history()
+        .expect("the transcript history");
+    let continuation = history
+        .iter()
+        .find(|message| message.text().contains("continue-now"))
+        .expect("the Stop continuation is in the transcript");
+    assert_eq!(
+        continuation.meta().source,
+        Some(radian_core::InputSource::System),
+        "a Stop continuation is a System input"
+    );
+    assert!(
+        started.elapsed() < SHORT_EXIT_BOUND,
+        "the continuation did not finish within the bound: {:?}",
+        started.elapsed()
+    );
 }
