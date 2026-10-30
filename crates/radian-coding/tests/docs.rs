@@ -100,8 +100,7 @@ async fn a_docs_page_reads_like_a_file() {
     let embedded = radian_coding::docs::find(first).expect("the page exists");
     assert_eq!(total, embedded.len() as u64);
 
-    // `offset` skips and `limit` caps like a file; an explicit range has no continuation
-    // hint, exactly as for a file.
+    // `offset` skips, `limit` caps, with the same continuation hint shape as a file.
     let part = call(
         &tools,
         "read",
@@ -115,8 +114,8 @@ async fn a_docs_page_reads_like_a_file() {
         "starts at line 2:\n{part_text}"
     );
     assert!(
-        !part_text.contains("[truncated"),
-        "an explicit range carries no note:\n{part_text}"
+        part_text.contains("[truncated: continue with offset="),
+        "a capped read names the next offset:\n{part_text}"
     );
 
     // Stripped of line numbers, the body is the embedded text verbatim.

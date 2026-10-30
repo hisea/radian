@@ -84,7 +84,7 @@ async fn read_prefixes_each_line_with_its_file_line_number() {
     // bytes_read is the file bytes ("alpha\nbeta\n" = 11), not the 14 output bytes.
     assert_eq!(structured(&output)["bytes_read"], 11);
 
-    // A middle read numbers by the file line; an explicit range ends with no hint.
+    // A middle read numbers by the file line, and the hint keeps no number.
     let middle = call(
         &tools,
         "read",
@@ -92,7 +92,10 @@ async fn read_prefixes_each_line_with_its_file_line_number() {
     )
     .await
     .unwrap();
-    assert_eq!(text(&middle), "3: gamma\n");
+    assert_eq!(
+        text(&middle),
+        "3: gamma\n[truncated: continue with offset=4]"
+    );
 }
 
 #[tokio::test]
@@ -167,13 +170,15 @@ async fn read_limit_stops_after_n_lines() {
     )
     .await
     .unwrap();
-    // An explicit `limit` is the caller's own range: the read stops there with no note.
-    assert_eq!(text(&output), "2: b\n3: c\n");
+    assert_eq!(
+        text(&output),
+        "2: b\n3: c\n[truncated: continue with offset=4]"
+    );
     let info = structured(&output);
     assert_eq!(info["start_line"], 2);
     assert_eq!(info["end_line"], 3);
-    assert!(info.get("next_offset").is_none(), "{info}");
-    assert_eq!(info["truncated"], false);
+    assert_eq!(info["next_offset"], 4);
+    assert_eq!(info["truncated"], true);
     assert_eq!(info["line_truncated"], false);
 }
 
@@ -346,10 +351,9 @@ async fn a_negative_offset_reads_the_last_lines_with_file_numbers() {
     assert!(info.get("next_offset").is_none(), "{info}");
 }
 
-/// `limit` works as for a positive offset, with absolute line numbers and no continuation
-/// note: an explicit range is the caller's own.
+/// `limit` and `next_offset` work as for a positive offset, with absolute line numbers.
 #[tokio::test]
-async fn a_negative_offset_with_a_limit_stops_without_a_note() {
+async fn a_negative_offset_with_a_limit_names_the_absolute_next_offset() {
     let dir = TempDir::new("read-tail-limit");
     let root = dir.file("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -363,11 +367,14 @@ async fn a_negative_offset_with_a_limit_stops_without_a_note() {
     )
     .await
     .unwrap();
-    assert_eq!(text(&output), "996: line 996\n997: line 997\n");
+    assert_eq!(
+        text(&output),
+        "996: line 996\n997: line 997\n[truncated: continue with offset=998]"
+    );
     let info = structured(&output);
     assert_eq!(info["start_line"], 996);
     assert_eq!(info["end_line"], 997);
-    assert!(info.get("next_offset").is_none(), "{info}");
+    assert_eq!(info["next_offset"], 998);
 }
 
 /// A negative `offset` past the start reads from line 1; an empty file is an empty read.
@@ -682,8 +689,7 @@ async fn an_explicit_budget_and_limit_restore_the_old_64_kib_window() {
 }
 
 /// Defaults, case 4: an explicit range is the caller's own: `offset: 100, limit: 50` returns
-/// exactly those 50 lines and nothing else. The caller named the range, so it ends with no
-/// continuation note: only the default line limit and the byte budget name the next offset.
+/// exactly those 50 lines and keeps today's continuation note for line 150.
 #[tokio::test]
 async fn an_explicit_offset_and_limit_are_unchanged_by_the_defaults() {
     let dir = TempDir::new("read-explicit-range");
@@ -702,13 +708,12 @@ async fn an_explicit_offset_and_limit_are_unchanged_by_the_defaults() {
     let info = structured(&output);
     assert_eq!(info["start_line"], 100, "{info}");
     assert_eq!(info["end_line"], 149, "{info}");
-    assert!(info.get("next_offset").is_none(), "{info}");
-    assert_eq!(info["truncated"], false, "{info}");
+    assert_eq!(info["next_offset"], 150, "{info}");
     let content = text(&output);
     assert!(content.starts_with("100: line 100\n"), "{content}");
     assert!(
-        !content.contains("[truncated"),
-        "an explicit range carries no continuation note:\n{content}"
+        content.ends_with("[truncated: continue with offset=150]"),
+        "the explicit range keeps its continuation note:\n{content}"
     );
 }
 
