@@ -398,6 +398,7 @@ class ReportTest(ScratchCase):
                     "exit_code": 124 if timed_out else 0,
                     "wall_seconds": 2.0,
                     "journal": str(journal_path),
+                    "session_dir": str(out / "session"),
                 }
             ),
         )
@@ -421,6 +422,13 @@ class ReportTest(ScratchCase):
         ):
             self.assertEqual(row[key], expected[key])
         self.assertEqual(built["totals"]["full"]["input_total"], expected["input_total"])
+
+    def test_a_session_directory_with_two_journals_is_summed(self):
+        out = self.make_run("full", "T1", 1, input_tokens=100)
+        write(out / "session" / "second.jsonl", session_journal(50))
+        built = report.build(self.root / "runs")
+        self.assertEqual(built["runs"][0]["metrics"]["input_total"], 150)
+        self.assertEqual(built["totals"]["full"]["input_total"], 150)
 
     def test_a_timeout_run_is_kept_and_reported(self):
         self.make_run("full", "T1", 1, timed_out=True)

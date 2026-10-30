@@ -91,15 +91,19 @@ def _json(path: Path) -> dict | None:
 
 def _journal_metrics(run: dict) -> dict | None:
     """The run's columns, read by `journal_metrics` and nowhere else."""
-    journal = run.get("journal")
-    if not journal:
+    target = run.get("session_dir") or run.get("journal")
+    if not target:
         session = Path(run["dir"]) / "session"
         files = sorted(session.glob("*.jsonl")) if session.is_dir() else []
-        journal = str(files[0]) if files else None
-    if not journal or not Path(journal).is_file():
+        target = str(files[0]) if files else None
+    if not target or not Path(target).exists():
         return None
-    report = journal_metrics.build_report([journal], recursive=False)
-    return report["journals"][0] if report["journals"] else None
+    report = journal_metrics.build_report([target], recursive=False)
+    if not report["journals"]:
+        return None
+    # A session directory may hold more than one journal (a resumed run); the
+    # run's row is their total, exactly the module's TOTAL row.
+    return report["totals"] if Path(target).is_dir() else report["journals"][0]
 
 
 def _result(run: dict) -> str:

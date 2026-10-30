@@ -125,10 +125,10 @@ git -C "$TREE" log --format='%h %s' "$base"..HEAD > "$OUT/commits.txt" 2>/dev/nu
 journal=$(find "$OUT/session" -name '*.jsonl' -type f 2>/dev/null | head -1)
 
 python3 - "$OUT/run.json" "$arm" "$task_id" "$k" "$base" "$agent" \
-  "$provider" "$model" "$extra" "$rc" "$timed_out" "$wall" "$journal" <<'EOF'
+  "$provider" "$model" "$extra" "$rc" "$timed_out" "$wall" "$journal" "$OUT/session" <<'EOF'
 import json, sys
 (path, arm, task, k, base, agent, provider, model, extra, rc, timed_out,
- wall, journal) = sys.argv[1:]
+ wall, journal, session_dir) = sys.argv[1:]
 status = "timeout" if timed_out == "1" else ("ok" if rc == "0" else "failed")
 json.dump({
     "arm": arm, "task": task, "k": int(k), "base": base,
@@ -136,6 +136,7 @@ json.dump({
     "extra": extra.split(), "exit_code": int(rc),
     "timed_out": timed_out == "1", "status": status,
     "wall_seconds": float(wall), "journal": journal or None,
+    "session_dir": session_dir,
 }, open(path, "w"), indent=1)
 print(json.dumps({"arm": arm, "task": task, "k": k, "status": status,
                   "exit_code": int(rc), "wall_seconds": float(wall)}))
