@@ -818,7 +818,10 @@ async fn a_permission_request_hook_error_never_asks_the_human() {
 }
 
 /// Edge case 5: a `System` source turn (a `Stop` continuation, a job-notice wake) is
-/// answered by the hook. Without one this call is denied before any approver.
+/// answered by the hook. Without one this call is denied before any approver. This sets the
+/// source directly; `radian-exec`'s
+/// `a_stop_continuation_ask_is_answered_by_the_permission_request_hook` drives the real
+/// `Stop` continuation through the host/runtime path and proves the same answer end to end.
 #[tokio::test]
 async fn a_non_human_turn_is_answered_by_the_permission_request_hook() {
     let dir = TempDir::new("request-system");

@@ -2441,14 +2441,18 @@ fn first_line(command: &str) -> String {
     command.lines().next().unwrap_or_default().to_owned()
 }
 
+/// The marker a bounded text ends with when it is cut. It is part of the bound, so a
+/// truncated result is at most `REASON_CHAR_LIMIT` characters in total.
+const TRUNCATION_MARKER: &str = "…[truncated]";
+
 /// Bounds hook stderr before it enters the transcript.
 fn short(text: &str) -> String {
-    let kept: String = text.chars().take(REASON_CHAR_LIMIT).collect();
-    if kept.len() < text.len() {
-        format!("{kept}…[truncated]")
-    } else {
-        kept
+    if text.chars().count() <= REASON_CHAR_LIMIT {
+        return text.to_owned();
     }
+    let keep = REASON_CHAR_LIMIT - TRUNCATION_MARKER.chars().count();
+    let kept: String = text.chars().take(keep).collect();
+    format!("{kept}{TRUNCATION_MARKER}")
 }
 
 impl NotificationHooks for CommandHooks {
@@ -2973,6 +2977,46 @@ mod tests {
         assert!(!miss.exists(), "the non-matching entry never runs");
     }
 
+    /// `error_details` is documented as "at most 2000 characters" (ADR 0045 §6), and the
+    /// truncation marker is part of that bound. Keeping 2000 and then appending the marker
+    /// made the field 2012 characters long.
+    #[tokio::test]
+    async fn stop_failure_error_details_stays_within_the_bound() {
+        let root = TempRoot::new("stop-failure-long");
+        let hit = root.outside("hit.json");
+        let config = HooksConfig {
+            stop_failure: vec![entry(
+                "*",
+                vec![hook(&format!("cat > '{}'", hit.display()))],
+            )],
+            ..HooksConfig::default()
+        };
+        let fixture =
+            layered_with_root(root, &config, &HooksConfig::default(), SandboxSlot::empty());
+        fixture.hooks.run_stop_failure(
+            &radian_core::ModelError::UsageLimit {
+                message: "x".repeat(5_000),
+                resets_in: None,
+            },
+            "",
+        );
+        fixture
+            .hooks
+            .wait_observe(std::time::Duration::from_secs(10))
+            .await;
+        let text = std::fs::read_to_string(&hit).expect("the matching hook ran");
+        let stdin: serde_json::Value =
+            serde_json::from_str(&text).expect("stdin is one JSON object");
+        let details = stdin["error_details"].as_str().expect("a string field");
+        assert_eq!(
+            details.chars().count(),
+            REASON_CHAR_LIMIT,
+            "the field stays at the documented maximum: {}",
+            details.len()
+        );
+        assert!(details.ends_with(TRUNCATION_MARKER), "{details}");
+    }
+
     /// A `StopFailure` matcher outside `MODEL_ERROR_KINDS` warns once at load and that entry
     /// never runs (ADR 0045 §6). `rate_limit` is Claude's name, not a radian kind.
     #[tokio::test]
@@ -3470,8 +3514,9 @@ mod tests {
         assert_eq!(result.text(), "patched", "the result is not replaced");
     }
 
-    /// Edge case 7: a 10,000-character `additionalContext` keeps 2,000 characters and the
-    /// existing truncation marker. Forwarding it whole fails the length and the marker.
+    /// Edge case 7: a 10,000-character `additionalContext` keeps the truncation marker and
+    /// stays within 2,000 characters in total. Forwarding it whole fails the length and the
+    /// marker; keeping 2,000 and then appending the marker overshoots by 12.
     #[tokio::test]
     async fn a_long_additional_context_is_truncated() {
         let long = "x".repeat(10_000);
@@ -3488,12 +3533,14 @@ mod tests {
             .after_tool_call(&cx(), &call("patch", serde_json::json!({})), &mut result)
             .await
             .unwrap();
+        let truncated = format!(
+            "{}…[truncated]",
+            "x".repeat(REASON_CHAR_LIMIT - TRUNCATION_MARKER.chars().count())
+        );
+        assert_eq!(truncated.chars().count(), REASON_CHAR_LIMIT);
         assert_eq!(
             result.text(),
-            format!(
-                "patched[PostToolUse hook] {}…[truncated]",
-                "x".repeat(REASON_CHAR_LIMIT)
-            )
+            format!("patched[PostToolUse hook] {truncated}")
         );
     }
 
