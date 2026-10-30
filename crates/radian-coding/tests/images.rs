@@ -171,7 +171,8 @@ async fn a_text_file_keeps_its_offset_and_limit_without_the_ignore_line() {
     )
     .await
     .unwrap();
-    assert_eq!(text(&output), "2: two\n[truncated: continue with offset=3]");
+    // An explicit `limit` is the caller's own range: it stops there with no note.
+    assert_eq!(text(&output), "2: two\n");
     assert!(!text(&output).contains("ignored"), "{}", text(&output));
 }
 

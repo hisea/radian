@@ -372,8 +372,19 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
             }
             let (offset, limit) = validated_range(offset, limit, &arguments)?;
             let budget = budget.unwrap_or(limits.default_read_bytes);
+            // An explicit `limit` is the caller's own range and ends with no continuation
+            // hint; only the default line cap is a cut that names the next line.
+            let limit_is_default = limit.is_none();
             let limit = Some(limit.unwrap_or(limits.default_read_lines));
-            finish_read(&mut reader, &path, total, budget, offset, limit)
+            finish_read(
+                &mut reader,
+                &path,
+                total,
+                budget,
+                offset,
+                limit,
+                limit_is_default,
+            )
         }
         crate::workspace::OpenedSource::Embedded(bytes) => {
             let mut reader = std::io::Cursor::new(bytes);
@@ -389,7 +400,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
             }
             let (offset, limit) = validated_range(offset, limit, &arguments)?;
             let budget = budget.unwrap_or(limits.default_manual_read_bytes);
-            finish_read(&mut reader, &path, total, budget, offset, limit)
+            // A manual page has no default line cap, so any `limit` here is the caller's own.
+            finish_read(&mut reader, &path, total, budget, offset, limit, false)
         }
     }
 }
@@ -475,6 +487,7 @@ fn finish_read<R: BufRead + Seek>(
     budget: usize,
     offset: i64,
     limit: Option<usize>,
+    limit_is_default: bool,
 ) -> Result<ToolOutput, ToolFailure> {
     // The count scans newlines with `fill_buf`/`consume` only, so it never holds the
     // file in memory; the bounded `read_stream` below still does the actual read.
@@ -487,7 +500,15 @@ fn finish_read<R: BufRead + Seek>(
     } else {
         offset
     };
-    let outcome = read_stream(&mut *reader, path, total, budget, offset, limit)?;
+    let outcome = read_stream(
+        &mut *reader,
+        path,
+        total,
+        budget,
+        offset,
+        limit,
+        limit_is_default,
+    )?;
 
     let structured = outcome.structured(path, total);
     Ok(ToolOutput {
@@ -543,6 +564,9 @@ fn resolve_from_end(total_lines: i64, offset: i64) -> i64 {
 /// most `budget - out.len() + 1` bytes of a line: enough to know whether it fits. A line that
 /// does not fit is dropped whole and `next_offset` names it; only when the **first** line is
 /// over the whole budget is its UTF-8 prefix returned, with `line_truncated`.
+///
+/// `limit_is_default` separates the tool's default line cap, a cut that names the unread line,
+/// from an explicit `limit`, which is the caller's own range and stops with no hint.
 fn read_stream<R: BufRead>(
     reader: &mut R,
     path: &str,
@@ -550,6 +574,7 @@ fn read_stream<R: BufRead>(
     budget: usize,
     offset: i64,
     limit: Option<usize>,
+    limit_is_default: bool,
 ) -> Result<ReadOutcome, ToolFailure> {
     skip_lines(reader, offset - 1).map_err(|e| io_failure(path, e))?;
     // A `fill_buf` that is empty means line `offset` does not exist (the file ended at or
@@ -574,8 +599,13 @@ fn read_stream<R: BufRead>(
         if let Some(limit) = limit
             && accepted >= limit
         {
-            // The line is unread: it is the next read's start. At EOF there is no next line,
-            // so a read that happens to end exactly on the cap carries no note.
+            // An explicit `limit` is the caller's own range: the read stops there, with no
+            // continuation hint. The default line cap is a cut, so it names the unread line.
+            // At EOF there is no next line either way, so a read that ends exactly on the
+            // cap carries no note.
+            if !limit_is_default {
+                break;
+            }
             if reader
                 .fill_buf()
                 .map_err(|e| io_failure(path, e))?
@@ -835,6 +865,7 @@ mod tests {
             8,
             1,
             None,
+            false,
         ));
         assert_eq!(error.code, "not_utf8", "{error:?}");
         assert!(
@@ -852,6 +883,7 @@ mod tests {
             8,
             1,
             None,
+            false,
         ));
         assert_eq!(error.code, "not_utf8", "{error:?}");
         assert!(error.message.contains("byte 0"), "{error:?}");
@@ -866,8 +898,16 @@ mod tests {
         bytes.extend_from_slice("€".as_bytes());
         bytes.extend_from_slice(&b"x".repeat(64));
         let mut reader = BufReader::new(&bytes[..]);
-        let outcome = read_stream(&mut reader, "long.txt", bytes.len() as u64, 4, 1, None)
-            .expect("a budget cut is not an error");
+        let outcome = read_stream(
+            &mut reader,
+            "long.txt",
+            bytes.len() as u64,
+            4,
+            1,
+            None,
+            false,
+        )
+        .expect("a budget cut is not an error");
         assert!(
             outcome.content.starts_with("1: ab"),
             "only complete characters survive: {}",
@@ -897,8 +937,16 @@ mod tests {
         bytes.push(0xFF);
         bytes.extend_from_slice(&b"b".repeat(64));
         let mut reader = BufReader::new(&bytes[..]);
-        let outcome = read_stream(&mut reader, "late-bad.bin", bytes.len() as u64, 8, 1, None)
-            .expect("the invalid byte was never read");
+        let outcome = read_stream(
+            &mut reader,
+            "late-bad.bin",
+            bytes.len() as u64,
+            8,
+            1,
+            None,
+            false,
+        )
+        .expect("the invalid byte was never read");
         assert!(
             outcome.content.starts_with("1: aaaaaaaa"),
             "content: {}",
@@ -920,7 +968,7 @@ mod tests {
             bytes: 0,
         };
         let mut reader = BufReader::with_capacity(CAPACITY, counting);
-        let outcome = read_stream(&mut reader, "big.js", 64 << 20, BUDGET, 1, None).unwrap();
+        let outcome = read_stream(&mut reader, "big.js", 64 << 20, BUDGET, 1, None, false).unwrap();
         assert!(outcome.line_truncated, "{:?}", outcome.next_offset);
         assert_eq!(outcome.next_offset, Some(2));
         assert_eq!(outcome.bytes_read, BUDGET);
@@ -994,8 +1042,16 @@ mod tests {
         };
         let start = resolve_from_end(4, -2);
         assert_eq!(start, 3);
-        let outcome = read_stream(&mut reader, "f.txt", content.len() as u64, 64, start, None)
-            .expect("streaming read works on fill_buf alone");
+        let outcome = read_stream(
+            &mut reader,
+            "f.txt",
+            content.len() as u64,
+            64,
+            start,
+            None,
+            false,
+        )
+        .expect("streaming read works on fill_buf alone");
         assert_eq!(outcome.start_line, 3);
         assert_eq!(outcome.end_line, 4);
         // Absolute, not relative to the tail: the continuation names a file line.
@@ -1010,9 +1066,11 @@ mod tests {
             64,
             start,
             Some(1),
+            false,
         )
         .expect("limited tail reads one line");
         assert_eq!(limited.end_line, 3);
-        assert_eq!(limited.next_offset, Some(4));
+        // An explicit `limit` is the caller's own range: it stops without a continuation note.
+        assert!(limited.next_offset.is_none(), "{:?}", limited.next_offset);
     }
 }
