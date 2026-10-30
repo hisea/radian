@@ -3412,3 +3412,7 @@ and restored from that copy (never `git checkout`), confirmed byte-identical wit
 | seo-M1 | `sitemap_xml` skips the `HAND_WRITTEN_PAGES` loop | ✅ 1 failed (rc=100) | `the_sitemap_lists_every_page_once` |
 | seo-M2 | the canonical `push_str` in `page_html` is removed | ✅ 1 failed (rc=100) | `every_docs_page_names_its_canonical_url` |
 | seo-M3 | `<meta name="robots" content="noindex">` is removed from `site/404.html` | ✅ 1 failed (rc=100) | `the_hand_written_pages_name_their_canonical_url` |
+| zh-split-M1 | `filter_language` keeps the other language's elements | ✅ 2 failed (rc=100) | `each_split_page_holds_one_language` (and `a_source_without_its_chinese_title_fails_the_build`, whose unbalanced-element case relies on the removal) |
+| zh-split-M2 | `set_url_metas` does not insert the `hreflang` alternates | ✅ 1 failed (rc=100) | `the_split_pages_point_at_each_other` |
+| zh-split-M3 | the Chinese page keeps `favicon.svg` and `media/` relative | ✅ 1 failed (rc=100) | `the_split_pages_name_files_the_site_serves` |
+| zh-split-M4 | a missing `title:zh` meta defaults to an empty title instead of failing | ✅ 1 failed (rc=100) | `a_source_without_its_chinese_title_fails_the_build` |

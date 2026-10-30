@@ -3,16 +3,40 @@
 //! JavaScript (only a `TechArticle` JSON-LD record), names its canonical URL on every page,
 //! and lists every page once in `llms.txt`, `sitemap.xml` and in full in `llms-full.txt`.
 
-use radian_tui::site_docs::{RenderedSite, render_site};
+use radian_tui::site_docs::{
+    HAND_WRITTEN_PAGES, HandPage, Lang, RenderedSite, render_site, split_page,
+};
 use std::collections::HashSet;
 
-/// The hand-written site pages that link into the generated docs, with the canonical URL
-/// each must name (`None` for the 404 page, which is `noindex` instead).
-const HAND_WRITTEN_PAGES: [(&str, Option<&str>); 3] = [
+/// The hand-written source pages and the canonical URL each must name (`None` for the
+/// 404 page, which is `noindex` instead). The two bilingual sources name the English URL;
+/// the split pages hold the rest.
+const SOURCE_PAGES: [(&str, Option<&str>); 3] = [
     ("index.html", Some("https://getrad.dev/")),
     ("arc.html", Some("https://getrad.dev/arc.html")),
     ("404.html", None),
 ];
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn source(file: &str) -> String {
+    std::fs::read_to_string(repo_root().join("site").join(file))
+        .unwrap_or_else(|error| panic!("site/{file}: {error}"))
+}
+
+/// Every hand-written page as the generator writes it.
+fn split_pages() -> Vec<(HandPage, String)> {
+    HAND_WRITTEN_PAGES
+        .iter()
+        .map(|page| {
+            let html = split_page(&source(page.file), page.file, page.lang)
+                .unwrap_or_else(|error| panic!("{error}"));
+            (*page, html)
+        })
+        .collect()
+}
 
 fn site() -> RenderedSite {
     render_site(radian_coding::docs::DOCS).expect("the manual renders without broken links")
@@ -231,10 +255,15 @@ fn the_llms_files_list_every_page_once() {
         index.contains("(https://getrad.dev/)"),
         "the home page is listed"
     );
-    assert!(
-        index.contains("(https://getrad.dev/arc.html)"),
-        "the arc page is listed"
-    );
+    for page in HAND_WRITTEN_PAGES {
+        let line = format!("(https://getrad.dev{}): {}\n", page.path, page.description);
+        assert_eq!(
+            index.matches(&line).count(),
+            1,
+            "{} is listed once",
+            page.path
+        );
+    }
     assert!(
         index.contains("(https://getrad.dev/llms-full.txt)"),
         "the full file is listed"
@@ -428,11 +457,10 @@ fn the_hand_written_pages_only_link_generated_docs() {
         .iter()
         .map(|page| (radian_tui::site_docs::output_path(&page.stem), page))
         .collect();
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (file, _) in HAND_WRITTEN_PAGES {
-        let source = root.join("site").join(file);
-        let html = std::fs::read_to_string(&source)
-            .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+    let root = repo_root();
+    let _ = root;
+    for (page, html) in split_pages() {
+        let file = format!("{} ({})", page.file, page.lang.code());
         for href in hrefs(&html) {
             let Some(rest) = href.strip_prefix("/docs/") else {
                 continue;
@@ -527,13 +555,13 @@ fn every_docs_page_names_its_canonical_url() {
     }
 }
 
-/// The hand-written pages name their canonical URL; the 404 page is `noindex` and names
+/// The source pages name the English canonical URL; the 404 page is `noindex` and names
 /// none. The home page's share image is a file the site serves.
 #[test]
 fn the_hand_written_pages_name_their_canonical_url() {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (file, canonical) in HAND_WRITTEN_PAGES {
-        let html = std::fs::read_to_string(root.join("site").join(file)).unwrap();
+    let root = repo_root();
+    for (file, canonical) in SOURCE_PAGES {
+        let html = source(file);
         match canonical {
             Some(url) => {
                 let link = format!("<link rel=\"canonical\" href=\"{url}\">");
@@ -556,7 +584,28 @@ fn the_hand_written_pages_name_their_canonical_url() {
             }
         }
     }
-    let home = std::fs::read_to_string(root.join("site/index.html")).unwrap();
+    for (page, html) in split_pages() {
+        let url = format!("https://getrad.dev{}", page.path);
+        let link = format!("<link rel=\"canonical\" href=\"{url}\">");
+        assert_eq!(
+            html.matches(&link).count(),
+            1,
+            "{} has its canonical",
+            page.path
+        );
+        assert_eq!(
+            html.matches("rel=\"canonical\"").count(),
+            1,
+            "{}",
+            page.path
+        );
+        assert!(
+            html.contains(&format!("<meta property=\"og:url\" content=\"{url}\">")),
+            "{} names its og:url",
+            page.path
+        );
+    }
+    let home = source("index.html");
     let image = home
         .split("<meta property=\"og:image\" content=\"https://getrad.dev/")
         .nth(1)
@@ -566,6 +615,188 @@ fn the_hand_written_pages_name_their_canonical_url() {
         root.join("site").join(image).is_file(),
         "site/{image} is a file the site serves"
     );
+}
+
+/// Each split page holds one language: no language class or script state is left, the
+/// `lang` attribute is right, and a sentence of the other language is gone.
+#[test]
+fn each_split_page_holds_one_language() {
+    // (file, a sentence only the English spans hold, its Chinese twin)
+    let samples = [
+        ("index.html", "Headless, observable.", "无头，可观测。"),
+        ("arc.html", "Not installed yet?", "还没装？"),
+    ];
+    for (page, html) in split_pages() {
+        let who = format!("{} ({})", page.file, page.lang.code());
+        for banned in [
+            "class=\"en\"",
+            "class=\"zh\"",
+            "flowwrap en",
+            "flowwrap zh",
+            "data-lang",
+            "rad-lang",
+            "localStorage",
+            "setLang",
+            "title:zh",
+            "description:zh",
+        ] {
+            assert!(!html.contains(banned), "{who} still holds `{banned}`");
+        }
+        assert!(
+            html.contains(&format!("<html lang=\"{}\">", page.lang.code())),
+            "{who} has its lang"
+        );
+        let (_, en, zh) = samples.iter().find(|(f, _, _)| *f == page.file).unwrap();
+        let (has, lacks) = match page.lang {
+            Lang::En => (en, zh),
+            Lang::Zh => (zh, en),
+        };
+        assert!(html.contains(has), "{who} holds `{has}`");
+        assert!(!html.contains(lacks), "{who} holds `{lacks}`");
+        if page.file == "index.html" {
+            assert!(
+                html.contains(".install-row button"),
+                "{who} keeps the copy buttons"
+            );
+        }
+    }
+}
+
+/// Every page lists the same three alternates, and each alternate is a page the generator
+/// writes; the toggle is two links with one `aria-current`.
+#[test]
+fn the_split_pages_point_at_each_other() {
+    let paths: HashSet<&str> = HAND_WRITTEN_PAGES.iter().map(|p| p.path).collect();
+    for (page, html) in split_pages() {
+        let en = HAND_WRITTEN_PAGES
+            .iter()
+            .find(|p| p.file == page.file && p.lang == Lang::En)
+            .unwrap();
+        let zh = HAND_WRITTEN_PAGES
+            .iter()
+            .find(|p| p.file == page.file && p.lang == Lang::Zh)
+            .unwrap();
+        for (hreflang, target) in [
+            ("en", en.path),
+            ("zh-Hans", zh.path),
+            ("x-default", en.path),
+        ] {
+            let link = format!(
+                "<link rel=\"alternate\" hreflang=\"{hreflang}\" href=\"https://getrad.dev{target}\">"
+            );
+            assert_eq!(html.matches(&link).count(), 1, "{}: {link}", page.path);
+            assert!(
+                paths.contains(target),
+                "{target} is a page the generator writes"
+            );
+        }
+        assert_eq!(
+            html.matches("rel=\"alternate\"").count(),
+            3,
+            "{}",
+            page.path
+        );
+        let toggle = html
+            .split("<div class=\"lang\"")
+            .nth(1)
+            .and_then(|rest| rest.split("</div>").next())
+            .expect("a language toggle");
+        assert_eq!(toggle.matches("<a ").count(), 2, "{}", page.path);
+        assert!(!toggle.contains("<button"), "{}", page.path);
+        assert_eq!(toggle.matches("aria-current=\"page\"").count(), 1);
+        assert!(toggle.contains(&format!("href=\"{}\"", en.path)));
+        assert!(toggle.contains(&format!("href=\"{}\"", zh.path)));
+        let current = toggle
+            .split("<a ")
+            .find(|a| a.contains("aria-current"))
+            .unwrap();
+        assert!(
+            current.contains(&format!("href=\"{}\"", page.path)),
+            "{}",
+            page.path
+        );
+    }
+}
+
+/// Every site-absolute URL a split page uses is a file under `site/`, a generated docs
+/// page, or one of the four hand-written pages.
+#[test]
+fn the_split_pages_name_files_the_site_serves() {
+    let root = repo_root();
+    let paths: HashSet<&str> = HAND_WRITTEN_PAGES.iter().map(|p| p.path).collect();
+    for (page, html) in split_pages() {
+        let mut urls: Vec<&str> = hrefs(&html);
+        for key in ["src=\"", "poster=\""] {
+            let mut rest = html.as_str();
+            while let Some(at) = rest.find(key) {
+                rest = &rest[at + key.len()..];
+                if let Some(end) = rest.find('"') {
+                    urls.push(&rest[..end]);
+                }
+            }
+        }
+        for url in urls {
+            if url.starts_with("/docs/") || !url.starts_with('/') || url.starts_with("//") {
+                continue;
+            }
+            let path = url.split('#').next().unwrap();
+            assert!(
+                paths.contains(path)
+                    || root
+                        .join("site")
+                        .join(path.trim_start_matches('/'))
+                        .is_file(),
+                "{}: `{url}` is not served",
+                page.path
+            );
+        }
+        // a Chinese page lives under /zh/, so nothing may stay relative
+        if page.lang == Lang::Zh {
+            assert!(
+                !html.contains("=\"media/"),
+                "{}: relative media URL",
+                page.path
+            );
+            assert!(!html.contains("href=\"favicon.svg\""), "{}", page.path);
+        }
+    }
+}
+
+/// The JSON-LD record parses and names the page's URL and language.
+#[test]
+fn the_split_pages_carry_their_own_json_ld() {
+    for (page, html) in split_pages() {
+        let record = json_ld(&html);
+        assert_eq!(record["url"], format!("https://getrad.dev{}", page.path));
+        assert_eq!(record["inLanguage"], page.lang.code());
+        let description = record["description"].as_str().unwrap();
+        let meta = html
+            .split("<meta name=\"description\" content=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        assert_eq!(description, meta.replace("&amp;", "&"), "{}", page.path);
+    }
+}
+
+/// A source without the Chinese title fails naming the file, and the generator writes no
+/// half page.
+#[test]
+fn a_source_without_its_chinese_title_fails_the_build() {
+    let broken = source("index.html").replace("name=\"title:zh\"", "name=\"title:xx\"");
+    for lang in Lang::ALL {
+        let error = split_page(&broken, "index.html", lang).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("site/index.html") && text.contains("title:zh"),
+            "{text}"
+        );
+    }
+    let no_toggle = source("arc.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
+    let error = split_page(&no_toggle, "arc.html", Lang::En).unwrap_err();
+    assert!(error.to_string().contains("language toggle"), "{error}");
+    let open = source("arc.html").replace("</video>", "");
+    assert!(split_page(&open, "arc.html", Lang::Zh).is_err());
 }
 
 /// `sitemap.xml` lists the hand-written pages and every manual page exactly once.
@@ -580,10 +811,11 @@ fn the_sitemap_lists_every_page_once() {
         .filter_map(|l| l.strip_prefix("<url><loc>"))
         .map(|l| l.trim_end_matches("</loc></url>"))
         .collect();
-    let mut expected = vec![
-        "https://getrad.dev/".to_owned(),
-        "https://getrad.dev/arc.html".to_owned(),
-    ];
+    let mut expected: Vec<String> = HAND_WRITTEN_PAGES
+        .iter()
+        .map(|p| format!("https://getrad.dev{}", p.path))
+        .collect();
+    assert_eq!(expected.len(), 4, "English and Chinese home and arc pages");
     expected.extend(
         site.pages
             .iter()
