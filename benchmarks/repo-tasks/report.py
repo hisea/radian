@@ -103,9 +103,11 @@ def _journal_metrics(run: dict) -> dict | None:
 
 
 def _result(run: dict) -> str:
-    """One run's outcome: timeout, checks-fail, review-fail, pass, failed, no-check."""
+    """One run's outcome: timeout, failed, checks-fail, review-fail, pass, no-check."""
     if run.get("timed_out") or run.get("status") == "timeout":
         return "timeout"
+    if run.get("status") == "failed":
+        return "failed"
     checks = run.get("checks")
     if checks is not None and not checks.get("checks_ok", False):
         return "checks-fail"

@@ -22,7 +22,9 @@ Stdlib only.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -76,6 +78,36 @@ def parse_task(path: Path) -> dict[str, object]:
     task["file"] = str(path)
     task["crates"] = [name.strip() for name in fields["crates"].split(",") if name.strip()]
     return task
+
+
+def parse_review_text(text: str) -> dict:
+    """The last closed fenced `json` block of a review, as arc reads it.
+
+    `blocking` counts every item in the block, at every level: arc's review
+    stage fails on any blocking item, whatever its `level`.
+    """
+    blocks = re.findall(r"```([^\n`]*)\n(.*?)```", text, re.S)
+    verdict = None
+    for info, body in reversed(blocks):
+        if info.strip().lower() != "json":
+            continue
+        try:
+            candidate = json.loads(body)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and "blocking" in candidate:
+            verdict = candidate
+        break
+    items = (verdict or {}).get("blocking", [])
+    items = items if isinstance(items, list) else []
+    return {
+        "parsed": verdict is not None,
+        "blocking": len(items),
+        "levels": [
+            item.get("level") if isinstance(item, dict) else None for item in items
+        ],
+        "verdict": verdict,
+    }
 
 
 def parse_arm(path: Path) -> dict[str, str]:

@@ -79,41 +79,19 @@ fi
 timed_out=0
 case $rc in 124|137) timed_out=1 ;; esac
 python3 - "$OUT/review.json" "$reviewer" "$r_agent" "$r_provider" "$r_model" \
-  "$rc" "$timed_out" "$OUT/review.stdout.log" <<'EOF'
-import json, re, sys
-path, reviewer, agent, provider, model, rc, timed_out, log = sys.argv[1:]
-text = open(log, encoding="utf-8", errors="replace").read()
-# The last closed fenced `json` block, as arc's `parse_report` reads it.
-reports = [
-    (info.strip(), body)
-    for info, body in re.findall(r"```([^\n`]*)\n(.*?)```", text, re.S)
-]
-verdict = None
-for info, body in reversed(reports):
-    if info.lower() == "json":
-        try:
-            candidate = json.loads(body)
-        except ValueError:
-            continue
-        if isinstance(candidate, dict) and "blocking" in candidate:
-            verdict = candidate
-        break
-levels = [
-    item.get("level") if isinstance(item, dict) else None
-    for item in (verdict or {}).get("blocking", [])
-]
-blocking = [
-    item for item in (verdict or {}).get("blocking", [])
-    if not isinstance(item, dict) or item.get("level", "major") in ("critical", "major")
-]
+  "$rc" "$timed_out" "$OUT/review.stdout.log" "$HERE" <<'EOF'
+import json, sys
+path, reviewer, agent, provider, model, rc, timed_out, log, here = sys.argv[1:]
+sys.path.insert(0, here)
+import lib
+parsed = lib.parse_review_text(open(log, encoding="utf-8", errors="replace").read())
 result = {
     "reviewer": reviewer, "agent": agent, "provider": provider, "model": model,
     "exit_code": int(rc), "timed_out": timed_out == "1",
-    "parsed": verdict is not None, "blocking": len(blocking),
-    "all_blocking": len((verdict or {}).get("blocking", [])),
-    "levels": levels, "verdict": verdict,
+    "parsed": parsed["parsed"], "blocking": parsed["blocking"],
+    "levels": parsed["levels"], "verdict": parsed["verdict"],
 }
-result["review_ok"] = verdict is not None and not blocking
+result["review_ok"] = parsed["parsed"] and parsed["blocking"] == 0
 json.dump(result, open(path, "w"), indent=1)
 print(json.dumps({key: result[key] for key in
                   ("parsed", "blocking", "levels", "review_ok", "timed_out")}))

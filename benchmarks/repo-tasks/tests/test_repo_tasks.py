@@ -485,5 +485,36 @@ class PromptTest(ScratchCase):
         self.assertIn('"summary"', text)
 
 
+class ReviewTextTest(unittest.TestCase):
+    def test_a_minor_blocking_item_blocks(self):
+        text = (
+            "```json\n"
+            '{"summary": "s", "blocking": [{"level": "minor", "text": "x"}], '
+            '"suggestions": [], "verified": []}\n'
+            "```\n"
+        )
+        parsed = lib.parse_review_text(text)
+        self.assertTrue(parsed["parsed"])
+        self.assertEqual(parsed["blocking"], 1)
+        self.assertEqual(parsed["levels"], ["minor"])
+
+    def test_the_last_json_block_wins(self):
+        text = (
+            "```json\n"
+            '{"summary": "old", "blocking": [{"text": "x"}], '
+            '"suggestions": [], "verified": []}\n'
+            "```\n```json\n"
+            '{"summary": "new", "blocking": [], "suggestions": [], '
+            '"verified": []}\n'
+            "```\n"
+        )
+        parsed = lib.parse_review_text(text)
+        self.assertEqual(parsed["blocking"], 0)
+        self.assertEqual(parsed["verdict"]["summary"], "new")
+
+    def test_no_json_block_is_unparsed(self):
+        self.assertFalse(lib.parse_review_text("no report here")["parsed"])
+
+
 if __name__ == "__main__":
     unittest.main()
