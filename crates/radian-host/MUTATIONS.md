@@ -1817,7 +1817,7 @@ named test ran with `cargo nextest run -p radian-host --lib --locked --profile s
 | TK0236-M5 | the import table maps `rate_limit` to `transport` instead of `unavailable` | ✅ 1 failed (rc=100) | `claude_migrate::the_typical_fixtures_map_commands_hooks_and_agents_md` (the imported matcher was `transport`) |
 | TK0236-M8 | `wait_observe` waits for any observe run instead of only `StopFailure` | ✅ 1 failed (rc=100) | `hooks::tests::notification_does_not_delay_the_exit_wait` (the exit wait held for 5 s on a `Notification` hook) |
 
-2/2 caught, no equivalent mutation.
+3/3 caught, no equivalent mutation.
 
 ## TK0236 rework: the StopFailure sink must not own the hook chain
 
@@ -1831,3 +1831,30 @@ hangs a real `radian exec`, so this check needs them).
 | TK0236-M9 | `HookRuntimeEvents` holds the `CommandHooks` strongly again (`Arc::clone`, direct call), recreating the sink → hook chain → inbox → sink cycle | ✅ 5 failed (rc=100) | `hooks::a_jsonl_run_with_no_hooks_exits`, `hooks::a_jsonl_run_with_a_notification_hook_exits`, `hooks::a_jsonl_run_with_a_fast_stop_failure_hook_exits`, `hooks::a_jsonl_run_exits_about_five_seconds_after_a_slow_stop_failure_hook` (each hit the 15 s bound: the leaked journal kept the tee sender and the printer never ended) and `pty::pty_new_releases_the_old_sessions_lock` (the old session's journal lock was never released, so the resume reported "already locked by another writer") |
 
 1/1 caught, no equivalent mutation.
+
+## TK0243: hooks Claude-parity follow-ups
+
+ADR 0045 §4/§6 and the manual's "Recent runs" and "StopFailure" sections. The
+`short()`, `config/hooks.rs` and `project_hooks.rs` mutations were applied in place and the
+named tests ran with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`. The session-wiring mutation was applied to
+`src/session/open.rs`; its test runs a real `radian exec`, so the binary was rebuilt with
+`cargo build -p radian-tui --bin radian` first and the test ran with
+`cargo nextest run -p radian-exec --test hooks --locked --profile sandbox --no-fail-fast -E
+'test(a_stop_continuation_ask_is_answered_by_the_permission_request_hook)'`. Each source was
+restored from a backup under `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0243-M1 | `short()` keeps `REASON_CHAR_LIMIT` characters and then appends `…[truncated]` (the old shape), so a bounded field reaches 2012 characters | ✅ 2 failed (rc=100) | `hooks::tests::stop_failure_error_details_stays_within_the_bound` (2012 vs 2000) and `hooks::tests::a_long_additional_context_is_truncated` (the kept text was 2000 characters, not 1988) |
+| TK0243-M2 | a structural skip returns `ParsedEntry::skipped()`, discarding the bad-`args` indexes collected before it | ✅ 1 failed (rc=100) | `config::hooks::args_tests::a_bad_args_hook_is_still_named_when_a_sibling_skips_the_entry` (only `hooks.PreToolUse[0]` was named) |
+| TK0243-M3 | `open_session` does not install the `CommandHooks` as the `PermissionRequest` chain (`set_permission_request_hooks(None)`) | ✅ 1 failed (rc=100) | `hooks::a_stop_continuation_ask_is_answered_by_the_permission_request_hook` (the continuation's outside-sandbox ask was denied, so the marker was never written) |
+| TK0243-M4 | the project reader's structural skip returns `ParsedEntry::skipped()`, discarding the bad-`args` indexes collected before it (the user reader's twin) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_hook_is_still_named_when_a_sibling_skips_the_entry` (one warning, not two) |
+
+4/4 caught, no equivalent mutation.
+
+An attempted strong-`Arc` mutation (the TK0236-M9 cycle: `HookRuntimeEvents` holds the
+`CommandHooks` again) did **not** fail `hooks::a_notification_hook_does_not_delay_a_plain_run`:
+a plain `exec -p` run exits even with the leaked session, because only the `--output jsonl`
+printer waits on the tee sender. The plain test is a regression net for the exit path, not a
+second catcher for that cycle.

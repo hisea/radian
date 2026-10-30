@@ -246,8 +246,10 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
                 Some(entry) => list.push(entry),
                 // One entry, one line: a bad hook drops its whole entry, never a sibling
                 // entry, and never the file. When every hook was dropped one by one, the
-                // per-hook lines above already say it.
-                None if !parsed.dropped_any() => {
+                // per-hook lines above already say it. A structural skip keeps its own
+                // line even when a sibling hook was also dropped one by one: the two
+                // lines name different defects.
+                None if parsed.structural_skip() || !parsed.dropped_any() => {
                     config.skipped.push(format!("hooks.{event}[{index}]"));
                 }
                 None => {}
@@ -259,13 +261,15 @@ pub fn parse_hooks(value: &Value, config: &mut Config) -> Result<(), super::Conf
 
 /// One parsed `{ matcher, hooks }` entry, plus the hooks dropped one by one.
 struct ParsedEntry {
-    /// The entry, `None` when it is skipped as a whole (then `dropped` is empty) or when
-    /// every hook was dropped individually (then `dropped` names them).
+    /// The entry, `None` when it is skipped as a whole or when every hook was dropped
+    /// individually (then `dropped` names them).
     entry: Option<HookMatcher>,
     /// Indexes of hooks dropped for a bad `args`, or for `async`/`asyncRewake` on an event
     /// that does not accept them. The rest of the entry still loads; each index is one
-    /// warning line.
+    /// warning line. A later structural defect keeps these, so both defects stay named.
     dropped: Vec<usize>,
+    /// The whole entry is outside the subset (one line names the entry).
+    structural: bool,
 }
 
 impl ParsedEntry {
@@ -274,6 +278,17 @@ impl ParsedEntry {
         Self {
             entry: None,
             dropped: Vec::new(),
+            structural: true,
+        }
+    }
+
+    /// The whole entry is outside the subset, but hooks before the structural defect were
+    /// already dropped one by one: keep their indexes so each still gets its own line.
+    fn skipped_after(dropped: Vec<usize>) -> Self {
+        Self {
+            entry: None,
+            dropped,
+            structural: true,
         }
     }
 
@@ -285,6 +300,12 @@ impl ParsedEntry {
     /// Whether any hook was dropped one by one (so the entry's own line would repeat it).
     fn dropped_any(&self) -> bool {
         !self.dropped.is_empty()
+    }
+
+    /// Whether the whole entry was skipped for a structural defect (its own line is due
+    /// even when a sibling hook was also dropped one by one).
+    fn structural_skip(&self) -> bool {
+        self.structural
     }
 }
 
@@ -313,7 +334,7 @@ fn parse_entry(item: &Value, accepts_async: bool) -> ParsedEntry {
         match parse_command(hook, accepts_async) {
             CommandParse::Ok(command) => commands.push(command),
             CommandParse::DropHook => dropped.push(index),
-            CommandParse::Skip => return ParsedEntry::skipped(),
+            CommandParse::Skip => return ParsedEntry::skipped_after(dropped),
         }
     }
     ParsedEntry {
@@ -322,6 +343,7 @@ fn parse_entry(item: &Value, accepts_async: bool) -> ParsedEntry {
             hooks: commands,
         }),
         dropped,
+        structural: false,
     }
 }
 
@@ -493,6 +515,37 @@ mod args_tests {
                 "one line names the dropped hook: {bad}"
             );
         }
+    }
+
+    /// A bad `args` hook followed by a structurally invalid hook keeps both warnings: the
+    /// per-hook `args` line and the entry's own line. Discarding the collected indexes on
+    /// the structural skip (the old `ParsedEntry::skipped()`) loses the `args` warning.
+    #[test]
+    fn a_bad_args_hook_is_still_named_when_a_sibling_skips_the_entry() {
+        let config = parse_str(concat!(
+            "schema_version = 1\n",
+            "[[hooks.PreToolUse]]\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"command\"\n",
+            "command = \"/work/example/hooks/bad\"\n",
+            "args = \"x\"\n",
+            "[[hooks.PreToolUse.hooks]]\n",
+            "type = \"prompt\"\n",
+            "command = \"/work/example/hooks/other\"\n",
+        ));
+        assert!(
+            config.hooks.pre_tool_use.is_empty(),
+            "the structural defect skips the entry: {:?}",
+            config.hooks
+        );
+        assert_eq!(
+            config.skipped,
+            vec![
+                "hooks.PreToolUse[0]".to_owned(),
+                "hooks.PreToolUse[0].hooks[0]".to_owned(),
+            ],
+            "both the bad-args hook and the entry are named"
+        );
     }
 }
 

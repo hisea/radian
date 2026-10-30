@@ -3130,25 +3130,40 @@ fn the_hooks_page_lists_recent_runs_newest_first() {
     );
 }
 
-/// The hooks page keeps every retained run reachable: with 50 run records (the session
-/// ring's last 50) and a normal-height panel, the rows below the fold are part of the same
-/// scrolling list, so ↓ reaches the oldest run and draws it. Appending the section after the
-/// list (the old shape) clips the older rows and fails this.
+/// The hooks page keeps every retained run reachable, end to end from a 60-run host
+/// sequence: the session ring keeps the newest `HOOK_RUN_HISTORY` (50) runs, so runs 00–09
+/// drop and the page's newest run is run-59 while its oldest retained row is run-10. At a
+/// constrained height the rows below the fold are part of the same scrolling list, so ↓
+/// reaches run-10 and draws it; run-00 is not reachable because the ring dropped it.
+/// Appending the section after the list (the old shape) clips the older rows and fails this.
 #[test]
 fn the_hooks_page_scrolls_to_every_retained_run() {
-    use radian_host::{HookRunEnd, HookRunRecord};
+    use radian_host::{HOOK_RUN_HISTORY, HookRunEnd, HookRunRecord};
     use radian_tui::app::{Input, Overlay};
     use radian_tui::command::InspectorPage;
     use radian_tui::inspector::{HookEntry, Inspector, InspectorSnapshot};
-    let runs: Vec<HookRunRecord> = (0..50)
+    // The host produced 60 runs, oldest first. The ring (`CommandHooks::record_run`) drops
+    // the oldest while it is full; `hooks::tests::the_run_ring_keeps_the_last_50_newest_first`
+    // proves that drop on the real ring, and the page receives its result newest first.
+    const PRODUCED: usize = 60;
+    let produced: Vec<HookRunRecord> = (0..PRODUCED)
         .map(|i| HookRunRecord {
             event: "PreToolUse".to_owned(),
             tool: Some("shell".to_owned()),
-            command: format!("run-{:02}", 49 - i),
+            command: format!("run-{i:02}"),
             end: HookRunEnd::Status(0),
             millis: 1,
         })
         .collect();
+    let oldest_retained = PRODUCED - HOOK_RUN_HISTORY;
+    let runs: Vec<HookRunRecord> = produced[oldest_retained..].iter().rev().cloned().collect();
+    assert_eq!(runs.len(), HOOK_RUN_HISTORY, "the ring keeps the last 50");
+    assert_eq!(runs[0].command, "run-59", "newest first");
+    assert_eq!(
+        runs[HOOK_RUN_HISTORY - 1].command,
+        format!("run-{oldest_retained:02}"),
+        "the oldest kept is run-10"
+    );
     let snapshot = InspectorSnapshot {
         hooks: vec![HookEntry {
             event: "PreToolUse".to_owned(),
@@ -3171,12 +3186,16 @@ fn the_hooks_page_scrolls_to_every_retained_run() {
     let text = screen(&terminal);
     assert!(text.contains("Recent runs"), "{text}");
     assert!(
-        text.contains("run-49"),
+        text.contains("run-59"),
         "the newest run is drawn first: {text}"
     );
     assert!(
+        !text.contains("run-10"),
+        "the oldest retained run starts below the fold: {text}"
+    );
+    assert!(
         !text.contains("run-00"),
-        "the oldest run starts below the fold: {text}"
+        "a run the ring dropped is never on the page: {text}"
     );
     // One Down from the configured hook skips the non-selectable heading and lands on the
     // newest run row.
@@ -3196,14 +3215,14 @@ fn the_hooks_page_scrolls_to_every_retained_run() {
     );
     let newest = text
         .lines()
-        .find(|line| line.contains("run-49"))
+        .find(|line| line.contains("run-59"))
         .expect("the newest run is drawn");
     assert!(
         newest.contains('\u{276f}'),
         "the selection lands on the newest run, not the heading: {newest}"
     );
-    // One Down per remaining row reaches the oldest retained run.
-    for _ in 0..49 {
+    // One Down per remaining row reaches the oldest retained run, run-10.
+    for _ in 0..(HOOK_RUN_HISTORY - 1) {
         app.update(Input::InspectorKey(KeyEvent::new(
             KeyCode::Down,
             KeyModifiers::NONE,
@@ -3212,14 +3231,14 @@ fn the_hooks_page_scrolls_to_every_retained_run() {
     let terminal = render(&mut app, 100, 24);
     let text = screen(&terminal);
     assert!(
-        text.contains("run-00"),
+        text.contains("run-10"),
         "↓ reaches the oldest retained run: {text}"
     );
     // The cursor lands on a run row, never on the section heading between the rows.
     let oldest = text
         .lines()
-        .find(|line| line.contains("run-00"))
-        .expect("the oldest run is drawn");
+        .find(|line| line.contains("run-10"))
+        .expect("the oldest retained run is drawn");
     assert!(
         oldest.contains('\u{276f}') || oldest.contains("> PreToolUse"),
         "the selected run carries the cursor: {oldest}"
