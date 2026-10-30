@@ -20,6 +20,10 @@ pub const VIRTUAL_PREFIX: &str = "radian://";
 pub const DOCS: &[(&str, &str)] = &[
     ("acp.md", include_str!("../../../docs/user/acp.md")),
     (
+        "arc/config.md",
+        include_str!("../../../docs/user/arc/config.md"),
+    ),
+    (
         "arc/files.md",
         include_str!("../../../docs/user/arc/files.md"),
     ),
@@ -28,8 +32,20 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/arc/flows.md"),
     ),
     (
+        "arc/gate-failures.md",
+        include_str!("../../../docs/user/arc/gate-failures.md"),
+    ),
+    (
+        "arc/gate-review.md",
+        include_str!("../../../docs/user/arc/gate-review.md"),
+    ),
+    (
         "arc/gate.md",
         include_str!("../../../docs/user/arc/gate.md"),
+    ),
+    (
+        "arc/hooks.md",
+        include_str!("../../../docs/user/arc/hooks.md"),
     ),
     (
         "arc/index.md",
@@ -44,6 +60,18 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/arc/loop.md"),
     ),
     ("arc/mcp.md", include_str!("../../../docs/user/arc/mcp.md")),
+    (
+        "arc/owner.md",
+        include_str!("../../../docs/user/arc/owner.md"),
+    ),
+    (
+        "arc/planning.md",
+        include_str!("../../../docs/user/arc/planning.md"),
+    ),
+    (
+        "arc/running.md",
+        include_str!("../../../docs/user/arc/running.md"),
+    ),
     ("arc/tui.md", include_str!("../../../docs/user/arc/tui.md")),
     (
         "arc/worker.md",
