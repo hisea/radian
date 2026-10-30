@@ -41,10 +41,9 @@
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
 | `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
 | `mcp-full-tier-ask.md` | idea | 0012、0043 | full 档 MCP 按 server 首次询问，工具定义按哈希固定 |
-| `eval-metrics.md` | decided | 0006、0007（只读） | `benchmarks/journal_metrics.py` 一套固定口径的 journal 提取器（radian 与 pi 会话），`terminal-bench/metrics.py` 复用它；`benchmarks/repo-tasks/` 仓库任务固定集（先 4 个）与 k≥2、噪声带的判定规则 |
 | `cache-efficiency.md` | idea | 0018、0026 | `prompt_cache_key`、TTL、摘要复用前缀；实测现用路由命中 98.7%，接入 Anthropic 路由时再做 |
 | `context-pruning.md` | idea | 新 ADR | 轻量档：清被同路径后续 `read` 取代的旧结果（占工具字节 24%）；条件：阈值 A/B 收益不够时才做 |
-| `compaction-threshold.md` | idea | 0018、0008 | `[compaction] threshold` + 压缩后确定性补水；条件：eval-metrics 落地后做，A/B 定缺省值 |
+| `compaction-threshold.md` | idea | 0018、0008 | `[compaction] threshold` + 压缩后确定性补水；条件已满足（journal 指标提取器与仓库任务固定集已落地），A/B 定缺省值 |
 | `arc-flows.md` | decided（1、2）；idea（3、4） | 0048、0043、0044、0025、0008 | 一个仓库按任务种类选 worker 参数与 gate profile：`[flows.<name>]` + task `flow` 字段；先落地 `review` stage；非代码资产的交付规则待定；第 4 步 trigger（clock / every N merges）与 ratchet / retro / fix 三个 flow 为 idea |
 | `arc-scope.md` | decided | 0048、0036、0025、0049、0008 | 子项目作为任务范围：`[scopes.<name>] path` + task/plan `scope`；worker cwd、gate commands 的 cwd 与锁、review 的 diff 都按 scope；一仓多 store 与稀疏 worktree 不做 |
 | `herdr-prompt-radian.md` | decided（跟踪上游 #4732） | 0034 | herdr 的 `agent prompt`/`send-keys` 只认编译进去的 agent 种类，自报的 radian 被拒；不提 PR（herdr 只收名单内 PR），在 herdr #4732 补复现；我们用 `pane send-text` + `send-keys enter` |
