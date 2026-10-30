@@ -979,6 +979,7 @@ restored from that copy (never `git checkout`), confirmed byte-identical with
 | TK0251-M2 | `let limit = Some(limit.unwrap_or(limits.default_read_lines));` → `let limit = limit;` (no default line cap) | ✅ 1 failed (rc=100) | `the_default_line_limit_stops_after_two_hundred_lines` (250 lines came back, `end_line` 250 instead of 200) |
 | TK0251-M3 | the embedded/manual branch uses `limits.default_read_bytes` instead of `default_manual_read_bytes` | ✅ 1 failed (rc=100) | `a_docs_page_reads_whole_beyond_the_file_defaults` (`configuration.md` cut at 16,348 bytes of 29,558, with `next_offset: 216`) |
 | TK0251-M4 | the byte-budget arm sets `next_offset = None` instead of `Some(lineno)` (the cut drops its note) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (`next_offset` was null; no `continue with offset` note) |
+| TK0251-M5 | the limit arm sets `next_offset = None` instead of `Some(lineno)` (an explicit `limit` cut drops its note) | ✅ 1 failed (rc=100) | `an_explicit_offset_and_limit_are_unchanged_by_the_defaults` (`next_offset` was null; no `continue with offset=150` note) |
 
 The same new tests were run against the old defaults (64 KiB, no line cap) before restoring:
 `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line`,

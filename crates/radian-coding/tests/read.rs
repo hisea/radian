@@ -717,6 +717,37 @@ async fn an_explicit_offset_and_limit_are_unchanged_by_the_defaults() {
     );
 }
 
+/// An explicit `limit` that reaches the end of the file is not a cut: the result carries
+/// no note and no `next_offset`.
+#[tokio::test]
+async fn an_explicit_limit_that_reaches_the_end_of_the_file_has_no_note() {
+    let dir = TempDir::new("read-explicit-range-end");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": 990, "limit": 50}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 990, "{info}");
+    assert_eq!(info["end_line"], 1000, "{info}");
+    assert!(info.get("next_offset").is_none(), "{info}");
+    assert_eq!(info["truncated"], false, "{info}");
+    let content = text(&output);
+    assert!(content.starts_with("990: line 990\n"), "{content}");
+    assert!(content.ends_with("1000: line 1000\n"), "{content}");
+    assert!(
+        !content.contains("[truncated"),
+        "a range that reaches the end carries no note:\n{content}"
+    );
+}
+
 /// Defaults, case 5: `offset: 100` with no `limit` still gets 200 lines, then names line 300.
 #[tokio::test]
 async fn the_default_line_limit_applies_after_a_positive_offset() {
