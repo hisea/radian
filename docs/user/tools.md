@@ -27,7 +27,7 @@ A text read prefixes each line with its file line number and `": "`.
 That prefix is not file content; remove it before you reuse the text in `patch`.
 A whole file enters the context at its full size; after `grep` locates lines, read the range around them with `offset` and `limit`, and read a whole file only when it is small or the task needs all of it.
 A directory read lists `kind`, size and name rows, sorted by name.
-`radian://docs/<page>.md` reads this manual from memory.
+`radian://docs/<page>.md` reads a manual page from memory.
 A path that names a directory reads its `index.md` (`radian://docs/arc/`).
 
 ### Images
@@ -65,7 +65,7 @@ A model that is not in the catalog, or whose entry has no input modalities, is t
 
 The same path rules apply to text and images.
 See `permissions` for which paths count as workspace paths.
-Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and this manual.
+Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and the manuals.
 In the `full` tier they also read any other path except the deny set.
 `write`, `patch` and shell working directories never leave the workspace.
 See `permissions` for the tiers and the deny set.

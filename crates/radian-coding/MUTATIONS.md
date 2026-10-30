@@ -975,3 +975,20 @@ and restored from that copy (never `git checkout`); the named test ran alone wit
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0247-M1 | a moved link points at `config.md#gone`, a heading `arc/config.md` does not have | ✅ 1 failed (rc=100) | `every_page_anchor_in_the_manual_resolves` (it named docs/user/arc/files.md:89 and the missing heading on arc/config.md) |
+
+## TK0248: two manuals with separate size budgets (2026-10-30, branch `work/TK0248-two-manual-budgets`)
+
+`radian_coding::docs` now marks every page as the radian manual or the arc manual in one
+place (`manual_of`), and the docs tests check each manual's own 512 KiB budget and each
+manual's own index. Each mutation was applied by hand to
+`crates/radian-coding/src/docs.rs`, backed up under `.radian/docs.rs.orig` and restored from
+that copy (never `git checkout`), confirmed byte-identical with `shasum -a 256`; the named
+test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test docs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0248-M1 | `manual_of` returns `Manual::Radian` for every page (the arc pages lose their manual) | ✅ 1 failed (rc=100) | `each_index_lists_every_page_of_its_manual` (the radian index did not list the 15 arc pages) |
+| TK0248-M2 | `cap_failure` drops `manual.name()`, so the message says "the manual is ..." | ✅ 1 failed (rc=100) | `a_manual_over_its_cap_fails_alone` (the message did not name the radian manual) |
+| TK0248-M3 | `pages_of` returns every page for either manual | ✅ 1 failed (rc=100) | `the_two_manuals_partition_the_embedded_table` (the two manuals' page count was twice the table's) |
+| TK0248-M4 | `pages_missing_from_index` always returns nothing | ✅ 1 failed (rc=100) | `an_unlisted_page_fails_naming_it` (the check named no missing page) |
