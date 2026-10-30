@@ -16,6 +16,9 @@
 //! with its description, in sidebar order), `llms-full.txt` (every page's Markdown in one
 //! file, each under its own URL) and `sitemap.xml` (every page's URL). Every page names its
 //! own absolute URL in a `canonical` link.
+//!
+//! The two hand-written pages (`site/index.html`, `site/arc.html`) hold English and Chinese in
+//! one source; `split_page` writes the English page and the Chinese page (`/zh/`) from each.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 use std::collections::{HashMap, HashSet};
@@ -29,19 +32,86 @@ const REPO_URL: &str = "https://github.com/hisea/radian";
 /// The site origin, without a trailing slash.
 pub const SITE_URL: &str = "https://getrad.dev";
 
-/// The site's hand-written pages, for the `llms.txt` index: path under the origin and the
-/// one-line description. The home page is `index.html`, served at `/`.
-const HAND_WRITTEN_PAGES: [(&str, &str, &str); 2] = [
-    (
-        "/",
-        "radian",
-        "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks, skills and memory.",
-    ),
-    (
-        "/arc.html",
-        "arc",
-        "The plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.",
-    ),
+/// A page language of the site: the closed set of languages the hand-written pages are
+/// split into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    En,
+    Zh,
+}
+
+impl Lang {
+    /// Every language, English first.
+    pub const ALL: [Lang; 2] = [Lang::En, Lang::Zh];
+
+    /// The `lang` attribute and `hreflang` value.
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Zh => "zh-Hans",
+        }
+    }
+
+    /// The class name the source pages give this language's elements.
+    fn class(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Zh => "zh",
+        }
+    }
+
+    fn other(self) -> Lang {
+        match self {
+            Lang::En => Lang::Zh,
+            Lang::Zh => Lang::En,
+        }
+    }
+}
+
+/// One output page of a hand-written source file: the file under `site/` it comes from,
+/// its language, its path under the origin, and the title and one-line description
+/// `llms.txt` prints.
+#[derive(Debug, Clone, Copy)]
+pub struct HandPage {
+    pub file: &'static str,
+    pub lang: Lang,
+    pub path: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+}
+
+/// The site's hand-written pages: each bilingual source file gives one page per language.
+/// `splitter`, `llms.txt` and `sitemap.xml` all read this table. The home page is
+/// `index.html`, served at `/` and `/zh/`.
+pub const HAND_WRITTEN_PAGES: [HandPage; 4] = [
+    HandPage {
+        file: "index.html",
+        lang: Lang::En,
+        path: "/",
+        title: "radian",
+        description: "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks, skills and memory.",
+    },
+    HandPage {
+        file: "arc.html",
+        lang: Lang::En,
+        path: "/arc.html",
+        title: "arc",
+        description: "The plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.",
+    },
+    HandPage {
+        file: "index.html",
+        lang: Lang::Zh,
+        path: "/zh/",
+        title: "radian（中文）",
+        description: "radian 是一个快速、高效的 Rust 单文件编码 agent：全屏终端界面、无头的 `radian exec` 命令、可回放的会话文件、沙箱工具、MCP、hooks、skills 和记忆。",
+    },
+    HandPage {
+        file: "arc.html",
+        lang: Lang::Zh,
+        path: "/zh/arc.html",
+        title: "arc（中文）",
+        description: "内置在 radian 二进制里的计划与任务编排器：每个任务交给独立的无头 radian worker 运行，只合并通过固定检查关卡的结果。",
+    },
 ];
 
 /// The workspace root the generator runs from: the crate lives two levels below it.
@@ -349,7 +419,13 @@ pub fn llms_txt(site: &RenderedSite) -> String {
     );
     out.push_str("llms-full.txt holds the whole user manual as Markdown.\n\n");
     out.push_str("## Site\n\n");
-    for (path, title, description) in HAND_WRITTEN_PAGES {
+    for page in HAND_WRITTEN_PAGES {
+        let HandPage {
+            path,
+            title,
+            description,
+            ..
+        } = page;
         out.push_str(&format!("- [{title}]({SITE_URL}{path}): {description}\n"));
     }
     let by_stem: HashMap<&str, &RenderedPage> =
@@ -385,7 +461,8 @@ pub fn sitemap_xml(site: &RenderedSite) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
-    for (path, _, _) in HAND_WRITTEN_PAGES {
+    for page in HAND_WRITTEN_PAGES {
+        let path = page.path;
         out.push_str(&format!("<url><loc>{SITE_URL}{path}</loc></url>\n"));
     }
     for page in &site.pages {
@@ -1137,6 +1214,437 @@ fn escape_into(text: &str, out: &mut String) {
             _ => out.push(ch),
         }
     }
+}
+
+/// A hand-written source page that cannot be split: it names the file and the missing or
+/// broken marker.
+pub fn split_error(file: &str, marker: &str, reason: &str) -> SiteError {
+    SiteError {
+        page: format!("site/{file}"),
+        link: marker.to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+fn hand_page(file: &str, lang: Lang) -> Result<&'static HandPage, SiteError> {
+    HAND_WRITTEN_PAGES
+        .iter()
+        .find(|page| page.file == file && page.lang == lang)
+        .ok_or_else(|| split_error(file, file, "is not a hand-written page"))
+}
+
+/// The absolute URL of a hand-written page in a language.
+pub fn hand_page_url(file: &str, lang: Lang) -> Result<String, SiteError> {
+    Ok(format!("{SITE_URL}{}", hand_page(file, lang)?.path))
+}
+
+/// Splits one bilingual source page (`site/index.html`, `site/arc.html`) into the page for
+/// `lang`: the other language's elements are removed, the language toggle becomes two links
+/// to the two pages, the inline language script goes, and the head carries this page's
+/// title, description, canonical, `hreflang` alternates and JSON-LD. A missing marker
+/// fails with the file's name rather than writing a half page.
+pub fn split_page(source: &str, file: &str, lang: Lang) -> Result<String, SiteError> {
+    let page = hand_page(file, lang)?;
+    let url = format!("{SITE_URL}{}", page.path);
+    let mut html = filter_language(source, file, lang)?;
+
+    // The head text: the Chinese strings sit in two metas of the source.
+    let title_zh = meta_value(&html, "name=\"title:zh\"", file)?;
+    let description_zh = meta_value(&html, "name=\"description:zh\"", file)?;
+    html = remove_line_containing(&html, "name=\"title:zh\"");
+    html = remove_line_containing(&html, "name=\"description:zh\"");
+    let description_en = meta_value(&html, "name=\"description\"", file)?;
+    let description = if lang == Lang::Zh {
+        set_meta(&mut html, "name=\"description\"", &description_zh, file)?;
+        set_meta(
+            &mut html,
+            "property=\"og:description\"",
+            &description_zh,
+            file,
+        )?;
+        set_meta(&mut html, "property=\"og:title\"", &title_zh, file)?;
+        replace_between(&mut html, "<title>", "</title>", &title_zh, file)?;
+        description_zh
+    } else {
+        description_en
+    };
+
+    html = language_css(&html, lang);
+    let html_tag = format!("<html lang=\"{}\">", lang.code());
+    if !html.contains("<html lang=\"en\">") {
+        return Err(split_error(file, "<html lang=\"en\">", "is missing"));
+    }
+    html = html.replacen("<html lang=\"en\">", &html_tag, 1);
+    html = drop_language_script(&html, file)?;
+
+    // Relative URLs: the Chinese pages live one directory down.
+    if lang == Lang::Zh {
+        for (from, to) in [
+            ("href=\"favicon.svg\"", "href=\"/favicon.svg\""),
+            ("=\"media/", "=\"/media/"),
+            ("href=\"/arc.html\"", "href=\"/zh/arc.html\""),
+            ("href=\"/#", "href=\"/zh/#"),
+            ("href=\"/\"", "href=\"/zh/\""),
+            ("media/arc-en.jpg\">", "media/arc-zh.jpg\">"),
+        ] {
+            html = html.replace(from, to);
+        }
+    }
+
+    set_url_metas(&mut html, &url, file)?;
+    html = json_ld_for(&html, &url, &description, lang, file)?;
+    html = language_toggle(&html, file, lang)?;
+
+    for banned in ["data-lang", "rad-lang", "localStorage", "setLang"] {
+        if html.contains(banned) {
+            return Err(split_error(file, banned, "is left in the split page"));
+        }
+    }
+    Ok(html)
+}
+
+/// Removes the other language's elements and the language class from the kept ones.
+fn filter_language(source: &str, file: &str, keep: Lang) -> Result<String, SiteError> {
+    let drop = keep.other().class();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < source.len() {
+        let Some(rel) = source[i..].find('<') else {
+            out.push_str(&source[i..]);
+            break;
+        };
+        out.push_str(&source[i..i + rel]);
+        i += rel;
+        let rest = &source[i..];
+        if rest.starts_with("<!--") {
+            let end = rest
+                .find("-->")
+                .ok_or_else(|| split_error(file, "<!--", "comment is not closed"))?;
+            out.push_str(&rest[..end + 3]);
+            i += end + 3;
+            continue;
+        }
+        let name: String = rest[1..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        if name.is_empty() {
+            out.push('<');
+            i += 1;
+            continue;
+        }
+        let tag_len = tag_end(rest)
+            .ok_or_else(|| split_error(file, &format!("<{name}"), "tag is not closed"))?;
+        let tag = &rest[..tag_len];
+        if (name == "script" || name == "style") && !tag.ends_with("/>") {
+            let close = format!("</{name}");
+            let end = rest[tag_len..]
+                .find(&close)
+                .ok_or_else(|| split_error(file, &format!("<{name}"), "is not closed"))?;
+            let stop = rest[tag_len + end..]
+                .find('>')
+                .map(|n| tag_len + end + n + 1);
+            let stop = stop.ok_or_else(|| split_error(file, &close, "is not closed"))?;
+            out.push_str(&rest[..stop]);
+            i += stop;
+            continue;
+        }
+        let tokens = class_tokens(tag);
+        let marked = tokens.iter().any(|t| *t == "en" || *t == "zh");
+        if marked && tokens.contains(&drop) {
+            i += element_len(rest, &name, tag_len, file)?;
+            continue;
+        }
+        if marked {
+            out.push_str(&without_language_class(tag));
+        } else {
+            out.push_str(tag);
+        }
+        i += tag_len;
+    }
+    Ok(out)
+}
+
+/// The byte length of the start tag at the start of `s`, quotes respected.
+fn tag_end(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, ch) in s.char_indices() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (None, '>') => return Some(index + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The class tokens of a start tag.
+fn class_tokens(tag: &str) -> Vec<&str> {
+    let Some(start) = tag.find(" class=\"") else {
+        return Vec::new();
+    };
+    let value = &tag[start + 8..];
+    value
+        .split('"')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect()
+}
+
+/// The start tag with `en` and `zh` removed from its class list (the attribute goes when
+/// nothing else is left).
+fn without_language_class(tag: &str) -> String {
+    let Some(start) = tag.find(" class=\"") else {
+        return tag.to_owned();
+    };
+    let value_start = start + 8;
+    let value_end = value_start + tag[value_start..].find('"').unwrap_or(0);
+    let kept: Vec<&str> = tag[value_start..value_end]
+        .split_whitespace()
+        .filter(|t| *t != "en" && *t != "zh")
+        .collect();
+    let attr = if kept.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", kept.join(" "))
+    };
+    format!("{}{}{}", &tag[..start], attr, &tag[value_end + 1..])
+}
+
+/// The byte length of the whole element whose start tag is `tag_len` bytes long, found by
+/// counting same-name tags. A void element is its start tag.
+fn element_len(rest: &str, name: &str, tag_len: usize, file: &str) -> Result<usize, SiteError> {
+    const VOID: [&str; 8] = ["img", "source", "br", "hr", "meta", "link", "input", "wbr"];
+    if VOID.contains(&name) || rest[..tag_len].ends_with("/>") {
+        return Ok(tag_len);
+    }
+    let open = format!("<{name}");
+    let close = format!("</{name}");
+    let mut depth = 1;
+    let mut pos = tag_len;
+    while let Some(rel) = rest[pos..].find('<') {
+        let at = pos + rel;
+        let here = &rest[at..];
+        let boundary = |n: usize| {
+            here[n..]
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+        };
+        if here.starts_with(&close) && boundary(close.len()) {
+            depth -= 1;
+            let end = here
+                .find('>')
+                .ok_or_else(|| split_error(file, &close, "is not closed"))?;
+            if depth == 0 {
+                return Ok(at + end + 1);
+            }
+            pos = at + end + 1;
+        } else if here.starts_with(&open) && boundary(open.len()) {
+            let len = tag_end(here).ok_or_else(|| split_error(file, &open, "tag is not closed"))?;
+            if !here[..len].ends_with("/>") {
+                depth += 1;
+            }
+            pos = at + len;
+        } else {
+            pos = at + 1;
+        }
+    }
+    Err(split_error(
+        file,
+        &format!("<{name}"),
+        "element is not closed",
+    ))
+}
+
+/// The `content` of the `<meta …>` whose attribute text contains `key`.
+fn meta_value(html: &str, key: &str, file: &str) -> Result<String, SiteError> {
+    let marker = format!("<meta {key} content=\"");
+    let start = html
+        .find(&marker)
+        .ok_or_else(|| split_error(file, &format!("<meta {key}>"), "is missing"))?
+        + marker.len();
+    let end = html[start..]
+        .find('"')
+        .ok_or_else(|| split_error(file, &format!("<meta {key}>"), "is not closed"))?;
+    Ok(html[start..start + end].to_owned())
+}
+
+fn set_meta(html: &mut String, key: &str, value: &str, file: &str) -> Result<(), SiteError> {
+    let marker = format!("<meta {key} content=\"");
+    replace_between(html, &marker, "\"", value, file)
+}
+
+/// Replaces the text between the first `open` and the next `close` after it.
+fn replace_between(
+    html: &mut String,
+    open: &str,
+    close: &str,
+    value: &str,
+    file: &str,
+) -> Result<(), SiteError> {
+    let start = html
+        .find(open)
+        .ok_or_else(|| split_error(file, open, "is missing"))?
+        + open.len();
+    let end = html[start..]
+        .find(close)
+        .ok_or_else(|| split_error(file, open, "is not closed"))?;
+    html.replace_range(start..start + end, value);
+    Ok(())
+}
+
+fn remove_line_containing(html: &str, needle: &str) -> String {
+    html.split_inclusive('\n')
+        .filter(|line| !line.contains(needle))
+        .collect()
+}
+
+/// Drops the source's language rules; for Chinese the typography rules apply unconditionally.
+/// The toggle's links look like the buttons they replace.
+fn language_css(html: &str, lang: Lang) -> String {
+    const ZH_RULE: &str = ":root[data-lang=\"zh\"] ";
+    let mut out = String::with_capacity(html.len());
+    for line in html.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        if trimmed.starts_with(":root:not([data-lang=\"zh\"])") {
+            continue;
+        }
+        if let Some(rule) = trimmed.strip_prefix(ZH_RULE) {
+            if lang == Lang::Zh {
+                out.push_str(indent);
+                out.push_str(rule);
+            }
+            continue;
+        }
+        if trimmed.starts_with(".lang button {") {
+            out.push_str(&line.replace(".lang button {", ".lang a {").replace(
+                "cursor: pointer; }",
+                "cursor: pointer; text-decoration: none; }",
+            ));
+        } else if trimmed.starts_with(".lang button[aria-pressed=\"true\"]") {
+            out.push_str(&line.replace(
+                ".lang button[aria-pressed=\"true\"]",
+                ".lang a[aria-current=\"page\"]",
+            ));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Removes the language part of the inline script (state, storage, the toggle's handlers);
+/// the copy-button handlers stay.
+fn drop_language_script(html: &str, file: &str) -> Result<String, SiteError> {
+    let start = html
+        .find("  var root = document.documentElement;")
+        .ok_or_else(|| split_error(file, "var root = document.documentElement;", "is missing"))?;
+    let stop = html
+        .find("  document.querySelectorAll('.install-row")
+        .ok_or_else(|| split_error(file, ".install-row", "script block is missing"))?;
+    if stop < start {
+        return Err(split_error(
+            file,
+            ".install-row",
+            "script block is out of order",
+        ));
+    }
+    Ok(format!("{}{}", &html[..start], &html[stop..]))
+}
+
+/// Points `canonical` and `og:url` at the page's own URL and lists the three alternates.
+fn set_url_metas(html: &mut String, url: &str, file: &str) -> Result<(), SiteError> {
+    set_meta(html, "property=\"og:url\"", url, file)?;
+    let canonical = "<link rel=\"canonical\" href=\"";
+    replace_between(html, canonical, "\"", url, file)?;
+    let en = hand_page_url(file, Lang::En)?;
+    let zh = hand_page_url(file, Lang::Zh)?;
+    let start = html.find(canonical).unwrap_or(0);
+    let line_end = start + html[start..].find('\n').unwrap_or(0) + 1;
+    let alternates = format!(
+        "<link rel=\"alternate\" hreflang=\"en\" href=\"{en}\">\n<link rel=\"alternate\" hreflang=\"zh-Hans\" href=\"{zh}\">\n<link rel=\"alternate\" hreflang=\"x-default\" href=\"{en}\">\n"
+    );
+    html.insert_str(line_end, &alternates);
+    Ok(())
+}
+
+/// Rewrites the JSON-LD record: this page's URL, description and language.
+fn json_ld_for(
+    html: &str,
+    url: &str,
+    description: &str,
+    lang: Lang,
+    file: &str,
+) -> Result<String, SiteError> {
+    let open = "<script type=\"application/ld+json\">";
+    let start = html
+        .find(open)
+        .ok_or_else(|| split_error(file, open, "is missing"))?
+        + open.len();
+    let end = html[start..]
+        .find("</script>")
+        .ok_or_else(|| split_error(file, open, "is not closed"))?;
+    let mut record: serde_json::Value = serde_json::from_str(&html[start..start + end])
+        .map_err(|e| split_error(file, "ld+json", &format!("does not parse: {e}")))?;
+    let object = record
+        .as_object_mut()
+        .ok_or_else(|| split_error(file, "ld+json", "is not an object"))?;
+    object.insert("url".into(), url.into());
+    object.insert("description".into(), unescape(description).into());
+    object.insert("inLanguage".into(), lang.code().into());
+    let text = record.to_string().replace("</", "<\\/");
+    Ok(format!(
+        "{}{}{}",
+        &html[..start],
+        text,
+        &html[start + end..]
+    ))
+}
+
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Replaces the language buttons with two links to the page in each language.
+fn language_toggle(html: &str, file: &str, lang: Lang) -> Result<String, SiteError> {
+    let open = "<div class=\"lang\"";
+    let start = html
+        .find(open)
+        .ok_or_else(|| split_error(file, open, "language toggle is missing"))?;
+    let end = html[start..]
+        .find("</div>")
+        .ok_or_else(|| split_error(file, open, "language toggle is not closed"))?
+        + start
+        + "</div>".len();
+    let line_start = html[..start].rfind('\n').map_or(0, |n| n + 1);
+    let indent = &html[line_start..start];
+    let link = |target: Lang, text: &str| -> Result<String, SiteError> {
+        let path = hand_page(file, target)?.path;
+        let current = if target == lang {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        Ok(format!(
+            "{indent}  <a href=\"{path}\" hreflang=\"{code}\" lang=\"{code}\"{current}>{text}</a>\n",
+            code = target.code()
+        ))
+    };
+    let toggle = format!(
+        "<div class=\"lang\" role=\"group\" aria-label=\"Language\">\n{}{}{indent}</div>",
+        link(Lang::En, "EN")?,
+        link(Lang::Zh, "中")?
+    );
+    Ok(format!("{}{}{}", &html[..start], toggle, &html[end..]))
 }
 
 #[cfg(test)]

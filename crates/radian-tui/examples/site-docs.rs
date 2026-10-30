@@ -7,7 +7,8 @@
 //! `<out-dir>/llms-full.txt` (every page's Markdown) and `<out-dir>/sitemap.xml`. A broken
 //! inter-page link fails the build with the source page
 //! and the link; a page holding raw HTML is reported on stderr (the HTML is escaped in the
-//! output).
+//! output). It also splits the two bilingual source pages `site/index.html` and
+//! `site/arc.html` into `index.html`, `arc.html`, `zh/index.html` and `zh/arc.html`.
 
 use std::path::PathBuf;
 
@@ -47,6 +48,39 @@ fn main() {
         }
         if page.raw_html {
             eprintln!("site-docs: {} contains raw HTML (escaped)", page.name);
+        }
+    }
+    let site_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site");
+    for page in radian_tui::site_docs::HAND_WRITTEN_PAGES {
+        let source = site_dir.join(page.file);
+        let text = std::fs::read_to_string(&source)
+            .map_err(|error| format!("site-docs: cannot read {}: {error}", source.display()))
+            .and_then(|text| {
+                radian_tui::site_docs::split_page(&text, page.file, page.lang)
+                    .map_err(|error| error.to_string())
+            });
+        let text = match text {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+        let target = out.join(page.path.trim_start_matches('/'));
+        let target = if page.path.ends_with('/') {
+            target.join("index.html")
+        } else {
+            target
+        };
+        if let Some(parent) = target.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("site-docs: cannot create {}: {error}", parent.display());
+            std::process::exit(1);
+        }
+        if let Err(error) = std::fs::write(&target, text) {
+            eprintln!("site-docs: cannot write {}: {error}", target.display());
+            std::process::exit(1);
         }
     }
     for (file, text) in [

@@ -1,8 +1,12 @@
 # getrad.dev
 
-Static site: two pages, `index.html` (radian) and `arc.html` (arc), each in one file with English and Chinese in the same page, switched by the `EN / 中` button, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds the arc videos and their poster frames, and `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies. Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
+Static site. Two source files, `index.html` (radian) and `arc.html` (arc), each hold English and Chinese in one file (`class="en"` / `class="zh"` pairs, an `EN / 中` toggle with a script) so they are written and previewed in one place. The deployed site is four pages: the generator (`crates/radian-tui/src/site_docs.rs`, `split_page`) splits each source into an English page (`/`, `/arc.html`) and a Chinese page (`/zh/`, `/zh/arc.html`) that hold one language each, link each other with the toggle, and name `hreflang` alternates (`en`, `zh-Hans`, `x-default` = the English page), their own canonical URL and a JSON-LD record with `inLanguage`. The manual under `/docs/` stays English. There is no redirect by browser language, so a search engine reaches both pages. Next to these, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds the arc videos and their poster frames, and `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies. Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
 
-Preview: `python3 -m http.server -d site 8000`.
+Preview a source file with its toggle: `python3 -m http.server -d site 8000`. Preview the four deployed pages: see "Preview the docs" below.
+
+## Head text of the two languages
+
+The English `<title>`, `description`, `og:title` and `og:description` stay as they are. The Chinese head text is two metas in each source, `<meta name="title:zh" content="…">` and `<meta name="description:zh" content="…">`; the Chinese page takes its title, description, `og:title` and `og:description` from them, and both outputs drop the two metas. A source without them, without the language toggle, or with an unbalanced language element fails the build naming the file. The Chinese page rewrites `favicon.svg` and `media/…` to absolute paths (it lives under `/zh/`) and its links between the two pages to the Chinese counterpart. `HAND_WRITTEN_PAGES` (one table) names the four pages for the splitter, `llms.txt` and `sitemap.xml`. `site/tools/readme-images.py` renders `site/index.html` itself and does not depend on the toggle.
 
 ## Machine-readable pages
 
@@ -43,8 +47,8 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 Every push to `main` that changes `site/**`, `docs/user/**`, the generator
 (`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
 or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
-copies `index.html`, `arc.html`, `404.html`, `robots.txt`, `favicon.svg`, `docs.css` and `media/` from `site/` into `_site/`,
-runs the generator into `_site/docs/` (which also writes `_site/llms.txt`,
+copies `404.html`, `robots.txt`, `favicon.svg`, `docs.css` and `media/` from `site/` into `_site/`,
+runs the generator into `_site/` (it writes `index.html`, `arc.html`, `zh/index.html` and `zh/arc.html` from the two sources, `docs/`, and also `_site/llms.txt`,
 `_site/llms-full.txt` and `_site/sitemap.xml`), writes `_site/CNAME` with `getrad.dev`,
 then configures and uploads the Pages artifact.
 
@@ -52,12 +56,12 @@ then configures and uploads the Pages artifact.
 
 ```sh
 cargo run -p radian-tui --example site-docs --locked -- /tmp/site
-cp site/index.html site/arc.html site/favicon.svg site/docs.css /tmp/site/
+cp site/404.html site/robots.txt site/favicon.svg site/docs.css /tmp/site/
 cp -r site/media /tmp/site/media
 python3 -m http.server -d /tmp/site 8000
 ```
 
-then open `http://localhost:8000/docs/`, `http://localhost:8000/llms.txt`, `http://localhost:8000/llms-full.txt` and `http://localhost:8000/sitemap.xml`.
+then open `http://localhost:8000/`, `http://localhost:8000/zh/`, `http://localhost:8000/docs/`, `http://localhost:8000/llms.txt`, `http://localhost:8000/llms-full.txt` and `http://localhost:8000/sitemap.xml`.
 
 ## One source
 
