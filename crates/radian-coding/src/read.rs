@@ -21,6 +21,7 @@ struct ReadArgs {
 }
 
 pub(crate) fn schema() -> serde_json::Value {
+    let limits = Limits::default();
     json!({
         "type": "object",
         "properties": {
@@ -35,8 +36,11 @@ pub(crate) fn schema() -> serde_json::Value {
             "max_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 1048576,
-                "description": "Maximum bytes to read. Default: 16384."
+                "maximum": limits.max_read_bytes,
+                "description": format!(
+                    "Maximum bytes to read. Default: {}.",
+                    limits.default_read_bytes
+                )
             },
             "offset": {
                 "type": "integer",
@@ -45,11 +49,14 @@ pub(crate) fn schema() -> serde_json::Value {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum lines to read; at least 1 for text and directory \
-                                reads. Set it to cover the located range, not the whole file. For \
-                                a directory, it caps entries instead. Default: 200 lines for a \
-                                file, 500 entries for a directory. Maximum: 5000 entries for a \
-                                directory. Ignored for an image."
+                "description": format!(
+                    "Maximum lines to read; at least 1 for text and directory \
+                     reads. Set it to cover the located range, not the whole file. For \
+                     a directory, it caps entries instead. Default: {} lines for a \
+                     file, {} entries for a directory. Maximum: {} entries for a \
+                     directory. Ignored for an image.",
+                    limits.default_read_lines, limits.default_list_entries, limits.max_list_entries
+                )
             }
         },
         "required": ["path"],
@@ -58,6 +65,7 @@ pub(crate) fn schema() -> serde_json::Value {
 }
 
 pub(crate) fn spec(presence: ToolPresence) -> ToolSpec {
+    let limits = Limits::default();
     // The prefix note is complete without the `patch` instruction; name that tool only when
     // it is mounted (ADR 0043 §4).
     let patch_hint = if presence.patch {
@@ -77,13 +85,16 @@ pub(crate) fn spec(presence: ToolPresence) -> ToolSpec {
         description: format!(
             "Read a UTF-8 text file, a directory, or an image. Each text line starts \
              with its line number and `\": \"`. This prefix is not part of the file.{patch_hint} \
-             A whole file enters the context at its full size: {locate}, read the range \
-             around them with `offset` and `limit`. Read a whole file only when it is small \
-             or the task needs all of it. Do not increase `max_bytes` to get a later part. \
+             A read with no range stops at {kib} KiB or {lines} lines, naming the next \
+             offset; {locate}, read the range around them with `offset` and `limit`. Read a \
+             whole file only when it is small or the task needs all of it. Do not increase \
+             `max_bytes` to get a later part. \
              An image (PNG, JPEG, GIF or WebP, judged by its magic number, never its \
              extension) returns a text line and the image itself; images are limited to \
              5 MiB and 8000 px per side (`image_too_large` when over). An image is read \
-             whole: `offset` and `limit` are ignored."
+             whole: `offset` and `limit` are ignored.",
+            kib = limits.default_read_bytes / 1024,
+            lines = limits.default_read_lines,
         ),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,

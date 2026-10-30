@@ -672,17 +672,17 @@ async fn an_explicit_budget_and_limit_restore_the_old_64_kib_window() {
     .await
     .unwrap();
     let info = structured(&output);
-    let end = info["end_line"].as_i64().expect("an end line");
-    assert!(end < 1400, "the 64 KiB budget still cuts the file: {info}");
-    assert_eq!(info["bytes_read"], json!(end * 50), "{info}");
-    assert!(
-        info["bytes_read"].as_u64().unwrap() > 16 * 1024,
-        "the explicit budget is 64 KiB, not the 16 KiB default: {info}"
+    assert_eq!(
+        info["end_line"], 1310,
+        "the 64 KiB window's exact cut: {info}"
     );
-    assert!(info["bytes_read"].as_u64().unwrap() <= 65536, "{info}");
-    assert_eq!(info["next_offset"], json!(end + 1), "{info}");
+    assert_eq!(
+        info["bytes_read"], 65500,
+        "1310 whole 50-byte lines, not a narrower budget: {info}"
+    );
+    assert_eq!(info["next_offset"], 1311, "{info}");
     assert!(
-        text(&output).contains(&format!("continue with offset={}", end + 1)),
+        text(&output).ends_with("[truncated: continue with offset=1311]"),
         "{}",
         text(&output)
     );
