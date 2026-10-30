@@ -12,6 +12,9 @@ spikes/*/target/
 # Radian's per-workspace state, including task progress notes (ADR 0036).
 /.radian/
 
+# The repository task set's runs and its separate clone: output, never committed.
+/benchmarks/repo-tasks/runs/
+
 # Python bytecode caches from the helper scripts (crates/*/scripts/); never tracked.
 __pycache__/
 *.pyc
