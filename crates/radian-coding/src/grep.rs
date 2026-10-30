@@ -45,11 +45,22 @@ impl OutputMode {
 }
 
 /// Whether `line` still fits in a body of `body_len` with room left for the trailing notes.
-fn fits(body_len: usize, line_len: usize, byte_cap: usize) -> bool {
+fn fits(body_len: usize, line_len: usize, byte_cap: usize, reserve: usize) -> bool {
     body_len
         .checked_add(line_len)
-        .and_then(|n| n.checked_add(BYTE_NOTE_RESERVE))
+        .and_then(|n| n.checked_add(reserve))
         .is_some_and(|n| n <= byte_cap)
+}
+
+/// The one trailing note when a directory or `glob` search left files over the size cap
+/// unscanned: how many, the cap, up to five of their paths, and how many paths it did not
+/// name. `count` is every skipped file; `shown` is what the caller kept (at most five).
+fn skipped_note(file_cap: usize, count: usize, shown: &[String]) -> String {
+    let mut list = shown.join(", ");
+    if count > shown.len() {
+        list.push_str(&format!(", and {} more", count - shown.len()));
+    }
+    format!("[skipped {count} files over {file_cap} bytes: {list}]\n")
 }
 
 /// The one trailing note when the byte cap stopped the output in `files`/`count` mode:
@@ -317,9 +328,19 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     // file's open fd is the one scanned, never a path re-opened.
     let resolved = search::resolve_bases(&root, requested)?;
     let header = resolved.header;
+    // Files a directory walk or `glob` found over `max_grep_file_bytes`: they are never
+    // scanned, only counted and named (up to five paths) in the one trailing note. A file
+    // named directly as `path` is exempt, below.
+    let mut skipped_paths: Vec<String> = Vec::new();
+    let mut skipped_count = 0usize;
     let mut files: Vec<(File, String)> = Vec::new();
     {
-        let mut seen = std::collections::HashSet::new();
+        // Display paths carry the duplicate rules across bases: `queued` holds what is queued
+        // for scanning, `skipped` what a walk left over the size cap. They are kept apart so a
+        // directly named file base can take its path back out of `skipped` (and be scanned),
+        // instead of being deduplicated against a walk that refused it.
+        let mut queued = std::collections::HashSet::new();
+        let mut skipped = std::collections::HashSet::new();
         for base in resolved.bases {
             match base {
                 search::SingleBase::Dir(dir_base) => {
@@ -336,7 +357,24 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                                 return true;
                             }
                             let display = display_path(prefix.as_deref(), &rel);
-                            if seen.insert(display.clone()) {
+                            if queued.contains(&display) || skipped.contains(&display) {
+                                return true;
+                            }
+                            // `File::metadata` is an fstat on the fd the walk opened, not a
+                            // read; a file that cannot be stat'ed falls through to the scan,
+                            // which skips it exactly as before.
+                            let over = found
+                                .file
+                                .metadata()
+                                .is_ok_and(|meta| meta.len() > limits.max_grep_file_bytes as u64);
+                            if over {
+                                skipped.insert(display.clone());
+                                skipped_count += 1;
+                                if skipped_paths.len() < 5 {
+                                    skipped_paths.push(display);
+                                }
+                            } else {
+                                queued.insert(display.clone());
                                 files.push((found.file, display));
                             }
                             true
@@ -361,7 +399,15 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                         .is_none_or(|filter| filter.is_match(&relative))
                     {
                         let display = display_path(prefix.as_deref(), &relative);
-                        if seen.insert(display.clone()) {
+                        // A file named directly as `path` is always searched, whatever its
+                        // size: when an earlier directory base refused it for its size, it
+                        // leaves the skipped set (and its count and name) here instead of
+                        // being deduplicated against that refusal.
+                        if skipped.remove(&display) {
+                            skipped_count -= 1;
+                            skipped_paths.retain(|path| path != &display);
+                        }
+                        if queued.insert(display.clone()) {
                             match opened.source {
                                 crate::workspace::OpenedSource::File(file) => {
                                     files.push((file, display));
@@ -383,6 +429,15 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
         }
     }
     files.sort_by(|a, b| a.1.cmp(&b.1));
+    let skip_note = if skipped_count > 0 {
+        skipped_note(limits.max_grep_file_bytes, skipped_count, &skipped_paths)
+    } else {
+        String::new()
+    };
+    // The body must leave room for every trailing note, the size note included, and for the
+    // multi-base header that is prepended afterwards: the header sits in front of the body, so
+    // the body budget has to spend from what the header leaves.
+    let reserve = BYTE_NOTE_RESERVE + skip_note.len() + header.as_ref().map_or(0, String::len);
 
     let mode = match output.as_deref() {
         None | Some("content") => OutputMode::Content,
@@ -473,7 +528,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                 if fb
                     .len()
                     .checked_add(add)
-                    .and_then(|n| n.checked_add(BYTE_NOTE_RESERVE))
+                    .and_then(|n| n.checked_add(reserve))
                     .is_some_and(|n| n <= byte_cap)
                 {
                     for (_, line) in &lines {
@@ -504,7 +559,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                     if !*is_match && matches_body.is_empty() {
                         continue;
                     }
-                    if !fits(matches_body.len(), line.len(), byte_cap) {
+                    if !fits(matches_body.len(), line.len(), byte_cap, reserve) {
                         complete = false;
                         break;
                     }
@@ -532,7 +587,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                             "[{}: more than {} matches in one file]\n",
                             rel, per_file_cap
                         );
-                        if !fits(matches_body.len(), note.len(), byte_cap) {
+                        if !fits(matches_body.len(), note.len(), byte_cap, reserve) {
                             matches_accepting = false;
                         } else {
                             matches_body.push_str(&note);
@@ -597,7 +652,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                         "{rel}: {matches} {}\n",
                         if matches == 1 { "match" } else { "matches" }
                     );
-                    if !fits(body.len(), line.len(), byte_cap) {
+                    if !fits(body.len(), line.len(), byte_cap, reserve) {
                         byte_truncated = true;
                         break;
                     }
@@ -631,7 +686,7 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                 if files_matched == 1 { "file" } else { "files" }
             )
         };
-        if fits(body.len(), line.len(), byte_cap) {
+        if fits(body.len(), line.len(), byte_cap, reserve) {
             body.push_str(&line);
         } else {
             byte_truncated = true;
@@ -661,12 +716,15 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
             suffix.push_str(&byte_note(byte_cap, total, files_matched, mode));
         }
     }
-    if total == 0 && !byte_truncated && mode != OutputMode::Count {
+    if total == 0 && !byte_truncated && mode != OutputMode::Count && skipped_count == 0 {
         suffix.push_str(&format!("[no matches for `{pattern}`]\n"));
     }
+    if !skip_note.is_empty() {
+        suffix.push_str(&skip_note);
+    }
     debug_assert!(
-        suffix.len() <= BYTE_NOTE_RESERVE,
-        "grep suffix {}B exceeds the {BYTE_NOTE_RESERVE}B reserve",
+        suffix.len() <= reserve,
+        "grep suffix {}B exceeds the {reserve}B reserve",
         suffix.len()
     );
     let mut out =

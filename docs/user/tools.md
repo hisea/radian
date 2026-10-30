@@ -94,6 +94,9 @@ Past a match cap the output ends with `[truncated: showing the first N matches]`
 Past the byte cap, context lines are dropped first to keep every match line; only if the match lines alone do not fit are whole match lines cut, in order.
 The output then ends with a note whose first line is `[truncated: output hit 16384 byte limit; ...]`, naming what was dropped and how to narrow the search: a narrower `path` or `glob`, a lower `context`, or `output: "files"` first (`output: "count"` in `files` mode).
 A `content` or `files` search with no matches prints ``[no matches for `<pattern>`]``; `count` prints `0 matches in 0 files`.
+A file larger than 262144 bytes (256 KiB) is not searched when the search runs over a directory or a `glob`: the result ends with one line `[skipped <n> files over 262144 bytes: <up to five paths>, and <m> more]` (the `and <m> more` part only when more than five were skipped) in all three `output` modes, and the match counts exclude the skipped files.
+When every file that could match was skipped, that line is the whole result.
+A file named directly as `path` is always searched, whatever its size.
 
 `.gitignore` and `.ignore` files apply from the workspace root down to the search directory, and the global gitignore is not read.
 `.git`, symlinks and binary files are skipped.

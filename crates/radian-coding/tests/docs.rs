@@ -459,6 +459,19 @@ fn the_manual_names_the_grep_limits_from_the_code() {
         "tools.md names the {} byte cap",
         limits.max_grep_output_bytes
     );
+    assert!(
+        text.contains(&format!("larger than {} bytes", limits.max_grep_file_bytes)),
+        "tools.md names the {} file-size cap",
+        limits.max_grep_file_bytes
+    );
+    assert!(
+        text.contains(&format!(
+            "[skipped <n> files over {} bytes",
+            limits.max_grep_file_bytes
+        )),
+        "tools.md shows the note's shape with the {} file-size cap",
+        limits.max_grep_file_bytes
+    );
 }
 
 /// The hand-written table matches `docs/user/` on disk, including the pages in subdirectories.
