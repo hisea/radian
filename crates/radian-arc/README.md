@@ -634,7 +634,11 @@ sha equality is not required, so a target that gained other merges still passes)
 leaves the task in `review.integrating` (the next pass reuses the passing integration
 verdict while its `base_sha` is still the remote target, so the command runs again without
 rebuilding the candidate), and `closed` or any other line is a failed integration. `pr` is
-`command` with the built-in `PR_COMMAND` script: it pushes `work/<task>`, opens a pull
+`command` with the built-in `PR_COMMAND` script: it derives the GitHub `owner/name` from the
+URL configured for `[repository] remote` (with `git config --get`, not `git remote get-url`,
+which expands `url.*.insteadOf`; `git@github.com:`, `https://github.com/` and
+`ssh://git@github.com/` forms), names it with `--repo` on every `gh` call, fails with the URL
+in its message and no `gh` call for any other URL, pushes `work/<task>`, opens a pull
 request with `gh` when none exists, and reports `pending`, `closed` or the current target
 sha. A non-zero
 exit or timeout wins over the last line. Before `done.merged`, the `push` path checks what

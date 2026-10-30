@@ -195,28 +195,57 @@ pub const INTEGRATION_METHODS: &[IntegrationMethod] = &[
 /// The script `method = "pr"` runs (ADR 0048 decision 10). It is the built-in `command` preset,
 /// not another code path: the manual shows it in full and the docs drift test compares that copy
 /// with this constant.
+///
+/// Every `gh` call names the repository its `--repo` derives from `[repository] remote`, so a
+/// second remote, or `gh`'s own default repository, cannot create or watch a pull request in
+/// another repository. The URL is read with `git config --get remote.<name>.url`, not
+/// `git remote get-url`: the latter expands `url.*.insteadOf` rewrites (a common way to point
+/// a GitHub URL at a mirror or a proxy), and the configured URL is what names the repository.
 pub const PR_COMMAND: &str = r#"set -eu
 
 branch="work/$ARC_TASK"
 
-# 1. Push the verified head, never with force, so the pull request shows it.
-git push "$ARC_REMOTE" "refs/heads/$branch:refs/heads/$branch"
+# 1. The GitHub repository of the configured remote. The raw URL is read, not
+#    `git remote get-url`, which would expand a url.*.insteadOf rewrite.
+url=$(git config --get "remote.$ARC_REMOTE.url") || {
+  echo "method = \"pr\": [repository] remote \"$ARC_REMOTE\" has no URL" >&2
+  exit 1
+}
+case "$url" in
+  git@github.com:*) repo=${url#git@github.com:} ;;
+  ssh://git@github.com/*) repo=${url#ssh://git@github.com/} ;;
+  https://github.com/*) repo=${url#https://github.com/} ;;
+  *) repo= ;;
+esac
+repo=${repo%.git}
+repo=${repo%/}
+case "$repo" in
+  ?*/?*) case "${repo#*/}" in */*) repo= ;; esac ;;
+  *) repo= ;;
+esac
+if [ -z "$repo" ]; then
+  echo "method = \"pr\": remote \"$ARC_REMOTE\" is \"$url\", not a GitHub URL (git@github.com:owner/name.git, https://github.com/owner/name.git or ssh://git@github.com/owner/name.git)" >&2
+  exit 1
+fi
 
 command -v gh >/dev/null 2>&1 || {
   echo "method = \"pr\" needs gh on PATH; run gh auth login" >&2
   exit 1
 }
 
-# 2. The pull request whose head is the task branch. `gh pr view` finds an open one;
+# 2. Push the verified head, never with force, so the pull request shows it.
+git push "$ARC_REMOTE" "refs/heads/$branch:refs/heads/$branch"
+
+# 3. The pull request whose head is the task branch. `gh pr view` finds an open one;
 #    `gh pr list --state all` also finds a closed or merged one.
-state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || true)
+state=$(gh pr view "$branch" --repo "$repo" --json state --jq .state 2>/dev/null || true)
 if [ -z "$state" ]; then
-  state=$(gh pr list --head "$branch" --state all --json state --jq '.[0].state // empty' 2>/dev/null || true)
+  state=$(gh pr list --repo "$repo" --head "$branch" --state all --json state --jq '.[0].state // empty' 2>/dev/null || true)
 fi
 
 if [ -z "$state" ]; then
-  # 3. No pull request yet: open one against the target branch and stay pending.
-  gh pr create --base "$ARC_TARGET_BRANCH" --head "$branch" \
+  # 4. No pull request yet: open one against the target branch and stay pending.
+  gh pr create --repo "$repo" --base "$ARC_TARGET_BRANCH" --head "$branch" \
     --title "$ARC_TITLE ($ARC_TASK)" --body "Task $ARC_TASK: $ARC_TITLE" >/dev/null
   echo pending
   exit 0
@@ -227,13 +256,13 @@ case "$state" in
     echo pending
     ;;
   MERGED)
-    # 4. The PR merged; print the target branch as it is now, not the PR's merge
+    # 5. The PR merged; print the target branch as it is now, not the PR's merge
     #    commit: others may have merged after it.
     git fetch "$ARC_REMOTE" "$ARC_TARGET_BRANCH" >/dev/null 2>&1
     git rev-parse FETCH_HEAD
     ;;
   CLOSED)
-    # 5. Closed without a merge.
+    # 6. Closed without a merge.
     echo closed
     ;;
   *)

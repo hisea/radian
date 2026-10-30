@@ -143,6 +143,45 @@ impl Fixture {
         );
     }
 
+    /// Gives `name` the configured URL `url` while git still reaches the fixture's local bare
+    /// repository: `git config --get remote.<name>.url` reads `url` (what the preset derives
+    /// `owner/name` from), and the `url.<path>.insteadOf` rewrite sends every fetch and push
+    /// there. Without this a test remote is a local path, which the preset refuses as not
+    /// GitHub.
+    fn github_remote(&self, name: &str, url: &str) {
+        let local = self.repo.origin.display().to_string();
+        self.repo
+            .git(&["config", &format!("remote.{name}.url"), url]);
+        self.repo
+            .git(&["config", &format!("url.{local}.insteadOf"), url]);
+    }
+
+    /// `[integration] method = "pr"` with `origin` configured as the GitHub URL `url`.
+    fn pr_method(&self, url: &str) {
+        self.github_remote("origin", url);
+        self.method("pr");
+    }
+
+    /// Sets `[repository] remote` in the arc store's `config.toml`.
+    fn repository_remote(&self, remote: &str) {
+        let path = self.store.root().join("config.toml");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("remote = \"origin\""),
+            "the default file has the remote line:\n{text}"
+        );
+        fs::write(
+            &path,
+            text.replace("remote = \"origin\"", &format!("remote = \"{remote}\"")),
+        )
+        .unwrap();
+        assert_eq!(
+            self.store.config().unwrap().repository.remote,
+            remote,
+            "the configured remote"
+        );
+    }
+
     fn key_commands(&self, lines: &[&str]) {
         let path = self.store.root().join("config.toml");
         let text = fs::read_to_string(&path).unwrap();
@@ -575,7 +614,8 @@ fn value_of<'a>(arguments: &'a [String], flag: &str) -> &'a str {
 }
 
 /// A fake `gh` on `PATH` for the `pr` preset: it records every argument block and answers
-/// from a state file. `create` records its arguments and leaves the PR `OPEN`.
+/// from a state file. `create` records its arguments and leaves the PR `OPEN`. It reads its
+/// subcommand from the first two arguments, so `--repo` may stand anywhere among them.
 struct FakeGh {
     dir: PathBuf,
     calls: PathBuf,
@@ -597,20 +637,22 @@ impl FakeGh {
              calls='{calls}'\n\
              creates='{creates}'\n\
              {{ printf 'call\\n'; for arg in \"$@\"; do printf 'arg:%s\\n' \"$arg\"; done; }} >> \"$calls\"\n\
-             if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n\
-               [ -s \"$state\" ] || {{ echo \"no pull requests found for branch $3\" >&2; exit 1; }}\n\
-               cat \"$state\"\n\
-               exit 0\n\
-             fi\n\
-             if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n\
-               [ -s \"$state\" ] && cat \"$state\"\n\
-               exit 0\n\
-             fi\n\
-             if [ \"$1\" = pr ] && [ \"$2\" = create ]; then\n\
-               {{ printf 'call\\n'; for arg in \"$@\"; do printf 'arg:%s\\n' \"$arg\"; done; }} >> \"$creates\"\n\
-               echo OPEN > \"$state\"\n\
-               exit 0\n\
-             fi\n\
+             case \"$1 $2\" in\n\
+               'pr view')\n\
+                 [ -s \"$state\" ] || {{ echo \"no pull requests found\" >&2; exit 1; }}\n\
+                 cat \"$state\"\n\
+                 exit 0\n\
+                 ;;\n\
+               'pr list')\n\
+                 [ -s \"$state\" ] && cat \"$state\"\n\
+                 exit 0\n\
+                 ;;\n\
+               'pr create')\n\
+                 {{ printf 'call\\n'; for arg in \"$@\"; do printf 'arg:%s\\n' \"$arg\"; done; }} >> \"$creates\"\n\
+                 echo OPEN > \"$state\"\n\
+                 exit 0\n\
+                 ;;\n\
+             esac\n\
              echo \"fake gh: unexpected arguments: $*\" >&2\n\
              exit 1\n",
             state = state.display(),
@@ -675,27 +717,38 @@ fn make_executable(path: &Path) {
     }
 }
 
-/// A `PATH` with a `git` and a `sh`, and no `gh`: the `pr` preset's own lookup fails.
+/// A `PATH` that holds only the programs the preset and its wrapper need, each linked by its
+/// absolute path: `sh` runs the line and `git` does the work. `gh` is really absent, whatever
+/// the host has installed; `/bin` on Linux is usually a link to `/usr/bin`, which holds a real
+/// `gh`, and an unauthenticated one there answers with the auth error instead of failing as
+/// missing.
 fn path_without_gh(repo: &Repo) -> String {
     let dir = repo.root.join("gh-missing-bin");
     fs::create_dir_all(&dir).unwrap();
-    let found = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .expect("the shell runs");
-    let git = String::from_utf8_lossy(&found.stdout);
-    let git = Path::new(git.trim());
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(git, dir.join("git")).expect("the git symlink");
-    format!("{}:/bin", dir.display())
+    for program in ["sh", "git"] {
+        let found = Command::new("sh")
+            .args(["-c", &format!("command -v {program}")])
+            .output()
+            .expect("the shell runs");
+        let stdout = String::from_utf8_lossy(&found.stdout);
+        let found = Path::new(stdout.trim());
+        assert!(
+            found.is_absolute(),
+            "{program} is not on the test's PATH: {stdout:?}"
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(found, dir.join(program)).expect("the program symlink");
+    }
+    dir.display().to_string()
 }
 
-/// A `gh` on `PATH` that always fails with `message`, like an unauthenticated one.
+/// A `gh` on `PATH` that always fails with `message` and exit `4`, like one that is installed
+/// but not logged in.
 fn failing_gh(repo: &Repo, message: &str) -> String {
     let dir = repo.root.join("gh-failing-bin");
     fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("gh");
-    fs::write(&bin, format!("#!/bin/sh\necho '{message}' >&2\nexit 1\n")).unwrap();
+    fs::write(&bin, format!("#!/bin/sh\necho '{message}' >&2\nexit 4\n")).unwrap();
     make_executable(&bin);
     format!("{}:{}", dir.display(), path_without_gh(repo))
 }
@@ -718,7 +771,7 @@ impl Fixture {
 fn the_pr_preset_opens_one_pull_request_and_stays_pending() {
     let fixture = Fixture::new("pr-create");
     let gh = FakeGh::new(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-create.git");
     let branch = format!("work/{}", fixture.task);
 
     let run = fixture.merge_with_path(&gh.path());
@@ -736,6 +789,7 @@ fn the_pr_preset_opens_one_pull_request_and_stays_pending() {
     let creates = gh.creates();
     assert_eq!(creates.len(), 1, "one `gh pr create`: {creates:?}");
     let arguments = &creates[0];
+    assert_eq!(value_of(arguments, "--repo"), "example/pr-create");
     assert_eq!(value_of(arguments, "--base"), "main");
     assert_eq!(value_of(arguments, "--head"), branch);
     assert_eq!(
@@ -756,7 +810,7 @@ fn the_pr_preset_opens_one_pull_request_and_stays_pending() {
 fn a_still_open_pull_request_stays_pending_without_a_second_create() {
     let fixture = Fixture::new("pr-open");
     let gh = FakeGh::new(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-open.git");
 
     let first = fixture.merge_with_path(&gh.path());
     assert_eq!(first.code, 3, "{}", first.stderr);
@@ -783,7 +837,7 @@ fn a_still_open_pull_request_stays_pending_without_a_second_create() {
 fn a_merged_pull_request_reaches_done_merged() {
     let fixture = Fixture::new("pr-merged");
     let gh = FakeGh::new(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-merged.git");
     let branch = format!("work/{}", fixture.task);
 
     let first = fixture.merge_with_path(&gh.path());
@@ -869,7 +923,7 @@ fn a_target_that_gained_another_merge_after_the_candidate_still_merges() {
 fn a_pull_request_merged_before_another_merge_reports_the_current_tip() {
     let fixture = Fixture::new("pr-later-merge");
     let gh = FakeGh::new(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-later-merge.git");
     let branch = format!("work/{}", fixture.task);
 
     let first = fixture.merge_with_path(&gh.path());
@@ -913,7 +967,7 @@ fn a_closed_pull_request_sends_the_task_to_rework_pending() {
     let fixture = Fixture::new("pr-closed");
     let gh = FakeGh::new(&fixture.repo);
     gh.set_state("CLOSED");
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-closed.git");
 
     let run = fixture.merge_with_path(&gh.path());
     assert_eq!(
@@ -933,12 +987,14 @@ fn a_closed_pull_request_sends_the_task_to_rework_pending() {
     assert!(gh.creates().is_empty(), "{:?}", gh.creates());
 }
 
-/// Edge 6a: no `gh` on `PATH` fails the integration at once with the preset's message.
+/// Edge 6a: no `gh` on `PATH` fails the integration at once with the preset's message. The
+/// `PATH` holds only the programs the wrapper and the preset need, so a real `gh` the host has
+/// installed (a Linux `/bin` is usually `/usr/bin`) cannot answer instead.
 #[test]
 fn a_missing_gh_fails_the_integration_with_its_message() {
     let fixture = Fixture::new("pr-no-gh");
     let path = path_without_gh(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-no-gh.git");
 
     let run = fixture.merge_with_path(&path);
     assert_eq!(
@@ -962,11 +1018,9 @@ fn a_missing_gh_fails_the_integration_with_its_message() {
 #[test]
 fn an_unauthenticated_gh_fails_the_integration_with_its_message() {
     let fixture = Fixture::new("pr-no-auth");
-    let path = failing_gh(
-        &fixture.repo,
-        "gh: authentication required; run gh auth login",
-    );
-    fixture.method("pr");
+    let message = "To get started with GitHub CLI, please run:  gh auth login";
+    let path = failing_gh(&fixture.repo, message);
+    fixture.pr_method("https://github.com/example/pr-no-auth.git");
 
     let run = fixture.merge_with_path(&path);
     assert_eq!(
@@ -979,11 +1033,12 @@ fn an_unauthenticated_gh_fails_the_integration_with_its_message() {
         ("review".to_owned(), "rework_pending".to_owned())
     );
     assert!(
-        run.stdout.contains("authentication required"),
+        run.stdout.contains("To get started with GitHub CLI"),
         "stdout: {}\nstderr: {}",
         run.stdout,
         run.stderr
     );
+    assert!(run.stdout.contains("gh auth login"), "{}", run.stdout);
 }
 
 /// Edge 7: a title with spaces and both quote kinds reaches `gh pr create` as one argument.
@@ -991,7 +1046,7 @@ fn an_unauthenticated_gh_fails_the_integration_with_its_message() {
 fn a_title_with_spaces_and_quotes_is_one_create_argument() {
     let fixture = Fixture::new_titled("pr-quotes", "Fix \"it's\" broken");
     let gh = FakeGh::new(&fixture.repo);
-    fixture.method("pr");
+    fixture.pr_method("https://github.com/example/pr-quotes.git");
 
     let run = fixture.merge_with_path(&gh.path());
     assert_eq!(run.code, 3, "{}", run.stderr);
@@ -1002,6 +1057,107 @@ fn a_title_with_spaces_and_quotes_is_one_create_argument() {
         creates[0].iter().any(|argument| argument == &title),
         "the title is one argument: {:?}",
         creates[0]
+    );
+}
+
+/// Edge 1 of the `--repo` derivation: with two remotes, every `gh` call names the configured
+/// one's repository (`deploy` = `b/y`), never `origin`'s (`a/x`).
+#[test]
+fn every_gh_call_names_the_configured_remotes_repository() {
+    let fixture = Fixture::new("pr-two-remotes");
+    let gh = FakeGh::new(&fixture.repo);
+    // `origin` stays the local bare repository; `deploy` is the configured remote, a GitHub
+    // URL that still reaches this fixture through the `insteadOf` rewrite.
+    fixture.github_remote("origin", "https://github.com/a/x.git");
+    fixture
+        .repo
+        .git(&["remote", "add", "deploy", "https://github.com/b/y.git"]);
+    fixture.github_remote("deploy", "https://github.com/b/y.git");
+    fixture.repository_remote("deploy");
+    fixture.method("pr");
+
+    let run = fixture.merge_with_path(&gh.path());
+    assert_eq!(run.code, 3, "{}", run.stderr);
+    let calls = gh.calls();
+    assert!(!calls.is_empty(), "gh ran");
+    for call in &calls {
+        assert_eq!(
+            value_of(call, "--repo"),
+            "b/y",
+            "a gh call named another repository: {call:?}"
+        );
+    }
+    let creates = gh.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(value_of(&creates[0], "--repo"), "b/y");
+}
+
+/// Edge 2 of the `--repo` derivation: each GitHub URL form names its `owner/name`.
+#[test]
+fn each_github_url_form_names_its_owner_and_repository() {
+    for (index, form) in [
+        "git@github.com:o/n.git",
+        "https://github.com/o/n.git",
+        "https://github.com/o/n",
+        "ssh://git@github.com/o/n.git",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = Fixture::new(&format!("pr-url-{index}"));
+        let gh = FakeGh::new(&fixture.repo);
+        fixture.github_remote("origin", form);
+        fixture.method("pr");
+
+        let run = fixture.merge_with_path(&gh.path());
+        assert_eq!(
+            run.code, 3,
+            "{form}: stdout: {}\nstderr: {}",
+            run.stdout, run.stderr
+        );
+        let creates = gh.creates();
+        assert_eq!(creates.len(), 1, "{form}: {creates:?}");
+        assert_eq!(value_of(&creates[0], "--repo"), "o/n", "{form}");
+        for call in gh.calls() {
+            assert_eq!(value_of(&call, "--repo"), "o/n", "{form}: {call:?}");
+        }
+    }
+}
+
+/// Edge 3 of the `--repo` derivation: a remote that is not a GitHub URL fails before any `gh`
+/// call, and the reason names the URL.
+#[test]
+fn a_remote_that_is_not_a_github_url_fails_naming_it() {
+    let fixture = Fixture::new("pr-not-github");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+    let local = fixture.repo.origin.display().to_string();
+
+    let run = fixture.merge_with_path(&gh.path());
+    assert_eq!(
+        run.code, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert!(
+        run.stdout.contains("not a GitHub URL"),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains(&local),
+        "the reason does not name the URL `{local}`: {}",
+        run.stdout
+    );
+    assert!(
+        gh.calls().is_empty(),
+        "gh ran for a non-GitHub remote: {:?}",
+        gh.calls()
     );
 }
 

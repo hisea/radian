@@ -6,7 +6,7 @@ description: How the merge builds the integration candidate and gets it onto the
 
 Integration is the step `radian arc merge` runs after your approval (see [`arc/index`](index.md#radian-arc-merge-task)).
 It builds the candidate commit from the task's `head_sha` on the current target branch (`[integration] target_branch`, else `[repository] main_branch`) and runs the `[integration] key_commands` on it.
-How the candidate then reaches the target branch is [`integration.method`](files.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)); `pr` runs the built-in pull-request preset of `command` (see [the pull-request preset](index.md#the-pull-request-preset)).
+How the candidate then reaches the target branch is [`integration.method`](files.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)); `pr` runs the built-in pull-request preset of `command` (see [the pull-request preset](#the-pull-request-preset)).
 The style changes the candidate's sha, never the task's `verified_sha`.
 
 ## The styles
@@ -48,25 +48,15 @@ arc itself never checks out or updates the main checkout's working tree: it fetc
 
 With `method = "command"`, arc does everything above and then runs [`integration.command`](files.md#configtoml) instead of pushing: one shell command line, in the repository root, through the gate's shell runner, with [`gate.command_timeout_secs`](files.md#configtoml) as its limit.
 arc itself pushes nothing; the command does the merge.
-`method = "pr"` is the same path with the built-in preset script instead of a configured line; the manual shows it in full under [the pull-request preset](index.md#the-pull-request-preset).
+`method = "pr"` is the same path with the built-in preset script instead of a configured line; the manual shows it in full under [the pull-request preset](#the-pull-request-preset).
 
-It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` and `ARC_TITLE`; it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
+It receives the [hooks' environment](index.md#hooks), which describes the variables, plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` and `ARC_TITLE` (and `ARC_HOOK` is `integration` rather than a hook point); it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
 
 | Variable | Value |
 |---|---|
-| `ARC_TASK` | The task id. |
-| `ARC_PLAN` | The task's plan id. |
-| `ARC_ATTEMPT` | The task's current attempt, `<task>-<n>`. |
-| `ARC_BRANCH` | The task's branch, `work/<task>`. |
-| `ARC_WORKTREE` | The task's worktree, absolute. |
-| `ARC_TARGET_BRANCH` | The branch the merge targets: [`integration.target_branch`](files.md#configtoml), else [`repository.main_branch`](files.md#configtoml). |
-| `ARC_STATE` | `review.ready_to_merge`, the phase the command runs in. |
-| `ARC_HOOK` | `integration`. The command is not a hook point; only the variables are the same. |
 | `ARC_CANDIDATE_SHA` | The candidate commit the command must merge. |
-| `ARC_REMOTE` | [`repository.remote`](files.md#configtoml): the remote the command pushes to. |
+| `ARC_REMOTE` | [`repository.remote`](files.md#configtoml): the remote the command pushes to. For the `pr` preset it also names the GitHub repository every `gh` call uses. |
 | `ARC_TITLE` | The task's title. |
-
-`ARC_REMOTE` and `ARC_TITLE` exist for the `pr` preset; a `command` may use them too.
 
 `ARC_MERGED_SHA` is not set: the command runs before there is a merged sha, and `after_merge` gets it.
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are removed from the environment the command starts with, the same rule arc's own git calls follow: a command that runs `git` never works on another repository than the one it runs in, whatever the process arc started from carried.
@@ -84,6 +74,89 @@ Its stdout and stderr go to `runs/<task>/attempts/<attempt id>/merge-command.log
 A non-zero exit or a timeout is a failed integration whatever the last line says: a command that pushes the sha and then fails is not a merge.
 A command that answers `pending` runs again on every later pass, and a failed one can run again after a rework, so it must be safe to run more than once (like a hook).
 `method = "command"` without `[integration] command`, `[integration] command` with `method = "push"`, and `[integration] command` with `method = "pr"`, are config errors that name the keys.
+
+### The pull-request preset
+
+`[integration] method = "pr"` is the built-in `command` method for a protected branch on GitHub.
+It runs the script below in place of [`integration.command`](files.md#configtoml), through the same runner with the same environment and the same answer, check and `pending` handling (see [the command method](#the-command-method)); `[integration] command` with `method = "pr"` is a config error, as `command` with `method = "push"` is.
+It needs `gh` on `PATH` and an authenticated session (`gh auth login`); a missing or unauthenticated `gh` fails the integration at once with its message, and the task goes to `review.rework_pending`.
+The script pushes `work/<task>` without force, so the pull request shows the verified head; it opens the pull request against `ARC_TARGET_BRANCH` with the task's title and id when none exists, answers `pending` while it is open, `closed` when it was closed without a merge, and the current target-branch sha when it is merged.
+Who merges it (a person, a merge queue, CI auto-merge) is not arc's business: each later pass runs the script again and reads the state.
+It derives the GitHub `owner/name` from the configured remote's URL, read with `git config --get remote.<name>.url` (not `git remote get-url`, which expands a `url.*.insteadOf` rewrite); it accepts `git@github.com:owner/name.git`, `https://github.com/owner/name.git` and `ssh://git@github.com/owner/name.git`, and passes `--repo owner/name` to every `gh` call, so [`repository.remote`](files.md#configtoml) decides the repository even when the clone has several remotes.
+Any other URL fails the integration with a message that names it, and no `gh` call runs.
+For another host or a different pull-request flow, use [`method = "command"`](#the-command-method) with your own line; `pr` is a preset, not another method.
+
+```sh
+set -eu
+
+branch="work/$ARC_TASK"
+
+# 1. The GitHub repository of the configured remote. The raw URL is read, not
+#    `git remote get-url`, which would expand a url.*.insteadOf rewrite.
+url=$(git config --get "remote.$ARC_REMOTE.url") || {
+  echo "method = \"pr\": [repository] remote \"$ARC_REMOTE\" has no URL" >&2
+  exit 1
+}
+case "$url" in
+  git@github.com:*) repo=${url#git@github.com:} ;;
+  ssh://git@github.com/*) repo=${url#ssh://git@github.com/} ;;
+  https://github.com/*) repo=${url#https://github.com/} ;;
+  *) repo= ;;
+esac
+repo=${repo%.git}
+repo=${repo%/}
+case "$repo" in
+  ?*/?*) case "${repo#*/}" in */*) repo= ;; esac ;;
+  *) repo= ;;
+esac
+if [ -z "$repo" ]; then
+  echo "method = \"pr\": remote \"$ARC_REMOTE\" is \"$url\", not a GitHub URL (git@github.com:owner/name.git, https://github.com/owner/name.git or ssh://git@github.com/owner/name.git)" >&2
+  exit 1
+fi
+
+command -v gh >/dev/null 2>&1 || {
+  echo "method = \"pr\" needs gh on PATH; run gh auth login" >&2
+  exit 1
+}
+
+# 2. Push the verified head, never with force, so the pull request shows it.
+git push "$ARC_REMOTE" "refs/heads/$branch:refs/heads/$branch"
+
+# 3. The pull request whose head is the task branch. `gh pr view` finds an open one;
+#    `gh pr list --state all` also finds a closed or merged one.
+state=$(gh pr view "$branch" --repo "$repo" --json state --jq .state 2>/dev/null || true)
+if [ -z "$state" ]; then
+  state=$(gh pr list --repo "$repo" --head "$branch" --state all --json state --jq '.[0].state // empty' 2>/dev/null || true)
+fi
+
+if [ -z "$state" ]; then
+  # 4. No pull request yet: open one against the target branch and stay pending.
+  gh pr create --repo "$repo" --base "$ARC_TARGET_BRANCH" --head "$branch" \
+    --title "$ARC_TITLE ($ARC_TASK)" --body "Task $ARC_TASK: $ARC_TITLE" >/dev/null
+  echo pending
+  exit 0
+fi
+
+case "$state" in
+  OPEN)
+    echo pending
+    ;;
+  MERGED)
+    # 5. The PR merged; print the target branch as it is now, not the PR's merge
+    #    commit: others may have merged after it.
+    git fetch "$ARC_REMOTE" "$ARC_TARGET_BRANCH" >/dev/null 2>&1
+    git rev-parse FETCH_HEAD
+    ;;
+  CLOSED)
+    # 6. Closed without a merge.
+    echo closed
+    ;;
+  *)
+    echo "the pull request for $branch is \"$state\"; expected OPEN, MERGED or CLOSED" >&2
+    exit 1
+    ;;
+esac
+```
 
 ## The command check
 

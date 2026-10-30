@@ -334,13 +334,9 @@ A `reverify` attempt is not a retry: it changes neither `retry_count` nor the li
 `todo.retry_wait` becomes `todo.ready` when `retry_at` has passed; the scheduling loop and `start` do this before they claim.
 `start` also claims a `todo.retry_wait` task whose time has not come, without waiting for it (see [`start`](index.md#radian-arc-start-task)).
 
-Every attempt of a task runs in a worker session.
-With [`worker.rework_session`](files.md#configtoml) at `fresh` (the default) each attempt has a session of its own, `<task>-<attempt>`, and none is ever resumed; an attempt after the first gets the hand-off section (see [the worker](worker.md#the-session-and-the-brief)).
-With `resume` the session id is the task id: the first attempt that reaches the model creates it, and every later attempt, a retry or a rework, continues it.
+Every attempt of a task runs in a worker session; `fresh` and `resume`, the hand-off section and the records that name the session are in [the session and the brief](worker.md#the-session-and-the-brief).
 An attempt that failed before the model started (a missing credential, a worktree that could not be prepared) leaves no session, so the next attempt creates it.
 A bad `worker.exec_args` entry no longer gets that far: `start`, `run` and `confirm` refuse it before the claim.
-The attempt's session id is decided by the claim, which writes it to `attempts/<task>/<attempt>/start.json` before the worker starts; the wrapper writes the session it used to `attempts/<task>/<attempt>/identity.json` when it spawns the worker and to `runs/<task>/attempts/<attempt id>/execution.json` when it ends.
-A reader takes the first of those records that names one: `execution.json`, then `identity.json`, then `start.json`, so the worker's journal is found by its session id from the claim on, while the attempt still runs (see [`arc/files`](files.md)).
 
 Cost is counted per attempt.
 A command worker's `Result.cost` is the session total, so its attempt's cost is the difference from the previous attempt's session total when both ran in the same session (`resume`), and the whole session total when the attempt has a session of its own (`fresh`).

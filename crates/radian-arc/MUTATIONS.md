@@ -1853,3 +1853,19 @@ restored from the copies with `cp` and confirmed identical with `diff -q`.
 | TK0242-M4 | `command_env` omits `ARC_REMOTE`, so the preset's `git push` has no remote | `merge_command::the_pr_preset_opens_one_pull_request_and_stays_pending` (`ARC_REMOTE: unbound variable`) | ✅ 1 failed |
 
 4/4 caught.
+
+## TK0242 rework 2: the `pr` preset names the configured remote's repository
+
+Every `gh` call in `PR_COMMAND` carries `--repo <owner/name>`, derived from the URL configured
+for `[repository] remote` (`git config --get remote.<name>.url`), and the missing-`gh` test runs
+with a `PATH` that holds only `sh` and `git`, so a real `gh` on the host cannot answer. Each
+mutation was applied by hand, backed up under `.radian/mut2/`, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test merge_command`, and the file
+was restored from the copy and confirmed with `diff -q`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0242-M5 | `PR_COMMAND` drops `--repo "$repo"` from every `gh` call (all three) | `merge_command::every_gh_call_names_the_configured_remotes_repository` (`--repo` is missing from the recorded `pr view`; `each_github_url_form_names_its_owner_and_repository` failed too) | ✅ 1 failed |
+| TK0242-M6 | `path_without_gh` appends the test process's `PATH`, so the host's real `gh` answers | `merge_command::a_missing_gh_fails_the_integration_with_its_message` (the reason carried gh's `gh auth login` message instead of `needs gh on PATH`) | ✅ 1 failed |
+
+2/2 caught.

@@ -2458,6 +2458,12 @@ mod tests {
         arc_page("arc/index.md")
     }
 
+    /// `docs/user/arc/integration.md`, the page the merge styles, the command method and the
+    /// `pr` preset are checked against.
+    fn arc_integration_md() -> String {
+        arc_page("arc/integration.md")
+    }
+
     /// `docs/user/arc/loop.md`, the page the scheduling loop and its log are checked against.
     fn arc_loop_md() -> String {
         arc_page("arc/loop.md")
@@ -2963,17 +2969,17 @@ mod tests {
         }
     }
 
-    /// The `pr` preset's script is one constant in the code, and `arc/index.md` shows it in
-    /// full: the `sh` block under `### The pull-request preset` is exactly
+    /// The `pr` preset's script is one constant in the code, and `arc/integration.md` shows it
+    /// in full: the `sh` block under `### The pull-request preset` is exactly
     /// `radian_arc::store::config::PR_COMMAND`. A change to either fails here.
     #[test]
-    fn the_pr_preset_script_in_arc_index_md_is_the_code_constant() {
-        let doc = arc_md();
+    fn the_pr_preset_script_in_arc_integration_md_is_the_code_constant() {
+        let doc = arc_integration_md();
         let documented = fenced_block_under(&doc, "### The pull-request preset", "sh");
         assert_eq!(
             documented,
             radian_arc::store::config::PR_COMMAND,
-            "arc/index.md's `pr` preset differs from radian_arc::store::config::PR_COMMAND"
+            "arc/integration.md's `pr` preset differs from radian_arc::store::config::PR_COMMAND"
         );
     }
 
@@ -3004,9 +3010,9 @@ mod tests {
                     block.push('\n');
                 }
             }
-            panic!("arc/index.md has no fenced `{language}` block under `{heading}`");
+            panic!("arc/integration.md has no fenced `{language}` block under `{heading}`");
         }
-        panic!("arc/index.md has no heading `{heading}`");
+        panic!("arc/integration.md has no heading `{heading}`");
     }
 
     /// Every environment variable the wrapper adds for a command worker appears in the
