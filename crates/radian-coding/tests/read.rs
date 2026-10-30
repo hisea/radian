@@ -565,3 +565,246 @@ async fn a_huge_single_line_is_bounded() {
     assert!(text(&past).contains("past the end"), "{}", text(&past));
     assert_eq!(structured(&past)["bytes_read"], 0);
 }
+
+/// `lines` lines of `width` bytes each (the last one a `\n`).
+fn lines_of(lines: usize, width: usize) -> String {
+    let body = "x".repeat(width - 1);
+    let mut out = String::new();
+    for _ in 0..lines {
+        out.push_str(&body);
+        out.push('\n');
+    }
+    out
+}
+
+/// Defaults, case 1: a file over 16 KiB with fewer than 200 lines is cut at the byte budget,
+/// on a line boundary, and the result names the next line.
+#[tokio::test]
+async fn the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line() {
+    let dir = TempDir::new("read-default-bytes");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    // 150 lines of 120 bytes: 18,000 bytes (over 16 KiB) and well under 200 lines.
+    std::fs::write(root.join("f.txt"), lines_of(150, 120)).unwrap();
+
+    let output = call(&tools, "read", json!({"path": "f.txt"}))
+        .await
+        .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 1, "{info}");
+    let end = info["end_line"].as_i64().expect("an end line");
+    assert!(end < 150, "the byte budget cut the file: {info}");
+    assert!(
+        info["bytes_read"].as_u64().unwrap() <= 16 * 1024,
+        "at most the 16 KiB budget: {info}"
+    );
+    assert_eq!(
+        info["bytes_read"],
+        json!(end * 120),
+        "the cut is on a line boundary: {info}"
+    );
+    assert_eq!(info["next_offset"], json!(end + 1), "{info}");
+    let content = text(&output);
+    assert!(
+        content.ends_with(&format!("[truncated: continue with offset={}]", end + 1)),
+        "the result names the next offset:\n{content}"
+    );
+    assert!(
+        !content.contains("truncated at max_bytes"),
+        "a whole line was dropped, not split:\n{content}"
+    );
+}
+
+/// Defaults, case 2: a file under 16 KiB with more than 200 lines stops after line 200 and
+/// names line 201.
+#[tokio::test]
+async fn the_default_line_limit_stops_after_two_hundred_lines() {
+    let dir = TempDir::new("read-default-lines");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    // 250 lines of "x\n": 500 bytes, so only the line cap can stop this read.
+    std::fs::write(root.join("f.txt"), lines_of(250, 2)).unwrap();
+
+    let output = call(&tools, "read", json!({"path": "f.txt"}))
+        .await
+        .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 1, "{info}");
+    assert_eq!(info["end_line"], 200, "{info}");
+    assert_eq!(info["bytes_read"], 400, "{info}");
+    assert_eq!(info["next_offset"], 201, "{info}");
+    assert_eq!(info["truncated"], true, "{info}");
+    assert!(
+        text(&output).ends_with("[truncated: continue with offset=201]"),
+        "{}",
+        text(&output)
+    );
+
+    // A file that ends exactly on line 200 is not cut: there is no next line, so no note.
+    std::fs::write(root.join("exact.txt"), lines_of(200, 2)).unwrap();
+    let exact = call(&tools, "read", json!({"path": "exact.txt"}))
+        .await
+        .unwrap();
+    let info = structured(&exact);
+    assert_eq!(info["end_line"], 200, "{info}");
+    assert!(info.get("next_offset").is_none(), "{info}");
+    assert_eq!(info["truncated"], false, "{info}");
+}
+
+/// Defaults, case 3: an explicit `max_bytes: 65536` and `limit: 5000` still reach the old
+/// 64 KiB window on request, on top of a 70 KB file.
+#[tokio::test]
+async fn an_explicit_budget_and_limit_restore_the_old_64_kib_window() {
+    let dir = TempDir::new("read-old-window");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    // 1400 lines of 50 bytes: 70,000 bytes.
+    std::fs::write(root.join("f.txt"), lines_of(1400, 50)).unwrap();
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "max_bytes": 65536, "limit": 5000}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    let end = info["end_line"].as_i64().expect("an end line");
+    assert!(end < 1400, "the 64 KiB budget still cuts the file: {info}");
+    assert_eq!(info["bytes_read"], json!(end * 50), "{info}");
+    assert!(
+        info["bytes_read"].as_u64().unwrap() > 16 * 1024,
+        "the explicit budget is 64 KiB, not the 16 KiB default: {info}"
+    );
+    assert!(info["bytes_read"].as_u64().unwrap() <= 65536, "{info}");
+    assert_eq!(info["next_offset"], json!(end + 1), "{info}");
+    assert!(
+        text(&output).contains(&format!("continue with offset={}", end + 1)),
+        "{}",
+        text(&output)
+    );
+}
+
+/// Defaults, case 4: an explicit range is the caller's own: `offset: 100, limit: 50` returns
+/// exactly those 50 lines and keeps today's continuation note for line 150.
+#[tokio::test]
+async fn an_explicit_offset_and_limit_are_unchanged_by_the_defaults() {
+    let dir = TempDir::new("read-explicit-range");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": 100, "limit": 50}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 100, "{info}");
+    assert_eq!(info["end_line"], 149, "{info}");
+    assert_eq!(info["next_offset"], 150, "{info}");
+    let content = text(&output);
+    assert!(content.starts_with("100: line 100\n"), "{content}");
+    assert!(
+        content.ends_with("[truncated: continue with offset=150]"),
+        "the explicit range keeps its continuation note:\n{content}"
+    );
+}
+
+/// An explicit `limit` that reaches the end of the file is not a cut: the result carries
+/// no note and no `next_offset`.
+#[tokio::test]
+async fn an_explicit_limit_that_reaches_the_end_of_the_file_has_no_note() {
+    let dir = TempDir::new("read-explicit-range-end");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(
+        &tools,
+        "read",
+        json!({"path": "f.txt", "offset": 990, "limit": 50}),
+    )
+    .await
+    .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 990, "{info}");
+    assert_eq!(info["end_line"], 1000, "{info}");
+    assert!(info.get("next_offset").is_none(), "{info}");
+    assert_eq!(info["truncated"], false, "{info}");
+    let content = text(&output);
+    assert!(content.starts_with("990: line 990\n"), "{content}");
+    assert!(content.ends_with("1000: line 1000\n"), "{content}");
+    assert!(
+        !content.contains("[truncated"),
+        "a range that reaches the end carries no note:\n{content}"
+    );
+}
+
+/// Defaults, case 5: `offset: 100` with no `limit` still gets 200 lines, then names line 300.
+#[tokio::test]
+async fn the_default_line_limit_applies_after_a_positive_offset() {
+    let dir = TempDir::new("read-default-offset");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let output = call(&tools, "read", json!({"path": "f.txt", "offset": 100}))
+        .await
+        .unwrap();
+    let info = structured(&output);
+    assert_eq!(info["start_line"], 100, "{info}");
+    assert_eq!(info["end_line"], 299, "{info}");
+    assert_eq!(info["next_offset"], 300, "{info}");
+    assert!(
+        text(&output).ends_with("[truncated: continue with offset=300]"),
+        "{}",
+        text(&output)
+    );
+}
+
+/// Defaults, case 6: a negative offset still counts from the end. A short tail (`-50`) fits
+/// under 200 lines and has no note; a long one (`-300`) stops after 200 lines and names the
+/// next.
+#[tokio::test]
+async fn a_negative_offset_uses_the_default_line_limit_only_past_two_hundred_lines() {
+    let dir = TempDir::new("read-default-tail");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let tools = tools(&root);
+    std::fs::write(root.join("f.txt"), thousand_lines()).unwrap();
+
+    let short = call(&tools, "read", json!({"path": "f.txt", "offset": -50}))
+        .await
+        .unwrap();
+    let info = structured(&short);
+    assert_eq!(info["start_line"], 951, "{info}");
+    assert_eq!(info["end_line"], 1000, "{info}");
+    assert!(info.get("next_offset").is_none(), "{info}");
+    assert!(
+        !text(&short).contains("[truncated"),
+        "a 50-line tail is not cut:\n{}",
+        text(&short)
+    );
+
+    let long = call(&tools, "read", json!({"path": "f.txt", "offset": -300}))
+        .await
+        .unwrap();
+    let info = structured(&long);
+    assert_eq!(info["start_line"], 701, "{info}");
+    assert_eq!(info["end_line"], 900, "{info}");
+    assert_eq!(info["next_offset"], 901, "{info}");
+    assert!(
+        text(&long).ends_with("[truncated: continue with offset=901]"),
+        "{}",
+        text(&long)
+    );
+}

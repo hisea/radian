@@ -15,7 +15,7 @@ tool name. Characters outside letters, digits, `_` and `-` become `_`. The
 id is the alias prefix, so renaming a server renames its tools, and two
 servers with one id fail before anything starts.
 
-Server text results use the same 64 KiB cap as file reads. Long results are
+Server text results are capped at 64 KiB. Long results are
 cut with a marker that names the full size. The stored record holds the cut
 text.
 
