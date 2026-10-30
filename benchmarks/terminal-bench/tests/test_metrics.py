@@ -16,7 +16,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import journal_metrics  # noqa: E402
 import metrics  # noqa: E402
 
 JOBS = Path(__file__).resolve().parent / "fixtures" / "jobs"
@@ -27,6 +29,15 @@ GEN_TOK_JOBS = Path(__file__).resolve().parent / "fixtures" / "gen-tok-jobs"
 # with three trials of that task for `tall`. `base` and `tall` are the labels;
 # both trials were produced by pi, so the ATIF `gen_tok` rule applies.
 ANALYSIS = Path(__file__).resolve().parent / "fixtures" / "analysis-jobs"
+# The fixed-definition extractor's own fixtures: one radian journal with every
+# column, one pi session, a latency bucket boundary, read ranges and a torn tail.
+JOURNAL_METRICS = Path(__file__).resolve().parent / "fixtures" / "journal-metrics"
+FULL = JOURNAL_METRICS / "full" / "run-full.jsonl"
+PI_SESSION = JOURNAL_METRICS / "pi" / "session.jsonl"
+LATENCY = JOURNAL_METRICS / "latency" / "boundary.jsonl"
+READ_RANGES = JOURNAL_METRICS / "read" / "ranges.jsonl"
+TORN = JOURNAL_METRICS / "torn" / "torn.jsonl"
+PREFIX = JOURNAL_METRICS / "prefix"
 
 
 def find(report, agent, task):
@@ -590,6 +601,199 @@ class BoundedReadTest(unittest.TestCase):
             self.assertEqual(
                 list(metrics._iter_lines(path)), ['{"seq":1}\n', '{"seq":2']
             )
+
+
+def write_journal(path, records, final_newline=True):
+    """Write journal records as JSONL, with or without the last commit LF."""
+    text = "".join(json.dumps(record) + "\n" for record in records)
+    if not final_newline and text.endswith("\n"):
+        text = text[:-1]
+    path.write_text(text, encoding="utf-8")
+
+
+class JournalMetricsTest(unittest.TestCase):
+    """The fixed-definition extractor on its own small fixtures."""
+
+    def row(self, path):
+        return journal_metrics.build_report([path])["journals"][0]
+
+    def test_a_radian_journal_yields_every_column(self):
+        row = self.row(FULL)
+        self.assertEqual(row["source"], "radian")
+        # Two assistant responses plus one summary call.
+        self.assertEqual(row["calls"], 3)
+        # input 1000 includes a 200 cache read; the two other calls are uncached.
+        self.assertEqual(row["input_uncached"], 110_800)
+        self.assertEqual(row["input_cache_read"], 200)
+        self.assertEqual(row["input_total"], 111_000)
+        self.assertEqual(row["output"], 1_300)
+        self.assertEqual(row["reasoning"], 75)
+        self.assertAlmostEqual(row["fee_usd"], 0.0035)
+        self.assertEqual(row["tool_calls"], {"read": 2})
+        self.assertEqual(row["tool_bytes"], {"read": 8})
+        self.assertEqual(row["read_ranged_calls"], 1)
+        self.assertEqual(row["read_ranged_bytes"], 5)
+        self.assertEqual(row["read_unranged_calls"], 1)
+        self.assertEqual(row["read_unranged_bytes"], 3)
+        self.assertEqual(row["read_large_calls"], 0)
+        self.assertEqual(row["compactions"], 1)
+        self.assertEqual(row["deterministic_compactions"], 0)
+        self.assertEqual(row["outcomes"], {"failed": 1})
+        self.assertEqual(row["wall_seconds"], 17)
+        self.assertEqual(row["latency"]["0-99999"]["calls"], 3)
+        self.assertAlmostEqual(row["latency"]["0-99999"]["p50_ms"], 2_000)
+        self.assertAlmostEqual(row["latency"]["0-99999"]["p90_ms"], 8_400)
+
+    def test_a_pi_session_uses_the_same_columns_and_bash_is_shell(self):
+        row = self.row(PI_SESSION)
+        self.assertEqual(row["source"], "pi")
+        self.assertEqual(row["calls"], 2)
+        self.assertEqual(row["input_uncached"], 3_000)
+        self.assertEqual(row["input_cache_read"], 300)
+        self.assertEqual(row["input_total"], 3_300)
+        self.assertEqual(row["output"], 500)
+        self.assertEqual(row["reasoning"], 40)
+        self.assertAlmostEqual(row["fee_usd"], 0.03)
+        self.assertEqual(row["tool_calls"], {"shell": 1})
+        self.assertNotIn("bash", row["tool_calls"])
+        self.assertEqual(row["tool_bytes"], {"shell": 5})
+        self.assertEqual(row["outcomes"], {"completed": 1})
+        self.assertEqual(row["wall_seconds"], 20)
+        self.assertEqual(row["latency"]["0-99999"]["calls"], 2)
+        self.assertAlmostEqual(row["latency"]["0-99999"]["p50_ms"], 9_500)
+        self.assertAlmostEqual(row["latency"]["0-99999"]["p90_ms"], 9_900)
+
+    def test_latency_uses_a_bucket_per_100k_prompt_tokens(self):
+        row = self.row(LATENCY)
+        self.assertEqual(sorted(row["latency"]), ["0-99999", "100000-199999"])
+        low = row["latency"]["0-99999"]
+        high = row["latency"]["100000-199999"]
+        self.assertEqual(low["calls"], 2)
+        # 99,999 and 100,000 prompt tokens are a bucket apart.
+        self.assertEqual(high["calls"], 1)
+        # Bucket 0 samples are 1 s and 3 s; bucket 1 is 2 s.
+        self.assertAlmostEqual(low["p50_ms"], 2_000)
+        self.assertAlmostEqual(low["p90_ms"], 2_800)
+        self.assertAlmostEqual(high["p50_ms"], 2_000)
+        self.assertAlmostEqual(high["p90_ms"], 2_000)
+
+    def test_read_counts_ranged_and_unranged_by_offset_or_limit(self):
+        row = self.row(READ_RANGES)
+        self.assertEqual(row["read_ranged_calls"], 1)
+        self.assertEqual(row["read_ranged_bytes"], len("hello"))
+        self.assertEqual(row["read_unranged_calls"], 1)
+        self.assertEqual(row["read_unranged_bytes"], len("world!"))
+        self.assertEqual(row["read_large_calls"], 0)
+
+    def test_a_read_result_counts_as_large_from_20_480_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "j.jsonl"
+            write_journal(
+                path,
+                [
+                    {
+                        "event": "ToolExecutionStarted",
+                        "data": {"call_id": "big", "name": "read", "arguments": {}},
+                    },
+                    {
+                        "event": "ToolExecutionStarted",
+                        "data": {"call_id": "small", "name": "read", "arguments": {}},
+                    },
+                    {
+                        "event": "ToolExecutionSettled",
+                        "data": {
+                            "call_id": "big",
+                            "result": {"content": [{"text": {"text": "x" * 20_480}}]},
+                        },
+                    },
+                    {
+                        "event": "ToolExecutionSettled",
+                        "data": {
+                            "call_id": "small",
+                            "result": {"content": [{"text": {"text": "x" * 20_479}}]},
+                        },
+                    },
+                ],
+            )
+            row = self.row(path)
+        self.assertEqual(row["read_large_calls"], 1)
+        self.assertEqual(row["read_unranged_calls"], 2)
+        self.assertEqual(row["read_unranged_bytes"], 20_480 + 20_479)
+
+    def test_a_torn_last_line_is_dropped(self):
+        row = self.row(TORN)
+        self.assertEqual(row["output"], 7)
+        self.assertEqual(row["input_uncached"], 10)
+        self.assertEqual(row["calls"], 0)
+
+    def test_json_and_table_report_the_same_rows(self):
+        report = journal_metrics.build_report([FULL])
+        table = journal_metrics.format_report(report)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = journal_metrics._main(["--json", str(FULL)])
+        self.assertEqual(status, 0)
+        printed = json.loads(output.getvalue())
+        self.assertEqual(printed, report)
+        self.assertEqual(journal_metrics.format_report(printed), table)
+        self.assertIn("run-full.jsonl", table)
+
+    def test_a_prefix_filter_reads_only_matching_files(self):
+        all_files = journal_metrics.build_report([PREFIX])
+        self.assertEqual(len(all_files["journals"]), 2)
+        only_a = journal_metrics.build_report([PREFIX], prefix="run-a")
+        self.assertEqual(len(only_a["journals"]), 1)
+        self.assertTrue(only_a["journals"][0]["journal"].endswith("run-a.jsonl"))
+        self.assertEqual(only_a["journals"][0]["input_uncached"], 10)
+
+    def test_journal_metrics_keeps_the_harbor_report_values(self):
+        fix_git = JOBS / "radian" / "2026-01-01T00-00-00" / "fix-git__radian001"
+        prove = JOBS / "radian" / "2026-01-01T00-00-00" / "prove-plus-comm__radian002"
+        sessions = fix_git / "agent" / "radian-sessions"
+        self.assertEqual(
+            metrics._journal_metrics(sessions),
+            {
+                "model_calls": 2,
+                "output_tokens": 17_500,
+                "generated_tokens": 17_500,
+                "reasoning_tokens": 1_300,
+                "over_16k_calls": 1,
+                "generation_minutes": 40.0 / 60.0,
+                "tool_minutes": 110.0 / 60.0,
+                "cost_usd": 0.012,
+                "max_tokens": False,
+            },
+        )
+        self.assertEqual(
+            metrics._journal_metrics(prove / "agent" / "radian-sessions"),
+            {
+                "model_calls": 1,
+                "output_tokens": 4_000,
+                "generated_tokens": 4_000,
+                "reasoning_tokens": 0,
+                "over_16k_calls": 0,
+                "generation_minutes": 1.0,
+                "tool_minutes": 0.0,
+                "cost_usd": 0.003,
+                "max_tokens": True,
+            },
+        )
+        self.assertEqual(
+            metrics._journal_metrics(sessions),
+            journal_metrics.usage_metrics([sessions]),
+        )
+
+    def test_the_help_and_readme_carry_the_generated_column_table(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            with contextlib.redirect_stdout(output):
+                journal_metrics._main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(journal_metrics.columns_text(), output.getvalue())
+        readme = (Path(metrics.__file__).resolve().parent / "README.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(journal_metrics.columns_markdown(), readme)
 
 
 def read_bound_docs():

@@ -37,6 +37,7 @@ fixture jobs; the same suite is a step of ``scripts/verify.sh``. See
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import random
@@ -57,6 +58,20 @@ OVER_16K_TOKENS = 16_000
 # near 64 KiB (a base64 image is at most ~7 MB), so a 16 MiB line is generous.
 MAX_LINE_CHARS = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
+
+
+def _load_journal_metrics():
+    """Load `benchmarks/journal_metrics.py` by path (it is not a sibling module)."""
+    path = Path(__file__).resolve().parents[1] / "journal_metrics.py"
+    spec = importlib.util.spec_from_file_location("journal_metrics", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - a broken tree
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+journal_metrics = _load_journal_metrics()
 
 # The task-level bootstrap behind INTERVALS. A fixed seed and a fixed number of
 # resamples make the printed interval reproducible from the same trials.
@@ -123,16 +138,6 @@ def _minutes(started: Any, finished: Any) -> float | None:
         return None
     try:
         return max(0.0, (end - begin).total_seconds() / 60.0)
-    except TypeError:  # one timestamp naive, the other aware
-        return None
-
-
-def _seconds(begin: datetime | None, end: datetime | None) -> float | None:
-    """Elapsed seconds between two timestamps, or None when either is missing."""
-    if begin is None or end is None:
-        return None
-    try:
-        return max(0.0, (end - begin).total_seconds())
     except TypeError:  # one timestamp naive, the other aware
         return None
 
@@ -223,103 +228,27 @@ def _last_result(stdout_path: Path) -> dict[str, Any]:
 def _journal_metrics(sessions_dir: Path) -> dict[str, Any]:
     """Calls, tokens and timing from one trial's radian session journals.
 
-    Generation time runs from the request boundary (a tool settling, a user
-    message, a turn start, or the previous response) to the assistant message
-    that ends it. Tool time is the sum of each matched
-    `ToolExecutionStarted` -> `ToolExecutionSettled` pair; parallel calls are
-    summed, so tool minutes can exceed the trial's wall time. A torn tail (no
-    final LF) is not a committed record and is dropped, like the Rust reader.
-    The journal is streamed, so one trial's memory use is one line, not the file.
+    The fixed definitions live in `benchmarks/journal_metrics.py`; this function
+    keeps the Harbor report's keys and values unchanged. Generation time runs
+    from the request boundary (a tool settling, a user message, a turn start,
+    or the previous response) to the assistant message that ends it. Tool time
+    is the sum of each matched `ToolExecutionStarted` -> `ToolExecutionSettled`
+    pair; parallel calls are summed, so tool minutes can exceed the trial's wall
+    time. A torn tail (no final LF) is not a committed record and is dropped,
+    like the Rust reader. The journal is streamed, so one trial's memory use is
+    one line, not the file.
     """
-    files = sorted(sessions_dir.glob("*.jsonl"))
-    model_calls = 0
-    output_tokens = reasoning_tokens = fee_micros = None
-    over_16k = 0
-    generation = tool = 0.0
-    max_tokens = False
-    for path in files:
-        started: dict[str, datetime] = {}
-        anchor: datetime | None = None
-        try:
-            for line in _iter_lines(path):
-                if not line.endswith("\n"):
-                    break  # torn tail: not a committed record
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                event = record.get("event")
-                data = _dict(record.get("data"))
-                ts = _time(record.get("ts"))
-                if event == "ToolExecutionStarted":
-                    call_id = data.get("call_id")
-                    if isinstance(call_id, str) and ts is not None:
-                        started[call_id] = ts
-                elif event == "ToolExecutionSettled":
-                    call_id = data.get("call_id")
-                    begin = started.pop(call_id, None) if isinstance(call_id, str) else None
-                    elapsed = _seconds(begin, ts)
-                    if elapsed is not None:
-                        tool += elapsed
-                    if ts is not None:
-                        anchor = ts
-                elif event == "MessageAppended":
-                    message = _dict(data.get("message"))
-                    if "assistant" in message:
-                        model_calls += 1
-                        elapsed = _seconds(anchor, ts)
-                        if elapsed is not None:
-                            generation += elapsed
-                        if ts is not None:
-                            anchor = ts
-                    elif "user" in message and ts is not None:
-                        anchor = ts
-                elif event == "TurnStarted" and ts is not None:
-                    anchor = ts
-                elif event in ("ModelUsageRecorded", "CompactionUsageRecorded"):
-                    usage = _dict(data.get("usage"))
-                    count = _int(usage.get("output"))
-                    if count is not None:
-                        output_tokens = _add(output_tokens, count)
-                        if count > OVER_16K_TOKENS:
-                            over_16k += 1
-                    count = _reasoning(usage.get("details"))
-                    if count is not None:
-                        reasoning_tokens = _add(reasoning_tokens, count)
-                    count = _int(_dict(data.get("fee")).get("micros"))
-                    if count is not None:
-                        fee_micros = _add(fee_micros, count)
-                    if event == "CompactionUsageRecorded":
-                        # A summarization call is a real model call and real money.
-                        model_calls += 1
-                        elapsed = _seconds(anchor, ts)
-                        if elapsed is not None:
-                            generation += elapsed
-                        if ts is not None:
-                            anchor = ts
-                elif event == "TurnFinished":
-                    if (
-                        data.get("outcome") == "incomplete"
-                        and data.get("reason") == "max_tokens"
-                    ):
-                        max_tokens = True
-        except OSError:
-            continue
+    source = journal_metrics.usage_metrics([sessions_dir])
     return {
-        "model_calls": model_calls,
-        "output_tokens": output_tokens,
-        # A journal's `usage.output` already includes reasoning.
-        "generated_tokens": output_tokens,
-        "reasoning_tokens": reasoning_tokens,
-        "over_16k_calls": over_16k,
-        "generation_minutes": generation / 60.0,
-        "tool_minutes": tool / 60.0,
-        "cost_usd": fee_micros / 1_000_000 if fee_micros is not None else None,
-        "max_tokens": max_tokens,
+        "model_calls": source["model_calls"],
+        "output_tokens": source["output_tokens"],
+        "generated_tokens": source["generated_tokens"],
+        "reasoning_tokens": source["reasoning_tokens"],
+        "over_16k_calls": source["over_16k_calls"],
+        "generation_minutes": source["generation_minutes"],
+        "tool_minutes": source["tool_minutes"],
+        "cost_usd": source["cost_usd"],
+        "max_tokens": source["max_tokens"],
     }
 
 
