@@ -390,12 +390,13 @@ enum RadianCommand {
         command: FooterCommand,
     },
 
-    /// Read the bundled user manual. No arguments prints the topic index; a topic prints
-    /// that page. The pages are compiled into the binary, the same text `read` sees.
+    /// Read the bundled user manuals. No arguments prints the radian manual's topics and
+    /// one `arc` entry; `arc` prints the arc manual's topics; any other topic prints that
+    /// page. The pages are compiled into the binary, the same text `read` sees.
     Docs {
-        /// The manual topic: a page stem like `commands`, or `commands.md`; a directory
-        /// topic like `arc` opens its `index.md`. Omitted prints one line per topic with its
-        /// description.
+        /// The manual topic: a page stem like `commands`, or `commands.md`; `arc` lists the
+        /// arc manual's topics; a directory topic like `arc/` opens its `index.md`. Omitted
+        /// prints one line per radian manual topic, then one `arc` line.
         #[arg(value_name = "TOPIC")]
         topic: Option<String>,
     },
@@ -1051,27 +1052,15 @@ fn run_subcommand(command: RadianCommand, config: Option<&Path>) -> ExitCode {
     }
 }
 
-/// Runs `radian docs [topic]`: the bundled manual from the same embedded table `read`
-/// sees, so the two never drift. No arguments prints one line per topic (`topic: description`);
-/// a topic prints that page verbatim. Read-only, no network, no model, no credentials.
-/// An unknown topic exits 2 and lists the pages on stderr.
+/// Runs `radian docs [topic]`: the bundled manuals from the same embedded table `read`
+/// sees, so the two never drift. No argument prints one line per radian-manual topic, then
+/// one `arc` line; `arc` prints one line per arc-manual page; any other topic prints that
+/// page verbatim. Read-only, no network, no model, no credentials. An unknown topic exits 2
+/// and lists the pages on stderr.
 fn run_docs(topic: Option<&str>) -> ExitCode {
     match topic {
-        None => {
-            for (name, text) in radian_coding::docs::DOCS {
-                let topic = radian_coding::docs::topic(name);
-                let description = radian_coding::docs::description(text);
-                let line = if description.is_empty() {
-                    topic.to_owned()
-                } else {
-                    format!("{topic}: {description}")
-                };
-                if let Err(error) = radian_host::write_line(&line) {
-                    return stdout_error(error);
-                }
-            }
-            ExitCode::SUCCESS
-        }
+        None => list_manual(radian_coding::docs::Manual::Radian, true),
+        Some("arc") => list_manual(radian_coding::docs::Manual::Arc, false),
         Some(topic) => match radian_coding::docs::lookup_topic(topic) {
             Some((_, text)) => {
                 if let Err(error) = radian_host::write_stdout(text) {
@@ -1080,18 +1069,39 @@ fn run_docs(topic: Option<&str>) -> ExitCode {
                 ExitCode::SUCCESS
             }
             None => {
+                let mut topics: Vec<&str> = radian_coding::docs::DOCS
+                    .iter()
+                    .map(|(name, _)| radian_coding::docs::topic(name))
+                    .collect();
+                // `arc` is a topic of its own: it lists the arc manual.
+                topics.push("arc");
                 eprintln!(
                     "radian: unknown docs topic `{topic}`; available topics: {}",
-                    radian_coding::docs::DOCS
-                        .iter()
-                        .map(|(name, _)| radian_coding::docs::topic(name))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    topics.join(", ")
                 );
                 ExitCode::from(2)
             }
         },
     }
+}
+
+/// Prints one line per page of `manual` (`topic: description`). With `arc_entry`, the
+/// listing ends with the arc manual's single `arc` line.
+fn list_manual(manual: radian_coding::docs::Manual, arc_entry: bool) -> ExitCode {
+    for (name, text) in radian_coding::docs::pages_of(manual) {
+        if let Err(error) = radian_host::write_line(&radian_coding::docs::topic_line(name, text)) {
+            return stdout_error(error);
+        }
+    }
+    if arc_entry {
+        let index = radian_coding::docs::find(radian_coding::docs::Manual::Arc.index())
+            .expect("arc/index.md is embedded");
+        if let Err(error) = radian_host::write_line(&radian_coding::docs::topic_line("arc", index))
+        {
+            return stdout_error(error);
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 /// Runs `radian theme import` (ADR 0029): a one-time pi → Radian TOML

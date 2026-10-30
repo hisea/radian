@@ -332,14 +332,18 @@ radian footer export pi
 
 ## `radian docs`
 
-`radian docs` prints one line per manual topic with its description.
+radian ships two manuals: the radian manual (every page outside `arc/`) and the arc manual (every page under `arc/`).
+Each has its own size budget, so the arc pages never crowd out the radian pages.
+`radian docs` prints one line per radian-manual page, `topic: description`, in table order, then exactly one `arc: <arc/index.md description>` line.
+`radian docs arc` prints one line per arc-manual page, `arc/<stem>: description`, in table order.
 `radian docs <topic>` prints that page verbatim, the same text the agent reads.
 The topic is a page stem (`commands`), a path under the manual (`arc/loop`), or a file name (`commands.md`, `arc/loop.md`).
-A topic that names a directory (`arc`) opens its `index.md`.
+`radian docs index` opens the radian manual's index and `radian docs arc/index` (or `radian docs arc/`) opens the arc manual's.
 An unknown topic exits `2` and lists the pages on stderr.
 
 ```sh
 radian docs
+radian docs arc
 radian docs cli
 radian docs arc/loop
 ```
