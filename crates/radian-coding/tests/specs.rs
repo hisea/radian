@@ -95,10 +95,10 @@ async fn the_read_spec_offers_offset_and_limit() {
     );
 }
 
-/// The description teaches how a read spends context: a whole file costs its full size, so
-/// the model locates lines with `grep` and reads the range with `offset` and `limit`. The old
-/// "read one part at a time" sentence said how without saying why, and workers read whole
-/// files instead. Dropping the guidance fails here.
+/// The description teaches how a read spends context: a read with no range stops at the
+/// byte budget or the line cap, so the model locates lines with `grep` and reads the range
+/// with `offset` and `limit`. The old "read one part at a time" sentence said how without
+/// saying why, and workers read whole files instead. Dropping the guidance fails here.
 #[tokio::test]
 async fn the_read_description_teaches_ranged_reads() {
     let dir = TempDir::new("read-guidance");
@@ -118,10 +118,15 @@ async fn the_read_description_teaches_ranged_reads() {
             read.description
         );
     }
+    let limits = radian_coding::Limits::default();
+    let kib = limits.default_read_bytes / 1024;
+    let default_cost = format!(
+        "A read with no range stops at {kib} KiB or {} lines, naming the next offset",
+        limits.default_read_lines
+    );
     assert!(
-        read.description
-            .contains("A whole file enters the context at its full size"),
-        "the description says what a whole file costs: {}",
+        read.description.contains(&default_cost),
+        "the description states the real default cost from `Limits`: {}",
         read.description
     );
     assert!(
@@ -251,8 +256,8 @@ async fn the_read_spec_names_directory_listing() {
         read.description
     );
     // The size budget: the directory description fit 1078 bytes (measured 2026-10-20); the
-    // image branch took it to 1430, and the range guidance the model must hear takes it to
-    // 1705. The pin leaves a little room above the measured 1705.
+    // image branch took it to 1430, the range guidance to 1705, and the real default cost
+    // (16 KiB or 200 lines) to 1800. The pin is this exact size.
     let bytes = serde_json::to_vec(read).unwrap().len();
     assert!(
         bytes <= 1800,

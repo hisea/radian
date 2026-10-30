@@ -963,35 +963,6 @@ byte-identical with `shasum -a 256`; the named test ran alone with
 |---|---|---|---|
 | TK0246-M1 | the `grep` arm of the locate hint → `"after locating lines"` (the description no longer names `grep` even when it is mounted) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` (``the description must name `grep` ``) |
 
-## TK0251: read's 16 KiB and 200-line defaults (2026-10-30, branch `work/TK0251-read-16k-200-line-defaults`)
-
-A text `read` with no arguments now stops at 16 KiB or 200 lines, whichever comes first, and
-names the next offset. Manual pages keep a 64 KiB budget with no line cap; `job op: read`
-keeps its 64 KiB window. Each mutation was applied by hand to
-`crates/radian-coding/src/provider.rs` or `src/read.rs`, backed up under `.radian/*.orig` and
-restored from that copy (never `git checkout`), confirmed byte-identical with
-`shasum -a 256`; the named test ran alone with
-`cargo nextest run -p radian-coding --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
-
-| # | Mutation | Result | Test that caught it |
-|---|---|---|---|
-| TK0251-M1 | `default_read_bytes: 16 << 10` → `64 << 10` (the old byte budget) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (all 18,000 bytes came back, `truncated: false`) |
-| TK0251-M2 | `let limit = Some(limit.unwrap_or(limits.default_read_lines));` → `let limit = limit;` (no default line cap) | ✅ 1 failed (rc=100) | `the_default_line_limit_stops_after_two_hundred_lines` (250 lines came back, `end_line` 250 instead of 200) |
-| TK0251-M3 | the embedded/manual branch uses `limits.default_read_bytes` instead of `default_manual_read_bytes` | ✅ 1 failed (rc=100) | `a_docs_page_reads_whole_beyond_the_file_defaults` (`configuration.md` cut at 16,348 bytes of 29,558, with `next_offset: 216`) |
-| TK0251-M4 | the byte-budget arm sets `next_offset = None` instead of `Some(lineno)` (the cut drops its note) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (`next_offset` was null; no `continue with offset` note) |
-| TK0251-M5 | the limit arm sets `next_offset = None` instead of `Some(lineno)` (an explicit `limit` cut drops its note) | ✅ 1 failed (rc=100) | `an_explicit_offset_and_limit_are_unchanged_by_the_defaults` (`next_offset` was null; no `continue with offset=150` note) |
-
-The same new tests were run against the old defaults (64 KiB, no line cap) before restoring:
-`the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line`,
-`the_default_line_limit_stops_after_two_hundred_lines`,
-`the_default_line_limit_applies_after_a_positive_offset` and
-`a_negative_offset_uses_the_default_line_limit_only_past_two_hundred_lines` failed, and the
-drift test `the_manual_names_the_read_limits_from_the_code` failed on the 65,536 default in
-the table. The unchanged-behaviour cases (`an_explicit_budget_and_limit_restore_the_old_64_kib_window`,
-`an_explicit_offset_and_limit_are_unchanged_by_the_defaults`,
-`the_directory_default_still_lists_five_hundred_entries`,
-`the_job_read_window_stays_64_kib`) pass on both the old and the new code: they pin the
-callers the change must not move.
 ## TK0247: split the three arc pages (2026-10-30, branch `work/TK0247-split-big-arc-pages`)
 
 `docs/user/arc/index.md`, `files.md` and `gate.md` were split into topic pages, and the docs
@@ -1021,3 +992,65 @@ test ran alone with
 | TK0248-M2 | `cap_failure` drops `manual.name()`, so the message says "the manual is ..." | ✅ 1 failed (rc=100) | `a_manual_over_its_cap_fails_alone` (the message did not name the radian manual) |
 | TK0248-M3 | `pages_of` returns every page for either manual | ✅ 1 failed (rc=100) | `the_two_manuals_partition_the_embedded_table` (the two manuals' page count was twice the table's) |
 | TK0248-M4 | `pages_missing_from_index` always returns nothing | ✅ 1 failed (rc=100) | `an_unlisted_page_fails_naming_it` (the check named no missing page) |
+
+## TK0254: manual-split follow-ups (2026-10-30, branch `work/TK0254-manual-split-followups`)
+
+`cli.md`'s `radian arc` pointer now names the pages that hold the flag tables, not only the
+overview: `arc/planning.md`, `arc/running.md`, `arc/owner.md` and `arc/hooks.md` are linked
+before the other arc pages. TK0247-M1's anchor test was removed here because it duplicated
+the site renderer's check (see `crates/radian-tui/MUTATIONS.md`). The mutation was applied by
+hand to `docs/user/cli.md` (the `arc/hooks` link was deleted), backed up under
+`.radian/cli.md.fixed` and restored from that copy (never `git checkout`), confirmed
+byte-identical with `shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test docs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0254-M2 | `cli.md`'s `radian arc` pointer drops its `arc/hooks` link | ✅ 1 failed (rc=100) | `the_cli_arc_pointer_names_the_arc_flag_pages` (it named the missing `arc/hooks.md` link) |
+## TK0251: read's 16 KiB and 200-line defaults (2026-10-30, branch `work/TK0251-read-16k-200-line-defaults`)
+
+A text `read` with no arguments now stops at 16 KiB or 200 lines, whichever comes first, and
+names the next offset. Manual pages keep a 64 KiB budget with no line cap; `job op: read`
+keeps its 64 KiB window. Each mutation was applied by hand to
+`crates/radian-coding/src/provider.rs` or `src/read.rs`, backed up under `.radian/*.orig` and
+restored from that copy (never `git checkout`), confirmed byte-identical with
+`shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0251-M1 | `default_read_bytes: 16 << 10` → `64 << 10` (the old byte budget) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (all 18,000 bytes came back, `truncated: false`) |
+| TK0251-M2 | `let limit = Some(limit.unwrap_or(limits.default_read_lines));` → `let limit = limit;` (no default line cap) | ✅ 1 failed (rc=100) | `the_default_line_limit_stops_after_two_hundred_lines` (250 lines came back, `end_line` 250 instead of 200) |
+| TK0251-M3 | the embedded/manual branch uses `limits.default_read_bytes` instead of `default_manual_read_bytes` | ✅ 1 failed (rc=100) | `a_docs_page_reads_whole_beyond_the_file_defaults` (`configuration.md` cut at 16,348 bytes of 29,558, with `next_offset: 216`) |
+| TK0251-M4 | the byte-budget arm sets `next_offset = None` instead of `Some(lineno)` (the cut drops its note) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (`next_offset` was null; no `continue with offset` note) |
+| TK0251-M5 | the limit arm sets `next_offset = None` instead of `Some(lineno)` (an explicit `limit` cut drops its note) | ✅ 1 failed (rc=100) | `an_explicit_offset_and_limit_are_unchanged_by_the_defaults` (`next_offset` was null; no `continue with offset=150` note) |
+
+The same new tests were run against the old defaults (64 KiB, no line cap) before restoring:
+`the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line`,
+`the_default_line_limit_stops_after_two_hundred_lines`,
+`the_default_line_limit_applies_after_a_positive_offset` and
+`a_negative_offset_uses_the_default_line_limit_only_past_two_hundred_lines` failed, and the
+drift test `the_manual_names_the_read_limits_from_the_code` failed on the 65,536 default in
+the table. The unchanged-behaviour cases (`an_explicit_budget_and_limit_restore_the_old_64_kib_window`,
+`an_explicit_offset_and_limit_are_unchanged_by_the_defaults`,
+`the_directory_default_still_lists_five_hundred_entries`,
+`the_job_read_window_stays_64_kib`) pass on both the old and the new code: they pin the
+callers the change must not move.
+
+## TK0255: read-defaults follow-ups (2026-10-30, branch `work/TK0255-read-defaults-followups`)
+
+The merged TK0251 reviews' minor items: the `read` description now states the real default
+(16 KiB or 200 lines, from `Limits`) instead of "a whole file enters the context at its full
+size", the `read` schema's byte and line defaults come from `Limits` too, the manual page
+budget is read from `Limits` by the drift test, the exact 64 KiB cut is pinned, and stale
+comments and the manual's continuation-note sentence are corrected. Each mutation was
+applied by hand to `crates/radian-coding/src/read.rs` or `src/provider.rs`, backed up under
+`.radian/*.orig` and restored from that copy (never `git checkout`), confirmed byte-identical
+with `shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0255-M1 | the description's cost sentence back to "A whole file enters the context at its full size" (the stale claim) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` ("the description states the real default cost from `Limits`") |
+| TK0255-M2 | `default_manual_read_bytes: 64 << 10` → `32 << 10` (the manual budget drifts from the manual's 65536) | ✅ 1 failed (rc=100) | `the_manual_names_the_read_limits_from_the_code` ("the manual page budget comes from the code: 32768") |
+| TK0255-M3 | an explicit `max_bytes` is capped at 32 KiB (`Some((n as usize).min(32 << 10))`), a narrower window than the name promises | ✅ 1 failed (rc=100) | `an_explicit_budget_and_limit_restore_the_old_64_kib_window` (`end_line` 655, `bytes_read` 32750, not 1310/65500) |
