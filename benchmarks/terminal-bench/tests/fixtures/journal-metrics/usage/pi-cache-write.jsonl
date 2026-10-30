@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-cache-write","timestamp":"2026-01-01T00:00:00Z","cwd":"/app"}
+{"type":"message","id":"e1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"a"}],"usage":{"input":1000,"output":10,"cacheRead":200,"cacheWrite":300,"cost":{"total":0.01}},"stopReason":"stop"}}

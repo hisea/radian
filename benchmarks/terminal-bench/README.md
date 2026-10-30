@@ -197,6 +197,50 @@ those tasks. `--json` prints the same report as one object (`agents`, `tasks`,
 `gen_unknown_agents` lists the ATIF producer names with no generated-token
 rule; the trial row that hit one carries its name in `unruled_producer`.
 
+### Journal metrics extractor
+
+`benchmarks/journal_metrics.py` reads radian session journals and pi session
+JSONL directly, without a Harbor job directory:
+
+```sh
+python3 benchmarks/journal_metrics.py SESSION_DIR [MORE...] [--prefix PREFIX] [--json]
+```
+
+Each input is a journal file or a directory searched recursively for
+`*.jsonl`; `--prefix` keeps only files whose name starts with it. The output is
+one row per journal plus a `TOTAL` row. `--json` prints the same computed rows
+(`{"journals": [...], "totals": {...}}`) instead of the table.
+`terminal-bench/metrics.py` uses this module for its journal summary
+(`_journal_metrics`), so the two reports cannot define "model calls", "input"
+or "result bytes" differently. The table below is generated from the script's
+`COLUMNS` data; the test in `tests/test_metrics.py` fails when the README block
+and the code differ.
+
+| Column | Definition | Unit |
+|---|---|---|
+| `journal` | The journal file that produced the row; `TOTAL` on the totals row. | path |
+| `source` | `radian` for a radian session journal, `pi` for a pi session JSONL. | name |
+| `calls` | Model calls, equal to steps: radian assistant messages plus `CompactionUsageRecorded` summary calls; pi assistant messages. | calls |
+| `input_uncached` | Input tokens billed at the full price (ADR 0007 `uncached_input()`). A radian record marked `input_includes_cache: true` subtracts both `cache_read` and `cache_write` from `input`; a record marked false and an unmarked one report `input` alone, as does a pi record. | tokens |
+| `input_cache_read` | Input tokens served from the provider cache (`cache_read`). An unmarked radian record's value is reported but not added to `input_total` (it may already sit inside `input`). | tokens |
+| `input_total` | The whole prompt the provider saw (ADR 0007 `prompt_total()`): `input` when it is marked `input_includes_cache: true` or unmarked, `input + cache_read + cache_write` when marked false. A cache write has no column of its own, so the total can exceed `input_uncached + input_cache_read`. | tokens |
+| `output` | Reported output tokens, raw: radian `usage.output`; pi `usage.output`. | tokens |
+| `reasoning` | The reasoning part of `output`, from the provider usage object (`reasoning_tokens`, `reasoning_output_tokens` or `thinking_tokens`). | tokens |
+| `fee_usd` | Fee in USD: radian `fee.micros / 1,000,000` (including summary calls); pi `usage.cost.total`. | USD |
+| `calls.<tool>` | Calls of one tool name. pi's `bash` is counted as `shell`, so the column means the same thing for both agents. | calls |
+| `bytes.<tool>` | UTF-8 bytes of the concatenated text parts of one tool name's results, without the JSON wrapping. | bytes |
+| `read_ranged_calls` | `read` calls whose arguments hold `offset` or `limit`. | calls |
+| `read_ranged_bytes` | Result-text bytes of the ranged `read` calls. | bytes |
+| `read_unranged_calls` | `read` calls whose arguments hold neither `offset` nor `limit`. | calls |
+| `read_unranged_bytes` | Result-text bytes of the unranged `read` calls. | bytes |
+| `read_large_calls` | `read` results whose text is 20,480 bytes or more (20 KiB). | calls |
+| `p50ms.<bucket>` | p50 of per-call latency in one prompt bucket: from the previous ready event (turn start, user message, tool settle, or the previous assistant message) to the usage record. Bucket 0 is 0-99,999 prompt tokens, bucket 1 is 100,000-199,999, and so on. | ms |
+| `p90ms.<bucket>` | p90 of the same per-bucket latency samples. | ms |
+| `compactions` | `ContextCompacted` records (pi: entries with type `compaction`). | count |
+| `deterministic_compactions` | The compactions whose `deterministic` field is true. | count |
+| `outcomes` | Turn outcome counts. radian counts every `TurnFinished.outcome`; pi counts the last assistant `stopReason` (stop -> completed, length -> incomplete, error -> failed, aborted -> cancelled, toolUse -> incomplete). | count |
+| `wall_seconds` | First committed timestamp to last committed timestamp. | seconds |
+
 ### Spread, leave-one-out and intervals
 
 The matrix and totals say what each agent spent. Three more sections say

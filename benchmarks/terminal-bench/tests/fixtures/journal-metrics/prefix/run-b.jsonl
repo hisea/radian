@@ -1,0 +1,1 @@
+{"schema_version":1,"session_id":"radian-run-b","seq":0,"ts":"2026-01-01T00:00:00Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":20,"output":2}}}

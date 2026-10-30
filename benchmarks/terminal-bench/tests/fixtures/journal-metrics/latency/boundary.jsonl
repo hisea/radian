@@ -1,0 +1,8 @@
+{"schema_version":1,"session_id":"radian-latency","seq":0,"ts":"2026-01-01T00:00:00Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"radian-latency","seq":1,"ts":"2026-01-01T00:00:00Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"three calls"}}]}}}}
+{"schema_version":1,"session_id":"radian-latency","seq":2,"ts":"2026-01-01T00:00:01Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"one"}}]}}}}
+{"schema_version":1,"session_id":"radian-latency","seq":3,"ts":"2026-01-01T00:00:01Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":99999,"output":1}}}
+{"schema_version":1,"session_id":"radian-latency","seq":4,"ts":"2026-01-01T00:00:04Z","event":"MessageAppended","critical":true,"data":{"index":2,"message":{"assistant":{"content":[{"text":{"text":"two"}}]}}}}
+{"schema_version":1,"session_id":"radian-latency","seq":5,"ts":"2026-01-01T00:00:04Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":99999,"output":1}}}
+{"schema_version":1,"session_id":"radian-latency","seq":6,"ts":"2026-01-01T00:00:06Z","event":"MessageAppended","critical":true,"data":{"index":3,"message":{"assistant":{"content":[{"text":{"text":"three"}}]}}}}
+{"schema_version":1,"session_id":"radian-latency","seq":7,"ts":"2026-01-01T00:00:06Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":100000,"output":1}}}
