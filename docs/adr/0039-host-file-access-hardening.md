@@ -36,7 +36,7 @@ Sandbox git skips this set by default. It runs as the sandbox user. The model co
 
 - `$CARGO_HOME/registry/src` (default `~/.cargo/registry/src`) and each toolchain `lib/rustlib/src` (`$RUSTUP_HOME/toolchains/*/lib/rustlib/src`, default `~/.rustup`).
 - The directory of each discovered skill (ADR 0025): the directory that holds its `SKILL.md`, never its parent. User skills always; project skills only when the project is trusted, the same set discovery loads. The `skill` tool says "relative paths use <skill directory> as base", and these roots make that true for the file tools.
-- In-binary docs: `radian://docs/` (`docs/user/` compiled into the binary). Virtual roots read only through `read`. `grep`/`glob` refuse and point at `read`.
+- In-binary docs: `radian://docs/` (`docs/user/` compiled into the binary). It holds two manuals, the radian manual and the arc manual (the pages under `arc/`), each with its own 512 KiB size budget. Virtual roots read only through `read`. `grep`/`glob` refuse and point at `read`.
 
 Disk roots open like the workspace: stepwise `openat(O_NOFOLLOW)` from the root fd, never following symlinks. They resolve once at session start (`radian-coding/src/read_roots.rs`); skill roots come from the session's skill discovery. `radian://docs/<page>.md` reads from memory, `radian://docs/` lists pages, and `write`/`patch` refuse the `radian://` prefix. Disk paths are written absolute or with `~`; a relative path stays a workspace path, and so does an absolute path inside the workspace root (decision 6). Missing, non-directory, or unopenable disk roots skip. `~/.cargo`/`~/.rustup` files outside the two source roots (such as `credentials.toml`) are not roots.
 

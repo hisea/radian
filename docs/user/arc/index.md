@@ -1,5 +1,5 @@
 ---
-description: The arc commands: an overview, the subcommand list, and the exit codes.
+description: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 ---
 
 # arc
@@ -12,6 +12,28 @@ It also has `radian arc mcp`, the MCP server a lead writes plans and tasks throu
 `radian arc serve` is the scheduling loop and `radian arc run` is one pass of it; a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
 The commands are in [`plans and tasks`](planning.md), [`running`](running.md), [`the owner's commands`](owner.md) and [`hooks`](hooks.md); the merge is in [`integration`](integration.md), the loop in [`loop`](loop.md), the gate in [`gate`](gate.md), [`gate-review`](gate-review.md) and [`gate-failures`](gate-failures.md), the MCP server in [`mcp`](mcp.md), the TUI in [`tui`](tui.md), the flows in [`flows`](flows.md), the worker in [`worker`](worker.md), and the files in [`files`](files.md) and [`config`](config.md).
+
+## Pages
+
+This page maps the arc manual.
+Each line names one page and what it covers.
+
+- `arc/index`: this page: the overview, the subcommand list, and the exit codes.
+- `arc/planning`: the plan and task commands.
+- `arc/running`: the task-running commands.
+- `arc/owner`: the owner's commands.
+- `arc/hooks`: the `[hooks]` points, rules and environment.
+- `arc/gate`: the gate run, a gate for this repository, and reconcile.
+- `arc/gate-review`: the review stage.
+- `arc/gate-failures`: the failure classes, retries and the budget.
+- `arc/integration`: how the merge builds and pushes the integration candidate: the styles, the key commands and the after-push check.
+- `arc/loop`: the scheduling loop: one pass, `loop.log`, `serve`, and its signals.
+- `arc/files`: the plan and task files and the `.radian/arc/` layout.
+- `arc/config`: the `config.toml` keys.
+- `arc/flows`: what a flow is, a two-flow example, how a task picks one, the two concurrency limits, and binary deliverables.
+- `arc/mcp`: the lead's MCP server: how a lead registers it, its seven tools, and its tool errors.
+- `arc/tui`: the TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
+- `arc/worker`: the worker: its session, the brief and limits, the checks after it exits, and another agent as the worker.
 
 ## `radian arc`
 
