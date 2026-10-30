@@ -271,9 +271,9 @@ async fn filled_optional_fields_still_read() {
     session.shutdown_jobs();
 }
 
-/// Defaults, case 9: the `job` read window stays 64 KiB. A 5000-line output is about 52 KiB
+/// Defaults, case 9: the `job` read window stays 64 KiB. A 5000-line output is about 23.9 KB
 /// (its text alone over 16 KiB), so `read`'s new 16 KiB default must not cut it. If it did,
-/// the range read would stop near line 1500 instead of returning every line.
+/// the range read would stop near line 3500 instead of returning every line.
 #[tokio::test]
 async fn the_job_read_window_stays_64_kib() {
     let dir = TempDir::new("job-file-window");

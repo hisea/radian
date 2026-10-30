@@ -753,6 +753,11 @@ fn the_manual_names_the_read_limits_from_the_code() {
         "the `limit` row names the {} entry maximum: {limit:?}",
         limits.max_list_entries
     );
+    let manual_bytes = limits.default_manual_read_bytes.to_string();
+    assert!(
+        text.contains(&format!("uses a {manual_bytes}-byte budget")),
+        "the manual page budget comes from the code: {manual_bytes}"
+    );
 }
 
 /// The hand-written table matches `docs/user/` on disk, including the pages in subdirectories.

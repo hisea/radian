@@ -1269,13 +1269,13 @@ async fn the_full_set_keeps_the_shell_description_byte_for_byte() {
         read.description,
         "Read a UTF-8 text file, a directory, or an image. Each text line starts with its \
          line number and `\": \"`. This prefix is not part of the file. Remove it before you \
-         use the text in `patch`. A whole file enters the context at its full size: after \
-         `grep` locates lines, read the range around them with `offset` and `limit`. Read a \
-         whole file only when it is small or the task needs all of it. Do not increase \
-         `max_bytes` to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
-         magic number, never its extension) returns a text line and the image itself; images \
-         are limited to 5 MiB and 8000 px per side (`image_too_large` when over). An image is \
-         read whole: `offset` and `limit` are ignored."
+         use the text in `patch`. A read with no range stops at 16 KiB or 200 lines, naming \
+         the next offset; after `grep` locates lines, read the range around them with \
+         `offset` and `limit`. Read a whole file only when it is small or the task needs all \
+         of it. Do not increase `max_bytes` to get a later part. An image (PNG, JPEG, GIF or \
+         WebP, judged by its magic number, never its extension) returns a text line and the \
+         image itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
+         when over). An image is read whole: `offset` and `limit` are ignored."
     );
 }
 
@@ -1486,7 +1486,7 @@ async fn read_names_patch_only_when_patch_is_mounted() {
     assert!(
         without_patch
             .description
-            .contains("This prefix is not part of the file. A whole file"),
+            .contains("This prefix is not part of the file. A read with no"),
         "{}",
         without_patch.description
     );
@@ -1507,7 +1507,7 @@ async fn read_names_patch_only_when_patch_is_mounted() {
     assert!(
         with_patch
             .description
-            .contains("A whole file enters the context at its full size: after locating lines"),
+            .contains("naming the next offset; after locating lines, read the range around them"),
         "{}",
         with_patch.description
     );
