@@ -22,6 +22,7 @@ Relative paths stay in the workspace.
 Absolute paths work only under the registry and tool chain roots.
 Use `read` for registry and tool chain files.
 Check `.gitignore` when `glob` or `grep` skips a file.
+A file over the size cap a directory or `glob` search skips is named in the result; `tools` gives the cap.
 Check `.git` when a search misses versioned files.
 The tools never follow a symlink.
 Read the target path directly.
