@@ -2232,6 +2232,12 @@ fn a_main_that_keeps_moving_is_never_overwritten() {
     let error = review::merge(&fixture.store, &fixture.task).expect_err("the merge refuses");
     assert_eq!(error.exit(), Exit::State);
     assert!(error.message().contains("integrating"), "{error:?}");
+    assert!(
+        error
+            .message()
+            .contains("the `main` branch moved after integration"),
+        "{error:?}"
+    );
     assert_state(&fixture, ("review", "integrating"));
     let main = fixture
         .repo
@@ -2259,6 +2265,43 @@ fn a_main_that_keeps_moving_is_never_overwritten() {
         3,
         "the other writer moved main once per integration round"
     );
+}
+
+/// With `[integration] target_branch = "release"`, an integration that must run again says
+/// that `release` moved. Naming `main` would tell an operator that a branch nothing touched
+/// changed.
+#[test]
+fn an_integration_that_keeps_moving_names_the_target_branch() {
+    let fixture = Fixture::new("merge-target-no-force");
+    fixture.tune(
+        "# target_branch = \"main\"      # not set: the value of [repository] main_branch",
+        "target_branch = \"release\"",
+    );
+    // `release` starts where `main` does; the integration builds on and pushes to it.
+    fixture
+        .repo
+        .git(&["push", "origin", "refs/heads/main:refs/heads/release"]);
+    let marker = fixture.repo.repo.with_file_name("target-moved-markers");
+    let command = format!(
+        "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m moved \
+         && git push origin HEAD:refs/heads/release \
+         && echo moved >> {}",
+        marker.display()
+    );
+    fixture.key_commands(&[command.as_str()]);
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    assert_eq!(fixture.verifying_with(&head).phase, "awaiting_human");
+
+    let error = review::merge(&fixture.store, &fixture.task).expect_err("the merge refuses");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error
+            .message()
+            .contains("the `release` branch moved after integration"),
+        "{error:?}"
+    );
+    assert!(!error.message().contains("main moved"), "{error:?}");
+    assert_state(&fixture, ("review", "integrating"));
 }
 
 // ---- reject and rework ---------------------------------------------------------------

@@ -1869,3 +1869,18 @@ was restored from the copy and confirmed with `diff -q`.
 | TK0242-M6 | `path_without_gh` appends the test process's `PATH`, so the host's real `gh` answers | `merge_command::a_missing_gh_fails_the_integration_with_its_message` (the reason carried gh's `gh auth login` message instead of `needs gh on PATH`) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0249: the automatic reverify and integration-again lines name the target branch (2026-10-30, branch `work/TK0249-arc-landing-followups`)
+
+With `[integration] target_branch = "release"` the two lines that report a moved branch used
+to say `main moved`, although `main` had not changed. `run::auto_reverify_tasks` names the
+configured target branch in both automatic reverify lines, and `finish_integration` names it in
+the integration's `again` reason. Each mutation was applied by hand to the working file, the
+`radian` binary was rebuilt with `cargo build -p radian-tui --bin radian` where the test drives
+the CLI, the named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox`,
+and the file was restored from a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0249-M1 | `auto_reverify_tasks` prints the literal `main` in the automatic reverify line instead of the configured target branch | `run::an_automatic_reverify_names_the_target_branch` (the line read `main moved (f8dbd9c)` for a `release` that moved) | ✅ 1 failed |
+| TK0249-M2 | `finish_integration` says `main moved after integration` instead of naming `context.target_branch` | `review::an_integration_that_keeps_moving_names_the_target_branch` (the reason read `main moved after integration`) | ✅ 1 failed |
