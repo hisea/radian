@@ -12,9 +12,10 @@
 //! `blob/main` URLs. No JavaScript is emitted on any page: the one `<script>` element is
 //! the `application/ld+json` `TechArticle` record a search engine reads, never run code.
 //!
-//! The same table also gives the two `llms.txt` files at the site root: `llms.txt` is the
-//! index (one line per page with its description, in sidebar order) and `llms-full.txt`
-//! is every page's Markdown in one file, each under its own URL.
+//! The same table also gives three files at the site root: `llms.txt` (one line per page
+//! with its description, in sidebar order), `llms-full.txt` (every page's Markdown in one
+//! file, each under its own URL) and `sitemap.xml` (every page's URL). Every page names its
+//! own absolute URL in a `canonical` link.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 use std::collections::{HashMap, HashSet};
@@ -195,6 +196,10 @@ pub fn page_html(site: &RenderedSite, index: usize) -> String {
     out.push_str("\">\n<meta property=\"og:title\" content=\"");
     escape_into(&page.title, &mut out);
     out.push_str(" · radian docs\">\n<meta property=\"og:type\" content=\"article\">\n");
+    out.push_str(&format!(
+        "<link rel=\"canonical\" href=\"{}\">\n",
+        page_url(&page.stem)
+    ));
     out.push_str("<script type=\"application/ld+json\">");
     out.push_str(&json_ld(page));
     out.push_str("</script>\n");
@@ -371,6 +376,22 @@ pub fn llms_txt(site: &RenderedSite) -> String {
     out.push_str(&format!(
         "- [Source]({REPO_URL}): the repository, MIT or Apache-2.0\n"
     ));
+    out
+}
+
+/// The `sitemap.xml` file: the hand-written pages, then every manual page, each as one
+/// `<url><loc>` entry.
+pub fn sitemap_xml(site: &RenderedSite) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    for (path, _, _) in HAND_WRITTEN_PAGES {
+        out.push_str(&format!("<url><loc>{SITE_URL}{path}</loc></url>\n"));
+    }
+    for page in &site.pages {
+        out.push_str(&format!("<url><loc>{}</loc></url>\n", page_url(&page.stem)));
+    }
+    out.push_str("</urlset>\n");
     out
 }
 
