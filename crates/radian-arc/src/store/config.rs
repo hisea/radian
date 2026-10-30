@@ -180,17 +180,97 @@ pub enum IntegrationMethod {
     Push,
     /// Run `[integration] command` and let it merge.
     Command,
-    /// The built-in `command` preset that opens a pull request (decided; not built yet).
+    /// The built-in `command` preset that merges through a GitHub pull request.
     Pr,
 }
 
 /// Every value `integration.method` names, in one list: the parser and the manual's drift test
-/// read it. [`IntegrationMethod::Push`] and [`IntegrationMethod::Command`] are built.
+/// read it.
 pub const INTEGRATION_METHODS: &[IntegrationMethod] = &[
     IntegrationMethod::Push,
     IntegrationMethod::Command,
     IntegrationMethod::Pr,
 ];
+
+/// The script `method = "pr"` runs (ADR 0048 decision 10). It is the built-in `command` preset,
+/// not another code path: the manual shows it in full and the docs drift test compares that copy
+/// with this constant.
+///
+/// Every `gh` call names the repository its `--repo` derives from `[repository] remote`, so a
+/// second remote, or `gh`'s own default repository, cannot create or watch a pull request in
+/// another repository. The URL is read with `git config --get remote.<name>.url`, not
+/// `git remote get-url`: the latter expands `url.*.insteadOf` rewrites (a common way to point
+/// a GitHub URL at a mirror or a proxy), and the configured URL is what names the repository.
+pub const PR_COMMAND: &str = r#"set -eu
+
+branch="work/$ARC_TASK"
+
+# 1. The GitHub repository of the configured remote. The raw URL is read, not
+#    `git remote get-url`, which would expand a url.*.insteadOf rewrite.
+url=$(git config --get "remote.$ARC_REMOTE.url") || {
+  echo "method = \"pr\": [repository] remote \"$ARC_REMOTE\" has no URL" >&2
+  exit 1
+}
+case "$url" in
+  git@github.com:*) repo=${url#git@github.com:} ;;
+  ssh://git@github.com/*) repo=${url#ssh://git@github.com/} ;;
+  https://github.com/*) repo=${url#https://github.com/} ;;
+  *) repo= ;;
+esac
+repo=${repo%.git}
+repo=${repo%/}
+case "$repo" in
+  ?*/?*) case "${repo#*/}" in */*) repo= ;; esac ;;
+  *) repo= ;;
+esac
+if [ -z "$repo" ]; then
+  echo "method = \"pr\": remote \"$ARC_REMOTE\" is \"$url\", not a GitHub URL (git@github.com:owner/name.git, https://github.com/owner/name.git or ssh://git@github.com/owner/name.git)" >&2
+  exit 1
+fi
+
+command -v gh >/dev/null 2>&1 || {
+  echo "method = \"pr\" needs gh on PATH; run gh auth login" >&2
+  exit 1
+}
+
+# 2. Push the verified head, never with force, so the pull request shows it.
+git push "$ARC_REMOTE" "refs/heads/$branch:refs/heads/$branch"
+
+# 3. The pull request whose head is the task branch. `gh pr view` finds an open one;
+#    `gh pr list --state all` also finds a closed or merged one.
+state=$(gh pr view "$branch" --repo "$repo" --json state --jq .state 2>/dev/null || true)
+if [ -z "$state" ]; then
+  state=$(gh pr list --repo "$repo" --head "$branch" --state all --json state --jq '.[0].state // empty' 2>/dev/null || true)
+fi
+
+if [ -z "$state" ]; then
+  # 4. No pull request yet: open one against the target branch and stay pending.
+  gh pr create --repo "$repo" --base "$ARC_TARGET_BRANCH" --head "$branch" \
+    --title "$ARC_TITLE ($ARC_TASK)" --body "Task $ARC_TASK: $ARC_TITLE" >/dev/null
+  echo pending
+  exit 0
+fi
+
+case "$state" in
+  OPEN)
+    echo pending
+    ;;
+  MERGED)
+    # 5. The PR merged; print the target branch as it is now, not the PR's merge
+    #    commit: others may have merged after it.
+    git fetch "$ARC_REMOTE" "$ARC_TARGET_BRANCH" >/dev/null 2>&1
+    git rev-parse FETCH_HEAD
+    ;;
+  CLOSED)
+    # 6. Closed without a merge.
+    echo closed
+    ;;
+  *)
+    echo "the pull request for $branch is \"$state\"; expected OPEN, MERGED or CLOSED" >&2
+    exit 1
+    ;;
+esac
+"#;
 
 impl IntegrationMethod {
     /// The stored spelling: the TOML value and the word the manual uses.
@@ -210,9 +290,9 @@ impl IntegrationMethod {
             .find(|value| value.as_str() == text)
     }
 
-    /// Whether this build runs the method.
-    pub fn is_built(self) -> bool {
-        matches!(self, IntegrationMethod::Push | IntegrationMethod::Command)
+    /// Whether the method runs a shell command line: `command`, or its `pr` preset.
+    pub fn runs_command(self) -> bool {
+        matches!(self, IntegrationMethod::Command | IntegrationMethod::Pr)
     }
 }
 
@@ -222,15 +302,14 @@ impl std::fmt::Display for IntegrationMethod {
     }
 }
 
-/// A value outside [`INTEGRATION_METHODS`] is refused by name when the file is read, and a
-/// value the list holds but this build does not run yet is refused as not built.
+/// A value outside [`INTEGRATION_METHODS`] is refused by name when the file is read.
 impl<'de> Deserialize<'de> for IntegrationMethod {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let text = String::deserialize(deserializer)?;
-        let value = Self::parse(&text).ok_or_else(|| {
+        Self::parse(&text).ok_or_else(|| {
             serde::de::Error::custom(format!(
                 "`integration.method` is `{text}`; it must be one of {}",
                 INTEGRATION_METHODS
@@ -239,14 +318,7 @@ impl<'de> Deserialize<'de> for IntegrationMethod {
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
-        })?;
-        if !value.is_built() {
-            return Err(serde::de::Error::custom(format!(
-                "`integration.method` is `{text}`; it is not built yet (this build runs `push` \
-                 and `command`)"
-            )));
-        }
-        Ok(value)
+        })
     }
 }
 
@@ -327,10 +399,10 @@ pub struct Integration {
     /// The branch integration merges into and pushes to. `None` is `[repository]
     /// main_branch`.
     pub target_branch: Option<String>,
-    /// How the candidate reaches the target branch: `push` or `command`.
+    /// How the candidate reaches the target branch: `push`, `command` or `pr`.
     pub method: IntegrationMethod,
     /// The one shell command line `method = "command"` runs, in the repository root, to merge
-    /// the candidate. Required by that method and refused with `push`.
+    /// the candidate. Required by that method and refused with `push` and `pr`.
     pub command: Option<String>,
     /// How the candidate is built: `merge`, `squash` or `rebase`.
     pub style: IntegrationStyle,
@@ -344,6 +416,19 @@ impl Default for Integration {
             method: IntegrationMethod::Push,
             command: None,
             style: IntegrationStyle::Merge,
+        }
+    }
+}
+
+impl Integration {
+    /// The command line the merge method runs: the configured one for `command`, the built-in
+    /// [`PR_COMMAND`] for `pr`, and `None` for `push` (ADR 0048 decision 10).
+    #[must_use]
+    pub fn command_line(&self) -> Option<&str> {
+        match self.method {
+            IntegrationMethod::Command => self.command.as_deref(),
+            IntegrationMethod::Pr => Some(PR_COMMAND),
+            IntegrationMethod::Push => None,
         }
     }
 }
@@ -724,8 +809,8 @@ task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of 
 [integration]
 key_commands = []             # what the integration stage runs on the merge candidate
 # target_branch = "main"      # not set: the value of [repository] main_branch
-# method = "push"             # `push`, or `command` with a `command` line below
-# command = "./merge.sh"     # the line `method = "command"` runs; refused with `push`
+# method = "push"             # `push`, `command` with a `command` line, or the `pr` gh preset
+# command = "./merge.sh"     # the line `method = "command"` runs; refused with `push` and `pr`
 # style = "merge"             # `merge`, `squash` or `rebase`: how the candidate is built
 
 [hooks]
@@ -811,8 +896,16 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 );
             }
         }
-        // The deserializer refuses `pr` as not built, so it never reaches here.
-        IntegrationMethod::Pr => {}
+        IntegrationMethod::Pr => {
+            if config.integration.command.is_some() {
+                return Err(
+                    "`integration.command` is set while `integration.method` is `pr`; `pr` is \
+                     the built-in `command` preset and runs no configured line, so remove the \
+                     command or set `integration.method = \"command\"`"
+                        .to_owned(),
+                );
+            }
+        }
     }
     // A command worker is one program and its arguments, and `exec_args` describes the other
     // worker line. Both set is ambiguous, so the file is refused by both names.
@@ -1322,9 +1415,9 @@ mod tests {
         }
     }
 
-    /// `integration.method` and `integration.style` are closed sets. Every style parses; the
-    /// method `command` is built and needs its command line, `pr` is refused as not built, and
-    /// an unknown value names every allowed one.
+    /// `integration.method` and `integration.style` are closed sets. Every method is built:
+    /// `command` needs its command line, `pr` runs the built-in preset and refuses a configured
+    /// line, and an unknown value names every allowed one.
     #[test]
     fn integration_method_and_style_are_closed_sets() {
         let methods: Vec<&str> = INTEGRATION_METHODS
@@ -1347,16 +1440,10 @@ mod tests {
             };
             let text =
                 format!("schema_version = 1\n[integration]\nmethod = \"{value}\"\n{command}");
-            if value.is_built() {
-                assert_eq!(
-                    parse(&text).expect("a built method").integration.method,
-                    *value
-                );
-            } else {
-                let error = parse(&text).expect_err("an unbuilt method");
-                assert!(error.contains("not built yet"), "{error}");
-                assert!(error.contains(value.as_str()), "{error}");
-            }
+            assert_eq!(
+                parse(&text).expect("a built method").integration.method,
+                *value
+            );
         }
         // `command` and `method` belong to each other.
         let missing = parse("schema_version = 1\n[integration]\nmethod = \"command\"\n")
@@ -1374,6 +1461,15 @@ mod tests {
                 .expect_err("push refuses a command");
         assert!(pushed.contains("integration.command"), "{pushed}");
         assert!(pushed.contains("push"), "{pushed}");
+        let preset =
+            parse("schema_version = 1\n[integration]\nmethod = \"pr\"\ncommand = \"true\"\n")
+                .expect_err("pr refuses a command");
+        assert!(preset.contains("integration.command"), "{preset}");
+        assert!(preset.contains("pr"), "{preset}");
+        assert!(
+            !PR_COMMAND.is_empty(),
+            "the `pr` preset is one script the manual shows in full"
+        );
         for value in INTEGRATION_STYLES {
             assert_eq!(IntegrationStyle::parse(value.as_str()), Some(*value));
             let text = format!("schema_version = 1\n[integration]\nstyle = \"{value}\"\n");

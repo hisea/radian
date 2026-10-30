@@ -2458,6 +2458,12 @@ mod tests {
         arc_page("arc/index.md")
     }
 
+    /// `docs/user/arc/integration.md`, the page the merge styles, the command method and the
+    /// `pr` preset are checked against.
+    fn arc_integration_md() -> String {
+        arc_page("arc/integration.md")
+    }
+
     /// `docs/user/arc/loop.md`, the page the scheduling loop and its log are checked against.
     fn arc_loop_md() -> String {
         arc_page("arc/loop.md")
@@ -2961,6 +2967,52 @@ mod tests {
                 "arc/files.md's `{key}` row lists the code's closed list: {row:?}"
             );
         }
+    }
+
+    /// The `pr` preset's script is one constant in the code, and `arc/integration.md` shows it
+    /// in full: the `sh` block under `### The pull-request preset` is exactly
+    /// `radian_arc::store::config::PR_COMMAND`. A change to either fails here.
+    #[test]
+    fn the_pr_preset_script_in_arc_integration_md_is_the_code_constant() {
+        let doc = arc_integration_md();
+        let documented = fenced_block_under(&doc, "### The pull-request preset", "sh");
+        assert_eq!(
+            documented,
+            radian_arc::store::config::PR_COMMAND,
+            "arc/integration.md's `pr` preset differs from radian_arc::store::config::PR_COMMAND"
+        );
+    }
+
+    /// The first fenced block of `language` under `heading` on a page, with each line and its
+    /// newline: the `pr` preset is compared byte for byte with the code's constant.
+    fn fenced_block_under(doc: &str, heading: &str, language: &str) -> String {
+        let mut lines = doc.lines();
+        while let Some(line) = lines.next() {
+            if line.trim_end() != heading {
+                continue;
+            }
+            let mut block = String::new();
+            let mut in_block = false;
+            for line in lines.by_ref() {
+                let trimmed = line.trim_start();
+                if !in_block && trimmed.starts_with('#') {
+                    break;
+                }
+                if !in_block && trimmed.starts_with("```") {
+                    in_block = trimmed.trim_start_matches('`').trim() == language;
+                    continue;
+                }
+                if in_block {
+                    if trimmed.starts_with("```") {
+                        return block;
+                    }
+                    block.push_str(line);
+                    block.push('\n');
+                }
+            }
+            panic!("arc/integration.md has no fenced `{language}` block under `{heading}`");
+        }
+        panic!("arc/integration.md has no heading `{heading}`");
     }
 
     /// Every environment variable the wrapper adds for a command worker appears in the

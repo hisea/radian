@@ -66,7 +66,8 @@ pub(crate) const INTEGRATION_POINT: &str = "integration";
 
 /// The environment the `[integration] command` receives (ADR 0048 decisions 6 and 10): the
 /// hook variables, with `ARC_HOOK=integration` and `ARC_STATE` naming the phase the merge
-/// runs in, plus `ARC_CANDIDATE_SHA`. `ARC_MERGED_SHA` belongs to `after_merge` and is not
+/// runs in, plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` (the configured remote the command pushes
+/// to) and `ARC_TITLE` (the task's title). `ARC_MERGED_SHA` belongs to `after_merge` and is not
 /// set: the command runs before there is a merged sha.
 pub(crate) fn command_env(
     store: &Store,
@@ -76,6 +77,8 @@ pub(crate) fn command_env(
 ) -> Vec<(&'static str, String)> {
     let mut env = env_for(store, config, task, INTEGRATION_POINT);
     env.push(("ARC_CANDIDATE_SHA", candidate.to_owned()));
+    env.push(("ARC_REMOTE", config.repository.remote.clone()));
+    env.push(("ARC_TITLE", task.title.clone()));
     env
 }
 

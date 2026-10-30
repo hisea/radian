@@ -593,13 +593,17 @@ Then it:
 2. runs the integration stage against the current remote target branch (`[integration] target_branch`, else `[repository] main_branch`). The candidate is built with `[integration] style` and the current `[integration] key_commands` run on it (see [Integration](integration.md)).
    A conflict, a failing key command, or a refused `rebase` moves the task to `review.rework_pending` with the reason, and `merge` exits `0`.
    A passing integration moves the task to `review.ready_to_merge`.
-3. lands the candidate: `push` pushes it to the remote target branch without force and integrates again when the target moved or the push was rejected, at most 3 times in one command; `command` runs `[integration] command` and reads its last non-empty line — a 40-hex sha is checked, `pending` leaves the task for a later run, and `closed` or any other line is a failed integration (see [the command method](integration.md#the-command-method)).
+3. lands the candidate as [`integration.method`](files.md#configtoml) says: `push` pushes it to the remote target branch without force and integrates again when the target moved or the push was rejected, at most 3 times in one command; `command` runs the line and `pr` the built-in preset, and arc reads their last non-empty line (see [the command method](integration.md#the-command-method) and [the pull-request preset](integration.md#the-pull-request-preset)).
    A push that does not settle or a `pending` answer exits `3`, and a later `merge` continues.
-4. checks that what landed is the candidate (see [The after-push check](integration.md#the-after-push-check) and [the command check](integration.md#the-command-check)). A failed check records the reason and moves the task to `review.rework_pending`; it never reaches `done.merged`. On a passing check it moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing (the branch stays on the remote until a hook deletes it); the default `[hooks] after_merge` lines do (see [Hooks](#hooks)).
+4. checks that what landed is the candidate (see [The after-push check](integration.md#the-after-push-check) and [the command check](integration.md#the-command-check)). On a passing check it moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing (the branch stays on the remote until a hook deletes it); the default `[hooks] after_merge` lines do (see [Hooks](#hooks)).
 
 On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A hook command that fails is a `warning:` line after it and does not undo the merge, and neither does a follow-up task that could not be added. It runs its pending hook unless a loop holds `runner.lock`, which runs it.
 
-The exit codes are the command's own:
+### The pull-request preset
+
+`[integration] method = "pr"` is the built-in `command` method for a protected branch on GitHub.
+It runs a fixed script in place of [`integration.command`](files.md#configtoml), through the same runner with the same environment and the same answer, check and `pending` handling (see [the command method](integration.md#the-command-method)); `[integration] command` with `method = "pr"` is a config error, as `command` with `method = "push"` is.
+The script in full, its `--repo` rule, its `gh` requirement and the way to use another host are in [the pull-request preset](integration.md#the-pull-request-preset).
 
 ### Merge exit codes
 
@@ -607,7 +611,7 @@ The exit codes are the command's own:
 |---|---|---|
 | `0` | success | The task reached `done.merged`, or the integration sent it to `review.rework_pending`. |
 | `1` | an error | A git or file error. |
-| `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), 3 integration runs did not settle, or an `[integration] command` answered `pending`. |
+| `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), 3 integration runs did not settle, or an `[integration] command` (or the `pr` preset) answered `pending`. |
 | `4` | a lock is held by another process | Another process holds `state.lock`. |
 
 ## Hooks
@@ -705,14 +709,8 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-The TUI never holds `runner.lock` and runs no pass. When it opens, it starts `radian arc serve` with the default interval as a detached process if no loop holds the lock; `R` starts one the same way while none runs.
-The header shows `loop ● running (pid <n>)` for any holder (the pid appears when the holder recorded a readable one, otherwise it is plain `loop ● running`), `loop ◌ starting` until the loop it started records its own pid in `runner.lock`, and `loop ○ stopped` when none runs; a failed start adds one footer line with its reason and exit code.
-The newest transition line `loop.log` gained since the TUI opened is the footer's ticker, and `L` opens a view of the last 500 lines.
-`q` and SIGTERM close the TUI and nothing else: a loop it started keeps running, and an attempt it left running is reconciled by the next loop.
-A running task's diff tab shows the worker's worktree against the attempt's `base_sha`, uncommitted files included (`live · worktree`), refreshed every 5 seconds.
-A bare `radian arc` opens the TUI; the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc/tui`](tui.md).
-The plans page shows one of four views (`active` by default, then `all`, `done`, `cancelled`; `f` cycles them) and each plan draws one of seven marks — `✕` cancelled, `◌` draft, `◉` needs you, `●` running, `◍` paused, `○` queued, `✓` done — in its own `plan_*` theme role, with `P<n>` by its id and in the frame label.
-Its `x`, `c`, `+`/`-` and `o` cancel, confirm, step the priority and cycle the order (`priority`, `state`, `id`); the mark rules and the columns are in [the plans page](tui.md#the-plans-page).
+The TUI never holds `runner.lock` and runs no pass; when it opens it starts `radian arc serve` if no loop holds the lock, and quitting it stops nothing.
+The header and ticker, the log view, the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc/tui`](tui.md).
 
 ## Not built yet
 

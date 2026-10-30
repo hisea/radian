@@ -40,7 +40,7 @@ use crate::gate::{
     merge_ready, required_passed, run_shell, verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
-use crate::store::config::{Config, IntegrationMethod, IntegrationStyle};
+use crate::store::config::{Config, IntegrationStyle};
 use crate::store::{Error, Loaded, Store, model};
 
 /// The file in an attempt's run directory that holds the last verify or merge reason.
@@ -2374,7 +2374,7 @@ pub fn merge_as(store: &Store, task_id: &str, approver: Option<&str>) -> Result<
     // rebuilding the candidate, unless the target branch moved (ADR 0048 decision 6).
     let resuming = store.load_task(task_id)?.item.phase == "integrating";
     let context = prepare_merge(store, task_id, approver)?;
-    let command_method = store.config()?.integration.method == IntegrationMethod::Command;
+    let command_method = store.config()?.integration.method.runs_command();
     let mut prepared = if command_method && resuming {
         reusable_command_verdict(store, &context)?
     } else {
@@ -2737,7 +2737,7 @@ fn finish_integration(
         Ok(())
     })?;
     let config = store.config()?;
-    if config.integration.method == IntegrationMethod::Command {
+    if config.integration.method.runs_command() {
         return finish_by_command(
             store,
             context,
@@ -2841,12 +2841,14 @@ fn finish_integration(
 /// line in the repository root, read its last non-empty line, and check what it reports
 /// (ADR 0048 decision 6).
 ///
-/// The environment is the hooks' ([`crate::hooks::command_env`]), plus `ARC_CANDIDATE_SHA`;
-/// `GIT_DIR`, `GIT_WORK_TREE` and the other repository variables of arc's own process are
-/// removed, so the command's git calls name the repository root it runs in
-/// ([`crate::git::REPOSITORY_ENV`]). The timeout is `[gate] command_timeout_secs`. A line that
+/// The environment is the hooks' ([`crate::hooks::command_env`]), plus `ARC_CANDIDATE_SHA`,
+/// `ARC_REMOTE` and `ARC_TITLE`; `GIT_DIR`, `GIT_WORK_TREE` and the other repository variables
+/// of arc's own process are removed, so the command's git calls name the repository root it runs
+/// in ([`crate::git::REPOSITORY_ENV`]). The timeout is `[gate] command_timeout_secs`. A line that
 /// is neither a 40-hex sha, `pending` nor `closed`, a non-zero exit and a timeout are all a
 /// failed integration.
+/// `method = "pr"` reaches this function through [`crate::store::config::Integration::command_line`],
+/// which answers the built-in [`crate::store::config::PR_COMMAND`] preset instead of a line.
 #[allow(clippy::too_many_arguments)]
 fn finish_by_command(
     store: &Store,
@@ -2858,7 +2860,7 @@ fn finish_by_command(
     config: &Config,
 ) -> Result<Integration, Error> {
     let task_id = context.task_id.as_str();
-    let Some(line) = config.integration.command.as_deref() else {
+    let Some(line) = config.integration.command_line() else {
         // `config::parse` refuses this pairing, so reaching it means the file is not one arc
         // reads; a merge outcome would hide that.
         return Err(Error::Failed(
@@ -2970,10 +2972,12 @@ fn finish_by_command(
     }
 }
 
-/// The check ADR 0048 decision 6 makes on what a merge command reported: after a fetch the
-/// sha must be on the remote target branch (equal to its tip or in its history), and its tree
-/// must be the candidate's tree. Exact sha equality is not required. `None` when both hold;
-/// otherwise the reason the merge did not land the candidate.
+/// The check ADR 0048 decision 10 makes on what a merge command reported: after a fetch the
+/// sha must be on the remote target branch (equal to its tip or in its history), and the
+/// candidate's tree must be the tree of that sha or of one of its ancestors. The tree is a
+/// history lookup, not an exact comparison with the reported sha, so a target branch that
+/// gained other merges after the merge still passes. Exact sha equality is not required.
+/// `None` when both hold; otherwise the reason the merge did not land the candidate.
 fn check_command_landed(
     store: &Store,
     context: &MergeContext,
@@ -3005,14 +3009,23 @@ fn check_command_landed(
             context.remote, context.target_branch
         )));
     }
-    let reported = git(store.repo(), &["rev-parse", &format!("{sha}^{{tree}}")])?;
     let expected = git(
         store.repo(),
         &["rev-parse", &format!("{candidate}^{{tree}}")],
     )?;
-    if !reported.success() || reported.stdout.trim() != expected.stdout.trim() {
+    if !expected.success() {
+        return Ok(Some(format!("candidate {candidate} has no tree")));
+    }
+    let expected_tree = expected.stdout.trim();
+    let history = git(store.repo(), &["log", "--format=%T", sha, "--"])?;
+    if !history.success()
+        || !history
+            .stdout
+            .lines()
+            .any(|line| line.trim() == expected_tree)
+    {
         return Ok(Some(format!(
-            "the tree of `{sha}` is not the tree of candidate {candidate}"
+            "the tree of candidate {candidate} is not in the history of `{sha}`"
         )));
     }
     Ok(None)
@@ -3478,7 +3491,7 @@ pub fn merge_step(store: &Store, task_id: &str, stop: bool) -> Result<MergeStep,
         // and no gate record: run the command again with the candidate it built, as long as
         // the target branch is still the one in the verdict. A moved target rebuilds the
         // candidate through a new gate below (ADR 0048 decision 6).
-        if record.is_none() && store.config()?.integration.method == IntegrationMethod::Command {
+        if record.is_none() && store.config()?.integration.method.runs_command() {
             let context = prepare_merge(store, task_id, Some("auto"))?;
             if let Some((path, verdict)) = reusable_command_verdict(store, &context)? {
                 return match finish_integration(store, &context, &verdict, &path, 1)? {

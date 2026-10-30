@@ -1,6 +1,6 @@
 # arc gate 合批：几个 task 一起过一次完整 Verify
 
-- 状态：decided（可以派发；排在 `arc-landing.md` 之后：合批是合并方式的一种，`method = "batch"`，两项改同一块 integration 代码）
+- 状态：decided（可以派发；排在已落地的合并方式之后：合批是合并方式的一种，`method = "batch"`，两项改同一块 integration 代码）
 - 涉及 ADR：0048（§10 gate 与 integration 候选、§11 批准与 `verdict_set_digest`、§13 调度循环）
 - 来源：arc 第二个 plan 的复盘后的讨论
 
