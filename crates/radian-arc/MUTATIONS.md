@@ -1830,3 +1830,5 @@ files were restored from the copies with `cp` and confirmed identical with `diff
 | TK0241-M10 | `common::isolate_git` drops `GIT_DIR` from the variables it removes | `merge_command::common::scratch_tests::the_git_isolation_helper_removes_the_repository_variables` (`GIT_DIR` is not removed) | ✅ 1 failed |
 
 4/4 caught.
+
+Re-run on the final code, once each, with the same commands and backups under `.radian/mut3/`: M7 is still caught by `merge_command::a_worker_environment_with_git_dir_does_not_redirect_the_merge_command`, M8 and M9 by `merge_command::the_config_guard_fails_and_restores_a_changed_config`, and M10 by `merge_command::common::scratch_tests::the_git_isolation_helper_removes_the_repository_variables`.
