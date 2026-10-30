@@ -3389,3 +3389,7 @@ confirmed byte-identical with `shasum -a 256`; the named test ran with
 |---|---|---|---|
 | TK0248-M5 | `list_manual` prints every page for either manual instead of the manual's own pages | ✅ 1 failed (rc=100) | `radian_docs_prints_the_radian_manual_and_the_arc_entry` (the listing included every arc page) |
 | TK0248-M6 | the `arc: ...` line is deleted from the documented `radian docs` listing in `docs/user/cli.md` | ✅ 1 failed (rc=100) | `the_manual_states_the_exact_radian_docs_output` (the documented block no longer matched stdout) |
+| aeo-M1 | the docs page JSON-LD record's `@type` is `Article` instead of `TechArticle` | ✅ 1 failed (rc=100) | `every_docs_page_carries_a_tech_article_record` |
+| aeo-M2 | `json_ld` no longer writes `</` as `<\/` | ✅ 1 failed (rc=100) | `a_description_cannot_close_the_json_ld_element` (a description holding `</script>` closed the element early) |
+| aeo-M3 | `llms_txt` lists the landing page twice | ✅ 1 failed (rc=100) | `the_llms_files_list_every_page_once` |
+| aeo-M4 | `page_url` gives `docs/arc/index.html` instead of `docs/arc/` for a subdirectory index | ✅ 1 failed (rc=100) | `every_docs_page_carries_a_tech_article_record` (the `arc/index` URL assertion) |
