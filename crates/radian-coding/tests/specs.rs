@@ -229,9 +229,9 @@ async fn radian_core_accepts_the_ask_user_spec() {
     chat.close().await.unwrap();
 }
 
-/// ADR 0043 decision 1: `read` on a directory lists it; the image branch says what it does.
-/// The description says both in one sentence each (decision 5's budget: the serialized spec
-/// stays within 1500 bytes).
+/// ADR 0043 decision 4: `read` on a directory lists it; the image branch says what it does.
+/// The description says both in one sentence each, and the serialized spec stays within the
+/// 1800-byte size pin measured below.
 #[tokio::test]
 async fn the_read_spec_names_directory_listing() {
     let dir = TempDir::new("read-dir-spec");
