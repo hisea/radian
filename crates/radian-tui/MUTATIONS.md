@@ -3405,3 +3405,7 @@ and restored from that copy (never `git checkout`), confirmed byte-identical wit
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0254-M1 | a moved link points at `config.md#gone`, a heading `arc/config.md` does not have | ✅ 1 failed (rc=100) | `every_link_resolves_to_a_page_and_heading` (the site render failed: `config.md` has no heading `#gone`) |
+| aeo-M1 | the docs page JSON-LD record's `@type` is `Article` instead of `TechArticle` | ✅ 1 failed (rc=100) | `every_docs_page_carries_a_tech_article_record` |
+| aeo-M2 | `json_ld` no longer writes `</` as `<\/` | ✅ 1 failed (rc=100) | `a_description_cannot_close_the_json_ld_element` (a description holding `</script>` closed the element early) |
+| aeo-M3 | `llms_txt` lists the landing page twice | ✅ 1 failed (rc=100) | `the_llms_files_list_every_page_once` |
+| aeo-M4 | `page_url` gives `docs/arc/index.html` instead of `docs/arc/` for a subdirectory index | ✅ 1 failed (rc=100) | `every_docs_page_carries_a_tech_article_record` (the `arc/index` URL assertion) |

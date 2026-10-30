@@ -4,6 +4,19 @@ Static site: two pages, `index.html` (radian) and `arc.html` (arc), each in one 
 
 Preview: `python3 -m http.server -d site 8000`.
 
+## Machine-readable pages
+
+Each hand-written page carries one Schema.org `SoftwareApplication` record in a
+`<script type="application/ld+json">` element in its `<head>`; every generated docs page
+carries a `TechArticle` record with its title, description and absolute URL. The generator
+also writes `llms.txt` (one line per page with its description, in sidebar order, after the
+two hand-written pages) and `llms-full.txt` (every manual page's Markdown under its URL)
+at the site root. All of it comes from the `DOCS` table, so a new manual page is listed
+without any edit here; the two hand-written pages' lines live in
+`crates/radian-tui/src/site_docs.rs` (`HAND_WRITTEN_PAGES`). GitHub Pages sends no custom
+response headers, so the site has no `Strict-Transport-Security` header; it redirects
+`http://` to `https://` with a 301.
+
 ## The terminal figure
 
 Figure 1 is a frame rendered by the TUI prototype script, pasted into `index.html` twice (`.frame-light`, `.frame-dark`). To regenerate:
@@ -30,7 +43,8 @@ Every push to `main` that changes `site/**`, `docs/user/**`, the generator
 (`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
 or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
 copies `index.html`, `arc.html`, `favicon.svg`, `docs.css` and `media/` from `site/` into `_site/`,
-runs the generator into `_site/docs/`, writes `_site/CNAME` with `getrad.dev`,
+runs the generator into `_site/docs/` (which also writes `_site/llms.txt` and
+`_site/llms-full.txt`), writes `_site/CNAME` with `getrad.dev`,
 then configures and uploads the Pages artifact.
 
 ## Preview the docs
@@ -42,7 +56,7 @@ cp -r site/media /tmp/site/media
 python3 -m http.server -d /tmp/site 8000
 ```
 
-then open `http://localhost:8000/docs/`.
+then open `http://localhost:8000/docs/`, `http://localhost:8000/llms.txt` and `http://localhost:8000/llms-full.txt`.
 
 ## One source
 
