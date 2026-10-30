@@ -1307,6 +1307,7 @@ async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
         &root,
         Limits {
             max_grep_output_bytes: 16 << 20,
+            max_grep_file_bytes: 16 << 20,
             ..Limits::default()
         },
     );
@@ -1341,6 +1342,7 @@ async fn grep_byte_cap_stays_bounded_when_full_body_is_many_times_the_cap() {
         &root,
         Limits {
             max_grep_output_bytes: 8192,
+            max_grep_file_bytes: 16 << 20,
             ..Limits::default()
         },
     );
@@ -1774,4 +1776,172 @@ async fn glob_mixes_workspace_and_read_only_root_paths_with_their_own_prefixes()
         body.contains("dep-1.0.0/src/lib.rs") && body.contains(&*registry.to_string_lossy()),
         "the registry hit stays absolute: {body}"
     );
+}
+
+// ---------- the per-file size cap for directory and glob searches ----------
+
+/// Writes a file of exactly `size` bytes whose first line is `needle`, so the scan finds the
+/// match at line 1 whatever the size. The remainder is one long `x` line; `MAX_LINE_BYTES`
+/// keeps reading it bounded.
+fn write_sized(dir: &TempDir, name: &str, size: usize) -> PathBuf {
+    let mut content = String::from("needle\n");
+    assert!(size >= content.len(), "the fixture holds the match line");
+    content.push_str(&"x".repeat(size - content.len()));
+    dir.write(name, &content)
+}
+
+/// Edge case 1: exactly 262144 bytes is searched, one byte more is skipped and named.
+#[tokio::test]
+async fn grep_searches_a_file_at_the_size_cap_and_skips_one_byte_over() {
+    let dir = TempDir::new("grep-size-cap-boundary");
+    let root = dir.file("ws");
+    write_sized(&dir, "ws/at.txt", 262144);
+    write_sized(&dir, "ws/over.txt", 262145);
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.contains("at.txt:1:needle"),
+        "a file of exactly 262144 bytes is searched: {body}"
+    );
+    assert!(
+        !body.contains("over.txt:1:needle"),
+        "a file of 262145 bytes is not searched: {body}"
+    );
+    assert_eq!(
+        body.lines().last(),
+        Some("[skipped 1 files over 262144 bytes: over.txt]"),
+        "the one skipped file is named at the end: {body}"
+    );
+}
+
+/// Edge case 2: the same large file named directly as `path` is searched, with no note.
+#[tokio::test]
+async fn grep_searches_a_large_file_named_as_path() {
+    let dir = TempDir::new("grep-size-cap-file-path");
+    let root = dir.file("ws");
+    write_sized(&dir, "ws/big.txt", 262145);
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "big.txt"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&out), "big.txt:1:needle\n");
+}
+
+/// Edge case 3: a glob matching only large files has no matches; the note is the whole
+/// result, not a `[no matches]` line beside it.
+#[tokio::test]
+async fn grep_a_glob_over_large_files_only_is_the_skip_note_alone() {
+    let dir = TempDir::new("grep-size-cap-glob-only");
+    let root = dir.file("ws");
+    write_sized(&dir, "ws/big.bin", 262145);
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "glob": "*.bin"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&out), "[skipped 1 files over 262144 bytes: big.bin]\n");
+    assert_eq!(structured(&out)["matches"], json!(0));
+    assert_eq!(structured(&out)["truncated"], json!(false));
+}
+
+/// Edge case 4: seven skipped files name five and count the other two.
+#[tokio::test]
+async fn grep_names_five_skipped_files_and_counts_the_rest() {
+    let dir = TempDir::new("grep-size-cap-many");
+    let root = dir.file("ws");
+    for i in 0..7 {
+        write_sized(&dir, &format!("ws/big{i}.bin"), 262145);
+    }
+    let tools = tools(&root);
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "glob": "*.bin"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&out),
+        "[skipped 7 files over 262144 bytes: big0.bin, big1.bin, big2.bin, big3.bin, \
+         big4.bin, and 2 more]\n"
+    );
+    assert_eq!(structured(&out)["matches"], json!(0));
+}
+
+/// Edge case 5: `files` and `count` both carry the note, and both exclude the skipped file
+/// from their counts.
+#[tokio::test]
+async fn grep_files_and_count_modes_name_skipped_files_and_exclude_them() {
+    let dir = TempDir::new("grep-size-cap-modes");
+    let root = dir.file("ws");
+    dir.write("ws/small.txt", "needle one\nneedle two\n");
+    write_sized(&dir, "ws/big.txt", 262145);
+    let tools = tools(&root);
+
+    let files = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "files"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&files),
+        "small.txt: 2 matches\n[skipped 1 files over 262144 bytes: big.txt]\n"
+    );
+    assert_eq!(structured(&files)["matches"], json!(2));
+    assert_eq!(structured(&files)["files"], json!(1));
+
+    let count = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "output": "count"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        text(&count),
+        "2 matches in 1 file\n[skipped 1 files over 262144 bytes: big.txt]\n"
+    );
+    assert_eq!(structured(&count)["matches"], json!(2));
+    assert_eq!(structured(&count)["files"], json!(1));
+}
+
+/// Edge case 6: the large file holds the only match, so the result is the note alone; naming
+/// that file as `path` reaches the match.
+#[tokio::test]
+async fn grep_a_large_file_holding_the_only_match_is_named_by_the_skip_note() {
+    let dir = TempDir::new("grep-size-cap-only-match");
+    let root = dir.file("ws");
+    dir.write("ws/small.txt", "nothing here\n");
+    write_sized(&dir, "ws/big.txt", 262145);
+    let tools = tools(&root);
+
+    let out = call(&tools, "grep", json!({"pattern": "needle"}))
+        .await
+        .unwrap();
+    assert_eq!(text(&out), "[skipped 1 files over 262144 bytes: big.txt]\n");
+
+    let named = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": "big.txt"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&named), "big.txt:1:needle\n");
 }

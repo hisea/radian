@@ -935,3 +935,16 @@ The docs drift test's own failure was checked the same way: changing the per-fil
 with "tools.md names the 50 per-file cap"; the page was restored from `.radian/tools.md.orig`
 and confirmed byte-identical with `shasum -a 256`.
 
+## TK0245: grep skips large files (2026-10-29, branch `work/TK0245-grep-skips-large-files`)
+
+A directory or `glob` search now leaves a regular file over `max_grep_file_bytes` (262144)
+unscanned and names it in one trailing note; a file named directly as `path` is always
+searched. The mutation was applied by hand to `crates/radian-coding/src/grep.rs`, backed up
+under `.radian/grep.rs.orig` and restored from that copy (never `git checkout`), confirmed
+byte-identical with `shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test search -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0245-M1 | the cap comparison `>` → `>=` (a file of exactly 262144 bytes is skipped too) | ✅ 1 failed (rc=100) | `grep_searches_a_file_at_the_size_cap_and_skips_one_byte_over` (the note named `at.txt` and `over.txt`, so the boundary file was not searched) |
+

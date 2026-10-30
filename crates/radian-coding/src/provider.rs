@@ -47,6 +47,12 @@ pub struct Limits {
     /// the data shows large results come mainly from context lines, and 16 KiB still
     /// holds about fifty short match lines while that context bloat is cut.
     pub max_grep_output_bytes: usize,
+    /// Largest regular file a directory or `glob` `grep` search opens, in bytes. A larger
+    /// file is not scanned and is named in one trailing note; a file named directly as
+    /// `path` is always searched. 256 KiB keeps a generated snapshot or lockfile from
+    /// drowning the matches while leaving ordinary source files untouched. Not
+    /// model-settable.
+    pub max_grep_file_bytes: usize,
     /// `shell`'s output budget **per stream** when the model does not give one. Smaller than
     /// `default_read_bytes`: a shell result competes with the rest of the turn, and a truncated
     /// foreground result stays retrievable through `job` (ADR 0037 decision 3a).
@@ -95,6 +101,7 @@ impl Default for Limits {
             default_grep_matches_per_file: 50,
             max_grep_context: 30,
             max_grep_output_bytes: 16 << 10, // 16 KiB, a quarter of `read`'s default
+            max_grep_file_bytes: 256 << 10,  // 256 KiB
             // Per stream. 24 KiB sits inside the brief's 16-32 KiB band and below what other
             // agents show inline (30k chars, 50 KB, ~10k tokens ≈ 40 KiB): it halves the
             // previous 64 KiB per stream, still fits a typical failure tail, is divisible by 8
