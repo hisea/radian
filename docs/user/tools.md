@@ -19,15 +19,17 @@ see `permissions` for the exact rule.
 | Argument | Type | Default | What it does |
 |---|---|---|---|
 | `path` | string, required | — | A file, a directory, or an image. A workspace path, as `permissions` defines it; absolute or `~` for a read-only root. |
-| `max_bytes` | integer, 1 to 1048576 | `65536` | Maximum bytes of text to read. |
+| `max_bytes` | integer, 1 to 1048576 | `16384` | Maximum bytes of text to read. |
 | `offset` | integer, 1-based, negative counts from the end | `1` | First text line to read. |
-| `limit` | integer, at least 1 for text and directory reads | `500` | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. Ignored for an image. |
+| `limit` | integer, at least 1 for text and directory reads | `200` lines for a file, `500` entries for a directory | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. Ignored for an image. |
 
 A text read prefixes each line with its file line number and `": "`.
 That prefix is not file content; remove it before you reuse the text in `patch`.
 A whole file enters the context at its full size; after `grep` locates lines, read the range around them with `offset` and `limit`, and read a whole file only when it is small or the task needs all of it.
+When a read stops at the 200-line limit or the byte budget, it ends with `[truncated: continue with offset=<next>]`; read on from that line.
 A directory read lists `kind`, size and name rows, sorted by name.
 `radian://docs/<page>.md` reads this manual from memory.
+A manual page read with no `max_bytes` uses a 65536-byte budget and no line limit, so a page reads whole.
 A path that names a directory reads its `index.md` (`radian://docs/arc/`).
 
 ### Images

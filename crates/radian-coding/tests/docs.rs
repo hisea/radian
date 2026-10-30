@@ -144,6 +144,58 @@ async fn a_docs_page_reads_like_a_file() {
     );
 }
 
+/// Defaults, case 8: a manual page keeps its own 64 KiB budget and has no line default, so a
+/// page over both file defaults still reads whole with no note. `configuration.md` is over
+/// 16 KiB and over 200 lines; `tools.md` is the page the manual names for `read`.
+#[tokio::test]
+async fn a_docs_page_reads_whole_beyond_the_file_defaults() {
+    let dir = TempDir::new("docs-page-defaults");
+    let tools = tools(dir.path());
+    let limits = radian_coding::Limits::default();
+    for name in ["tools.md", "configuration.md"] {
+        let embedded = radian_coding::docs::find(name).expect("the page exists");
+        let output = call(
+            &tools,
+            "read",
+            json!({"path": format!("radian://docs/{name}")}),
+        )
+        .await
+        .expect("a docs page reads");
+        let info = structured(&output);
+        assert_eq!(
+            info["bytes_read"].as_u64(),
+            Some(embedded.len() as u64),
+            "{name} reads whole: {info}"
+        );
+        assert_eq!(
+            info["end_line"].as_u64(),
+            Some(embedded.lines().count() as u64),
+            "{name} reads every line: {info}"
+        );
+        assert_eq!(info["truncated"], false, "{name}: {info}");
+        assert!(info.get("next_offset").is_none(), "{name}: {info}");
+        // The page's own text may discuss truncation notes; the read must not append one, so
+        // the body ends with the page's last line instead of a tool note.
+        let last_line = embedded.lines().last().unwrap_or_default();
+        let last_numbered = format!("{}: {}\n", embedded.lines().count(), last_line);
+        assert!(
+            text(&output).ends_with(&last_numbered),
+            "{name} ends with its own last line, not a note:\n{}",
+            text(&output)
+        );
+        if name == "configuration.md" {
+            assert!(
+                embedded.len() > limits.default_read_bytes,
+                "the page is over the file byte default"
+            );
+            assert!(
+                embedded.lines().count() > limits.default_read_lines,
+                "the page is over the file line default"
+            );
+        }
+    }
+}
+
 /// An unknown page names the available pages.
 #[tokio::test]
 async fn an_unknown_docs_page_lists_the_pages() {
@@ -238,10 +290,10 @@ fn the_embedded_manual_has_a_size_cap() {
     assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
 }
 
-/// Every page stays under 56 KiB (57,344 bytes), below the read tool's 65,536-byte
-/// default cap: a page that drifts up would no longer read whole, which is what
-/// `a_docs_page_reads_like_a_file` and `radian docs <topic>` rely on. The failure names
-/// the page and its size.
+/// Every page stays under 56 KiB (57,344 bytes), below the manual's own 65,536-byte read
+/// budget (`Limits::default_manual_read_bytes`): a page that drifts up would no longer read
+/// whole, which is what `a_docs_page_reads_like_a_file` and `radian docs <topic>` rely on. The
+/// failure names the page and its size.
 #[test]
 fn every_user_manual_page_is_at_most_56_kib() {
     const CAP: usize = 56 * 1024;
@@ -471,6 +523,50 @@ fn the_manual_names_the_grep_limits_from_the_code() {
         )),
         "tools.md shows the note's shape with the {} file-size cap",
         limits.max_grep_file_bytes
+    );
+}
+
+/// `read`'s limits are the code's, not prose that can drift: the manual's `## \`read\`` table
+/// shows the byte budget, the file line cap and both directory entry counts from `Limits`.
+#[test]
+fn the_manual_names_the_read_limits_from_the_code() {
+    let text = radian_coding::docs::find("tools.md").expect("tools.md is in the table");
+    let limits = radian_coding::Limits::default();
+    let rows = radian_coding::drift::table_under(text, "tools.md", "## `read`");
+    let row = |name: &str| {
+        rows.iter()
+            .find(|row| {
+                row.first()
+                    .is_some_and(|cell| cell.trim_matches('`') == name)
+            })
+            .unwrap_or_else(|| panic!("tools.md's `read` table has a `{name}` row: {rows:?}"))
+    };
+    let default_bytes = limits.default_read_bytes.to_string();
+    assert_eq!(
+        row("max_bytes").get(2).map(|cell| cell.trim_matches('`')),
+        Some(default_bytes.as_str()),
+        "the `max_bytes` default comes from the code: {:?}",
+        row("max_bytes")
+    );
+    let limit = row("limit");
+    let default_cell = limit.get(2).map(String::as_str).unwrap_or_default();
+    let default_lines = limits.default_read_lines.to_string();
+    let default_entries = limits.default_list_entries.to_string();
+    assert!(
+        default_cell.contains(&default_lines),
+        "the `limit` default names {} lines for a file: {default_cell}",
+        limits.default_read_lines
+    );
+    assert!(
+        default_cell.contains(&default_entries),
+        "the `limit` default names {} entries for a directory: {default_cell}",
+        limits.default_list_entries
+    );
+    let max_entries = limits.max_list_entries.to_string();
+    assert!(
+        limit.iter().any(|cell| cell.contains(&max_entries)),
+        "the `limit` row names the {} entry maximum: {limit:?}",
+        limits.max_list_entries
     );
 }
 

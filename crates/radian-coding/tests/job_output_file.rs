@@ -270,3 +270,35 @@ async fn filled_optional_fields_still_read() {
 
     session.shutdown_jobs();
 }
+
+/// Defaults, case 9: the `job` read window stays 64 KiB. A 5000-line output is about 52 KiB
+/// (its text alone over 16 KiB), so `read`'s new 16 KiB default must not cut it. If it did,
+/// the range read would stop near line 1500 instead of returning every line.
+#[tokio::test]
+async fn the_job_read_window_stays_64_kib() {
+    let dir = TempDir::new("job-file-window");
+    let ws = dir.file("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let tools = transparent_tools(&ws);
+    let session = tools.open_session().await.expect("session");
+    let id = run_to_end(&session, "seq 1 5000").await;
+
+    let output = exec(
+        &session,
+        "job",
+        json!({"id": id, "op": "read", "from_line": 1}),
+    )
+    .await
+    .expect("range read");
+    let info = structured(&output);
+    assert_eq!(info["total_lines"], 5000, "{info}");
+    assert_eq!(
+        info["returned"], 5000,
+        "the 64 KiB window holds it all: {info}"
+    );
+    assert_eq!(info["end_line"], 5000, "{info}");
+    assert_eq!(info["truncated"], false, "{info}");
+    assert!(output_text(&output).contains("[end of output]"), "{info}");
+
+    session.shutdown_jobs();
+}

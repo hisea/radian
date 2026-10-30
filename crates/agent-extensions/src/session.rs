@@ -26,10 +26,8 @@ const REAP_LIMIT: Duration = Duration::from_secs(2);
 
 /// The most `Text`-part bytes one MCP tool result may carry into the context.
 ///
-/// The same budget as `read`'s default (`Limits::default_read_bytes` in `radian-coding`,
-/// named here so `agent-extensions` does not depend on the coding tools): an unbounded
-/// server reply would otherwise compress or overflow the context. Text past the budget is
-/// dropped on a UTF-8 boundary and a final line names the original size, so a result
+/// An unbounded server reply would otherwise compress or overflow the context. Text past the
+/// budget is dropped on a UTF-8 boundary and a final line names the original size, so a result
 /// under the cap is byte-identical to today's. Image, audio and other parts are untouched.
 /// Applied here, where the server's response becomes the tool result, so the journal
 /// records the cut result and replay matches. No configuration key.

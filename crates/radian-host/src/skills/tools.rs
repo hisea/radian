@@ -18,8 +18,8 @@ use serde_json::Value;
 use super::{Skill, read_skill_body};
 
 /// The largest body the tool returns. A skill bigger than this is a tool-result error rather
-/// than a truncation: half a skill is worse than a clear failure (ADR 0025 S3). The repo has no
-/// shared tool-output cap; 64 KiB matches the `read` tool's default `max_bytes`.
+/// than a truncation: half a skill is worse than a clear failure (ADR 0025 S3). This tool's own
+/// cap is 64 KiB; the repo has no shared tool-output cap.
 pub const SKILL_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]

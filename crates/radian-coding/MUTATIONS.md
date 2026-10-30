@@ -962,3 +962,32 @@ byte-identical with `shasum -a 256`; the named test ran alone with
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0246-M1 | the `grep` arm of the locate hint → `"after locating lines"` (the description no longer names `grep` even when it is mounted) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` (``the description must name `grep` ``) |
+
+## TK0251: read's 16 KiB and 200-line defaults (2026-10-30, branch `work/TK0251-read-16k-200-line-defaults`)
+
+A text `read` with no arguments now stops at 16 KiB or 200 lines, whichever comes first, and
+names the next offset. Manual pages keep a 64 KiB budget with no line cap; `job op: read`
+keeps its 64 KiB window. Each mutation was applied by hand to
+`crates/radian-coding/src/provider.rs` or `src/read.rs`, backed up under `.radian/*.orig` and
+restored from that copy (never `git checkout`), confirmed byte-identical with
+`shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test <binary> -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0251-M1 | `default_read_bytes: 16 << 10` → `64 << 10` (the old byte budget) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (all 18,000 bytes came back, `truncated: false`) |
+| TK0251-M2 | `let limit = Some(limit.unwrap_or(limits.default_read_lines));` → `let limit = limit;` (no default line cap) | ✅ 1 failed (rc=100) | `the_default_line_limit_stops_after_two_hundred_lines` (250 lines came back, `end_line` 250 instead of 200) |
+| TK0251-M3 | the embedded/manual branch uses `limits.default_read_bytes` instead of `default_manual_read_bytes` | ✅ 1 failed (rc=100) | `a_docs_page_reads_whole_beyond_the_file_defaults` (`configuration.md` cut at 16,348 bytes of 29,558, with `next_offset: 216`) |
+| TK0251-M4 | the byte-budget arm sets `next_offset = None` instead of `Some(lineno)` (the cut drops its note) | ✅ 1 failed (rc=100) | `the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line` (`next_offset` was null; no `continue with offset` note) |
+
+The same new tests were run against the old defaults (64 KiB, no line cap) before restoring:
+`the_default_byte_budget_cuts_at_a_line_boundary_and_names_the_next_line`,
+`the_default_line_limit_stops_after_two_hundred_lines`,
+`the_default_line_limit_applies_after_a_positive_offset` and
+`a_negative_offset_uses_the_default_line_limit_only_past_two_hundred_lines` failed, and the
+drift test `the_manual_names_the_read_limits_from_the_code` failed on the 65,536 default in
+the table. The unchanged-behaviour cases (`an_explicit_budget_and_limit_restore_the_old_64_kib_window`,
+`an_explicit_offset_and_limit_are_unchanged_by_the_defaults`,
+`the_directory_default_still_lists_five_hundred_entries`,
+`the_job_read_window_stays_64_kib`) pass on both the old and the new code: they pin the
+callers the change must not move.

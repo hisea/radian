@@ -36,7 +36,7 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 1048576,
-                "description": "Maximum bytes to read. Default: 65536."
+                "description": "Maximum bytes to read. Default: 16384."
             },
             "offset": {
                 "type": "integer",
@@ -47,8 +47,9 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "integer",
                 "description": "Maximum lines to read; at least 1 for text and directory \
                                 reads. Set it to cover the located range, not the whole file. For \
-                                a directory, it caps entries instead. Default: 500. \
-                                Maximum: 5000. Ignored for an image."
+                                a directory, it caps entries instead. Default: 200 lines for a \
+                                file, 500 entries for a directory. Maximum: 5000 entries for a \
+                                directory. Ignored for an image."
             }
         },
         "required": ["path"],
@@ -351,8 +352,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
                 ),
             ));
         }
-        Some(n) => n as usize,
-        None => limits.default_read_bytes,
+        Some(n) => Some(n as usize),
+        None => None,
     };
     let total = opened.stat.size;
 
@@ -370,6 +371,8 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
                 return Ok(image_output);
             }
             let (offset, limit) = validated_range(offset, limit, &arguments)?;
+            let budget = budget.unwrap_or(limits.default_read_bytes);
+            let limit = Some(limit.unwrap_or(limits.default_read_lines));
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
         crate::workspace::OpenedSource::Embedded(bytes) => {
@@ -385,6 +388,7 @@ fn read_blocking(scan: BlockingRead) -> Result<ToolOutput, ToolFailure> {
                 return Ok(image_output);
             }
             let (offset, limit) = validated_range(offset, limit, &arguments)?;
+            let budget = budget.unwrap_or(limits.default_manual_read_bytes);
             finish_read(&mut reader, &path, total, budget, offset, limit)
         }
     }
@@ -570,7 +574,15 @@ fn read_stream<R: BufRead>(
         if let Some(limit) = limit
             && accepted >= limit
         {
-            // The line is unread: it is the next read's start.
+            // The line is unread: it is the next read's start. At EOF there is no next line,
+            // so a read that happens to end exactly on the cap carries no note.
+            if reader
+                .fill_buf()
+                .map_err(|e| io_failure(path, e))?
+                .is_empty()
+            {
+                break;
+            }
             next_offset = Some(lineno);
             break;
         }

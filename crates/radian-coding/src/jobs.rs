@@ -1229,7 +1229,7 @@ pub(crate) fn read_output_file(
         "job_id",
         id,
         mode,
-        limits.default_read_bytes,
+        limits.default_job_read_bytes,
         limits.default_grep_matches,
         "jobs_output",
     )

@@ -215,3 +215,27 @@ async fn read_on_a_file_is_unchanged() {
         .unwrap();
     assert_eq!(text(&output), "1: alpha\n2: beta\n");
 }
+
+/// Defaults, case 7: a directory read with no `limit` still lists 500 entries. The read tool's
+/// new 200-line text default does not touch the directory cap.
+#[tokio::test]
+async fn the_directory_default_still_lists_five_hundred_entries() {
+    let dir = TempDir::new("read-dir-default");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..550 {
+        std::fs::write(root.join(format!("f{i:04}")), "").unwrap();
+    }
+    let tools = common::tools(&root);
+
+    let output = call(&tools, "read", json!({"path": "."})).await.unwrap();
+    let info = structured(&output);
+    assert_eq!(info["entries"], 500, "{info}");
+    assert_eq!(info["total_entries"], 550, "{info}");
+    assert_eq!(info["truncated"], true, "{info}");
+    assert!(
+        text(&output).contains("[truncated: showing 500 of 550 entries;"),
+        "{}",
+        text(&output)
+    );
+}

@@ -18,8 +18,18 @@ use crate::{fail, foreground, glob, grep, jobs, patch, read, shell, write};
 pub struct Limits {
     /// Hard cap for one `read`; a larger `max_bytes` is refused.
     pub max_read_bytes: usize,
-    /// `read`'s default budget when the model does not give one.
+    /// `read`'s default byte budget when the model does not give one.
     pub default_read_bytes: usize,
+    /// `read`'s default line cap for a text file when the model does not give one. The byte
+    /// budget and this cap both apply; whichever is reached first ends the read.
+    pub default_read_lines: usize,
+    /// A bundled-manual (`radian://docs/`) page's default byte budget when the model does not
+    /// give one. Larger than a file's and with no line cap, so a page reads whole: the manual's
+    /// 56 KiB page cap keeps every page inside it.
+    pub default_manual_read_bytes: usize,
+    /// The `job` tool's `op: read` byte window when the model does not give a range: the
+    /// documented 64 KiB per-job read, kept apart from `read`'s own budget.
+    pub default_job_read_bytes: usize,
     /// Maximum bytes `write` accepts in one call.
     pub max_write_bytes: usize,
     /// Largest file `patch` will edit in memory.
@@ -43,9 +53,9 @@ pub struct Limits {
     /// Hard cap on `grep`'s total output bytes (match and context lines plus the
     /// truncation notes). Past it the tool first drops context lines to keep every match,
     /// and only then cuts whole match lines, ending with one note naming the byte limit,
-    /// what was dropped, and how to narrow the search. A quarter of `default_read_bytes`:
-    /// the data shows large results come mainly from context lines, and 16 KiB still
-    /// holds about fifty short match lines while that context bloat is cut.
+    /// what was dropped, and how to narrow the search. 16 KiB, the same size as
+    /// `default_read_bytes`: the data shows large results come mainly from context lines, and
+    /// 16 KiB still holds about fifty short match lines while that context bloat is cut.
     pub max_grep_output_bytes: usize,
     /// Largest regular file a directory or `glob` `grep` search opens, in bytes. A larger
     /// file is not scanned and is named in one trailing note; a file named directly as
@@ -53,9 +63,9 @@ pub struct Limits {
     /// drowning the matches while leaving ordinary source files untouched. Not
     /// model-settable.
     pub max_grep_file_bytes: usize,
-    /// `shell`'s output budget **per stream** when the model does not give one. Smaller than
-    /// `default_read_bytes`: a shell result competes with the rest of the turn, and a truncated
-    /// foreground result stays retrievable through `job` (ADR 0037 decision 3a).
+    /// `shell`'s output budget **per stream** when the model does not give one. A shell result
+    /// competes with the rest of the turn, and a truncated foreground result stays retrievable
+    /// through `job` (ADR 0037 decision 3a).
     pub default_shell_output_bytes: usize,
     /// Hard cap on a model-supplied `shell` `max_output_bytes`, per stream.
     pub max_shell_output_bytes: usize,
@@ -88,10 +98,13 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_read_bytes: 1 << 20,      // 1 MiB
-            default_read_bytes: 64 << 10, // 64 KiB
-            max_write_bytes: 8 << 20,     // 8 MiB
-            max_patch_bytes: 4 << 20,     // 4 MiB
+            max_read_bytes: 1 << 20,             // 1 MiB
+            default_read_bytes: 16 << 10,        // 16 KiB
+            default_read_lines: 200,             // lines
+            default_manual_read_bytes: 64 << 10, // 64 KiB, no line cap
+            default_job_read_bytes: 64 << 10,    // 64 KiB per job read
+            max_write_bytes: 8 << 20,            // 8 MiB
+            max_patch_bytes: 4 << 20,            // 4 MiB
             max_list_entries: 5000,
             default_list_entries: 500,
             max_glob_results: 5000,
@@ -100,7 +113,7 @@ impl Default for Limits {
             default_grep_matches: 50,
             default_grep_matches_per_file: 50,
             max_grep_context: 30,
-            max_grep_output_bytes: 16 << 10, // 16 KiB, a quarter of `read`'s default
+            max_grep_output_bytes: 16 << 10, // 16 KiB, the same as `read`'s default
             max_grep_file_bytes: 256 << 10,  // 256 KiB
             // Per stream. 24 KiB sits inside the brief's 16-32 KiB band and below what other
             // agents show inline (30k chars, 50 KB, ~10k tokens ≈ 40 KiB): it halves the
