@@ -3409,3 +3409,6 @@ and restored from that copy (never `git checkout`), confirmed byte-identical wit
 | aeo-M2 | `json_ld` no longer writes `</` as `<\/` | ✅ 1 failed (rc=100) | `a_description_cannot_close_the_json_ld_element` (a description holding `</script>` closed the element early) |
 | aeo-M3 | `llms_txt` lists the landing page twice | ✅ 1 failed (rc=100) | `the_llms_files_list_every_page_once` |
 | aeo-M4 | `page_url` gives `docs/arc/index.html` instead of `docs/arc/` for a subdirectory index | ✅ 1 failed (rc=100) | `every_docs_page_carries_a_tech_article_record` (the `arc/index` URL assertion) |
+| seo-M1 | `sitemap_xml` skips the `HAND_WRITTEN_PAGES` loop | ✅ 1 failed (rc=100) | `the_sitemap_lists_every_page_once` |
+| seo-M2 | the canonical `push_str` in `page_html` is removed | ✅ 1 failed (rc=100) | `every_docs_page_names_its_canonical_url` |
+| seo-M3 | `<meta name="robots" content="noindex">` is removed from `site/404.html` | ✅ 1 failed (rc=100) | `the_hand_written_pages_name_their_canonical_url` |

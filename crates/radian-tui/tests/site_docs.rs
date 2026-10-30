@@ -1,13 +1,18 @@
 //! The web manual (`site-docs` example) renders every `DOCS` page, resolves every
 //! inter-page link and fragment, lists exactly the manual pages in its sidebar, emits no
-//! JavaScript (only a `TechArticle` JSON-LD record), and lists every page once in
-//! `llms.txt` and in full in `llms-full.txt`.
+//! JavaScript (only a `TechArticle` JSON-LD record), names its canonical URL on every page,
+//! and lists every page once in `llms.txt`, `sitemap.xml` and in full in `llms-full.txt`.
 
 use radian_tui::site_docs::{RenderedSite, render_site};
 use std::collections::HashSet;
 
-/// The hand-written site pages that link into the generated docs.
-const HAND_WRITTEN_PAGES: [&str; 2] = ["index.html", "arc.html"];
+/// The hand-written site pages that link into the generated docs, with the canonical URL
+/// each must name (`None` for the 404 page, which is `noindex` instead).
+const HAND_WRITTEN_PAGES: [(&str, Option<&str>); 3] = [
+    ("index.html", Some("https://getrad.dev/")),
+    ("arc.html", Some("https://getrad.dev/arc.html")),
+    ("404.html", None),
+];
 
 fn site() -> RenderedSite {
     render_site(radian_coding::docs::DOCS).expect("the manual renders without broken links")
@@ -424,7 +429,7 @@ fn the_hand_written_pages_only_link_generated_docs() {
         .map(|page| (radian_tui::site_docs::output_path(&page.stem), page))
         .collect();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for file in HAND_WRITTEN_PAGES {
+    for (file, _) in HAND_WRITTEN_PAGES {
         let source = root.join("site").join(file);
         let html = std::fs::read_to_string(&source)
             .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
@@ -495,4 +500,99 @@ fn hrefs(html: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Every docs page names its absolute URL once in a `canonical` link.
+#[test]
+fn every_docs_page_names_its_canonical_url() {
+    let site = site();
+    for (index, page) in site.pages.iter().enumerate() {
+        let html = radian_tui::site_docs::page_html(&site, index);
+        let link = format!(
+            "<link rel=\"canonical\" href=\"{}\">",
+            radian_tui::site_docs::page_url(&page.stem)
+        );
+        assert_eq!(
+            html.matches(&link).count(),
+            1,
+            "{} has its canonical",
+            page.name
+        );
+        assert_eq!(
+            html.matches("rel=\"canonical\"").count(),
+            1,
+            "{}",
+            page.name
+        );
+    }
+}
+
+/// The hand-written pages name their canonical URL; the 404 page is `noindex` and names
+/// none. The home page's share image is a file the site serves.
+#[test]
+fn the_hand_written_pages_name_their_canonical_url() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (file, canonical) in HAND_WRITTEN_PAGES {
+        let html = std::fs::read_to_string(root.join("site").join(file)).unwrap();
+        match canonical {
+            Some(url) => {
+                let link = format!("<link rel=\"canonical\" href=\"{url}\">");
+                assert_eq!(
+                    html.matches(&link).count(),
+                    1,
+                    "site/{file} has its canonical"
+                );
+                assert!(!html.contains("noindex"), "site/{file} is indexable");
+            }
+            None => {
+                assert!(
+                    !html.contains("rel=\"canonical\""),
+                    "site/{file} has no canonical"
+                );
+                assert!(
+                    html.contains("<meta name=\"robots\" content=\"noindex\">"),
+                    "site/{file} is noindex"
+                );
+            }
+        }
+    }
+    let home = std::fs::read_to_string(root.join("site/index.html")).unwrap();
+    let image = home
+        .split("<meta property=\"og:image\" content=\"https://getrad.dev/")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the home page names an og:image under the site");
+    assert!(
+        root.join("site").join(image).is_file(),
+        "site/{image} is a file the site serves"
+    );
+}
+
+/// `sitemap.xml` lists the hand-written pages and every manual page exactly once.
+#[test]
+fn the_sitemap_lists_every_page_once() {
+    let site = site();
+    let xml = radian_tui::site_docs::sitemap_xml(&site);
+    assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset "));
+    assert!(xml.ends_with("</urlset>\n"));
+    let locs: Vec<&str> = xml
+        .lines()
+        .filter_map(|l| l.strip_prefix("<url><loc>"))
+        .map(|l| l.trim_end_matches("</loc></url>"))
+        .collect();
+    let mut expected = vec![
+        "https://getrad.dev/".to_owned(),
+        "https://getrad.dev/arc.html".to_owned(),
+    ];
+    expected.extend(
+        site.pages
+            .iter()
+            .map(|p| radian_tui::site_docs::page_url(&p.stem)),
+    );
+    assert_eq!(
+        locs, expected,
+        "the sitemap is exactly the site's pages, in order"
+    );
+    let unique: HashSet<&str> = locs.iter().copied().collect();
+    assert_eq!(unique.len(), locs.len(), "no URL twice");
 }

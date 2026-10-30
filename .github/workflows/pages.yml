@@ -38,7 +38,7 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site
-          cp site/index.html site/arc.html site/favicon.svg site/docs.css _site/
+          cp site/index.html site/arc.html site/404.html site/robots.txt site/favicon.svg site/docs.css _site/
           cp -r site/media _site/media
           cargo run -p radian-tui --example site-docs --locked -- _site
           printf 'getrad.dev' > _site/CNAME
