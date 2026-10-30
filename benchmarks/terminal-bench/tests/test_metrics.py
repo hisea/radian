@@ -852,12 +852,17 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertIn(str(missing), error.getvalue())
 
     def test_a_directory_with_no_journal_after_the_prefix_is_an_error(self):
+        # `_inputs_without_journals` applies the prefix itself. Without that
+        # check the old empty-report fallback still exits 1, so the test asserts
+        # the diagnostic names both the directory and the unmatched prefix.
         error = io.StringIO()
         with contextlib.redirect_stderr(error):
             status = journal_metrics._main([str(PREFIX), "--prefix", "run-z"])
         self.assertEqual(status, 1)
-        self.assertIn(str(PREFIX), error.getvalue())
-        self.assertIn("run-z", error.getvalue())
+        message = error.getvalue()
+        self.assertIn(f"no journal file under: {PREFIX}", message)
+        self.assertIn("(no *.jsonl named run-z*)", message)
+        self.assertNotIn("no journal file found under:", message)
 
     def test_text_table_headers_use_the_fixed_column_names(self):
         report = journal_metrics.build_report([FULL, PI_SESSION])

@@ -51,4 +51,5 @@ rest), expect a non-zero exit, restore the file from a backup under `.radian/`.
 | TK0256-M4 | `review.sh` parses the JSONL stdout for a radian reviewer instead of its session journal | `ReviewScriptTest.test_a_radian_reviewer_report_is_read_from_its_session` (exit 1, `parsed` false) | ✅ failed |
 | TK0256-M5 | `run.sh` refuses every directory inside the caller or source, not only a repository or worktree root | `RunScriptTest.test_a_plain_directory_inside_the_caller_is_allowed_as_the_clone` (exit 2, "not a separate clone") | ✅ failed |
 | TK0256-M6 | `timeout_run.py` installs no signal handler, so an interrupt kills only the wrapper | `TimeoutRunTest.test_an_interrupt_is_forwarded_to_the_command` (exit -15 instead of 143; the command outlives the wrapper) | ✅ failed |
+| TK0256-M7 | `_inputs_without_journals` ignores the prefix, so a directory whose only journals miss it is not rejected by the new check and only the old empty-report fallback exits 1 | `JournalMetricsTest.test_a_directory_with_no_journal_after_the_prefix_is_an_error` (the old "no journal file found under:" message, no prefix detail) | ✅ failed |
 
