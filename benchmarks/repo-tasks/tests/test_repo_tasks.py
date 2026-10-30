@@ -357,6 +357,21 @@ class RunScriptTest(ScratchCase):
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["journal"])
 
+    def test_radian_gets_the_worktree_as_its_workspace(self):
+        # Without `--workspace` radian exec has no file or shell tools, so a run
+        # ends at once with an empty diff.
+        repo, _, tasks, arms, _ = self.prepare()
+        argv = self.root / "argv.json"
+        stub = radian_stub(
+            self.root, STUB_RADIAN + f"pathlib.Path({str(argv)!r}).write_text(json.dumps(args))\n"
+        )
+        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(argv.read_text())
+        tree = self.root / "runs" / "trees" / "full-T1-1"
+        self.assertIn("--workspace", args)
+        self.assertEqual(Path(args[args.index("--workspace") + 1]).resolve(), tree.resolve())
+
     def test_a_clone_pointing_at_the_callers_repository_is_refused(self):
         repo, _, tasks, arms, stub = self.prepare()
         before = (repo / ".git" / "config").read_bytes()

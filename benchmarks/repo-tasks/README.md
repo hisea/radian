@@ -69,8 +69,10 @@ directory is removed.
    by the bundled `timeout_run.py`, so a machine without coreutils is still
    capped):
 
-   - radian: `radian exec --output jsonl --session-dir <out>/session --provider
-     <provider> --model <model> <extra> -p -`, with the brief on stdin;
+   - radian: `radian exec --output jsonl --workspace <tree> --session-dir
+     <out>/session --provider <provider> --model <model> <extra> -p -`, with the
+     brief on stdin (without `--workspace` the session has no file, shell or job
+     tools);
    - pi: `pi --model <provider>/<model> <extra> -p "<brief>"`.
 
    An arm's `extra` is the agent's own flag string, which is how an arm sets

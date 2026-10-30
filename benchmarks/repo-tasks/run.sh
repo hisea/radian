@@ -121,7 +121,9 @@ run_capped() {
 
 if [ "$agent" = "radian" ]; then
   # shellcheck disable=SC2086
+  # Without `--workspace` radian exec has no file, shell or job tools.
   ( cd "$TREE" && run_capped "$RADIAN_BIN" exec --output jsonl \
+      --workspace "$TREE" \
       --session-dir "$OUT/session" --provider "$provider" --model "$model" \
       $extra -p - < "$OUT/brief.md" ) \
       > "$OUT/radian.stdout.jsonl" 2> "$OUT/radian.stderr.log"

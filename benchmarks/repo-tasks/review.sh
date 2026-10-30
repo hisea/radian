@@ -58,6 +58,7 @@ mkdir -p "$OUT/review-session"
 if [ "$r_agent" = "radian" ]; then
   # shellcheck disable=SC2086
   ( cd "$TREE" && run_capped "$RADIAN_BIN" exec --output jsonl \
+      --workspace "$TREE" \
       --session-dir "$OUT/review-session" --provider "$r_provider" \
       --model "$r_model" $r_extra -p - < "$OUT/review-prompt.md" ) \
       > "$OUT/review.stdout.log" 2> "$OUT/review.stderr.log"
