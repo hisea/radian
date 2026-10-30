@@ -10,7 +10,7 @@
 //!    `failed.cancelled` (its plan is final);
 //! 2. release every retry whose `retry_at` has passed;
 //! 3. re-verify, without a worker, every task a `commands` or integration command failure
-//!    blocked, once the remote main moved (ADR 0048 decision 9);
+//!    blocked, once the remote target branch moved (ADR 0048 decision 9);
 //! 4. start the gate of every task in `review.verifying`, or apply the verdicts a background
 //!    gate left; this is also how a task a moved branch or a changed digest sent back reaches
 //!    `review.awaiting_human` again;
@@ -677,8 +677,9 @@ fn one_pass(
         changed = true;
     }
 
-    // 3. Automatic reverify, for a task a command failure blocked once main moved (ADR 0048
-    // decision 9). The claim is worker-less; step 4 starts its gate in this same pass.
+    // 3. Automatic reverify, for a task a command failure blocked once the target branch moved
+    // (ADR 0048 decision 9). The claim is worker-less; step 4 starts its gate in this same
+    // pass.
     if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
         changed |= auto_reverify_tasks(store, transitions)?;
     }
@@ -912,16 +913,20 @@ fn advance_verification(
     }
 }
 
-/// Re-verifies by itself every task a moved main unblocked (ADR 0048 decision 9): a
+/// Re-verifies by itself every task a moved target branch unblocked (ADR 0048 decision 9): a
 /// `review.rework_pending` task of a plan whose `auto` is not `off`, whose `commands` or
-/// integration stage failed with `command_failed` or `timeout`, once the remote main is no
-/// longer the main that verdict recorded. `true` when it claimed an attempt or reported the
-/// count stop.
+/// integration stage failed with `command_failed` or `timeout`, once the remote target branch
+/// is no longer the one that verdict recorded. `true` when it claimed an attempt or reported
+/// the count stop.
 fn auto_reverify_tasks(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
+    // The branch whose move starts the step, named in the line: with `[integration]
+    // target_branch = "release"` an operator must not read an untouched `main` as changed
+    // (ADR 0048 decision 9).
+    let target = store.config()?.target_branch().to_owned();
     let mut changed = false;
     for id in rework_pending_tasks(store)? {
-        // A task waiting on an unavailable review model comes first: it needs no moved main
-        // and has no count (ADR 0048 decision 9).
+        // A task waiting on an unavailable review model comes first: it needs no moved target
+        // branch and has no count (ADR 0048 decision 9).
         match crate::review::auto_reverify_review(store, &id)? {
             crate::review::ReviewReverify::Not => {}
             crate::review::ReviewReverify::Started { .. } => {
@@ -934,7 +939,7 @@ fn auto_reverify_tasks(store: &Store, transitions: &mut Transitions) -> Result<b
             crate::review::AutoReverify::Not => {}
             crate::review::AutoReverify::Started { main_sha, .. } => {
                 transitions.push(format!(
-                    "{id} main moved ({}) -> auto reverify",
+                    "{id} {target} moved ({}) -> auto reverify",
                     short_sha(&main_sha)
                 ));
                 changed = true;
@@ -943,7 +948,7 @@ fn auto_reverify_tasks(store: &Store, transitions: &mut Transitions) -> Result<b
                 // The count is used up: `run` prints the reason, `show` prints the same text
                 // (ADR 0048 decision 9).
                 transitions.push(format!(
-                    "{id} main moved ({}) -> auto reverify limit reached: {text}",
+                    "{id} {target} moved ({}) -> auto reverify limit reached: {text}",
                     short_sha(&main_sha)
                 ));
                 changed = true;

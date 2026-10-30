@@ -3817,16 +3817,30 @@ fn record_failure(
     stage: Stage,
     reason: &str,
 ) -> String {
+    record_failure_on(repo, store, plan, task, stage, reason, &repo.main_sha())
+}
+
+/// [`record_failure`] whose verdict records `target_sha` as the branch sha the stage failed
+/// on, so a test can record a failure against a `[integration] target_branch` other than
+/// `main`.
+fn record_failure_on(
+    repo: &Repo,
+    store: &Store,
+    plan: &str,
+    task: &str,
+    stage: Stage,
+    reason: &str,
+    target_sha: &str,
+) -> String {
     let head = publish_verifying(repo, store, plan, task);
-    let main = repo.main_sha();
     let verdicts = repo.run_dir(task, 1).join("verdicts");
     fs::create_dir_all(&verdicts).expect("the verdict directory");
     let mut verdict = Verdict::human(head.clone(), false, Some(reason.to_owned()));
     verdict.stage = stage;
     if stage == Stage::Integration {
-        verdict.base_sha = Some(main);
+        verdict.base_sha = Some(target_sha.to_owned());
     } else {
-        verdict.main_sha = Some(main);
+        verdict.main_sha = Some(target_sha.to_owned());
     }
     let path = verdicts.join(format!("{}.json", stage.as_str()));
     verdict.write_new(&path).expect("the verdict");
@@ -3861,6 +3875,18 @@ fn advance_main(repo: &Repo, file: &str, content: &str) -> String {
     repo.git(&["commit", "-m", file]);
     let sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     repo.git(&["push", &repo.remote, &repo.main_branch]);
+    sha
+}
+
+/// Commits one file on `branch`, started at `base`, in the clone, pushes it to the remote, and
+/// returns the commit id.
+fn advance_branch(repo: &Repo, branch: &str, base: &str, file: &str, content: &str) -> String {
+    repo.git(&["checkout", "-B", branch, base]);
+    write(&repo.clone.join(file), content);
+    repo.git(&["add", file]);
+    repo.git(&["commit", "-m", file]);
+    let sha = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    repo.git(&["push", repo.remote.as_str(), branch]);
     sha
 }
 
@@ -3937,6 +3963,50 @@ fn a_command_failure_is_reverified_automatically_once_main_moves() {
     assert!(
         !repo.attempt_dir(&task, 2).join("identity.json").exists(),
         "the automatic reverify started a worker"
+    );
+}
+
+/// With `[integration] target_branch = "release"`, the automatic reverify line names the
+/// branch whose move it observed. Reporting `main moved` would tell an operator that a branch
+/// nothing touched changed (ADR 0048 decision 9).
+#[test]
+fn an_automatic_reverify_names_the_target_branch() {
+    let repo = Repo::new("run-auto-reverify-target");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-target");
+    let task = add_task(&store, &plan, "work", &[]);
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    tune(
+        &repo,
+        "# target_branch = \"main\"      # not set: the value of [repository] main_branch",
+        "target_branch = \"release\"",
+    );
+    // `release` starts where `main` does, so the task's failing verdict recorded its sha.
+    repo.git(&["push", "origin", "refs/heads/main:refs/heads/release"]);
+    let recorded = repo.main_sha();
+    record_failure_on(
+        &repo,
+        &store,
+        &plan,
+        &task,
+        Stage::Commands,
+        "command_failed",
+        &recorded,
+    );
+
+    let moved = advance_branch(&repo, "release", &recorded, "release-fix.txt", "fixed\n");
+    let short = &moved[..7];
+    let run = run_until(&repo, Duration::from_secs(90), || {
+        attempt(&store, &task) == 2 && state(&store, &task).1 == "awaiting_human"
+    });
+    assert!(
+        run.contains(&format!("{task} release moved ({short}) -> auto reverify")),
+        "{run}"
+    );
+    assert!(
+        !run.contains("main moved"),
+        "the line blamed an untouched `main`: {run}"
     );
 }
 

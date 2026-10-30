@@ -1122,18 +1122,18 @@ pub fn reverify_with(
 /// What one scheduling pass's automatic reverify step did for one task (ADR 0048 decision 9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoReverify {
-    /// Nothing ran: the task is not one a moved main applies to, main has not moved, or this
-    /// `(head, remote main)` pair was re-verified already.
+    /// Nothing ran: the task is not one a moved target branch applies to, the target branch
+    /// has not moved, or this `(head, remote target branch)` pair was re-verified already.
     Not,
     /// A new worker-less attempt was claimed. The pass that claimed it starts its gate.
     Started {
         attempt_id: String,
-        /// The remote main the pass saw when it claimed the attempt.
+        /// The remote target branch the pass saw when it claimed the attempt.
         main_sha: String,
     },
-    /// Main moved, but the task used its `[limits] max_auto_reverify` automatic reverifies.
-    /// `text` is what `run` prints after the task and the short sha, and what `show` puts in
-    /// `rework_reason`.
+    /// The target branch moved, but the task used its `[limits] max_auto_reverify`
+    /// automatic reverifies. `text` is what `run` prints after the task, the branch and the
+    /// short sha, and what `show` puts in `rework_reason`.
     Limit { main_sha: String, text: String },
 }
 
@@ -1169,13 +1169,13 @@ struct AutoReverifyRecord {
 
 /// The scheduling loop's automatic reverify (ADR 0048 decision 9): re-run the gate, without a
 /// worker, for a task a `commands` or integration command failure blocked, once the remote
-/// main is no longer the main that failing verdict recorded.
+/// target branch is no longer the branch that failing verdict recorded.
 ///
-/// Two guards stop a loop: a `(head_sha, remote main)` pair is re-verified at most once (kept
-/// in [`AUTO_REVERIFY_FILE`]), and `[limits] max_auto_reverify` counts the automatic reverifies
-/// of one task; `0` turns the step off. The pair and the count are written before the claim, so
-/// a pass that dies in between spends them rather than running the pair twice; a claim that is
-/// refused gives them back.
+/// Two guards stop a loop: a `(head_sha, remote target branch)` pair is re-verified at most
+/// once (kept in [`AUTO_REVERIFY_FILE`]), and `[limits] max_auto_reverify` counts the
+/// automatic reverifies of one task; `0` turns the step off. The pair and the count are
+/// written before the claim, so a pass that dies in between spends them rather than running
+/// the pair twice; a claim that is refused gives them back.
 ///
 /// A refused claim is the ordinary "nothing ran" result: the task moved since it was read.
 ///
@@ -2752,9 +2752,12 @@ fn finish_integration(
         .map_err(gate_error)?
     {
         back_to_integrating(store, task_id)?;
-        return Ok(Integration::Again(
-            "main moved after integration".to_owned(),
-        ));
+        // The line names the branch that moved: with `[integration] target_branch =
+        // "release"`, `main` did not move at all.
+        return Ok(Integration::Again(format!(
+            "the `{}` branch moved after integration",
+            context.target_branch
+        )));
     }
     match push_candidate(
         store.repo(),
