@@ -3361,3 +3361,17 @@ identical). The named test ran with `cargo nextest run -p radian-tui --test rend
 |---|---|---|---|
 | TK0236-M4 | `idle_deadline_fired` never sets `idle_notified` | ✅ 1 failed (rc=100) | `app::idle_prompt::tests::idle_prompt_fires_once_and_input_restarts_the_timer` (a second 60 s window fired again) |
 | TK0236-M7 | `idle_deadline` drops the `/loop` suppression | ✅ 1 failed (rc=100) | `app::idle_prompt::tests::loop_active_suppresses_idle_prompt` (the loop-owned turn end armed the timer) |
+
+## TK0243: the hooks page navigates a 60-run sequence's retained window (2026-10-29, branch `work/TK0243-hooks-claude-parity-followups`)
+
+`docs/user/hooks.md` "Recent runs" keeps the last 50 runs: a 60-run host sequence leaves
+runs 10–59 in the session ring, and `the_hooks_page_scrolls_to_every_retained_run` feeds
+that retained window and proves `↓` reaches the oldest kept row (run-10) while the dropped
+runs never draw. The mutation was applied in place to `crates/radian-tui/src/inspector.rs`,
+backed up to `.radian/inspector.rs.bak` and restored (`cmp` identical). The named test ran
+with `cargo nextest run -p radian-tui --test render --locked --profile sandbox --no-fail-fast
+-E 'test(the_hooks_page_scrolls_to_every_retained_run)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0243-M5 | the run rows stop after the newest 40 (`.take(40)` on `hook_runs` when the list is built), so the oldest retained rows are clipped again | ✅ 1 failed (rc=100) | `the_hooks_page_scrolls_to_every_retained_run` (`↓ reaches the oldest retained run` failed: run-10 was never drawn) |
