@@ -81,8 +81,9 @@ pub const EXIT_CODES: &[(u8, &str)] = &[
 ];
 
 /// The exit codes `radian arc merge` itself returns: success, a git or file error, a
-/// refused state (the branch moved, the digest changed, or three integration runs did not
-/// settle), and a held `state.lock`. `2` is clap's usage error before the command runs.
+/// refused or unfinished state (the branch moved, the digest changed, three integration runs
+/// did not settle, or a merge command answered `pending`), and a held `state.lock`. `2` is
+/// clap's usage error before the command runs.
 /// The manual's merge exit table is checked against this list.
 pub const MERGE_EXIT_CODES: &[Exit] = &[Exit::Ok, Exit::Error, Exit::State, Exit::Locked];
 

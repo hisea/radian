@@ -207,7 +207,7 @@ fn run_one(
     timeout: Duration,
     log: &Path,
 ) -> Result<ShellOutcome, GateError> {
-    run_shell(checkout, line, timeout, log, &[], None)
+    run_shell(checkout, line, timeout, log, &[], &[], None)
 }
 
 /// What can stop a [`run_shell`] command from outside the process that started it (ADR 0048
@@ -231,14 +231,18 @@ pub(crate) trait ShellWatch {
 /// own shell exiting on SIGTERM does not end the stop while one of its children still runs.
 /// `envs` are added on top of the wrapper's own environment; the gate stages pass none, the
 /// wrapper's `before_attempt` commands pass the `ARC_*` values a command worker gets (ADR
-/// 0048 decisions 7 and 10). `watch` is the caller's stop path: it receives the command's
-/// process group and is asked whether a stop was requested.
+/// 0048 decisions 7 and 10). `remove` names variables the command must not inherit: the
+/// `[integration] command` passes [`crate::git::REPOSITORY_ENV`], so a caller's environment
+/// cannot point the command's own git calls at another repository (ADR 0048 decision 6).
+/// `watch` is the caller's stop path: it receives the command's process group and is asked
+/// whether a stop was requested.
 pub(crate) fn run_shell(
     dir: &Path,
     line: &str,
     timeout: Duration,
     log: &Path,
     envs: &[(&str, String)],
+    remove: &[&str],
     watch: Option<&dyn ShellWatch>,
 ) -> Result<ShellOutcome, GateError> {
     let file = File::create(log).map_err(|source| GateError::Io {
@@ -259,6 +263,9 @@ pub(crate) fn run_shell(
         .stderr(Stdio::from(stderr));
     for (name, value) in envs {
         command.env(name, value);
+    }
+    for name in remove {
+        command.env_remove(name);
     }
     #[cfg(unix)]
     {

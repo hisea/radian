@@ -175,18 +175,17 @@ impl Config {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IntegrationMethod {
-    /// Push the candidate to the target branch (the default, and the only method this build
-    /// runs).
+    /// Push the candidate to the target branch (the default).
     #[default]
     Push,
-    /// Run `[integration] command` and let it merge (decided; not built yet).
+    /// Run `[integration] command` and let it merge.
     Command,
     /// The built-in `command` preset that opens a pull request (decided; not built yet).
     Pr,
 }
 
 /// Every value `integration.method` names, in one list: the parser and the manual's drift test
-/// read it. Only [`IntegrationMethod::Push`] is built.
+/// read it. [`IntegrationMethod::Push`] and [`IntegrationMethod::Command`] are built.
 pub const INTEGRATION_METHODS: &[IntegrationMethod] = &[
     IntegrationMethod::Push,
     IntegrationMethod::Command,
@@ -213,7 +212,7 @@ impl IntegrationMethod {
 
     /// Whether this build runs the method.
     pub fn is_built(self) -> bool {
-        matches!(self, IntegrationMethod::Push)
+        matches!(self, IntegrationMethod::Push | IntegrationMethod::Command)
     }
 }
 
@@ -243,7 +242,8 @@ impl<'de> Deserialize<'de> for IntegrationMethod {
         })?;
         if !value.is_built() {
             return Err(serde::de::Error::custom(format!(
-                "`integration.method` is `{text}`; it is not built yet (this build runs `push`)"
+                "`integration.method` is `{text}`; it is not built yet (this build runs `push` \
+                 and `command`)"
             )));
         }
         Ok(value)
@@ -327,8 +327,11 @@ pub struct Integration {
     /// The branch integration merges into and pushes to. `None` is `[repository]
     /// main_branch`.
     pub target_branch: Option<String>,
-    /// How the candidate reaches the target branch. Only `push` is built.
+    /// How the candidate reaches the target branch: `push` or `command`.
     pub method: IntegrationMethod,
+    /// The one shell command line `method = "command"` runs, in the repository root, to merge
+    /// the candidate. Required by that method and refused with `push`.
+    pub command: Option<String>,
     /// How the candidate is built: `merge`, `squash` or `rebase`.
     pub style: IntegrationStyle,
 }
@@ -339,6 +342,7 @@ impl Default for Integration {
             key_commands: Vec::new(),
             target_branch: None,
             method: IntegrationMethod::Push,
+            command: None,
             style: IntegrationStyle::Merge,
         }
     }
@@ -720,7 +724,8 @@ task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of 
 [integration]
 key_commands = []             # what the integration stage runs on the merge candidate
 # target_branch = "main"      # not set: the value of [repository] main_branch
-# method = "push"             # `push` is the only method this build runs
+# method = "push"             # `push`, or `command` with a `command` line below
+# command = "./merge.sh"     # the line `method = "command"` runs; refused with `push`
 # style = "merge"             # `merge`, `squash` or `rebase`: how the candidate is built
 
 [hooks]
@@ -778,6 +783,36 @@ pub fn parse(text: &str) -> Result<Config, String> {
         return Err(
             "`limits.git_remote_timeout_secs` is 0; it must be 1 second or more".to_owned(),
         );
+    }
+    // `command` and `method` belong to each other: a command method without a command line
+    // has nothing to run, and a push with one would never run the line.
+    match config.integration.method {
+        IntegrationMethod::Command => {
+            let line = config
+                .integration
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|line| !line.is_empty());
+            if line.is_none() {
+                return Err(
+                    "`integration.method` is `command`, so `[integration] command` must name the \
+                     one shell command line that merges the candidate"
+                        .to_owned(),
+                );
+            }
+        }
+        IntegrationMethod::Push => {
+            if config.integration.command.is_some() {
+                return Err(
+                    "`integration.command` is set while `integration.method` is `push`; set \
+                     `integration.method = \"command\"` or remove the command"
+                        .to_owned(),
+                );
+            }
+        }
+        // The deserializer refuses `pr` as not built, so it never reaches here.
+        IntegrationMethod::Pr => {}
     }
     // A command worker is one program and its arguments, and `exec_args` describes the other
     // worker line. Both set is ambiguous, so the file is refused by both names.
@@ -1288,8 +1323,8 @@ mod tests {
     }
 
     /// `integration.method` and `integration.style` are closed sets. Every style parses; the
-    /// methods `command` and `pr` are refused as not built, and an unknown value names every
-    /// allowed one.
+    /// method `command` is built and needs its command line, `pr` is refused as not built, and
+    /// an unknown value names every allowed one.
     #[test]
     fn integration_method_and_style_are_closed_sets() {
         let methods: Vec<&str> = INTEGRATION_METHODS
@@ -1305,7 +1340,13 @@ mod tests {
 
         for value in INTEGRATION_METHODS {
             assert_eq!(IntegrationMethod::parse(value.as_str()), Some(*value));
-            let text = format!("schema_version = 1\n[integration]\nmethod = \"{value}\"\n");
+            let command = if *value == IntegrationMethod::Command {
+                "command = \"true\"\n"
+            } else {
+                ""
+            };
+            let text =
+                format!("schema_version = 1\n[integration]\nmethod = \"{value}\"\n{command}");
             if value.is_built() {
                 assert_eq!(
                     parse(&text).expect("a built method").integration.method,
@@ -1317,6 +1358,22 @@ mod tests {
                 assert!(error.contains(value.as_str()), "{error}");
             }
         }
+        // `command` and `method` belong to each other.
+        let missing = parse("schema_version = 1\n[integration]\nmethod = \"command\"\n")
+            .expect_err("a command method needs its command");
+        assert!(missing.contains("[integration] command"), "{missing}");
+        for empty in ["", "   "] {
+            let text = format!(
+                "schema_version = 1\n[integration]\nmethod = \"command\"\ncommand = \"{empty}\"\n"
+            );
+            let error = parse(&text).expect_err("an empty command");
+            assert!(error.contains("[integration] command"), "{error}");
+        }
+        let pushed =
+            parse("schema_version = 1\n[integration]\nmethod = \"push\"\ncommand = \"true\"\n")
+                .expect_err("push refuses a command");
+        assert!(pushed.contains("integration.command"), "{pushed}");
+        assert!(pushed.contains("push"), "{pushed}");
         for value in INTEGRATION_STYLES {
             assert_eq!(IntegrationStyle::parse(value.as_str()), Some(*value));
             let text = format!("schema_version = 1\n[integration]\nstyle = \"{value}\"\n");
