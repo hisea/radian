@@ -25,6 +25,7 @@ see `permissions` for the exact rule.
 
 A text read prefixes each line with its file line number and `": "`.
 That prefix is not file content; remove it before you reuse the text in `patch`.
+A whole file enters the context at its full size; after `grep` locates lines, read the range around them with `offset` and `limit`, and read a whole file only when it is small or the task needs all of it.
 A directory read lists `kind`, size and name rows, sorted by name.
 `radian://docs/<page>.md` reads this manual from memory.
 A path that names a directory reads its `index.md` (`radian://docs/arc/`).

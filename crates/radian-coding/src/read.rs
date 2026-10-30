@@ -41,12 +41,13 @@ pub(crate) fn schema() -> serde_json::Value {
             "offset": {
                 "type": "integer",
                 "description": "First line to read (1-based). Default: 1. Negative counts from the end. \
-                                Ignored for an image."
+                                Set it to the first line of a located range. Ignored for an image."
             },
             "limit": {
                 "type": "integer",
                 "description": "Maximum lines to read; at least 1 for text and directory \
-                                reads. For a directory, it caps entries instead. Default: 500. \
+                                reads. Set it to cover the located range, not the whole file. For \
+                                a directory, it caps entries instead. Default: 500. \
                                 Maximum: 5000. Ignored for an image."
             }
         },
@@ -63,17 +64,25 @@ pub(crate) fn spec(presence: ToolPresence) -> ToolSpec {
     } else {
         ""
     };
+    // The range advice names `grep` only when it is mounted, and keeps the advice without the
+    // name otherwise (ADR 0043 §4).
+    let locate = if presence.grep {
+        "after `grep` locates lines"
+    } else {
+        "after locating lines"
+    };
     ToolSpec {
         name: "read".into(),
         description: format!(
             "Read a UTF-8 text file, a directory, or an image. Each text line starts \
              with its line number and `\": \"`. This prefix is not part of the file.{patch_hint} \
-             For a large file, read one \
-             part at a time with `offset` and `limit`. Do not increase `max_bytes` \
-             to get a later part. An image (PNG, JPEG, GIF or WebP, judged by its \
-             magic number, never its extension) returns a text line and the image \
-             itself; images are limited to 5 MiB and 8000 px per side (`image_too_large` \
-             when over). An image is read whole: `offset` and `limit` are ignored."
+             A whole file enters the context at its full size: {locate}, read the range \
+             around them with `offset` and `limit`. Read a whole file only when it is small \
+             or the task needs all of it. Do not increase `max_bytes` to get a later part. \
+             An image (PNG, JPEG, GIF or WebP, judged by its magic number, never its \
+             extension) returns a text line and the image itself; images are limited to \
+             5 MiB and 8000 px per side (`image_too_large` when over). An image is read \
+             whole: `offset` and `limit` are ignored."
         ),
         input_schema: schema(),
         concurrency: ToolConcurrency::Shared,
