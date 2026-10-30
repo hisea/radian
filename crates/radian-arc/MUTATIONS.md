@@ -1832,3 +1832,24 @@ files were restored from the copies with `cp` and confirmed identical with `diff
 4/4 caught.
 
 Re-run on the final code, once each, with the same commands and backups under `.radian/mut3/`: M7 is still caught by `merge_command::a_worker_environment_with_git_dir_does_not_redirect_the_merge_command`, M8 and M9 by `merge_command::the_config_guard_fails_and_restores_a_changed_config`, and M10 by `merge_command::common::scratch_tests::the_git_isolation_helper_removes_the_repository_variables`.
+
+## TK0242: `[integration] method = "pr"`, the built-in `command` preset (2026-10-29, branch `work/TK0242-merge-method-pr`)
+
+`method = "pr"` is `command` with `PR_COMMAND`, a POSIX `sh` script that pushes
+`work/<task>`, runs `gh` against the pull request for that branch, and answers `pending`,
+`closed` or the current target-branch sha. `Integration::command_line` supplies the preset,
+`config::parse` refuses a configured `command` with it, the command environment carries
+`ARC_REMOTE` and `ARC_TITLE`, and `check_command_landed` accepts the candidate's tree anywhere
+in the reported sha's history. Each mutation was applied by hand to the committed files, backed
+up under `.radian/mut/`, the named tests ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox` (the binary was rebuilt for the child-process cases), and the files were
+restored from the copies with `cp` and confirmed identical with `diff -q`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0242-M1 | `Integration::command_line` returns `None` for `Pr`, so the preset never runs | `merge_command::the_pr_preset_opens_one_pull_request_and_stays_pending` (`integration.command` is not set) | ✅ 1 failed |
+| TK0242-M2 | `config::parse` accepts `command` with `method = "pr"` (the `Pr` arm does nothing) | `store::config::tests::integration_method_and_style_are_closed_sets` (`pr refuses a command` parsed) | ✅ 1 failed |
+| TK0242-M3 | `check_command_landed` compares the reported sha's own tree instead of looking for the candidate tree in its history | `merge_command::a_target_that_gained_another_merge_after_the_candidate_still_merges` (`is not the tree of candidate`) | ✅ 1 failed |
+| TK0242-M4 | `command_env` omits `ARC_REMOTE`, so the preset's `git push` has no remote | `merge_command::the_pr_preset_opens_one_pull_request_and_stays_pending` (`ARC_REMOTE: unbound variable`) | ✅ 1 failed |
+
+4/4 caught.

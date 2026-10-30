@@ -622,16 +622,21 @@ path moves to `review.ready_to_merge`. `[integration] method` then decides the m
 `push` pushes `<candidate>:refs/heads/<target>` without force, and a target branch that moved
 after integration, or a rejected push, makes it integrate again (one round per pass in the
 loop; at most three runs per `radian arc merge` command). `command` runs `[integration]
-command` in the repository root with the hooks' environment plus `ARC_CANDIDATE_SHA` (and
+command` in the repository root with the hooks' environment plus `ARC_CANDIDATE_SHA`,
+`ARC_REMOTE` and `ARC_TITLE` (and
 without the repository variables of arc's own process: `run_shell` removes
 `git::REPOSITORY_ENV`, so the command's git calls name the repository root it runs in), logs to
 `runs/<task>/attempts/<attempt>/merge-command.log`, and reads its last non-empty line
 (`last_non_empty_line`, with a CRLF's `\r` trimmed): a 40-hex sha is checked by
 `check_command_landed` (after a fetch the sha is on the remote target, equal to its tip or in
-its history, and its tree is the candidate's tree; exact sha equality is not required),
-`pending` leaves the task in `review.integrating` (the next pass reuses the passing integration
+its history, and the candidate's tree is the tree of that sha or one of its ancestors; exact
+sha equality is not required, so a target that gained other merges still passes), `pending`
+leaves the task in `review.integrating` (the next pass reuses the passing integration
 verdict while its `base_sha` is still the remote target, so the command runs again without
-rebuilding the candidate), and `closed` or any other line is a failed integration. A non-zero
+rebuilding the candidate), and `closed` or any other line is a failed integration. `pr` is
+`command` with the built-in `PR_COMMAND` script: it pushes `work/<task>`, opens a pull
+request with `gh` when none exists, and reports `pending`, `closed` or the current target
+sha. A non-zero
 exit or timeout wins over the last line. Before `done.merged`, the `push` path checks what
 landed: for `merge`, the remote target is the candidate and contains `head_sha`; for `squash`
 and `rebase`, the remote target's tree is the candidate's tree. A failed check records the

@@ -593,11 +593,71 @@ Then it:
 2. runs the integration stage against the current remote target branch (`[integration] target_branch`, else `[repository] main_branch`). The candidate is built with `[integration] style` and the current `[integration] key_commands` run on it (see [Integration](integration.md)).
    A conflict, a failing key command, or a refused `rebase` moves the task to `review.rework_pending` with the reason, and `merge` exits `0`.
    A passing integration moves the task to `review.ready_to_merge`.
-3. lands the candidate: `push` pushes it to the remote target branch without force and integrates again when the target moved or the push was rejected, at most 3 times in one command; `command` runs `[integration] command` and reads its last non-empty line — a 40-hex sha is checked, `pending` leaves the task for a later run, and `closed` or any other line is a failed integration (see [the command method](integration.md#the-command-method)).
+3. lands the candidate: `push` pushes it to the remote target branch without force and integrates again when the target moved or the push was rejected, at most 3 times in one command; `command` runs `[integration] command` and reads its last non-empty line — a 40-hex sha is checked, `pending` leaves the task for a later run, and `closed` or any other line is a failed integration; `pr` runs the built-in pull-request preset the same way (see [the command method](integration.md#the-command-method) and [the pull-request preset](#the-pull-request-preset)).
    A push that does not settle or a `pending` answer exits `3`, and a later `merge` continues.
 4. checks that what landed is the candidate (see [The after-push check](integration.md#the-after-push-check) and [the command check](integration.md#the-command-check)). A failed check records the reason and moves the task to `review.rework_pending`; it never reaches `done.merged`. On a passing check it moves the task to `done.merged`, recording the `after_merge` hook and `merged_sha` in the same write. arc itself removes nothing (the branch stays on the remote until a hook deletes it); the default `[hooks] after_merge` lines do (see [Hooks](#hooks)).
 
 On `done.merged` it prints `<task> done.merged (<candidate sha>)`, followed by `<new task id> proposed (follow-ups from <plan id>)` when the merge left the plan with no open task and it has review items to collect (see [The review's follow-up](gate.md#the-reviews-follow-up)). A hook command that fails is a `warning:` line after it and does not undo the merge, and neither does a follow-up task that could not be added. It runs its pending hook unless a loop holds `runner.lock`, which runs it.
+
+### The pull-request preset
+
+`[integration] method = "pr"` is the built-in `command` method for a protected branch on GitHub.
+It runs the script below in place of [`integration.command`](files.md#configtoml), through the same runner with the same environment and the same answer, check and `pending` handling (see [the command method](integration.md#the-command-method)).
+`[integration] command` with `method = "pr"` is a config error, as `command` with `method = "push"` is.
+
+It needs `gh` on `PATH` and an authenticated session (`gh auth login`); a missing or unauthenticated `gh` fails the integration at once with its message, and the task goes to `review.rework_pending`.
+The script pushes `work/<task>` without force, so the pull request shows the verified head; it opens the pull request against `ARC_TARGET_BRANCH` with the task's title and id when none exists, answers `pending` while it is open, `closed` when it was closed without a merge, and the current target-branch sha when it is merged.
+Who merges it (a person, a merge queue, CI auto-merge) is not arc's business: each later pass runs the script again and reads the state.
+For another host or a different pull-request flow, use [`method = "command"`](integration.md#the-command-method) with your own line; `pr` is a preset, not another method.
+
+```sh
+set -eu
+
+branch="work/$ARC_TASK"
+
+# 1. Push the verified head, never with force, so the pull request shows it.
+git push "$ARC_REMOTE" "refs/heads/$branch:refs/heads/$branch"
+
+command -v gh >/dev/null 2>&1 || {
+  echo "method = \"pr\" needs gh on PATH; run gh auth login" >&2
+  exit 1
+}
+
+# 2. The pull request whose head is the task branch. `gh pr view` finds an open one;
+#    `gh pr list --state all` also finds a closed or merged one.
+state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || true)
+if [ -z "$state" ]; then
+  state=$(gh pr list --head "$branch" --state all --json state --jq '.[0].state // empty' 2>/dev/null || true)
+fi
+
+if [ -z "$state" ]; then
+  # 3. No pull request yet: open one against the target branch and stay pending.
+  gh pr create --base "$ARC_TARGET_BRANCH" --head "$branch" \
+    --title "$ARC_TITLE ($ARC_TASK)" --body "Task $ARC_TASK: $ARC_TITLE" >/dev/null
+  echo pending
+  exit 0
+fi
+
+case "$state" in
+  OPEN)
+    echo pending
+    ;;
+  MERGED)
+    # 4. The PR merged; print the target branch as it is now, not the PR's merge
+    #    commit: others may have merged after it.
+    git fetch "$ARC_REMOTE" "$ARC_TARGET_BRANCH" >/dev/null 2>&1
+    git rev-parse FETCH_HEAD
+    ;;
+  CLOSED)
+    # 5. Closed without a merge.
+    echo closed
+    ;;
+  *)
+    echo "the pull request for $branch is \"$state\"; expected OPEN, MERGED or CLOSED" >&2
+    exit 1
+    ;;
+esac
+```
 
 The exit codes are the command's own:
 
@@ -607,7 +667,7 @@ The exit codes are the command's own:
 |---|---|---|
 | `0` | success | The task reached `done.merged`, or the integration sent it to `review.rework_pending`. |
 | `1` | an error | A git or file error. |
-| `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), 3 integration runs did not settle, or an `[integration] command` answered `pending`. |
+| `3` | the state does not allow the operation | The state does not allow the merge, the branch moved, the digest changed (the task returns to `review.verifying`), 3 integration runs did not settle, or an `[integration] command` (or the `pr` preset) answered `pending`. |
 | `4` | a lock is held by another process | Another process holds `state.lock`. |
 
 ## Hooks

@@ -7,6 +7,7 @@
 mod common;
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,11 @@ impl Fixture {
     /// A repository, arc set up, one confirmed plan with one task, the task's branch published
     /// at `feature.txt`, and the task verified to `review.awaiting_human`.
     fn new(label: &str) -> Self {
+        Self::new_titled(label, "A task")
+    }
+
+    /// [`Fixture::new`] with the task's own title, for the quoting case of the `pr` preset.
+    fn new_titled(label: &str, title: &str) -> Self {
         let real = RealGitConfig::record();
         let repo = Repo::new(label);
         Store::init(&repo.clone, false).expect("arc init");
@@ -49,7 +55,7 @@ impl Fixture {
             .add_task(
                 &plan,
                 "work",
-                "A task",
+                title,
                 Vec::new(),
                 false,
                 Vec::new(),
@@ -112,13 +118,28 @@ impl Fixture {
         );
         let text = text.replace("# method = \"push\"", "method = \"command\"");
         let text = text.replace(
-            "# command = \"./merge.sh\"     # the line `method = \"command\"` runs; refused with `push`",
+            "# command = \"./merge.sh\"     # the line `method = \"command\"` runs; refused with `push` and `pr`",
             &format!("command = 'sh \"{script}\"'"),
         );
         fs::write(&path, text).unwrap();
         assert_eq!(
             self.store.config().unwrap().integration.method.as_str(),
             "command"
+        );
+    }
+
+    fn method(&self, method: &str) {
+        let path = self.store.root().join("config.toml");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("# method = \"push\""),
+            "the default file has the method line:\n{text}"
+        );
+        let text = text.replace("# method = \"push\"", &format!("method = \"{method}\""));
+        fs::write(&path, text).unwrap();
+        assert_eq!(
+            self.store.config().unwrap().integration.method.as_str(),
+            method
         );
     }
 
@@ -223,6 +244,8 @@ fn a_command_that_pushes_the_candidate_and_prints_its_sha_reaches_done_merged() 
         format!("ARC_ATTEMPT={}-1", fixture.task),
         format!("ARC_BRANCH=work/{}", fixture.task),
         format!("ARC_CANDIDATE_SHA={candidate}"),
+        "ARC_REMOTE=origin".to_owned(),
+        "ARC_TITLE=A task".to_owned(),
         "ARC_STATE=review.ready_to_merge".to_owned(),
         "ARC_HOOK=integration".to_owned(),
         "ARC_TARGET_BRANCH=main".to_owned(),
@@ -265,7 +288,7 @@ fn a_sha_whose_tree_differs_is_recorded_not_merged() {
         ("review", "rework_pending")
     );
     let reason = merged.reason.clone().expect("a reason");
-    assert!(reason.contains("is not the tree of candidate"), "{reason}");
+    assert!(reason.contains("the tree of candidate"), "{reason}");
     assert_eq!(fixture.remote_main().as_deref(), Some(base.as_str()));
     assert_eq!(
         fixture
@@ -538,6 +561,447 @@ fn the_cli_exits_three_and_says_pending() {
     assert_eq!(
         fixture.state(),
         ("review".to_owned(), "integrating".to_owned())
+    );
+}
+
+// ---- method = "pr": the built-in `command` preset ----------------------------------
+
+fn value_of<'a>(arguments: &'a [String], flag: &str) -> &'a str {
+    let index = arguments
+        .iter()
+        .position(|argument| argument == flag)
+        .unwrap_or_else(|| panic!("`{flag}` is missing from {arguments:?}"));
+    &arguments[index + 1]
+}
+
+/// A fake `gh` on `PATH` for the `pr` preset: it records every argument block and answers
+/// from a state file. `create` records its arguments and leaves the PR `OPEN`.
+struct FakeGh {
+    dir: PathBuf,
+    calls: PathBuf,
+    creates: PathBuf,
+    state: PathBuf,
+}
+
+impl FakeGh {
+    fn new(repo: &Repo) -> Self {
+        let dir = repo.root.join("gh-bin");
+        fs::create_dir_all(&dir).unwrap();
+        let calls = repo.root.join("gh-calls.log");
+        let creates = repo.root.join("gh-creates.log");
+        let state = repo.root.join("gh-state");
+        let bin = dir.join("gh");
+        let body = format!(
+            "#!/bin/sh\n\
+             state='{state}'\n\
+             calls='{calls}'\n\
+             creates='{creates}'\n\
+             {{ printf 'call\\n'; for arg in \"$@\"; do printf 'arg:%s\\n' \"$arg\"; done; }} >> \"$calls\"\n\
+             if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n\
+               [ -s \"$state\" ] || {{ echo \"no pull requests found for branch $3\" >&2; exit 1; }}\n\
+               cat \"$state\"\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n\
+               [ -s \"$state\" ] && cat \"$state\"\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = pr ] && [ \"$2\" = create ]; then\n\
+               {{ printf 'call\\n'; for arg in \"$@\"; do printf 'arg:%s\\n' \"$arg\"; done; }} >> \"$creates\"\n\
+               echo OPEN > \"$state\"\n\
+               exit 0\n\
+             fi\n\
+             echo \"fake gh: unexpected arguments: $*\" >&2\n\
+             exit 1\n",
+            state = state.display(),
+            calls = calls.display(),
+            creates = creates.display(),
+        );
+        fs::write(&bin, body).unwrap();
+        make_executable(&bin);
+        Self {
+            dir,
+            calls,
+            creates,
+            state,
+        }
+    }
+
+    /// The `PATH` the merge command's child sees: this fake `gh` first, then the test's own.
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    fn set_state(&self, state: &str) {
+        fs::write(&self.state, state).unwrap();
+    }
+
+    fn calls(&self) -> Vec<Vec<String>> {
+        parse_blocks(&fs::read_to_string(&self.calls).unwrap_or_default())
+    }
+
+    fn creates(&self) -> Vec<Vec<String>> {
+        parse_blocks(&fs::read_to_string(&self.creates).unwrap_or_default())
+    }
+}
+
+/// One `call` block of a fake program's log: the marker line starts it and `arg:` lines hold
+/// its arguments.
+fn parse_blocks(text: &str) -> Vec<Vec<String>> {
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    for line in text.lines() {
+        if line == "call" {
+            blocks.push(Vec::new());
+        } else if let Some(argument) = line.strip_prefix("arg:")
+            && let Some(block) = blocks.last_mut()
+        {
+            block.push(argument.to_owned());
+        }
+    }
+    blocks
+}
+
+fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+/// A `PATH` with a `git` and a `sh`, and no `gh`: the `pr` preset's own lookup fails.
+fn path_without_gh(repo: &Repo) -> String {
+    let dir = repo.root.join("gh-missing-bin");
+    fs::create_dir_all(&dir).unwrap();
+    let found = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .expect("the shell runs");
+    let git = String::from_utf8_lossy(&found.stdout);
+    let git = Path::new(git.trim());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(git, dir.join("git")).expect("the git symlink");
+    format!("{}:/bin", dir.display())
+}
+
+/// A `gh` on `PATH` that always fails with `message`, like an unauthenticated one.
+fn failing_gh(repo: &Repo, message: &str) -> String {
+    let dir = repo.root.join("gh-failing-bin");
+    fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("gh");
+    fs::write(&bin, format!("#!/bin/sh\necho '{message}' >&2\nexit 1\n")).unwrap();
+    make_executable(&bin);
+    format!("{}:{}", dir.display(), path_without_gh(repo))
+}
+
+impl Fixture {
+    fn merge_with_path(&self, path: &str) -> common::Run {
+        self.repo
+            .radian_with_env(&["arc", "merge", &self.task], &[("PATH", path.to_owned())])
+    }
+
+    fn merged_state(&self) -> (String, String) {
+        let task = self.store.load_task(&self.task).unwrap().item;
+        (task.state.as_str().to_owned(), task.phase)
+    }
+}
+
+/// Edge 1: the first pass opens one pull request with the right base and head, and the task
+/// stays pending. The branch is pushed so the pull request shows the verified head.
+#[test]
+fn the_pr_preset_opens_one_pull_request_and_stays_pending() {
+    let fixture = Fixture::new("pr-create");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+    let branch = format!("work/{}", fixture.task);
+
+    let run = fixture.merge_with_path(&gh.path());
+    assert_eq!(
+        run.code, 3,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert!(run.stdout.contains("pending"), "{}", run.stdout);
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "integrating".to_owned())
+    );
+
+    let creates = gh.creates();
+    assert_eq!(creates.len(), 1, "one `gh pr create`: {creates:?}");
+    let arguments = &creates[0];
+    assert_eq!(value_of(arguments, "--base"), "main");
+    assert_eq!(value_of(arguments, "--head"), branch);
+    assert_eq!(
+        value_of(arguments, "--title"),
+        format!("A task ({})", fixture.task),
+        "{arguments:?}"
+    );
+    assert_eq!(
+        fixture.repo.remote_branch(&fixture.task).as_deref(),
+        Some(fixture.head.as_str()),
+        "the preset pushes the verified head"
+    );
+}
+
+/// Edge 2: a second pass with the pull request still open opens no second one and stays
+/// pending.
+#[test]
+fn a_still_open_pull_request_stays_pending_without_a_second_create() {
+    let fixture = Fixture::new("pr-open");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+
+    let first = fixture.merge_with_path(&gh.path());
+    assert_eq!(first.code, 3, "{}", first.stderr);
+    assert_eq!(gh.creates().len(), 1);
+
+    // `create` left the state `OPEN`; the second pass reads it.
+    let second = fixture.merge_with_path(&gh.path());
+    assert_eq!(second.code, 3, "{}", second.stderr);
+    assert!(second.stdout.contains("pending"), "{}", second.stdout);
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "integrating".to_owned())
+    );
+    assert_eq!(
+        gh.creates().len(),
+        1,
+        "no second `gh pr create`: {:?}",
+        gh.calls()
+    );
+}
+
+/// Edge 3: a merged pull request reports the target branch's sha and the task merges.
+#[test]
+fn a_merged_pull_request_reaches_done_merged() {
+    let fixture = Fixture::new("pr-merged");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+    let branch = format!("work/{}", fixture.task);
+
+    let first = fixture.merge_with_path(&gh.path());
+    assert_eq!(first.code, 3, "{}", first.stderr);
+
+    // The pull request merges: `work/<task>` goes into main, and main is pushed.
+    fixture.repo.git(&["checkout", "main"]);
+    fixture
+        .repo
+        .git(&["merge", "--no-ff", "--no-edit", "-m", "PR merge", &branch]);
+    let merged_sha = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.repo.git(&["push", "origin", "main"]);
+    gh.set_state("MERGED");
+
+    let second = fixture.merge_with_path(&gh.path());
+    assert_eq!(
+        second.code, 0,
+        "stdout: {}\nstderr: {}",
+        second.stdout, second.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("done".to_owned(), "merged".to_owned())
+    );
+    let task = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(task.merged_sha.as_deref(), Some(merged_sha.as_str()));
+    assert_eq!(fixture.remote_main().as_deref(), Some(merged_sha.as_str()));
+}
+
+/// Edge 4 (through the `command` method, which the `pr` preset uses unchanged): the reported
+/// sha is the target branch's current tip, and one commit in its history holds the candidate's
+/// tree. The tip's own tree is larger, so the check is "the candidate tree is in the history
+/// of the reported sha", not "the two trees are equal".
+#[test]
+fn a_target_that_gained_another_merge_after_the_candidate_still_merges() {
+    let fixture = Fixture::new("merge-command-later-merge");
+    let branch = format!("work/{}", fixture.task);
+    // A merge of the task branch into the target, then someone else's commit. The merge commit
+    // has the tree the integration candidate will have; the tip has more.
+    fixture.repo.git(&["checkout", "-B", "prmerge", "main"]);
+    fixture
+        .repo
+        .git(&["merge", "--no-ff", "--no-edit", "-m", "PR merge", &branch]);
+    write(&fixture.repo.clone.join("later.txt"), "later\n");
+    fixture.repo.git(&["add", "later.txt"]);
+    fixture.repo.git(&["commit", "-m", "someone else"]);
+    let tip = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.repo.git(&["checkout", &branch]);
+
+    let script = fixture.script(
+        "merge.sh",
+        &format!(
+            "git push origin prmerge:refs/heads/main >/dev/null 2>&1\n\
+             echo \"{tip}\"\n"
+        ),
+    );
+    fixture.command_method(&script);
+
+    let merged = fixture.merge();
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    assert_eq!(merged.candidate_sha.as_deref(), Some(tip.as_str()));
+    assert_eq!(
+        fixture
+            .store
+            .load_task(&fixture.task)
+            .unwrap()
+            .item
+            .merged_sha
+            .as_deref(),
+        Some(tip.as_str()),
+        "the task records the reported tip"
+    );
+    assert_eq!(fixture.remote_main().as_deref(), Some(tip.as_str()));
+}
+
+/// Edge 4: a pull request merged before someone else's merge reports the target branch's
+/// current tip, not the pull request's merge commit.
+#[test]
+fn a_pull_request_merged_before_another_merge_reports_the_current_tip() {
+    let fixture = Fixture::new("pr-later-merge");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+    let branch = format!("work/{}", fixture.task);
+
+    let first = fixture.merge_with_path(&gh.path());
+    assert_eq!(first.code, 3, "{}", first.stderr);
+
+    fixture.repo.git(&["checkout", "main"]);
+    fixture
+        .repo
+        .git(&["merge", "--no-ff", "--no-edit", "-m", "PR merge", &branch]);
+    let pr_merge = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    write(&fixture.repo.clone.join("later.txt"), "later\n");
+    fixture.repo.git(&["add", "later.txt"]);
+    fixture.repo.git(&["commit", "-m", "someone else"]);
+    let tip = fixture.repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    fixture.repo.git(&["push", "origin", "main"]);
+    gh.set_state("MERGED");
+
+    let second = fixture.merge_with_path(&gh.path());
+    assert_eq!(
+        second.code, 0,
+        "stdout: {}\nstderr: {}",
+        second.stdout, second.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("done".to_owned(), "merged".to_owned())
+    );
+    let task = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert_eq!(
+        task.merged_sha.as_deref(),
+        Some(tip.as_str()),
+        "the current tip, not the pull request's merge commit"
+    );
+    assert_ne!(pr_merge, tip);
+    assert_eq!(fixture.remote_main().as_deref(), Some(tip.as_str()));
+}
+
+/// Edge 5: a pull request closed without a merge sends the task to rework.
+#[test]
+fn a_closed_pull_request_sends_the_task_to_rework_pending() {
+    let fixture = Fixture::new("pr-closed");
+    let gh = FakeGh::new(&fixture.repo);
+    gh.set_state("CLOSED");
+    fixture.method("pr");
+
+    let run = fixture.merge_with_path(&gh.path());
+    assert_eq!(
+        run.code, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert!(
+        run.stdout.contains("closed by the merge command"),
+        "{}",
+        run.stdout
+    );
+    assert!(gh.creates().is_empty(), "{:?}", gh.creates());
+}
+
+/// Edge 6a: no `gh` on `PATH` fails the integration at once with the preset's message.
+#[test]
+fn a_missing_gh_fails_the_integration_with_its_message() {
+    let fixture = Fixture::new("pr-no-gh");
+    let path = path_without_gh(&fixture.repo);
+    fixture.method("pr");
+
+    let run = fixture.merge_with_path(&path);
+    assert_eq!(
+        run.code, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert!(
+        run.stdout.contains("needs gh on PATH"),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// Edge 6b: `gh` that is not authenticated fails with gh's own message in the reason.
+#[test]
+fn an_unauthenticated_gh_fails_the_integration_with_its_message() {
+    let fixture = Fixture::new("pr-no-auth");
+    let path = failing_gh(
+        &fixture.repo,
+        "gh: authentication required; run gh auth login",
+    );
+    fixture.method("pr");
+
+    let run = fixture.merge_with_path(&path);
+    assert_eq!(
+        run.code, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        fixture.merged_state(),
+        ("review".to_owned(), "rework_pending".to_owned())
+    );
+    assert!(
+        run.stdout.contains("authentication required"),
+        "stdout: {}\nstderr: {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// Edge 7: a title with spaces and both quote kinds reaches `gh pr create` as one argument.
+#[test]
+fn a_title_with_spaces_and_quotes_is_one_create_argument() {
+    let fixture = Fixture::new_titled("pr-quotes", "Fix \"it's\" broken");
+    let gh = FakeGh::new(&fixture.repo);
+    fixture.method("pr");
+
+    let run = fixture.merge_with_path(&gh.path());
+    assert_eq!(run.code, 3, "{}", run.stderr);
+    let creates = gh.creates();
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    let title = format!("Fix \"it's\" broken ({})", fixture.task);
+    assert!(
+        creates[0].iter().any(|argument| argument == &title),
+        "the title is one argument: {:?}",
+        creates[0]
     );
 }
 

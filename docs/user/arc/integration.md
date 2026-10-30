@@ -6,7 +6,7 @@ description: How the merge builds the integration candidate and gets it onto the
 
 Integration is the step `radian arc merge` runs after your approval (see [`arc/index`](index.md#radian-arc-merge-task)).
 It builds the candidate commit from the task's `head_sha` on the current target branch (`[integration] target_branch`, else `[repository] main_branch`) and runs the `[integration] key_commands` on it.
-How the candidate then reaches the target branch is [`integration.method`](files.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)).
+How the candidate then reaches the target branch is [`integration.method`](files.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)); `pr` runs the built-in pull-request preset of `command` (see [the pull-request preset](index.md#the-pull-request-preset)).
 The style changes the candidate's sha, never the task's `verified_sha`.
 
 ## The styles
@@ -42,14 +42,15 @@ Integration reads the current list, never the `key_commands` an older attempt re
 With `method = "push"` (the default), the candidate is pushed to the remote target branch without force: `git push <remote> <candidate>:refs/heads/<target>`.
 When the target moved after the integration (or the push is rejected as non-fast-forward), the task returns to `review.integrating` and `merge` integrates again, at most 3 times in one command.
 After that it exits `3` with the task in `review.integrating`; a later `merge` continues from there.
-arc itself never checks out or updates the main checkout's working tree: it fetches and reads refs, and with `method = "command"` it runs your line in the repository root.
+arc itself never checks out or updates the main checkout's working tree: it fetches and reads refs, and with `method = "command"` or `"pr"` it runs your line or the preset in the repository root.
 
 ## The command method
 
 With `method = "command"`, arc does everything above and then runs [`integration.command`](files.md#configtoml) instead of pushing: one shell command line, in the repository root, through the gate's shell runner, with [`gate.command_timeout_secs`](files.md#configtoml) as its limit.
 arc itself pushes nothing; the command does the merge.
+`method = "pr"` is the same path with the built-in preset script instead of a configured line; the manual shows it in full under [the pull-request preset](index.md#the-pull-request-preset).
 
-It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`; it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
+It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` and `ARC_TITLE`; it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
 
 | Variable | Value |
 |---|---|
@@ -62,6 +63,10 @@ It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`; i
 | `ARC_STATE` | `review.ready_to_merge`, the phase the command runs in. |
 | `ARC_HOOK` | `integration`. The command is not a hook point; only the variables are the same. |
 | `ARC_CANDIDATE_SHA` | The candidate commit the command must merge. |
+| `ARC_REMOTE` | [`repository.remote`](files.md#configtoml): the remote the command pushes to. |
+| `ARC_TITLE` | The task's title. |
+
+`ARC_REMOTE` and `ARC_TITLE` exist for the `pr` preset; a `command` may use them too.
 
 `ARC_MERGED_SHA` is not set: the command runs before there is a merged sha, and `after_merge` gets it.
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are removed from the environment the command starts with, the same rule arc's own git calls follow: a command that runs `git` never works on another repository than the one it runs in, whatever the process arc started from carried.
@@ -78,17 +83,18 @@ Its stdout and stderr go to `runs/<task>/attempts/<attempt id>/merge-command.log
 
 A non-zero exit or a timeout is a failed integration whatever the last line says: a command that pushes the sha and then fails is not a merge.
 A command that answers `pending` runs again on every later pass, and a failed one can run again after a rework, so it must be safe to run more than once (like a hook).
-`method = "command"` without `[integration] command`, and `[integration] command` with `method = "push"`, are config errors that name the keys.
+`method = "command"` without `[integration] command`, `[integration] command` with `method = "push"`, and `[integration] command` with `method = "pr"`, are config errors that name the keys.
 
 ## The command check
 
 When the command prints a sha, arc fetches the remote target branch and checks two things:
 
 - the sha is on the remote target branch: it is the branch's tip, or it is in the branch's history;
-- its tree is the candidate's tree.
+- the candidate's tree is the tree of that sha or of one of its ancestors.
 
-Exact sha equality is not required, so a target that moved forward after the merge still passes when the candidate's content is in it.
-A sha that is not on the remote, or one whose tree differs from the candidate's, records the reason and sends the task to `review.rework_pending`; it never reaches `done.merged`.
+Exact sha equality is not required, so a target that moved forward after the merge, or gained another merge after it, still passes when the candidate's content is in it.
+The second check is a history lookup, not a comparison with the reported sha's own tree: a later merge gives the tip a larger tree, while the commit that landed the candidate keeps the candidate's tree.
+A sha that is not on the remote, or one whose history holds no commit with the candidate's tree, records the reason and sends the task to `review.rework_pending`; it never reaches `done.merged`.
 
 ## The after-push check
 
