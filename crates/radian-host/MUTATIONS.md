@@ -1853,3 +1853,9 @@ restored from a backup under `.radian/mut/` (`cmp` empty).
 | TK0243-M4 | the project reader's structural skip returns `ParsedEntry::skipped()`, discarding the bad-`args` indexes collected before it (the user reader's twin) | ✅ 1 failed (rc=100) | `project_hooks::args_tests::a_bad_args_hook_is_still_named_when_a_sibling_skips_the_entry` (one warning, not two) |
 
 4/4 caught, no equivalent mutation.
+
+An attempted strong-`Arc` mutation (the TK0236-M9 cycle: `HookRuntimeEvents` holds the
+`CommandHooks` again) did **not** fail `hooks::a_notification_hook_does_not_delay_a_plain_run`:
+a plain `exec -p` run exits even with the leaked session, because only the `--output jsonl`
+printer waits on the tee sender. The plain test is a regression net for the exit path, not a
+second catcher for that cycle.
