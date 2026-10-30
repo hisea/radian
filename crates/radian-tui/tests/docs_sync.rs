@@ -541,6 +541,30 @@ fn radian_docs_reads_directory_topics_and_nested_pages() {
             "{topic} prints arc/loop.md"
         );
     }
+    // Every page the arc split introduced reads by its path through the same door.
+    for stem in [
+        "config",
+        "gate-failures",
+        "gate-review",
+        "hooks",
+        "owner",
+        "planning",
+        "running",
+    ] {
+        let topic = format!("arc/{stem}");
+        let (_, expected) =
+            radian_coding::docs::lookup_topic(&topic).unwrap_or_else(|| panic!("{topic} exists"));
+        let output = std::process::Command::new(bin)
+            .args(["docs", &topic])
+            .output()
+            .expect("radian docs runs");
+        assert!(output.status.success(), "{topic}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            *expected,
+            "{topic} prints docs/user/{topic}.md"
+        );
+    }
     // A topic that names a directory opens its `index.md`.
     let (_, index_page) = radian_coding::docs::lookup_topic("arc").expect("arc opens its index");
     let index = std::process::Command::new(bin)

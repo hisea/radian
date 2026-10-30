@@ -962,3 +962,16 @@ byte-identical with `shasum -a 256`; the named test ran alone with
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0246-M1 | the `grep` arm of the locate hint → `"after locating lines"` (the description no longer names `grep` even when it is mounted) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` (``the description must name `grep` ``) |
+
+## TK0247: split the three arc pages (2026-10-30, branch `work/TK0247-split-big-arc-pages`)
+
+`docs/user/arc/index.md`, `files.md` and `gate.md` were split into topic pages, and the docs
+tests now check every `](page.md#anchor)` link in `docs/user/` against the headings of the page
+it resolves to. The mutation was applied by hand to `docs/user/arc/files.md` (one
+`config.md#configtoml` link became `config.md#gone`), backed up under `.radian/files.md.bak`
+and restored from that copy (never `git checkout`); the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test docs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0247-M1 | a moved link points at `config.md#gone`, a heading `arc/config.md` does not have | ✅ 1 failed (rc=100) | `every_page_anchor_in_the_manual_resolves` (it named docs/user/arc/files.md:89 and the missing heading on arc/config.md) |

@@ -224,6 +224,66 @@ fn the_index_lists_every_page() {
     }
 }
 
+/// The pages the arc split introduced: each was carved out of a page at the 56 KiB cap, so each
+/// starts with room below a 32 KiB target. A page that grows past it fails here, naming the page
+/// and its size, before it nears the cap that would stop it reading whole.
+const SPLIT_ARC_PAGES: &[&str] = &[
+    "arc/config.md",
+    "arc/gate-failures.md",
+    "arc/gate-review.md",
+    "arc/hooks.md",
+    "arc/owner.md",
+    "arc/planning.md",
+    "arc/running.md",
+];
+
+/// Every page the arc split introduced is at most 32 KiB (32,768 bytes).
+#[test]
+fn the_split_arc_pages_stay_under_32_kib() {
+    const TARGET: usize = 32 * 1024;
+    for name in SPLIT_ARC_PAGES {
+        let text = radian_coding::docs::find(name)
+            .unwrap_or_else(|| panic!("docs/user/{name} is in the table"));
+        assert!(
+            text.len() <= TARGET,
+            "docs/user/{name} is {} bytes, over the {TARGET}-byte split target",
+            text.len()
+        );
+    }
+}
+
+/// Every page the arc split introduced reads through the virtual root by its path, the same
+/// door `radian docs arc/<stem>` uses: the page is embedded, is not empty, and the read returns
+/// its bytes whole.
+#[tokio::test]
+async fn every_split_arc_page_reads_by_its_path() {
+    let dir = TempDir::new("docs-split");
+    let tools = tools(dir.path());
+    for name in SPLIT_ARC_PAGES {
+        let embedded = radian_coding::docs::find(name)
+            .unwrap_or_else(|| panic!("docs/user/{name} is embedded"));
+        assert!(!embedded.is_empty(), "docs/user/{name} is not empty");
+        let output = call(
+            &tools,
+            "read",
+            json!({"path": format!("radian://docs/{name}")}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("radian://docs/{name} reads: {error:?}"));
+        let body = text(&output);
+        let mut stripped = String::new();
+        for line in body.lines() {
+            if let Some((_, rest)) = line.split_once(": ") {
+                stripped.push_str(rest);
+                stripped.push('\n');
+            }
+        }
+        let got = stripped.strip_suffix('\n').unwrap_or(&stripped);
+        let expected = embedded.strip_suffix('\n').unwrap_or(embedded);
+        assert_eq!(got, expected, "radian://docs/{name} returns the page whole");
+    }
+}
+
 /// The embedded manual stays small.
 #[test]
 fn the_embedded_manual_has_a_size_cap() {
@@ -535,6 +595,124 @@ fn every_relative_link_in_the_manual_resolves() {
         "manual links do not resolve:\n{}",
         broken.join("\n")
     );
+}
+
+/// Every `*.md` fragment link in the manual names a heading on the page it resolves to. The
+/// slug is the site renderer's (`radian_tui::site_docs`): ASCII letters and digits, runs of
+/// separators become one `-`, and a repeated heading gets `-1`, `-2`, … So a moved section
+/// that leaves a link behind fails here with the page and the line, naming the anchor.
+#[test]
+fn every_page_anchor_in_the_manual_resolves() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("../../docs/user");
+    let mut pages: Vec<(String, String)> = Vec::new();
+    collect_pages(&dir, &dir, &mut pages);
+    let ids: std::collections::HashMap<&str, std::collections::HashSet<String>> = pages
+        .iter()
+        .map(|(name, text)| (name.as_str(), heading_ids(text)))
+        .collect();
+    let mut broken: Vec<String> = Vec::new();
+    for (name, text) in &pages {
+        let from = std::path::Path::new(name)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        for (index, line) in text.lines().enumerate() {
+            for target in link_targets(line) {
+                let (path, anchor) = match target.split_once('#') {
+                    Some((path, anchor)) => (path, anchor),
+                    None => continue,
+                };
+                if anchor.is_empty() || path.contains("://") {
+                    continue;
+                }
+                let page = if path.is_empty() {
+                    name.clone()
+                } else if path.ends_with(".md") {
+                    let joined = from.join(path);
+                    let joined = joined.to_string_lossy();
+                    let mut parts: Vec<&str> = Vec::new();
+                    for part in joined.split('/') {
+                        match part {
+                            "" | "." => {}
+                            ".." => {
+                                parts.pop();
+                            }
+                            other => parts.push(other),
+                        }
+                    }
+                    parts.join("/")
+                } else {
+                    // The footer's inline-format syntax `[text](style)`: not a page link.
+                    continue;
+                };
+                let Some(headings) = ids.get(page.as_str()) else {
+                    broken.push(format!(
+                        "docs/user/{name}:{} links `{target}`, which names no page",
+                        index + 1
+                    ));
+                    continue;
+                };
+                if !headings.contains(anchor) {
+                    broken.push(format!(
+                        "docs/user/{name}:{} links `{target}`, but docs/user/{page} has no heading `#{anchor}`",
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "manual anchors do not resolve:\n{}",
+        broken.join("\n")
+    );
+}
+
+/// The heading ids of one page, by the site renderer's slug convention.
+fn heading_ids(text: &str) -> std::collections::HashSet<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ids = std::collections::HashSet::new();
+    for line in text.lines() {
+        let heading = line.trim_start();
+        let hashes = heading.chars().take_while(|ch| *ch == '#').count();
+        if !(1..=6).contains(&hashes) {
+            continue;
+        }
+        let rest = &heading[hashes..];
+        if !rest.starts_with(' ') {
+            continue;
+        }
+        let base = heading_slug(rest);
+        let seen = counts.entry(base.clone()).or_insert(0);
+        let id = if *seen == 0 {
+            base
+        } else {
+            format!("{base}-{seen}")
+        };
+        *seen += 1;
+        ids.insert(id);
+    }
+    ids
+}
+
+/// The site renderer's slug (`radian_tui::site_docs::slugify`).
+fn heading_slug(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, ' ' | '-' | '_' | '\t') && !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("section");
+    }
+    out
 }
 
 /// Every `](...)` target on one line of Markdown, in order.

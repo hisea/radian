@@ -556,18 +556,19 @@ fn two_pending_hooks_run_once_each_with_their_own_variables() {
 #[test]
 fn the_manual_names_every_hook_variable_and_point() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let page = fs::read_to_string(manifest.join("../../docs/user/arc/index.md"))
-        .expect("docs/user/arc/index.md");
+    let page = fs::read_to_string(manifest.join("../../docs/user/arc/hooks.md"))
+        .expect("docs/user/arc/hooks.md");
+    assert!(!page.is_empty(), "docs/user/arc/hooks.md is not empty");
     for name in radian_arc::hooks::HOOK_ENV {
         assert!(
             page.contains(name),
-            "docs/user/arc/index.md does not name `{name}`"
+            "docs/user/arc/hooks.md does not name `{name}`"
         );
     }
     for point in radian_arc::hooks::HOOK_POINTS {
         assert!(
             page.contains(point),
-            "docs/user/arc/index.md does not name the point `{point}`"
+            "docs/user/arc/hooks.md does not name the point `{point}`"
         );
     }
 }

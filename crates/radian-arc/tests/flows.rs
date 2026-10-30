@@ -1353,9 +1353,9 @@ fn a_changed_outside_arc_file_names_no_slot() {
 #[test]
 fn the_manual_names_the_flow_keys_and_the_task_field() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let page = std::fs::read_to_string(manifest.join("../../docs/user/arc/files.md"))
-        .expect("docs/user/arc/files.md");
-    let table = radian_coding::drift::table_under(&page, "arc/files.md", "## `config.toml`");
+    let page = std::fs::read_to_string(manifest.join("../../docs/user/arc/config.md"))
+        .expect("docs/user/arc/config.md");
+    let table = radian_coding::drift::table_under(&page, "arc/config.md", "## `config.toml`");
     let row = |key: &str| {
         table
             .iter()
@@ -1369,7 +1369,9 @@ fn the_manual_names_the_flow_keys_and_the_task_field() {
     assert_eq!(default_cell("flows.<name>.commit_dirty"), "`false`");
     assert!(default_cell("flows.<name>.gate_profile").contains("\"default\""));
 
-    let task_fields = radian_coding::drift::table_under(&page, "arc/files.md", "### Task fields");
+    let files = std::fs::read_to_string(manifest.join("../../docs/user/arc/files.md"))
+        .expect("docs/user/arc/files.md");
+    let task_fields = radian_coding::drift::table_under(&files, "arc/files.md", "### Task fields");
     assert!(
         task_fields
             .iter()
@@ -1389,16 +1391,16 @@ fn the_manual_names_the_flow_keys_and_the_task_field() {
             .any(|cell| cell.contains("flows.<name>.allow_noop")),
         "the task field's row names the flow's value it falls back to: {allow_noop:?}"
     );
-    let index = std::fs::read_to_string(manifest.join("../../docs/user/arc/index.md"))
-        .expect("docs/user/arc/index.md");
+    let index = std::fs::read_to_string(manifest.join("../../docs/user/arc/planning.md"))
+        .expect("docs/user/arc/planning.md");
     let source_line = index
         .lines()
         .find(|line| line.contains("`allow_noop_source` is"))
-        .expect("arc/index.md explains `allow_noop_source`");
+        .expect("arc/planning.md explains `allow_noop_source`");
     for source in radian_arc::store::model::ALLOW_NOOP_SOURCES {
         assert!(
             source_line.contains(&format!("`{source}`")),
-            "arc/index.md names the source `{source}`: {source_line}"
+            "arc/planning.md names the source `{source}`: {source_line}"
         );
     }
 }
