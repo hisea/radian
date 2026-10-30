@@ -1,0 +1,2 @@
+{"schema_version":1,"session_id":"radian-torn","seq":0,"ts":"2026-01-01T00:00:00Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":10,"output":7}}}
+{"schema_version":1,"session_id":"radian-torn","seq":1,"ts":"2026-01-01T00:00:01Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":20,"output":999}}}

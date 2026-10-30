@@ -874,11 +874,11 @@ fn the_manual_says_the_first_fetch_creates_the_lock() {
         .parent()
         .and_then(Path::parent)
         .expect("the crate lives in <root>/crates/radian-arc");
-    let page = read(&root.join("docs/user/arc/index.md"));
+    let page = read(&root.join("docs/user/arc/planning.md"));
     let line = page
         .lines()
         .find(|line| line.contains("radian-arc-fetch.lock"))
-        .expect("docs/user/arc/index.md names the fetch lock");
+        .expect("docs/user/arc/planning.md names the fetch lock");
     assert!(
         line.contains("first fetch"),
         "the page must say when the lock appears, not leave it to `init`: {line}"

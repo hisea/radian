@@ -1,0 +1,3 @@
+{"event":"MessageAppended","ts":"2026-01-01T00:00:07Z","data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"archived"}}]}}}}
+{"event":"ModelUsageRecorded","ts":"2026-01-01T00:00:07Z","data":{"usage":{"input":900,"output":900},"fee":{"micros":9000}}}
+{"event":"TurnFinished","ts":"2026-01-01T00:00:08Z","data":{"turn_id":"t-2","outcome":"failed"}}

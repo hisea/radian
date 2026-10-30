@@ -4,7 +4,7 @@ description: The lead's MCP server: registering it, its tools and its tool error
 
 # arc: the MCP server
 
-This page covers `radian arc mcp`; the `radian arc` commands are in [`arc`](index.md), the scheduling loop is in [`arc/loop`](loop.md), the gate and its failures are in [`arc/gate`](gate.md), and the files arc keeps are in [`arc/files`](files.md).
+This page covers `radian arc mcp`; the `radian arc` commands are in [`arc`](index.md), the scheduling loop is in [`arc/loop`](loop.md), the gate is in [`arc/gate`](gate.md), [`arc/gate-review`](gate-review.md) and [`arc/gate-failures`](gate-failures.md), and the files arc keeps are in [`arc/files`](files.md).
 
 ## `radian arc mcp`
 
@@ -71,7 +71,7 @@ One event is sent per task whose `state.phase` differs from the previous read an
 `todo.proposed`, `review.awaiting_human`, `review.rework_pending`, `done.merged`, `failed.exhausted`, `failed.cancelled`, `failed.irrecoverable`.
 
 A move into `todo.ready` sends one too, from one of these previous phases: `todo.proposed` (your `radian arc confirm <task>`) and `review.*` (the lead's `add_rework`).
-A reject keeps the task in `review.rework_pending`, so its event is that one and its second line is the note (see [`reject`](index.md#radian-arc-reject-task-note-text)).
+A reject keeps the task in `review.rework_pending`, so its event is that one and its second line is the note (see [`reject`](owner.md#radian-arc-reject-task-note-text)).
 A rework arc writes itself (a conflict with main, or a review that failed with blocking items) is not your action: its rework heading carries a suffix and the move sends nothing.
 
 A task that is new since the previous read counts as a transition from nothing.
@@ -134,10 +134,10 @@ Claude Code ignores the flag in a non-interactive `-p` session, so the events re
 | `list` | `plan` (string, optional: only this plan) | the JSON array `radian arc list --json` prints |
 | `show` | `id` (string, required) | the JSON object `radian arc show --json` prints, a task's `waits_on`, `blocks`, `never_runs` and `cycle` included |
 
-There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see [`confirm`](index.md#radian-arc-confirm-id), [`auto`](index.md#radian-arc-auto-plan-level), and [`pause`](index.md#radian-arc-pause-plan)).
+There is no tool to confirm a plan or a task, start a task, merge, reject, change `auto`, or approve: those are yours (see [`confirm`](owner.md#radian-arc-confirm-id), [`auto`](owner.md#radian-arc-auto-plan-level), and [`pause`](owner.md#radian-arc-pause-plan)).
 
 `add_plan` creates a `draft` plan with `auto` `off`.
-The `slug` rule and the title rule are the ones in [`radian arc add`](index.md#radian-arc-add); an empty title is refused.
+The `slug` rule and the title rule are the ones in [`radian arc add`](planning.md#radian-arc-add); an empty title is refused.
 
 `add_task` depends on the plan's state. On a `draft` plan it keeps the rules of `radian arc add task`, and the new task is `todo.ready`: it is confirmed with the plan. On a `confirmed` plan the new task is `todo.proposed`, and it waits for you to confirm it with `radian arc confirm <task>`; the plan keeps its `status` and `auto`. A `cancelled` plan is refused, and the error names the status. In both cases each `after` id must name a task of the same plan or a task whose state is `done`, each `extra_stages` name must be a gate stage, and `flow` must name a `[flows.<name>]` section of `config.toml` (absent: `default`).
 

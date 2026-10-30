@@ -460,6 +460,36 @@ fn item_section<'a>(footer_md: &'a str, name: &str) -> &'a str {
     &footer_md[start..end]
 }
 
+/// The `## `radian docs`` section of `cli.md`: from its heading to the next `## ` heading.
+fn radian_docs_section(cli_md: &str) -> &str {
+    let heading = "## `radian docs`";
+    let start = cli_md
+        .find(heading)
+        .unwrap_or_else(|| panic!("cli.md has a `{heading}` section"));
+    let rest = &cli_md[start + heading.len()..];
+    let end = rest
+        .find("\n## ")
+        .map(|index| start + heading.len() + index)
+        .unwrap_or(cli_md.len());
+    &cli_md[start..end]
+}
+
+/// Every fenced block of `lang` in a section, in order, each with its trailing newline.
+fn fenced_blocks(section: &str, lang: &str) -> Vec<String> {
+    let open = format!("```{lang}\n");
+    let mut blocks = Vec::new();
+    let mut rest = section;
+    while let Some(index) = rest.find(&open) {
+        let after = &rest[index + open.len()..];
+        let end = after
+            .find("\n```")
+            .unwrap_or_else(|| panic!("a {lang} block is closed"));
+        blocks.push(format!("{}\n", &after[..end]));
+        rest = &after[end + "\n```".len()..];
+    }
+    blocks
+}
+
 /// The first fenced `toml` block of a section, with its trailing newline restored.
 fn fenced_toml(section: &str) -> String {
     let start = section
@@ -492,24 +522,40 @@ fn docs_topics_match_embedded_pages() {
     assert!(radian_coding::docs::lookup_topic("nope").is_none());
 }
 
-/// `radian docs` prints the index; a topic prints the page verbatim.
+/// `radian docs` prints one line per radian-manual page, then exactly one `arc` line;
+/// a topic prints the page verbatim.
 #[test]
-fn radian_docs_prints_index_and_pages() {
+fn radian_docs_prints_the_radian_manual_and_the_arc_entry() {
     let bin = env!("CARGO_BIN_EXE_radian");
-    // No arguments: one line per topic with its description.
+    let arc_index = radian_coding::docs::find(radian_coding::docs::Manual::Arc.index())
+        .expect("arc/index.md is embedded");
+    let expected: Vec<String> = radian_coding::docs::pages_of(radian_coding::docs::Manual::Radian)
+        .map(|(name, text)| radian_coding::docs::topic_line(name, text))
+        .chain(std::iter::once(radian_coding::docs::topic_line(
+            "arc", arc_index,
+        )))
+        .collect();
     let index = std::process::Command::new(bin)
         .arg("docs")
         .output()
         .expect("radian docs runs");
     assert!(index.status.success(), "{index:?}");
-    let out = String::from_utf8_lossy(&index.stdout);
-    for (name, text) in radian_coding::docs::DOCS {
-        let topic = radian_coding::docs::topic(name);
-        assert!(out.contains(topic), "index lists {topic}");
-        assert!(
-            out.contains(radian_coding::docs::description(text)),
-            "index describes {topic}"
-        );
+    assert_eq!(
+        String::from_utf8_lossy(&index.stdout),
+        format!("{}\n", expected.join("\n")),
+        "radian docs lists the radian manual and one arc entry"
+    );
+    // No arc page is also listed under its own topic.
+    for (name, _) in radian_coding::docs::DOCS {
+        if radian_coding::docs::manual_of(name) == radian_coding::docs::Manual::Arc {
+            let topic = radian_coding::docs::topic(name);
+            assert!(
+                !expected
+                    .iter()
+                    .any(|line| line.starts_with(&format!("{topic}:"))),
+                "`radian docs` does not list {topic} as a radian topic"
+            );
+        }
     }
     // A topic prints the page verbatim (the same table `read` uses).
     let page = std::process::Command::new(bin)
@@ -523,13 +569,32 @@ fn radian_docs_prints_index_and_pages() {
     assert_eq!(body, *expected, "page bytes match the table");
 }
 
-/// A directory topic opens its `index.md`; a page under `arc/` reads by its path, and the
-/// old prefixed names are unknown.
+/// `radian docs arc` lists every arc-manual page; `arc/<stem>` reads that page, and
+/// `arc/index` (or `arc/`) still opens the arc index.
 #[test]
-fn radian_docs_reads_directory_topics_and_nested_pages() {
+fn radian_docs_lists_the_arc_manual_and_reads_nested_pages() {
     let bin = env!("CARGO_BIN_EXE_radian");
-    let (_, loop_page) = radian_coding::docs::lookup_topic("arc/loop").expect("arc/loop exists");
-    for topic in ["arc/loop", "arc/loop.md"] {
+    let expected: Vec<String> = radian_coding::docs::pages_of(radian_coding::docs::Manual::Arc)
+        .map(|(name, text)| radian_coding::docs::topic_line(name, text))
+        .collect();
+    let listing = std::process::Command::new(bin)
+        .args(["docs", "arc"])
+        .output()
+        .expect("radian docs arc runs");
+    assert!(listing.status.success(), "{listing:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&listing.stdout),
+        format!("{}\n", expected.join("\n")),
+        "radian docs arc lists every arc page"
+    );
+    let (_, index_page) = radian_coding::docs::lookup_topic("arc").expect("arc opens its index");
+    assert_ne!(
+        String::from_utf8_lossy(&listing.stdout),
+        *index_page,
+        "`radian docs arc` is a listing, not the index page"
+    );
+    // `arc/index` and the directory spelling still open the index page.
+    for topic in ["arc/index", "arc/", "arc/index.md"] {
         let output = std::process::Command::new(bin)
             .args(["docs", topic])
             .output()
@@ -537,18 +602,25 @@ fn radian_docs_reads_directory_topics_and_nested_pages() {
         assert!(output.status.success(), "{topic}: {output:?}");
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            *loop_page,
-            "{topic} prints arc/loop.md"
+            *index_page,
+            "{topic} opens arc/index.md"
         );
     }
-    // A topic that names a directory opens its `index.md`.
-    let (_, index_page) = radian_coding::docs::lookup_topic("arc").expect("arc opens its index");
-    let index = std::process::Command::new(bin)
-        .args(["docs", "arc"])
-        .output()
-        .expect("radian docs arc runs");
-    assert!(index.status.success(), "{index:?}");
-    assert_eq!(String::from_utf8_lossy(&index.stdout), *index_page);
+    // Every page under arc/ reads by its path through the same door, both spellings.
+    for (name, text) in radian_coding::docs::pages_of(radian_coding::docs::Manual::Arc) {
+        for topic in [radian_coding::docs::topic(name), *name] {
+            let output = std::process::Command::new(bin)
+                .args(["docs", topic])
+                .output()
+                .expect("radian docs runs");
+            assert!(output.status.success(), "{topic}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                *text,
+                "{topic} prints docs/user/{name}"
+            );
+        }
+    }
     // The old prefixed name is not kept as an alias.
     let missing = std::process::Command::new(bin)
         .args(["docs", "arc-loop"])
@@ -562,6 +634,39 @@ fn radian_docs_reads_directory_topics_and_nested_pages() {
     );
 }
 
+/// `cli.md` states the exact `radian docs` output in two `text` blocks: the radian-manual
+/// topics with the single `arc` entry, then the arc-manual topics. The binary prints exactly
+/// those lines, in that order.
+#[test]
+fn the_manual_states_the_exact_radian_docs_output() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cli_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/cli.md")).expect("cli.md exists");
+    let blocks = fenced_blocks(radian_docs_section(&cli_md), "text");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the `radian docs` section has two `text` blocks: the radian listing and the arc listing"
+    );
+    let bin = env!("CARGO_BIN_EXE_radian");
+    for (args, documented) in [
+        (&["docs"][..], &blocks[0]),
+        (&["docs", "arc"][..], &blocks[1]),
+    ] {
+        let output = std::process::Command::new(bin)
+            .args(args)
+            .output()
+            .expect("radian docs runs");
+        assert!(output.status.success(), "radian {args:?}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            *documented,
+            "cli.md states the exact output of `radian {}`",
+            args.join(" ")
+        );
+    }
+}
+
 /// An unknown topic exits 2 and lists the pages.
 #[test]
 fn radian_docs_unknown_topic_exits_two_and_lists_pages() {
@@ -573,10 +678,18 @@ fn radian_docs_unknown_topic_exits_two_and_lists_pages() {
         .expect("radian docs nope runs");
     assert_eq!(missing.status.code(), Some(2), "{missing:?}");
     let err = String::from_utf8_lossy(&missing.stderr);
+    let listed = err
+        .strip_prefix("radian: unknown docs topic `nope`; available topics: ")
+        .unwrap_or_else(|| panic!("the refusal lists the topics: {err}"));
+    let topics: Vec<&str> = listed.trim_end().split(", ").collect();
     for (name, _) in radian_coding::docs::DOCS {
         let topic = radian_coding::docs::topic(name);
-        assert!(err.contains(topic), "stderr lists {topic}: {err}");
+        assert!(topics.contains(&topic), "stderr lists {topic}: {err}");
     }
+    assert!(
+        topics.contains(&"arc"),
+        "stderr lists the `arc` topic that maps the arc manual: {err}"
+    );
 }
 
 /// The commands of the `## Verify` block in `AGENTS.md`, in order.

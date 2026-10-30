@@ -4,9 +4,9 @@ description: How the merge builds the integration candidate and gets it onto the
 
 # Integration
 
-Integration is the step `radian arc merge` runs after your approval (see [`arc/index`](index.md#radian-arc-merge-task)).
+Integration is the step `radian arc merge` runs after your approval (see [`arc/owner`](owner.md#radian-arc-merge-task)).
 It builds the candidate commit from the task's `head_sha` on the current target branch (`[integration] target_branch`, else `[repository] main_branch`) and runs the `[integration] key_commands` on it.
-How the candidate then reaches the target branch is [`integration.method`](files.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)); `pr` runs the built-in pull-request preset of `command` (see [the pull-request preset](#the-pull-request-preset)).
+How the candidate then reaches the target branch is [`integration.method`](config.md#configtoml): `push` (the default) pushes it without force; `command` runs your own merge command and checks what it reports (see [the command method](#the-command-method)); `pr` runs the built-in pull-request preset of `command` (see [the pull-request preset](#the-pull-request-preset)).
 The style changes the candidate's sha, never the task's `verified_sha`.
 
 ## The styles
@@ -46,16 +46,16 @@ arc itself never checks out or updates the main checkout's working tree: it fetc
 
 ## The command method
 
-With `method = "command"`, arc does everything above and then runs [`integration.command`](files.md#configtoml) instead of pushing: one shell command line, in the repository root, through the gate's shell runner, with [`gate.command_timeout_secs`](files.md#configtoml) as its limit.
+With `method = "command"`, arc does everything above and then runs [`integration.command`](config.md#configtoml) instead of pushing: one shell command line, in the repository root, through the gate's shell runner, with [`gate.command_timeout_secs`](config.md#configtoml) as its limit.
 arc itself pushes nothing; the command does the merge.
 `method = "pr"` is the same path with the built-in preset script instead of a configured line; the manual shows it in full under [the pull-request preset](#the-pull-request-preset).
 
-It receives the [hooks' environment](index.md#hooks), which describes the variables, plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` and `ARC_TITLE` (and `ARC_HOOK` is `integration` rather than a hook point); it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
+It receives the [hooks' environment](hooks.md#hooks), which describes the variables, plus `ARC_CANDIDATE_SHA`, `ARC_REMOTE` and `ARC_TITLE` (and `ARC_HOOK` is `integration` rather than a hook point); it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
 
 | Variable | Value |
 |---|---|
 | `ARC_CANDIDATE_SHA` | The candidate commit the command must merge. |
-| `ARC_REMOTE` | [`repository.remote`](files.md#configtoml): the remote the command pushes to. For the `pr` preset it also names the GitHub repository every `gh` call uses. |
+| `ARC_REMOTE` | [`repository.remote`](config.md#configtoml): the remote the command pushes to. For the `pr` preset it also names the GitHub repository every `gh` call uses. |
 | `ARC_TITLE` | The task's title. |
 
 `ARC_MERGED_SHA` is not set: the command runs before there is a merged sha, and `after_merge` gets it.
@@ -78,11 +78,11 @@ A command that answers `pending` runs again on every later pass, and a failed on
 ### The pull-request preset
 
 `[integration] method = "pr"` is the built-in `command` method for a protected branch on GitHub.
-It runs the script below in place of [`integration.command`](files.md#configtoml), through the same runner with the same environment and the same answer, check and `pending` handling (see [the command method](#the-command-method)); `[integration] command` with `method = "pr"` is a config error, as `command` with `method = "push"` is.
+It runs the script below in place of [`integration.command`](config.md#configtoml), through the same runner with the same environment and the same answer, check and `pending` handling (see [the command method](#the-command-method)); `[integration] command` with `method = "pr"` is a config error, as `command` with `method = "push"` is.
 It needs `gh` on `PATH` and an authenticated session (`gh auth login`); a missing or unauthenticated `gh` fails the integration at once with its message, and the task goes to `review.rework_pending`.
 The script pushes `work/<task>` without force, so the pull request shows the verified head; it opens the pull request against `ARC_TARGET_BRANCH` with the task's title and id when none exists, answers `pending` while it is open, `closed` when it was closed without a merge, and the current target-branch sha when it is merged.
 Who merges it (a person, a merge queue, CI auto-merge) is not arc's business: each later pass runs the script again and reads the state.
-It derives the GitHub `owner/name` from the configured remote's URL, read with `git config --get remote.<name>.url` (not `git remote get-url`, which expands a `url.*.insteadOf` rewrite); it accepts `git@github.com:owner/name.git`, `https://github.com/owner/name.git` and `ssh://git@github.com/owner/name.git`, and passes `--repo owner/name` to every `gh` call, so [`repository.remote`](files.md#configtoml) decides the repository even when the clone has several remotes.
+It derives the GitHub `owner/name` from the configured remote's URL, read with `git config --get remote.<name>.url` (not `git remote get-url`, which expands a `url.*.insteadOf` rewrite); it accepts `git@github.com:owner/name.git`, `https://github.com/owner/name.git` and `ssh://git@github.com/owner/name.git`, and passes `--repo owner/name` to every `gh` call, so [`repository.remote`](config.md#configtoml) decides the repository even when the clone has several remotes.
 Any other URL fails the integration with a message that names it, and no `gh` call runs.
 For another host or a different pull-request flow, use [`method = "command"`](#the-command-method) with your own line; `pr` is a preset, not another method.
 

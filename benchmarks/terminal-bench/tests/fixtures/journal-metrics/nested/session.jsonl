@@ -1,0 +1,4 @@
+{"event":"TurnStarted","ts":"2026-01-01T00:00:00Z","data":{"turn_id":"t-1"}}
+{"event":"MessageAppended","ts":"2026-01-01T00:00:05Z","data":{"index":0,"message":{"assistant":{"content":[{"text":{"text":"done"}}]}}}}
+{"event":"ModelUsageRecorded","ts":"2026-01-01T00:00:05Z","data":{"usage":{"input":100,"output":10},"fee":{"micros":1000}}}
+{"event":"TurnFinished","ts":"2026-01-01T00:00:06Z","data":{"turn_id":"t-1","outcome":"completed"}}

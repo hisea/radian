@@ -1,5 +1,5 @@
-//! The bundled manual (`radian://docs/`): embedded pages, the virtual root,
-//! refusals, and the size cap.
+//! The bundled manuals (`radian://docs/`): embedded pages, the virtual root,
+//! refusals, and each manual's size cap.
 
 mod common;
 
@@ -255,39 +255,224 @@ async fn writers_refuse_virtual_paths() {
     }
 }
 
-/// `index.md` is the manual's map: it names every other page as a list item (`` - `stem`: ``),
-/// so a new page cannot ship without a line on the map.
+/// Each manual's own index maps that manual: `index.md` lists the radian pages, and
+/// `arc/index.md` lists the arc pages (`- \`arc/<stem>\`:`). A page left off its own manual's
+/// index fails here, naming the page.
 #[test]
-fn the_index_lists_every_page() {
-    let index = radian_coding::docs::DOCS
-        .iter()
-        .find(|(name, _)| *name == "index.md")
-        .map(|(_, text)| *text)
-        .expect("index.md is in the table");
-    for name in page_names() {
-        let stem = name.trim_end_matches(".md");
-        if stem == "index" {
-            continue;
-        }
+fn each_index_lists_every_page_of_its_manual() {
+    for manual in radian_coding::docs::Manual::ALL {
+        let index = radian_coding::docs::find(manual.index())
+            .unwrap_or_else(|| panic!("{}'s index is embedded", manual.name()));
+        let missing = radian_coding::docs::pages_missing_from_index(manual, index);
         assert!(
-            index.contains(&format!("- `{stem}`:")),
-            "index.md does not list {name}"
+            missing.is_empty(),
+            "{}'s index `{}` does not list: {missing:?}",
+            manual.name(),
+            manual.index()
         );
     }
 }
 
-/// The embedded manual stays small.
+/// The radian manual's index reaches the arc manual exactly once, through `arc/index`; the
+/// arc index maps the arc pages themselves.
 #[test]
-fn the_embedded_manual_has_a_size_cap() {
-    let total: usize = radian_coding::docs::DOCS
+fn the_radian_index_links_the_arc_manual_once() {
+    let index = radian_coding::docs::find("index.md").expect("index.md exists");
+    let arc_lines: Vec<&str> = index
+        .lines()
+        .filter(|line| line.contains("`arc/"))
+        .collect();
+    assert_eq!(
+        arc_lines.len(),
+        1,
+        "index.md has one arc reference: {arc_lines:?}"
+    );
+    assert!(
+        arc_lines[0].contains("`arc/index`"),
+        "index.md's one arc reference is `arc/index`: {:?}",
+        arc_lines[0]
+    );
+}
+
+/// A page a manual's index leaves off is named by the check, for both manuals.
+#[test]
+fn an_unlisted_page_fails_naming_it() {
+    let arc_index = radian_coding::docs::find("arc/index.md").expect("arc/index.md exists");
+    let without_worker: String = arc_index
+        .lines()
+        .filter(|line| !line.starts_with("- `arc/worker`:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        radian_coding::docs::pages_missing_from_index(
+            radian_coding::docs::Manual::Arc,
+            &without_worker
+        ),
+        vec!["arc/worker.md"],
+        "the arc index check names the page it left off"
+    );
+
+    let radian_index = radian_coding::docs::find("index.md").expect("index.md exists");
+    let without_cli: String = radian_index
+        .lines()
+        .filter(|line| !line.starts_with("- `cli`:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        radian_coding::docs::pages_missing_from_index(
+            radian_coding::docs::Manual::Radian,
+            &without_cli
+        ),
+        vec!["cli.md"],
+        "the radian index check names the page it left off"
+    );
+}
+
+/// The pages the arc split introduced: each was carved out of a page at the 56 KiB cap, so each
+/// starts with room below a 32 KiB target. A page that grows past it fails here, naming the page
+/// and its size, before it nears the cap that would stop it reading whole.
+const SPLIT_ARC_PAGES: &[&str] = &[
+    "arc/config.md",
+    "arc/gate-failures.md",
+    "arc/gate-review.md",
+    "arc/hooks.md",
+    "arc/owner.md",
+    "arc/planning.md",
+    "arc/running.md",
+];
+
+/// Every page the arc split introduced is at most 32 KiB (32,768 bytes).
+#[test]
+fn the_split_arc_pages_stay_under_32_kib() {
+    const TARGET: usize = 32 * 1024;
+    for name in SPLIT_ARC_PAGES {
+        let text = radian_coding::docs::find(name)
+            .unwrap_or_else(|| panic!("docs/user/{name} is in the table"));
+        assert!(
+            text.len() <= TARGET,
+            "docs/user/{name} is {} bytes, over the {TARGET}-byte split target",
+            text.len()
+        );
+    }
+}
+
+/// Every page the arc split introduced reads through the virtual root by its path, the same
+/// door `radian docs arc/<stem>` uses: the page is embedded, is not empty, and the read returns
+/// its bytes whole.
+#[tokio::test]
+async fn every_split_arc_page_reads_by_its_path() {
+    let dir = TempDir::new("docs-split");
+    let tools = tools(dir.path());
+    for name in SPLIT_ARC_PAGES {
+        let embedded = radian_coding::docs::find(name)
+            .unwrap_or_else(|| panic!("docs/user/{name} is embedded"));
+        assert!(!embedded.is_empty(), "docs/user/{name} is not empty");
+        let output = call(
+            &tools,
+            "read",
+            json!({"path": format!("radian://docs/{name}")}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("radian://docs/{name} reads: {error:?}"));
+        let body = text(&output);
+        let mut stripped = String::new();
+        for line in body.lines() {
+            if let Some((_, rest)) = line.split_once(": ") {
+                stripped.push_str(rest);
+                stripped.push('\n');
+            }
+        }
+        let got = stripped.strip_suffix('\n').unwrap_or(&stripped);
+        let expected = embedded.strip_suffix('\n').unwrap_or(embedded);
+        assert_eq!(got, expected, "radian://docs/{name} returns the page whole");
+    }
+}
+
+/// Every page still reads through the one virtual root by its unchanged path, arc pages
+/// under `arc/` included.
+#[tokio::test]
+async fn every_page_reads_at_its_unchanged_path() {
+    let dir = TempDir::new("docs-paths");
+    let tools = tools(dir.path());
+    for (name, embedded) in radian_coding::docs::DOCS {
+        let output = call(
+            &tools,
+            "read",
+            json!({"path": format!("radian://docs/{name}")}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("radian://docs/{name} reads: {error:?}"));
+        let info = structured(&output);
+        assert_eq!(
+            info.get("total_bytes").and_then(|v| v.as_u64()),
+            Some(embedded.len() as u64),
+            "radian://docs/{name} returns the page's bytes"
+        );
+    }
+}
+
+/// Each manual has its own 512 KiB budget. A failure names the manual and its size, so a
+/// page's growth points at the manual that must shrink.
+#[test]
+fn each_manual_has_its_own_size_cap() {
+    for manual in radian_coding::docs::Manual::ALL {
+        let total = radian_coding::docs::size_of(manual);
+        if let Some(failure) = radian_coding::docs::cap_failure(manual, total) {
+            panic!("{failure}");
+        }
+    }
+    assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
+}
+
+/// The caps are separate: 520 KiB of radian pages fails the radian manual while arc's
+/// 100 KiB still fits, and 520 KiB of arc pages fails only the arc manual.
+#[test]
+fn a_manual_over_its_cap_fails_alone() {
+    const KIB: usize = 1024;
+    let radian = radian_coding::docs::cap_failure(radian_coding::docs::Manual::Radian, 520 * KIB)
+        .expect("radian is over its cap");
+    assert!(radian.contains("radian manual"), "{radian}");
+    assert!(
+        radian.contains("532480"),
+        "the message names the size: {radian}"
+    );
+    assert!(
+        radian_coding::docs::cap_failure(radian_coding::docs::Manual::Arc, 100 * KIB).is_none(),
+        "arc's 100 KiB still fits"
+    );
+    let arc = radian_coding::docs::cap_failure(radian_coding::docs::Manual::Arc, 520 * KIB)
+        .expect("arc is over its cap");
+    assert!(arc.contains("arc manual"), "{arc}");
+    assert!(arc.contains("532480"), "the message names the size: {arc}");
+    assert!(
+        radian_coding::docs::cap_failure(radian_coding::docs::Manual::Radian, 100 * KIB).is_none(),
+        "radian's 100 KiB still fits"
+    );
+}
+
+/// The split is bookkeeping only: the two manuals' page counts and sizes add up to the
+/// table's, so the binary embeds exactly the same bytes as before.
+#[test]
+fn the_two_manuals_partition_the_embedded_table() {
+    let total_pages = radian_coding::docs::DOCS.len();
+    let total_bytes: usize = radian_coding::docs::DOCS
         .iter()
         .map(|(_, text)| text.len())
         .sum();
-    assert!(
-        total <= 512 * 1024,
-        "embedded manual is {total} bytes, over the 512 KiB cap"
+    let mut manual_pages = 0;
+    let mut manual_bytes = 0;
+    for manual in radian_coding::docs::Manual::ALL {
+        manual_pages += radian_coding::docs::pages_of(manual).count();
+        manual_bytes += radian_coding::docs::size_of(manual);
+    }
+    assert_eq!(
+        manual_pages, total_pages,
+        "the two manuals hold every page once"
     );
-    assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
+    assert_eq!(
+        manual_bytes, total_bytes,
+        "the two totals sum to the old total"
+    );
 }
 
 /// Every page stays under 56 KiB (57,344 bytes), below the manual's own 65,536-byte read
@@ -631,6 +816,124 @@ fn every_relative_link_in_the_manual_resolves() {
         "manual links do not resolve:\n{}",
         broken.join("\n")
     );
+}
+
+/// Every `*.md` fragment link in the manual names a heading on the page it resolves to. The
+/// slug is the site renderer's (`radian_tui::site_docs`): ASCII letters and digits, runs of
+/// separators become one `-`, and a repeated heading gets `-1`, `-2`, … So a moved section
+/// that leaves a link behind fails here with the page and the line, naming the anchor.
+#[test]
+fn every_page_anchor_in_the_manual_resolves() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("../../docs/user");
+    let mut pages: Vec<(String, String)> = Vec::new();
+    collect_pages(&dir, &dir, &mut pages);
+    let ids: std::collections::HashMap<&str, std::collections::HashSet<String>> = pages
+        .iter()
+        .map(|(name, text)| (name.as_str(), heading_ids(text)))
+        .collect();
+    let mut broken: Vec<String> = Vec::new();
+    for (name, text) in &pages {
+        let from = std::path::Path::new(name)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        for (index, line) in text.lines().enumerate() {
+            for target in link_targets(line) {
+                let (path, anchor) = match target.split_once('#') {
+                    Some((path, anchor)) => (path, anchor),
+                    None => continue,
+                };
+                if anchor.is_empty() || path.contains("://") {
+                    continue;
+                }
+                let page = if path.is_empty() {
+                    name.clone()
+                } else if path.ends_with(".md") {
+                    let joined = from.join(path);
+                    let joined = joined.to_string_lossy();
+                    let mut parts: Vec<&str> = Vec::new();
+                    for part in joined.split('/') {
+                        match part {
+                            "" | "." => {}
+                            ".." => {
+                                parts.pop();
+                            }
+                            other => parts.push(other),
+                        }
+                    }
+                    parts.join("/")
+                } else {
+                    // The footer's inline-format syntax `[text](style)`: not a page link.
+                    continue;
+                };
+                let Some(headings) = ids.get(page.as_str()) else {
+                    broken.push(format!(
+                        "docs/user/{name}:{} links `{target}`, which names no page",
+                        index + 1
+                    ));
+                    continue;
+                };
+                if !headings.contains(anchor) {
+                    broken.push(format!(
+                        "docs/user/{name}:{} links `{target}`, but docs/user/{page} has no heading `#{anchor}`",
+                        index + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "manual anchors do not resolve:\n{}",
+        broken.join("\n")
+    );
+}
+
+/// The heading ids of one page, by the site renderer's slug convention.
+fn heading_ids(text: &str) -> std::collections::HashSet<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ids = std::collections::HashSet::new();
+    for line in text.lines() {
+        let heading = line.trim_start();
+        let hashes = heading.chars().take_while(|ch| *ch == '#').count();
+        if !(1..=6).contains(&hashes) {
+            continue;
+        }
+        let rest = &heading[hashes..];
+        if !rest.starts_with(' ') {
+            continue;
+        }
+        let base = heading_slug(rest);
+        let seen = counts.entry(base.clone()).or_insert(0);
+        let id = if *seen == 0 {
+            base
+        } else {
+            format!("{base}-{seen}")
+        };
+        *seen += 1;
+        ids.insert(id);
+    }
+    ids
+}
+
+/// The site renderer's slug (`radian_tui::site_docs::slugify`).
+fn heading_slug(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, ' ' | '-' | '_' | '\t') && !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("section");
+    }
+    out
 }
 
 /// Every `](...)` target on one line of Markdown, in order.

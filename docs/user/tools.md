@@ -28,7 +28,7 @@ That prefix is not file content; remove it before you reuse the text in `patch`.
 A read with no range enters the context as the file, cut at the defaults; after `grep` locates lines, read the range around them with `offset` and `limit`, and read a whole file only when it is small or the task needs all of it.
 When a read stops before the end of the file (an explicit `limit`, the default 200-line limit, or the byte budget), it ends with `[truncated: continue with offset=<next>]`; read on from that line.
 A directory read lists `kind`, size and name rows, sorted by name.
-`radian://docs/<page>.md` reads this manual from memory.
+`radian://docs/<page>.md` reads a manual page from memory.
 A manual page read with no `max_bytes` uses a 65536-byte budget and no line limit, so a page reads whole.
 A path that names a directory reads its `index.md` (`radian://docs/arc/`).
 
@@ -67,7 +67,7 @@ A model that is not in the catalog, or whose entry has no input modalities, is t
 
 The same path rules apply to text and images.
 See `permissions` for which paths count as workspace paths.
-Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and this manual.
+Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and the manuals.
 In the `full` tier they also read any other path except the deny set.
 `write`, `patch` and shell working directories never leave the workspace.
 See `permissions` for the tiers and the deny set.

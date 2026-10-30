@@ -173,7 +173,7 @@ A bare `radian arc` opens its TUI (plans, board, task and merge pages, with the 
 The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
 arc's exit codes are its own: `3` means the state does not allow the operation and `4`
 means a lock is held.
-See [`arc`](arc/index.md) for every subcommand, flag, and exit code, [`arc/integration`](arc/integration.md) for how the merge builds and pushes the integration candidate, [`arc/loop`](arc/loop.md) for the scheduling loop and `loop.log`, [`arc/gate`](arc/gate.md) for the gate and its failures, [`arc/mcp`](arc/mcp.md) for the lead's MCP server, [`arc/files`](arc/files.md) for every file field and configuration key, and [`arc/tui`](arc/tui.md) for the TUI and its owner's actions.
+See [`arc`](arc/index.md) for the overview, every subcommand, flag, and exit code, [`arc/integration`](arc/integration.md) for how the merge builds and pushes the integration candidate, [`arc/loop`](arc/loop.md) for the scheduling loop and `loop.log`, [`arc/gate`](arc/gate.md), [`arc/gate-review`](arc/gate-review.md) and [`arc/gate-failures`](arc/gate-failures.md) for the gate, its review stage and its failures, [`arc/mcp`](arc/mcp.md) for the lead's MCP server, [`arc/files`](arc/files.md) for every file field, [`arc/config`](arc/config.md) for every configuration key, and [`arc/tui`](arc/tui.md) for the TUI and its owner's actions.
 
 ```sh
 radian arc init
@@ -332,14 +332,68 @@ radian footer export pi
 
 ## `radian docs`
 
-`radian docs` prints one line per manual topic with its description.
+radian ships two manuals: the radian manual (every page outside `arc/`) and the arc manual (every page under `arc/`).
+Each has its own size budget, so the arc pages never crowd out the radian pages.
+`radian docs` prints one line per radian-manual page, `topic: description`, in table order, then exactly one `arc: <description>` line for the arc manual's index.
+These are its exact lines, in order:
+
+```text
+acp: Serve radian to an editor over the Agent Client Protocol (stdio), with one session per process.
+cli: Every radian command, subcommand, flag, and exit code.
+commands: Every slash command, shell command, and what happens while a turn runs.
+configuration: Every configuration key, where the file lives, and how it is checked.
+context-files: Which project direction files load, from where, in which order, and their limits.
+environment: Every environment variable radian reads, and what each controls.
+extensions: Which extension mechanism fits which need, where each lives, and a first example.
+footer: Shape the status line under the input box: presets, rows, items and command items.
+hooks: Run your own commands when a tool runs, the model stops, a turn fails, or radian needs you.
+index: What radian is and where every radian manual page lives.
+keybindings: Every key in the full screen interface, by area, and how to rebind it.
+mcp: Add local model servers over standard input and output.
+memory: Save facts across sessions and search them by keyword.
+permissions: Permission tiers, trust, approval, and sandbox behavior.
+pi-migration: Draft a Radian configuration from a Pi agent directory.
+providers: Store keys, choose a provider and model, and control request options.
+quickstart: Install radian, connect a model, and finish your first task.
+sessions: Resume, list, search, fork, and export sessions.
+skills: Find skills, read their bodies, and run them.
+subagent-and-jobs: Run helper sessions and background shell jobs.
+themes: Write a color theme from scratch, import one, and shape the status line.
+tools: The built-in file tools: `read`'s text, directory and image branches with its limits and error codes, and `grep`'s arguments, defaults and caps.
+troubleshooting: Fix common setup, network, and session problems.
+arc: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
+```
+
+`radian docs arc` prints one line per arc-manual page, `arc/<stem>: description`, in table order, with no `arc` line of its own.
+These are its exact lines, in order:
+
+```text
+arc/config: The config.toml keys: every key, its type, default, allowed values and when it takes effect.
+arc/files: The files arc keeps: plan and task files, the worker brief, and the .radian/arc/ layout.
+arc/flows: What an arc flow is: the two-flow example, how a task picks one, the two concurrency limits, binary deliverables, and the five questions every flow answers.
+arc/gate-failures: The gate's failure classes, the retry rules, the budget, and the worker, conflict and moved-branch waits.
+arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
+arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
+arc/hooks: The `[hooks]` points, their rules and their environment.
+arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
+arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
+arc/loop: The arc scheduling loop: one pass, its output and loop.log, serve, and its signals.
+arc/mcp: The lead's MCP server: registering it, its tools and its tool errors.
+arc/owner: The owner's commands: confirm, auto, priority, pause, merge and reject.
+arc/planning: The commands that write plans and tasks: init, add, list, show and adopt.
+arc/running: The commands that run a task: start, cancel, reset-budget and reverify.
+arc/tui: The arc TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
+arc/worker: arc's worker: the session, the brief, the steps before an attempt, the limits, the checks after it exits, and another agent as the worker.
+```
+
 `radian docs <topic>` prints that page verbatim, the same text the agent reads.
 The topic is a page stem (`commands`), a path under the manual (`arc/loop`), or a file name (`commands.md`, `arc/loop.md`).
-A topic that names a directory (`arc`) opens its `index.md`.
+`radian docs index` opens the radian manual's index and `radian docs arc/index` (or `radian docs arc/`) opens the arc manual's.
 An unknown topic exits `2` and lists the pages on stderr.
 
 ```sh
 radian docs
+radian docs arc
 radian docs cli
 radian docs arc/loop
 ```

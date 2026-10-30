@@ -1,0 +1,7 @@
+{"schema_version":1,"session_id":"radian-read","seq":0,"ts":"2026-01-01T00:00:00Z","event":"TurnStarted","critical":true,"data":{"turn_id":"t-1"}}
+{"schema_version":1,"session_id":"radian-read","seq":1,"ts":"2026-01-01T00:00:00Z","event":"MessageAppended","critical":true,"data":{"index":0,"message":{"user":{"content":[{"text":{"text":"read"}}]}}}}
+{"schema_version":1,"session_id":"radian-read","seq":2,"ts":"2026-01-01T00:00:01Z","event":"MessageAppended","critical":true,"data":{"index":1,"message":{"assistant":{"content":[{"text":{"text":"reading"}}],"tool_calls":[{"id":"c1","name":"read","arguments":{"path":"a","offset":0}},{"id":"c2","name":"read","arguments":{"path":"b"}}]}}}}
+{"schema_version":1,"session_id":"radian-read","seq":3,"ts":"2026-01-01T00:00:02Z","event":"ToolExecutionStarted","critical":true,"data":{"call_id":"c1","name":"read","arguments":{"path":"a","offset":0}}}
+{"schema_version":1,"session_id":"radian-read","seq":4,"ts":"2026-01-01T00:00:02Z","event":"ToolExecutionStarted","critical":true,"data":{"call_id":"c2","name":"read","arguments":{"path":"b"}}}
+{"schema_version":1,"session_id":"radian-read","seq":5,"ts":"2026-01-01T00:00:03Z","event":"ToolExecutionSettled","critical":true,"data":{"call_id":"c1","result":{"call_id":"c1","content":[{"text":{"text":"hello"}}],"is_error":false}}}
+{"schema_version":1,"session_id":"radian-read","seq":6,"ts":"2026-01-01T00:00:03Z","event":"ToolExecutionSettled","critical":true,"data":{"call_id":"c2","result":{"call_id":"c2","content":[{"text":{"text":"world!"}}],"is_error":false}}}

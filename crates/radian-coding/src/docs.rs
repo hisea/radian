@@ -1,9 +1,14 @@
-//! The bundled user manual (`docs/user/`), compiled into the binary.
+//! The bundled user manuals (`docs/user/`), compiled into the binary.
 //!
 //! The pages live in `docs/user/` as English Markdown. This table embeds each page with
 //! `include_str!`, so the binary and the source tree always carry the same text. No file
 //! is written at startup and nothing is read from `~/.radian/`: the pages come from
 //! memory only.
+//!
+//! The pages make up two manuals with separate size budgets: the radian manual (every page
+//! outside `arc/`) and the arc manual (every page under `arc/`). [`Manual`] is the one place
+//! that decides membership; `radian://docs/` still carries both, so no virtual path changes
+//! and every page still reads by its topic.
 //!
 //! A page name is its path under `docs/user/` (`commands.md`, `arc/loop.md`). The virtual
 //! root is `radian://docs/`. `read` opens `radian://docs/<page>.md`, lists `radian://docs/`,
@@ -20,6 +25,10 @@ pub const VIRTUAL_PREFIX: &str = "radian://";
 pub const DOCS: &[(&str, &str)] = &[
     ("acp.md", include_str!("../../../docs/user/acp.md")),
     (
+        "arc/config.md",
+        include_str!("../../../docs/user/arc/config.md"),
+    ),
+    (
         "arc/files.md",
         include_str!("../../../docs/user/arc/files.md"),
     ),
@@ -28,8 +37,20 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/arc/flows.md"),
     ),
     (
+        "arc/gate-failures.md",
+        include_str!("../../../docs/user/arc/gate-failures.md"),
+    ),
+    (
+        "arc/gate-review.md",
+        include_str!("../../../docs/user/arc/gate-review.md"),
+    ),
+    (
         "arc/gate.md",
         include_str!("../../../docs/user/arc/gate.md"),
+    ),
+    (
+        "arc/hooks.md",
+        include_str!("../../../docs/user/arc/hooks.md"),
     ),
     (
         "arc/index.md",
@@ -44,6 +65,18 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/arc/loop.md"),
     ),
     ("arc/mcp.md", include_str!("../../../docs/user/arc/mcp.md")),
+    (
+        "arc/owner.md",
+        include_str!("../../../docs/user/arc/owner.md"),
+    ),
+    (
+        "arc/planning.md",
+        include_str!("../../../docs/user/arc/planning.md"),
+    ),
+    (
+        "arc/running.md",
+        include_str!("../../../docs/user/arc/running.md"),
+    ),
     ("arc/tui.md", include_str!("../../../docs/user/arc/tui.md")),
     (
         "arc/worker.md",
@@ -111,6 +144,98 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/troubleshooting.md"),
     ),
 ];
+
+/// The two manuals the binary carries. Pages under `arc/` are the arc manual; every other
+/// page is the radian manual.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Manual {
+    /// Every page outside `arc/`, mapped by `index.md`.
+    Radian,
+    /// Every page under `arc/`, mapped by `arc/index.md`.
+    Arc,
+}
+
+impl Manual {
+    /// Both manuals, radian first.
+    pub const ALL: [Manual; 2] = [Manual::Radian, Manual::Arc];
+
+    /// The name a failure or a listing uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Manual::Radian => "radian manual",
+            Manual::Arc => "arc manual",
+        }
+    }
+
+    /// The page that maps this manual. A mapping check leaves this page out.
+    pub fn index(self) -> &'static str {
+        match self {
+            Manual::Radian => "index.md",
+            Manual::Arc => "arc/index.md",
+        }
+    }
+}
+
+/// The manual a page belongs to. This is the one place membership is decided: a page under
+/// `arc/` is the arc manual, every other page the radian manual.
+pub fn manual_of(name: &str) -> Manual {
+    if name.starts_with("arc/") {
+        Manual::Arc
+    } else {
+        Manual::Radian
+    }
+}
+
+/// Every page of one manual, in table order.
+pub fn pages_of(manual: Manual) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    DOCS.iter()
+        .filter(move |(name, _)| manual_of(name) == manual)
+}
+
+/// The embedded bytes one manual carries.
+pub fn size_of(manual: Manual) -> usize {
+    pages_of(manual).map(|(_, text)| text.len()).sum()
+}
+
+/// The size cap one manual may reach (512 KiB). Each manual has its own budget, so arc's
+/// growth never spends the radian manual's.
+pub const MANUAL_SIZE_CAP: usize = 512 * 1024;
+
+/// The failure message when one manual is over its cap, or `None` when it fits. The message
+/// names the manual and the size.
+pub fn cap_failure(manual: Manual, total: usize) -> Option<String> {
+    (total > MANUAL_SIZE_CAP).then(|| {
+        format!(
+            "the {} is {total} bytes, over the {MANUAL_SIZE_CAP}-byte cap",
+            manual.name()
+        )
+    })
+}
+
+/// The index list item that names a page: a dash, the backticked topic, and a colon.
+fn index_line(name: &str) -> String {
+    format!("- `{}`:", topic(name))
+}
+
+/// The pages of `manual` that its own index does not list, in table order. The index page
+/// itself is not listed by itself, so it never counts as missing.
+pub fn pages_missing_from_index(manual: Manual, index: &str) -> Vec<&'static str> {
+    let own = manual.index();
+    pages_of(manual)
+        .map(|(name, _)| *name)
+        .filter(|name| *name != own && !index.contains(&index_line(name)))
+        .collect()
+}
+
+/// The `radian docs` line for a page: `topic: description`, or just `topic` when the page
+/// has no frontmatter description.
+pub fn topic_line(name: &str, text: &str) -> String {
+    let topic = topic(name);
+    match description(text) {
+        "" => topic.to_owned(),
+        description => format!("{topic}: {description}"),
+    }
+}
 
 /// The page text, or `None` when no page has this name.
 pub fn find(name: &str) -> Option<&'static str> {

@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"pi-s","timestamp":"2026-01-01T00:00:00Z","cwd":"/app"}
+{"type":"message","id":"e1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"list the files"}]}}
+{"type":"message","id":"e2","timestamp":"2026-01-01T00:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"listing"},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}],"usage":{"input":1000,"output":200,"cacheRead":300,"cacheWrite":0,"totalTokens":1500,"cost":{"total":0.01}},"stopReason":"toolUse"}}
+{"type":"message","id":"e3","timestamp":"2026-01-01T00:00:11Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"a.txt"}],"isError":false}}
+{"type":"message","id":"e4","timestamp":"2026-01-01T00:00:20Z","message":{"role":"assistant","content":[{"type":"text","text":"one file"}],"usage":{"input":2000,"output":300,"cacheRead":0,"cost":{"total":0.02},"reasoningTokens":40},"stopReason":"stop"}}
