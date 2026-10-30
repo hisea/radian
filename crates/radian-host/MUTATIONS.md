@@ -1838,8 +1838,7 @@ ADR 0045 §4/§6 and the manual's "Recent runs" and "StopFailure" sections. The
 `short()`, `config/hooks.rs` and `project_hooks.rs` mutations were applied in place and the
 named tests ran with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 --no-fail-fast -E 'test(<name>)'`. The session-wiring mutation was applied to
-`src/session/open.rs`; its test
-runs a real `radian exec`, so the binary was rebuilt with
+`src/session/open.rs`; its test runs a real `radian exec`, so the binary was rebuilt with
 `cargo build -p radian-tui --bin radian` first and the test ran with
 `cargo nextest run -p radian-exec --test hooks --locked --profile sandbox --no-fail-fast -E
 'test(a_stop_continuation_ask_is_answered_by_the_permission_request_hook)'`. Each source was
