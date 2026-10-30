@@ -225,6 +225,51 @@ def parse_review_text(text: str, levels: tuple[str, ...] | None = None) -> dict:
     }
 
 
+def final_assistant_text(session_dir) -> str | None:
+    """The last assistant message of the session journals under a directory.
+
+    `radian exec --output jsonl` writes its stdout as JSON lines, so a radian
+    answer only appears as plain text in the session journal. The journals are
+    read in name order (a later file is a resumed run) and the last committed
+    `MessageAppended` assistant message wins; a torn final line is not a
+    committed record (ADR 0006) and is dropped.
+    """
+    directory = Path(session_dir)
+    if not directory.is_dir():
+        return None
+    answer = None
+    for path in sorted(directory.glob("*.jsonl")):
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                if not line.endswith("\n"):
+                    break
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict) or record.get("event") != "MessageAppended":
+                    continue
+                data = record.get("data")
+                message = data.get("message") if isinstance(data, dict) else None
+                if not isinstance(message, dict):
+                    continue
+                assistant = message.get("assistant")
+                if not isinstance(assistant, dict):
+                    continue
+                parts = []
+                for part in assistant.get("content") or []:
+                    text = part.get("text") if isinstance(part, dict) else None
+                    if isinstance(text, dict) and isinstance(text.get("text"), str):
+                        parts.append(text["text"])
+                if parts:
+                    answer = "".join(parts)
+    return answer
+
+
 def parse_arm(path: Path) -> dict[str, str]:
     """One arm file as its fields; ``extra`` is the raw flag string."""
     fields: dict[str, str] = {}

@@ -75,18 +75,25 @@ fi
 timed_out=0
 case $rc in 124|137) timed_out=1 ;; esac
 python3 - "$OUT/review.json" "$reviewer" "$r_agent" "$r_provider" "$r_model" \
-  "$rc" "$timed_out" "$OUT/review.stdout.log" "$HERE" <<'EOF'
+  "$rc" "$timed_out" "$OUT/review.stdout.log" "$OUT/review-session" "$HERE" <<'EOF'
 import json, sys
-path, reviewer, agent, provider, model, rc, timed_out, log, here = sys.argv[1:]
+path, reviewer, agent, provider, model, rc, timed_out, log, session, here = sys.argv[1:]
 sys.path.insert(0, here)
 import lib
-text = open(log, encoding="utf-8", errors="replace").read()
-parsed = lib.parse_review_text(text)
+log_text = open(log, encoding="utf-8", errors="replace").read()
+# A radian reviewer writes JSONL to stdout, where the answer is only an escaped
+# string; its final assistant message in the session journal is the report.
+report_text = log_text
+if agent == "radian":
+    answer = lib.final_assistant_text(session)
+    if answer is not None:
+        report_text = answer
+parsed = lib.parse_review_text(report_text)
 # arc accepts a report only from a session that completed and exited 0. A
 # radian session ends with a `Result` line; a pi review has none, so its exit
 # code is the only signal.
 completed = None
-for line in reversed(text.splitlines()):
+for line in reversed(log_text.splitlines()):
     try:
         value = json.loads(line)
     except ValueError:

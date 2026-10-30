@@ -61,9 +61,10 @@ directory is removed.
    holding this script) if it is not one, and a detached worktree of the task's
    `base` sha at `runs/trees/<arm>-<task>-<k>`. `git worktree` and `git branch`
    never run in the source repository, so its `.git/config` is untouched. A
-   `REPO_TASKS_CLONE` that resolves to the source or to the repository `run.sh`
-   was started in is refused with exit 2, because `git worktree add` would write
-   that repository's `.git/config`.
+   `REPO_TASKS_CLONE` that is the source, the caller's repository or a worktree
+   of either is refused with exit 2, because `git worktree add` would write that
+   repository's `.git/config`. An existing plain directory (even inside one of
+   those repositories) is allowed: cloning into it creates its own `.git`.
 3. Runs the agent in the worktree under a wall-time cap (default 2700 s, measured
    by the bundled `timeout_run.py`, so a machine without coreutils is still
    capped):
@@ -84,7 +85,7 @@ Environment inputs:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REPO_TASKS_SOURCE` | the repository of this script | repository cloned for the worktrees |
-| `REPO_TASKS_CLONE` | `<runs>/clone` | the separate clone; the source is never written, and a clone that resolves to the source or the caller is refused |
+| `REPO_TASKS_CLONE` | `<runs>/clone` | the separate clone; the source is never written, and a clone that is the source or the caller repository (or a worktree of either) is refused |
 | `REPO_TASKS_RUNS` | `benchmarks/repo-tasks/runs` | the run root |
 | `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`timeout_run.py`) |
 | `REPO_TASKS_RADIAN_BIN` | `radian` | the radian binary |
@@ -127,6 +128,11 @@ incomplete report, a non-zero exit or a timeout exits 1 and is recorded in
 `suggestions`, a string list `verified`, and every item's `level` from arc's
 `REVIEW_LEVELS`.
 
+A radian reviewer's stdout is JSONL, where the answer is only an escaped string
+inside journal lines, so its report is read from the final assistant message in
+`review-session/`. A pi reviewer's stdout is the plain answer and is read
+directly.
+
 ## Columns
 
 The column definitions are the `COLUMNS` table in
@@ -137,18 +143,19 @@ Every number in the report comes from that module: `report.py` calls
 per-run rows per arm and task. It does not redefine "model calls", "input",
 "result bytes" or "wall".
 
-The text tables show, for each arm: `runs`, the `result` counts, `calls`,
-`uncached_in`, `cache_read_in`, `total_in`, `output`, `reasoning`, `fee_usd`,
-`read_ranged`, `read_unranged`, `read_20kb`, `compactions`, `calls.<tool>` and
-`bytes.<tool>` for every tool the runs used, `result_bytes`, `wall_s`, and
-`in_spread` (the smallest and largest `total_in` over that arm's runs, the
-same-arm noise band).
+The text tables show, for each arm: `runs`, the `result` counts, and the fixed
+column names from `journal_metrics.COLUMNS` — `calls`, `input_uncached`,
+`input_cache_read`, `input_total`, `output`, `reasoning`, `fee_usd`,
+`read_ranged_calls`, `read_unranged_calls`, `read_large_calls`, `compactions` —
+plus `calls.<tool>` and `bytes.<tool>` for every tool the runs used,
+`result_bytes`, `wall_seconds`, and `in_spread` (the smallest and largest
+`input_total` over that arm's runs, the same-arm noise band).
 `-` means no journal reported the value; it is never a zero.
 
 `report.py --baseline <arm>` adds a ratio table (`arm / baseline`) per task and
-for the totals, over `total_in`, `calls`, `output`, `fee_usd`, `wall_s` and
-`result_bytes`. A baseline with no runs is a clear error that lists the arms
-that do have runs.
+for the totals, over `input_total`, `calls`, `output`, `fee_usd`,
+`wall_seconds` and `result_bytes`. A baseline with no runs is a clear error that
+lists the arms that do have runs.
 
 ## Decision rules
 

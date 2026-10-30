@@ -12,6 +12,7 @@ Stdlib only.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -377,6 +378,18 @@ class RunScriptTest(ScratchCase):
         self.assertIn("separate clone", result.stderr)
         self.assertEqual((repo / ".git" / "config").read_bytes(), before)
 
+    def test_a_plain_directory_inside_the_caller_is_allowed_as_the_clone(self):
+        repo, _, tasks, arms, stub = self.prepare()
+        plain = repo / "runs" / "clone"
+        plain.mkdir(parents=True)
+        before = git(repo, "worktree", "list", "--porcelain")
+        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1", clone=plain)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Cloning there creates its own `.git`; the caller gains no worktree.
+        self.assertTrue((plain / ".git").is_dir())
+        self.assertTrue((self.root / "runs" / "trees" / "full-T1-1" / "README.md").is_file())
+        self.assertEqual(git(repo, "worktree", "list", "--porcelain"), before)
+
     def test_a_task_with_two_crates_runs_both_checks(self):
         repo, _, tasks, arms, stub = self.prepare()
         result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1")
@@ -573,8 +586,8 @@ class ReportTest(ScratchCase):
         self.make_run("full", "T1", 1, input_tokens=200)
         self.make_run("pi-like", "T1", 1, input_tokens=100)
         built = report.build(self.root / "runs", "full")
-        self.assertEqual(built["ratios"]["T1"]["pi-like"]["total_in"], "0.500")
-        self.assertEqual(built["ratios"]["TOTAL"]["pi-like"]["total_in"], "0.500")
+        self.assertEqual(built["ratios"]["T1"]["pi-like"]["input_total"], "0.500")
+        self.assertEqual(built["ratios"]["TOTAL"]["pi-like"]["input_total"], "0.500")
         text = report.format_report(built)
         self.assertIn("RATIOS (arm / full)", text)
         self.assertIn("0.500", text)
@@ -636,6 +649,24 @@ class PromptTest(ScratchCase):
 
 
 class ReviewTextTest(unittest.TestCase):
+    def test_the_final_assistant_message_is_the_last_committed_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            old = {
+                "event": "MessageAppended",
+                "data": {"message": {"assistant": {"content": [{"text": {"text": "old"}}]}}},
+            }
+            new = {
+                "event": "MessageAppended",
+                "data": {"message": {"assistant": {"content": [{"text": {"text": "new"}}]}}},
+            }
+            torn = json.dumps(new)
+            write(directory / "a.jsonl", json.dumps(old) + "\n")
+            # The second journal wins; its unterminated final line is not committed.
+            write(directory / "b.jsonl", json.dumps(new) + "\n" + torn)
+            self.assertEqual(lib.final_assistant_text(directory), "new")
+            self.assertIsNone(lib.final_assistant_text(directory / "missing"))
+
     def test_a_minor_blocking_item_blocks(self):
         text = (
             "```json\n"
@@ -755,6 +786,56 @@ class TimeoutRunTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 7, result.stderr)
 
+    def test_an_interrupt_is_forwarded_to_the_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "pid"
+            child = (
+                "import os, pathlib, sys, time;"
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()));"
+                "time.sleep(30)"
+            )
+            wrapper = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(ROOT / "timeout_run.py"),
+                    "60",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    child,
+                ]
+            )
+            pid = None
+            try:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if pid_path.exists():
+                        pid = int(pid_path.read_text())
+                        break
+                    time.sleep(0.01)
+                self.assertIsNotNone(pid, "the command never started")
+                wrapper.terminate()
+                self.assertEqual(wrapper.wait(timeout=10), 128 + signal.SIGTERM)
+                # The child was in its own session; it must be gone with the wrapper.
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("the command outlived the wrapper")
+            finally:
+                if wrapper.poll() is None:
+                    wrapper.kill()
+                    wrapper.wait()
+                if pid is not None:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
 
 class ReviewScriptTest(ScratchCase):
     def prepare(self):
@@ -791,6 +872,32 @@ class ReviewScriptTest(ScratchCase):
         )
         result = self.review(tasks, arms, stub)
         self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads((out / "review.json").read_text())
+        self.assertTrue(data["parsed"])
+        self.assertTrue(data["review_ok"])
+
+    def test_a_radian_reviewer_report_is_read_from_its_session(self):
+        # `radian exec --output jsonl` puts the answer on stdout only as an
+        # escaped string, so the final message in the session is the report.
+        tasks, arms, out = self.prepare()
+        record = {
+            "event": "MessageAppended",
+            "data": {"message": {"assistant": {"content": [{"text": {"text": VALID_REPORT}}]}}},
+        }
+        result_line = {"type": "Result", "outcome": "completed"}
+        stub = reviewer_stub(
+            self.root,
+            "import json, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "session = pathlib.Path(args[args.index('--session-dir') + 1])\n"
+            "session.mkdir(parents=True, exist_ok=True)\n"
+            f"(session / 's.jsonl').write_text(json.dumps({record!r}) + '\\n')\n"
+            f"sys.stdout.write(json.dumps({record!r}) + '\\n')\n"
+            f"sys.stdout.write(json.dumps({result_line!r}) + '\\n')\n"
+            "sys.exit(0)\n",
+        )
+        reviewed = self.review(tasks, arms, stub)
+        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
         data = json.loads((out / "review.json").read_text())
         self.assertTrue(data["parsed"])
         self.assertTrue(data["review_ok"])

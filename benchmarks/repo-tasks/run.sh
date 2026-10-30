@@ -9,8 +9,10 @@
 # The repository this script is started in is only read: the worktree is made in
 # the clone (`REPO_TASKS_CLONE`, default `runs/clone`), never in the caller's
 # repository or in `REPO_TASKS_SOURCE`, so their `.git/config` is not touched.
-# A CLONE that resolves to either one is refused. `REPO_TASKS_SOURCE` names the
-# repository to clone from; it defaults to the repository holding this script.
+# A CLONE that is either repository (or a worktree of one) is refused; an
+# existing plain directory is allowed, because cloning into it creates its own
+# `.git`. `REPO_TASKS_SOURCE` names the repository to clone from; it defaults to
+# the repository holding this script.
 #
 # Environment:
 #   REPO_TASKS_SOURCE   repository to clone (default: the repository of this file)
@@ -53,16 +55,29 @@ common_dir() {
   ( cd "$dir" 2>/dev/null && pwd -P )
 }
 
+# Whether `$1` is itself a repository or worktree root. `rev-parse
+# --show-prefix` prints the path down from the root, which is empty only at the
+# root; a plain directory inside a repository is not a repository of its own.
+at_repo_root() {
+  local prefix
+  prefix=$(git -C "$1" rev-parse --show-prefix 2>/dev/null) || return 1
+  [ -z "$prefix" ]
+}
+
 # A separate clone. The caller's repository and the source are read only; a
 # worktree or a branch is never made in either one. `git worktree add` writes
 # the repository's `.git/config`, so a CLONE that is the source or the caller's
-# repository is refused before anything is created.
-clone_common=$(common_dir "$CLONE" || true)
-if [ -n "$clone_common" ]; then
-  source_common=$(common_dir "$SOURCE" || true)
-  caller_common=$(common_dir "$PWD" || true)
-  if [ "$clone_common" = "$source_common" ] || [ "$clone_common" = "$caller_common" ]; then
-    die "REPO_TASKS_CLONE ($CLONE) is the repository this run reads, not a separate clone; give another path"
+# repository is refused before anything is created. An existing plain directory
+# — even one inside either repository — is allowed: cloning into it creates its
+# own `.git`, so no repository's config is touched.
+if at_repo_root "$CLONE"; then
+  clone_common=$(common_dir "$CLONE" || true)
+  if [ -n "$clone_common" ]; then
+    source_common=$(common_dir "$SOURCE" || true)
+    caller_common=$(common_dir "$PWD" || true)
+    if [ "$clone_common" = "$source_common" ] || [ "$clone_common" = "$caller_common" ]; then
+      die "REPO_TASKS_CLONE ($CLONE) is the repository this run reads, not a separate clone; give another path"
+    fi
   fi
 fi
 

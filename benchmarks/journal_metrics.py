@@ -5,9 +5,11 @@
 
 ``JOURNALS`` is any number of radian session journal files or directories, plus
 pi session JSONL files. A directory is searched recursively for ``*.jsonl``;
-``--prefix`` keeps only files whose name starts with the prefix. One row is
-printed per journal and a ``TOTAL`` row after them. ``--json`` prints the same
-computed rows as JSON.
+``--prefix`` keeps only files whose name starts with the prefix. A path that
+names no journal — a missing file or directory, or a directory with no file
+after the prefix filter — is an error that names the path, so a typo cannot
+read as an empty run. One row is printed per journal and a ``TOTAL`` row after
+them. ``--json`` prints the same computed rows as JSON.
 
 The column table below (``COLUMNS``) is the single source for this help text and
 for the generated table in ``benchmarks/terminal-bench/README.md``: a test
@@ -508,6 +510,9 @@ def _facts(path: Path) -> dict[str, Any]:
                 _pi_message(row, record)
             elif record.get("type") == "compaction":
                 row["source"] = row["source"] or "pi"
+                # A pi compaction is a committed record with a timestamp: when it
+                # bounds the session it bounds `wall_seconds` too.
+                _note_time(row, _time(record.get("timestamp")))
                 row["compactions"] += 1
                 if record.get("deterministic") is True:
                     row["deterministic_compactions"] += 1
@@ -807,6 +812,27 @@ def collect_files(
     return files
 
 
+def _inputs_without_journals(
+    inputs: list[str | Path], prefix: str | None = None
+) -> list[Path]:
+    """The inputs that name no journal: a missing path, or a directory with no match.
+
+    `build_report` still returns no rows for such an input, so a caller that
+    wants an empty report (the Harbor summary) can ask for one. The command line
+    uses this to refuse a typo instead of printing a row of zeros for it.
+    """
+    unmatched: list[Path] = []
+    for raw in map(Path, inputs):
+        if not raw.exists():
+            unmatched.append(raw)
+        elif raw.is_dir() and not any(
+            prefix is None or path.name.startswith(prefix)
+            for path in raw.rglob("*.jsonl")
+        ):
+            unmatched.append(raw)
+    return unmatched
+
+
 def build_report(
     inputs: list[str | Path], prefix: str | None = None, recursive: bool = True
 ) -> dict[str, Any]:
@@ -938,28 +964,30 @@ def format_report(report: dict[str, Any]) -> str:
     rows = [*report["journals"], report["totals"]]
     tool_columns = _tool_columns(report)
     buckets = _buckets(report)
+    # Each header is a `COLUMNS` name (with `<tool>` and `<bucket>` filled in),
+    # so the table and the generated definition table name the same columns.
     headers = [
         "journal",
         "source",
         "calls",
-        "uncached_in",
-        "cache_read_in",
-        "total_in",
+        "input_uncached",
+        "input_cache_read",
+        "input_total",
         "output",
         "reasoning",
         "fee_usd",
         *tool_columns,
-        "read_ranged",
+        "read_ranged_calls",
         "read_ranged_bytes",
-        "read_unranged",
+        "read_unranged_calls",
         "read_unranged_bytes",
-        "read_20kb",
+        "read_large_calls",
         *(f"p50ms.{bucket}" for bucket in buckets),
         *(f"p90ms.{bucket}" for bucket in buckets),
         "compactions",
-        "det_compactions",
+        "deterministic_compactions",
         "outcomes",
-        "wall_s",
+        "wall_seconds",
     ]
     cells: list[list[str]] = []
     for row in rows:
@@ -1019,6 +1047,17 @@ def _main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="print the rows as JSON")
     args = parser.parse_args(argv)
+    unmatched = _inputs_without_journals(args.journals, args.prefix)
+    if unmatched:
+        for path in unmatched:
+            if path.is_dir():
+                detail = "no *.jsonl"
+                if args.prefix is not None:
+                    detail += f" named {args.prefix}*"
+                print(f"no journal file under: {path} ({detail})", file=sys.stderr)
+            else:
+                print(f"no journal file at: {path}", file=sys.stderr)
+        return 1
     report = build_report(args.journals, prefix=args.prefix)
     if not report["journals"]:
         print(
