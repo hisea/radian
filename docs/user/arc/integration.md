@@ -49,7 +49,7 @@ arc itself never checks out or updates the main checkout's working tree: it fetc
 With `method = "command"`, arc does everything above and then runs [`integration.command`](files.md#configtoml) instead of pushing: one shell command line, in the repository root, through the gate's shell runner, with [`gate.command_timeout_secs`](files.md#configtoml) as its limit.
 arc itself pushes nothing; the command does the merge.
 
-It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`:
+It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`; it does not inherit the repository variables of the process arc runs in, so its own git calls always work on the repository root it runs in:
 
 | Variable | Value |
 |---|---|
@@ -64,6 +64,7 @@ It receives the [hooks' environment](index.md#hooks) plus `ARC_CANDIDATE_SHA`:
 | `ARC_CANDIDATE_SHA` | The candidate commit the command must merge. |
 
 `ARC_MERGED_SHA` is not set: the command runs before there is a merged sha, and `after_merge` gets it.
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are removed from the environment the command starts with, the same rule arc's own git calls follow: a command that runs `git` never works on another repository than the one it runs in, whatever the process arc started from carried.
 Its stdout and stderr go to `runs/<task>/attempts/<attempt id>/merge-command.log`.
 
 **The answer.** The last non-empty line of the output decides; trailing blank lines are skipped and a CRLF ending's `\r` is trimmed.

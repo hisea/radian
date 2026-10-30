@@ -7,9 +7,10 @@
 mod common;
 
 use std::fs;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{Repo, write};
+use common::{RealGitConfig, Repo, write};
 use radian_arc::review;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
@@ -20,12 +21,26 @@ struct Fixture {
     task: String,
     base: String,
     head: String,
+    /// The real repository's git config, recorded before any of this fixture's git runs and
+    /// compared after the test: nothing here may write the checkout the tests run from.
+    real: RealGitConfig,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // A test that is already failing has its own reason; asserting here would replace it
+        // (and panic while unwinding aborts the process).
+        if !std::thread::panicking() {
+            self.real.assert_unchanged();
+        }
+    }
 }
 
 impl Fixture {
     /// A repository, arc set up, one confirmed plan with one task, the task's branch published
     /// at `feature.txt`, and the task verified to `review.awaiting_human`.
     fn new(label: &str) -> Self {
+        let real = RealGitConfig::record();
         let repo = Repo::new(label);
         Store::init(&repo.clone, false).expect("arc init");
         let store = Store::open(&repo.clone).expect("open");
@@ -64,13 +79,18 @@ impl Fixture {
             .unwrap();
         let verified = review::verify(&store, &task).expect("verification runs");
         assert_eq!(verified.phase, "awaiting_human");
-        Self {
+        let fixture = Self {
             repo,
             store,
             task,
             base,
             head,
-        }
+            real,
+        };
+        // The fixture's own setup (a bare remote, a clone, a gate worktree) is git in
+        // temporary repositories; it must not have touched the real one either.
+        fixture.real.assert_unchanged();
+        fixture
     }
 
     /// Writes a shell script into the scratch root (outside the repository) and returns its
@@ -156,6 +176,7 @@ fn a_command_that_pushes_the_candidate_and_prints_its_sha_reaches_done_merged() 
         "merge.sh",
         &format!(
             "env | grep '^ARC_' | sort > \"{}\"\n\
+             git config --local radian.guard-marker yes\n\
              git push origin \"$ARC_CANDIDATE_SHA:refs/heads/main\" >/dev/null 2>&1\n\
              echo \"$ARC_CANDIDATE_SHA\"\n",
             env_file.display()
@@ -174,6 +195,25 @@ fn a_command_that_pushes_the_candidate_and_prints_its_sha_reaches_done_merged() 
     );
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
     assert_eq!(stored.merged_sha.as_deref(), Some(candidate.as_str()));
+    // The command's git calls ran in the temporary repository: its local config carries the
+    // write, the real repository's does not (the fixture's guard checks that after the test).
+    let local = fixture.repo.clone.join(".git").join("config");
+    assert!(
+        fs::read_to_string(&local).unwrap().contains("guard-marker"),
+        "the command did not run in the fixture repository: {}",
+        local.display()
+    );
+    let real = fixture
+        .real
+        .path()
+        .expect("the test crate is checked out in a repository")
+        .to_path_buf();
+    assert!(
+        !real.starts_with(&fixture.repo.root),
+        "the guard watches the fixture, not the real repository: {}",
+        real.display()
+    );
+    fixture.real.assert_unchanged();
 
     // The environment is the hooks' plus `ARC_CANDIDATE_SHA`, and no `ARC_MERGED_SHA`.
     let env = fs::read_to_string(&env_file).unwrap();
@@ -499,4 +539,120 @@ fn the_cli_exits_three_and_says_pending() {
         fixture.state(),
         ("review".to_owned(), "integrating".to_owned())
     );
+}
+
+/// The guard the command-method tests run against the real repository: a `git config --local`
+/// against the repository it guards is seen, and the recorded content is put back, so the
+/// failure leaves the checkout as it was.
+#[test]
+fn the_config_guard_fails_and_restores_a_changed_config() {
+    let root = common::scratch("merge-command-guard");
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.current_dir(&repo).args(args);
+        let output = common::isolate_git(&mut command)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(&["init", "-q"]);
+    let config = repo.join(".git").join("config");
+    let recorded = fs::read_to_string(&config).unwrap();
+
+    let guard = RealGitConfig::of(&repo);
+    let expected = fs::canonicalize(&config).unwrap();
+    assert_eq!(guard.path(), Some(expected.as_path()));
+    assert!(!guard.changed(), "a fresh record is not a change");
+
+    run(&["config", "--local", "x.y", "z"]);
+    assert!(guard.changed(), "the guard did not see the change");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        recorded,
+        "the guard did not restore the config it recorded"
+    );
+}
+
+/// A worker's environment can carry `GIT_DIR` and `GIT_WORK_TREE`; the merge command must
+/// still run against the repository root it runs in, never the one those name.
+#[test]
+fn a_worker_environment_with_git_dir_does_not_redirect_the_merge_command() {
+    let decoy = Repo::new("merge-command-gitdir-decoy");
+    let decoy_main = decoy.main_sha();
+    let decoy_config = decoy.clone.join(".git").join("config");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "child_merge_under_an_inherited_git_dir",
+            "--nocapture",
+        ])
+        .env("ARC_MERGE_GIT_DIR_DECOY", &decoy.clone)
+        .env("GIT_DIR", decoy.clone.join(".git"))
+        .env("GIT_WORK_TREE", &decoy.clone)
+        .output()
+        .expect("the child test runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("MERGED"),
+        "the child did not merge:\n{stdout}"
+    );
+    assert!(
+        !fs::read_to_string(&decoy_config)
+            .unwrap()
+            .contains("guard-marker"),
+        "the merge command ran in the repository `GIT_DIR` named"
+    );
+    assert_eq!(
+        decoy.remote_main_sha(),
+        decoy_main,
+        "the merge command pushed to the repository `GIT_DIR` named"
+    );
+}
+
+/// Child for [`a_worker_environment_with_git_dir_does_not_redirect_the_merge_command`]: a
+/// whole merge in a temporary repository while this process's environment carries `GIT_DIR`
+/// and `GIT_WORK_TREE` for another one (the parent sets them for this child only).
+#[test]
+fn child_merge_under_an_inherited_git_dir() {
+    if std::env::var("ARC_MERGE_GIT_DIR_DECOY").is_err() {
+        return;
+    }
+    let fixture = Fixture::new("merge-command-gitdir");
+    let candidate = fixture.head.clone();
+    let script = fixture.script(
+        "merge.sh",
+        "git config --local radian.guard-marker yes\n\
+         git push origin \"$ARC_CANDIDATE_SHA:refs/heads/main\" >/dev/null 2>&1\n\
+         echo \"$ARC_CANDIDATE_SHA\"\n",
+    );
+    fixture.command_method(&script);
+
+    let merged = fixture.merge();
+    assert_eq!(
+        (merged.state, merged.phase.as_str()),
+        ("done", "merged"),
+        "{merged:?}"
+    );
+    assert_eq!(
+        fixture.remote_main().as_deref(),
+        Some(candidate.as_str()),
+        "the command did not push to the fixture's own remote"
+    );
+    let local = fixture.repo.clone.join(".git").join("config");
+    assert!(
+        fs::read_to_string(&local).unwrap().contains("guard-marker"),
+        "the command's git config write did not land in the fixture repository"
+    );
+    println!("MERGED {candidate}");
 }

@@ -1809,3 +1809,24 @@ below>'`, and the files were restored from the copies with `cp` and confirmed id
 | TK0241-M6 | `config::parse` accepts `method = "command"` without `[integration] command` | `merge_command::method_command_without_a_command_is_refused_by_name` | ✅ 1 failed |
 
 6/6 caught.
+
+## TK0241 rework: the merge command and the real repository's config (2026-10-29, branch `work/TK0241-merge-method-command`)
+
+The command-method tests run a real command in a repository root, so they must never reach
+the checkout they run from. `run_shell` removes `git::REPOSITORY_ENV` from the `[integration]
+command`'s environment (ADR 0048 decision 6), the shared test harness removes the same
+variables from every git call it makes (`common::isolate_git`), and `common::RealGitConfig`
+records the real repository's common `config` before a command-method test and fails it, after
+restoring the recorded content, when it changed. Each mutation was applied by hand to the
+committed files, backed up under `.radian/mut2/`, the named tests ran with `cargo nextest run
+-p radian-arc --locked --profile sandbox --test merge_command -E '<the test below>'`, and the
+files were restored from the copies with `cp` and confirmed identical with `diff -q`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0241-M7 | the integration command inherits the process environment (`run_shell` gets no removals) | `merge_command::a_worker_environment_with_git_dir_does_not_redirect_the_merge_command` (the child's push went to the repository `GIT_DIR` named, so the check answered the sha is not on the remote target) | ✅ 1 failed |
+| TK0241-M8 | `RealGitConfig::changed` reports no change (the guard is blind) | `merge_command::the_config_guard_fails_and_restores_a_changed_config` (`the guard did not see the change`) | ✅ 1 failed |
+| TK0241-M9 | `RealGitConfig::changed` sees the change but does not restore the record | `merge_command::the_config_guard_fails_and_restores_a_changed_config` (`the guard did not restore the config it recorded`) | ✅ 1 failed |
+| TK0241-M10 | `common::isolate_git` drops `GIT_DIR` from the variables it removes | `merge_command::common::scratch_tests::the_git_isolation_helper_removes_the_repository_variables` (`GIT_DIR` is not removed) | ✅ 1 failed |
+
+4/4 caught.

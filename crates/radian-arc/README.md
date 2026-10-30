@@ -622,7 +622,9 @@ path moves to `review.ready_to_merge`. `[integration] method` then decides the m
 `push` pushes `<candidate>:refs/heads/<target>` without force, and a target branch that moved
 after integration, or a rejected push, makes it integrate again (one round per pass in the
 loop; at most three runs per `radian arc merge` command). `command` runs `[integration]
-command` in the repository root with the hooks' environment plus `ARC_CANDIDATE_SHA`, logs to
+command` in the repository root with the hooks' environment plus `ARC_CANDIDATE_SHA` (and
+without the repository variables of arc's own process: `run_shell` removes
+`git::REPOSITORY_ENV`, so the command's git calls name the repository root it runs in), logs to
 `runs/<task>/attempts/<attempt>/merge-command.log`, and reads its last non-empty line
 (`last_non_empty_line`, with a CRLF's `\r` trimmed): a 40-hex sha is checked by
 `check_command_landed` (after a fetch the sha is on the remote target, equal to its tip or in

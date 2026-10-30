@@ -1528,8 +1528,16 @@ fn run_before_command(
         clock: &s.clock,
         grace: Duration::from_secs(o.cancel_grace_secs),
     };
-    let result = run_shell(&s.worktree, &command.run, timeout, &log, &env, Some(&stop))
-        .map_err(|error| Failure::error(format!("before_attempt entry {index}: {error}")))?;
+    let result = run_shell(
+        &s.worktree,
+        &command.run,
+        timeout,
+        &log,
+        &env,
+        &[],
+        Some(&stop),
+    )
+    .map_err(|error| Failure::error(format!("before_attempt entry {index}: {error}")))?;
     // A stop wins over the command's own result, as a cancel does for a running worker.
     if s.clock.stopped() {
         return Err(stopped_before(index, command));

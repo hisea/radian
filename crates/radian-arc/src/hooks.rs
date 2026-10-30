@@ -128,7 +128,7 @@ fn run_point(
     let timeout = Duration::from_secs(config.gate.command_timeout_secs);
     for (index, line) in commands.iter().enumerate() {
         let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
-        match run_shell(store.repo(), line, timeout, &log, &env, None) {
+        match run_shell(store.repo(), line, timeout, &log, &env, &[], None) {
             Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
             Ok(outcome) => {
                 let reason = if outcome.outcome == SeriesOutcome::TimedOut {

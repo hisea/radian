@@ -51,7 +51,8 @@ impl Drop for Scratch {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .current_dir(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "arc test")
@@ -59,9 +60,20 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_NAME", "arc test")
         .env("GIT_COMMITTER_EMAIL", "arc@example.com")
         .args(["-c", "core.hooksPath="])
-        .args(args)
-        .output()
-        .expect("git runs");
+        .args(args);
+    // The git variables of the process this test runs in can name another repository (the
+    // worker's `GIT_DIR`, for one); this harness must only ever touch its temporary one.
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("git runs");
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",

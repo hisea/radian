@@ -2842,8 +2842,11 @@ fn finish_integration(
 /// (ADR 0048 decision 6).
 ///
 /// The environment is the hooks' ([`crate::hooks::command_env`]), plus `ARC_CANDIDATE_SHA`;
-/// the timeout is `[gate] command_timeout_secs`. A line that is neither a 40-hex sha,
-/// `pending` nor `closed`, a non-zero exit and a timeout are all a failed integration.
+/// `GIT_DIR`, `GIT_WORK_TREE` and the other repository variables of arc's own process are
+/// removed, so the command's git calls name the repository root it runs in
+/// ([`crate::git::REPOSITORY_ENV`]). The timeout is `[gate] command_timeout_secs`. A line that
+/// is neither a 40-hex sha, `pending` nor `closed`, a non-zero exit and a timeout are all a
+/// failed integration.
 #[allow(clippy::too_many_arguments)]
 fn finish_by_command(
     store: &Store,
@@ -2881,6 +2884,7 @@ fn finish_by_command(
         config.gate.command_timeout(),
         &log,
         &env,
+        &crate::git::REPOSITORY_ENV,
         None,
     )
     .map_err(|error| Error::Failed(format!("the merge command could not run: {error}")))?;

@@ -32,7 +32,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// The environment variables that would point git at another repository or object store.
-const REPOSITORY_ENV: [&str; 6] = [
+/// [`crate::gate::run_shell`]'s callers that run a user command in a named repository remove
+/// them too, so the command's own git calls name the same repository.
+pub(crate) const REPOSITORY_ENV: [&str; 6] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",

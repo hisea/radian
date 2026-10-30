@@ -125,10 +125,12 @@ impl TestRepo {
     /// Whether `ancestor` is an ancestor of `descendant`, without asserting success (the
     /// command's exit code is the answer).
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
-        Command::new("git")
+        let mut command = Command::new("git");
+        command
             .current_dir(&self.repo)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .args(["merge-base", "--is-ancestor", ancestor, descendant]);
+        isolate_git(&mut command)
             .status()
             .expect("git runs")
             .success()
@@ -195,6 +197,27 @@ pub fn write(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+/// Removes the git variables that would point a test's git command at another repository.
+///
+/// A worker's environment can carry `GIT_DIR`, `GIT_WORK_TREE` and the rest (ADR 0048
+/// decisions 7 and 8: the wrapper's own record of the repository), and a harness that
+/// inherited them would run its `git init`, `git config` and `git push` in the real checkout
+/// instead of its temporary repository. `env_clear` also drops them; a helper that keeps the
+/// process environment (for `PATH` and `HOME`) calls this instead.
+pub fn isolate_git(command: &mut Command) -> &mut Command {
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     run(Some(dir), args)
 }
@@ -210,7 +233,7 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
     command.env("GIT_AUTHOR_EMAIL", "test@example.com");
     command.env("GIT_COMMITTER_NAME", "Test");
     command.env("GIT_COMMITTER_EMAIL", "test@example.com");
-    let output = command.output().expect("git runs");
+    let output = isolate_git(&mut command).output().expect("git runs");
     assert!(
         output.status.success(),
         "git {} failed: {}",
@@ -218,6 +241,112 @@ fn run(dir: Option<&Path>, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// The git config of the checkout this test crate lives in: the real repository, which no test
+/// may write. A test that runs a user command records it before the command and compares it
+/// after, so a command that escaped its temporary repository fails the test instead of
+/// changing the developer's checkout (and the sandbox's git control-file check).
+///
+/// Only the common `config` is guarded, because that is the file a stray `git config`, `git
+/// push -u` or `git remote add` rewrites; the temporary repositories a test creates are not
+/// this file. Content, not time, is what the check compares: a rewrite with the same bytes is
+/// no change.
+pub struct RealGitConfig {
+    /// `None` when the crate is not checked out in a git repository: there is nothing to guard
+    /// and every check is inert.
+    path: Option<PathBuf>,
+    /// The config as it was recorded.
+    before: Vec<u8>,
+}
+
+impl RealGitConfig {
+    /// Records the config of the repository holding `CARGO_MANIFEST_DIR`.
+    pub fn record() -> Self {
+        Self::of(Path::new(env!("CARGO_MANIFEST_DIR")))
+    }
+
+    /// Records the config of the repository holding `dir`, asked of git with the environment
+    /// isolated from this process: a `GIT_DIR` in the worker's environment must not decide
+    /// which repository is the real one.
+    pub fn of(dir: &Path) -> Self {
+        let output = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .output();
+        let text = output
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|text| !text.is_empty());
+        let Some(text) = text else {
+            return Self {
+                path: None,
+                before: Vec::new(),
+            };
+        };
+        let path = PathBuf::from(text);
+        let common = if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        };
+        match std::fs::canonicalize(&common) {
+            Ok(common) => Self::at(&common),
+            Err(_) => Self {
+                path: None,
+                before: Vec::new(),
+            },
+        }
+    }
+
+    /// Records the `config` of an explicit git common dir.
+    pub fn at(common: &Path) -> Self {
+        let path = common.join("config");
+        let before = fs::read(&path).unwrap_or_default();
+        Self {
+            path: Some(path),
+            before,
+        }
+    }
+
+    /// The guarded file, when the crate is in a repository.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Whether the guarded config differs from the record. A change is restored before this
+    /// returns, so the caller's failure leaves the developer's checkout as it was.
+    pub fn changed(&self) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        let now = fs::read(path).unwrap_or_default();
+        if now == self.before {
+            return false;
+        }
+        let _ = fs::write(path, &self.before);
+        true
+    }
+
+    /// Fails when the real repository's config changed since it was recorded, and puts the
+    /// recorded content back first.
+    pub fn assert_unchanged(&self) {
+        if !self.changed() {
+            return;
+        }
+        panic!(
+            "a test changed the real repository's git config ({}); it was restored. A command \
+             that runs git must stay inside its temporary repository.",
+            self.path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        );
+    }
 }
 
 /// A unique scratch directory under `$TMPDIR` — the `workspace` sandbox sets it to its own
@@ -258,6 +387,33 @@ mod scratch_tests {
             !config.control.enabled,
             "a scratch home must not bind the control socket: {text}"
         );
+    }
+
+    /// The harness drops the variables that would point a test's git at another repository: a
+    /// `GIT_DIR` in the worker's environment must never reach a `git init`, a `git config` or
+    /// a `git push` the tests run.
+    #[test]
+    fn the_git_isolation_helper_removes_the_repository_variables() {
+        let mut command = Command::new("git");
+        isolate_git(&mut command);
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ] {
+            assert!(
+                removed.iter().any(|got| got == name),
+                "`{name}` is not removed: {removed:?}"
+            );
+        }
     }
 
     /// A scratch name is unique only within one process (`<pid>-<n>`), so the OS can hand a
