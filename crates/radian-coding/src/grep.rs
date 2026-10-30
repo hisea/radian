@@ -335,7 +335,12 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     let mut skipped_count = 0usize;
     let mut files: Vec<(File, String)> = Vec::new();
     {
-        let mut seen = std::collections::HashSet::new();
+        // Display paths carry the duplicate rules across bases: `queued` holds what is queued
+        // for scanning, `skipped` what a walk left over the size cap. They are kept apart so a
+        // directly named file base can take its path back out of `skipped` (and be scanned),
+        // instead of being deduplicated against a walk that refused it.
+        let mut queued = std::collections::HashSet::new();
+        let mut skipped = std::collections::HashSet::new();
         for base in resolved.bases {
             match base {
                 search::SingleBase::Dir(dir_base) => {
@@ -352,21 +357,25 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                                 return true;
                             }
                             let display = display_path(prefix.as_deref(), &rel);
-                            if seen.insert(display.clone()) {
-                                // `File::metadata` is an fstat on the fd the walk opened, not a
-                                // read; a file that cannot be stat'ed falls through to the scan,
-                                // which skips it exactly as before.
-                                let over = found.file.metadata().is_ok_and(|meta| {
-                                    meta.len() > limits.max_grep_file_bytes as u64
-                                });
-                                if over {
-                                    skipped_count += 1;
-                                    if skipped_paths.len() < 5 {
-                                        skipped_paths.push(display);
-                                    }
-                                } else {
-                                    files.push((found.file, display));
+                            if queued.contains(&display) || skipped.contains(&display) {
+                                return true;
+                            }
+                            // `File::metadata` is an fstat on the fd the walk opened, not a
+                            // read; a file that cannot be stat'ed falls through to the scan,
+                            // which skips it exactly as before.
+                            let over = found
+                                .file
+                                .metadata()
+                                .is_ok_and(|meta| meta.len() > limits.max_grep_file_bytes as u64);
+                            if over {
+                                skipped.insert(display.clone());
+                                skipped_count += 1;
+                                if skipped_paths.len() < 5 {
+                                    skipped_paths.push(display);
                                 }
+                            } else {
+                                queued.insert(display.clone());
+                                files.push((found.file, display));
                             }
                             true
                         },
@@ -390,7 +399,15 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
                         .is_none_or(|filter| filter.is_match(&relative))
                     {
                         let display = display_path(prefix.as_deref(), &relative);
-                        if seen.insert(display.clone()) {
+                        // A file named directly as `path` is always searched, whatever its
+                        // size: when an earlier directory base refused it for its size, it
+                        // leaves the skipped set (and its count and name) here instead of
+                        // being deduplicated against that refusal.
+                        if skipped.remove(&display) {
+                            skipped_count -= 1;
+                            skipped_paths.retain(|path| path != &display);
+                        }
+                        if queued.insert(display.clone()) {
                             match opened.source {
                                 crate::workspace::OpenedSource::File(file) => {
                                     files.push((file, display));
@@ -417,8 +434,10 @@ fn scan_blocking(scan: BlockingScan) -> Result<ToolOutput, ToolFailure> {
     } else {
         String::new()
     };
-    // The body must leave room for every trailing note, the size note included.
-    let reserve = BYTE_NOTE_RESERVE + skip_note.len();
+    // The body must leave room for every trailing note, the size note included, and for the
+    // multi-base header that is prepended afterwards: the header sits in front of the body, so
+    // the body budget has to spend from what the header leaves.
+    let reserve = BYTE_NOTE_RESERVE + skip_note.len() + header.as_ref().map_or(0, String::len);
 
     let mode = match output.as_deref() {
         None | Some("content") => OutputMode::Content,

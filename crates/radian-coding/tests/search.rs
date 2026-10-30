@@ -1945,3 +1945,93 @@ async fn grep_a_large_file_holding_the_only_match_is_named_by_the_skip_note() {
     .unwrap();
     assert_eq!(text(&named), "big.txt:1:needle\n");
 }
+
+/// An earlier directory base must not hide a large file that a later base names directly:
+/// the `src` walk refuses the snapshot for its size, then `src/snapshot.json` is scanned
+/// once, and the skip note does not count it.
+#[tokio::test]
+async fn grep_a_directory_base_does_not_hide_a_large_file_named_later_as_path() {
+    let dir = TempDir::new("grep-size-cap-multi-order");
+    let root = dir.file("ws");
+    dir.write("ws/src/small.txt", "needle small\n");
+    write_sized(&dir, "ws/src/snapshot.json", 262145);
+    let tools = tools(&root);
+    let path = "src src/snapshot.json";
+
+    let out = call(&tools, "grep", json!({"pattern": "needle", "path": path}))
+        .await
+        .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 2 paths: src, src/snapshot.json]\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("src/snapshot.json:1:needle"),
+        "the directly named file is searched: {body}"
+    );
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.contains("src/snapshot.json:1:"))
+            .count(),
+        1,
+        "the directly named file is reported once: {body}"
+    );
+    assert!(
+        !body.contains("[skipped"),
+        "a file named directly as `path` is not counted as skipped: {body}"
+    );
+    assert_eq!(structured(&out)["matches"], json!(2));
+}
+
+/// Multi-base regression: the `[searched N paths: …]` header is prepended to the body, so
+/// the body budget must reserve its length too. A long header, enough ordinary matches to
+/// fill the budget and one skipped file must still end with the complete skip note inside
+/// the byte cap, instead of the final truncation cutting the note off.
+#[tokio::test]
+async fn grep_a_multi_base_search_keeps_the_skip_note_inside_the_byte_cap() {
+    let dir = TempDir::new("grep-size-cap-multi-header");
+    let root = dir.file("ws");
+    let cap = 2048;
+    // Four long-named bases make the header several hundred bytes, past the fixed note
+    // reserve; each holds short match lines that fill the body budget.
+    let names: Vec<String> = (0..4).map(|i| format!("d{i}{}", "x".repeat(140))).collect();
+    for (i, name) in names.iter().enumerate() {
+        let content = "needle\n".repeat(40);
+        dir.write(&format!("ws/{name}/f{i}.txt"), &content);
+    }
+    write_sized(&dir, &format!("ws/{}/big.bin", names[0]), 262145);
+    let tools = tools_with(
+        &root,
+        Limits {
+            max_grep_output_bytes: cap,
+            ..Limits::default()
+        },
+    );
+
+    let out = call(
+        &tools,
+        "grep",
+        json!({"pattern": "needle", "path": names.join(" ")}),
+    )
+    .await
+    .unwrap();
+    let body = text(&out);
+    assert!(
+        body.starts_with("[searched 4 paths: "),
+        "the header names every base: {body}"
+    );
+    assert!(
+        body.len() <= cap,
+        "output {}B passes the {cap}B cap",
+        body.len()
+    );
+    assert_eq!(
+        body.lines().last(),
+        Some(&*format!(
+            "[skipped 1 files over 262144 bytes: {}/big.bin]",
+            names[0]
+        )),
+        "the complete skip note ends the output: {body}"
+    );
+}
