@@ -1,6 +1,7 @@
 //! The web manual (`site-docs` example) renders every `DOCS` page, resolves every
-//! inter-page link and fragment, lists exactly the manual pages in its sidebar, and
-//! emits no JavaScript.
+//! inter-page link and fragment, lists exactly the manual pages in its sidebar, emits no
+//! JavaScript (only a `TechArticle` JSON-LD record), and lists every page once in
+//! `llms.txt` and in full in `llms-full.txt`.
 
 use radian_tui::site_docs::{RenderedSite, render_site};
 use std::collections::HashSet;
@@ -118,15 +119,17 @@ fn the_sidebar_lists_exactly_the_docs_pages() {
     }
 }
 
-/// No docs page emits JavaScript.
+/// No docs page emits JavaScript: the only `<script>` element is the JSON-LD record.
 #[test]
 fn the_docs_pages_hold_no_script() {
     let site = site();
     for (index, page) in site.pages.iter().enumerate() {
         let html = radian_tui::site_docs::page_html(&site, index);
+        let scripts = html.to_lowercase().matches("<script").count();
+        assert_eq!(scripts, 1, "{} has one script element", page.name);
         assert!(
-            !html.to_lowercase().contains("<script"),
-            "{} emits no script",
+            html.contains(JSON_LD_OPEN),
+            "{} has only the JSON-LD element",
             page.name
         );
         assert!(
@@ -135,6 +138,129 @@ fn the_docs_pages_hold_no_script() {
             page.name
         );
     }
+}
+
+/// The opening tag of the one `<script>` element a docs page holds.
+const JSON_LD_OPEN: &str = "<script type=\"application/ld+json\">";
+
+/// The JSON-LD element's content.
+fn json_ld(html: &str) -> serde_json::Value {
+    let start = html.find(JSON_LD_OPEN).expect("the JSON-LD element") + JSON_LD_OPEN.len();
+    let end = html[start..].find("</script>").expect("the element closes") + start;
+    serde_json::from_str(&html[start..end]).expect("the JSON-LD record parses")
+}
+
+/// Every docs page carries a `TechArticle` record with the page's title, description and
+/// absolute URL, and the record cannot close its element early.
+#[test]
+fn every_docs_page_carries_a_tech_article_record() {
+    let site = site();
+    for (index, page) in site.pages.iter().enumerate() {
+        let html = radian_tui::site_docs::page_html(&site, index);
+        let record = json_ld(&html);
+        assert_eq!(record["@context"], "https://schema.org", "{}", page.name);
+        assert_eq!(record["@type"], "TechArticle", "{}", page.name);
+        assert_eq!(record["headline"], page.title.as_str(), "{}", page.name);
+        assert_eq!(
+            record["description"],
+            page.description.as_str(),
+            "{}",
+            page.name
+        );
+        assert_eq!(
+            record["url"],
+            radian_tui::site_docs::page_url(&page.stem).as_str(),
+            "{}",
+            page.name
+        );
+        assert_eq!(
+            record["about"]["@type"], "SoftwareApplication",
+            "{}",
+            page.name
+        );
+    }
+    assert_eq!(
+        radian_tui::site_docs::page_url("index"),
+        "https://getrad.dev/docs/"
+    );
+    assert_eq!(
+        radian_tui::site_docs::page_url("arc/index"),
+        "https://getrad.dev/docs/arc/"
+    );
+    assert_eq!(
+        radian_tui::site_docs::page_url("arc/loop"),
+        "https://getrad.dev/docs/arc/loop.html"
+    );
+}
+
+/// A description holding `</script>` cannot end the JSON-LD element early.
+#[test]
+fn a_description_cannot_close_the_json_ld_element() {
+    let pages: &[(&str, &str)] = &[
+        ("index.md", "# Home\n\n## Start\n\n- `evil`\n"),
+        (
+            "evil.md",
+            "---\ndescription: A </script><b> description.\n---\n\n# Evil\n",
+        ),
+    ];
+    let site = render_site(pages).expect("renders");
+    let index = site.pages.iter().position(|p| p.stem == "evil").unwrap();
+    let html = radian_tui::site_docs::page_html(&site, index);
+    assert_eq!(html.matches("</script>").count(), 1, "one closing tag");
+    assert_eq!(json_ld(&html)["description"], "A </script><b> description.");
+}
+
+/// `llms.txt` lists every manual page exactly once, by its absolute URL, after the two
+/// hand-written pages; `llms-full.txt` holds every page's Markdown under its URL, with the
+/// `# ` title (not the frontmatter) right after the URL line.
+#[test]
+fn the_llms_files_list_every_page_once() {
+    let site = site();
+    let index = radian_tui::site_docs::llms_txt(&site);
+    let full = radian_tui::site_docs::llms_full_txt(&site);
+    assert!(
+        index.starts_with("# radian\n"),
+        "llms.txt starts with the title"
+    );
+    assert!(
+        index.contains("(https://getrad.dev/)"),
+        "the home page is listed"
+    );
+    assert!(
+        index.contains("(https://getrad.dev/arc.html)"),
+        "the arc page is listed"
+    );
+    assert!(
+        index.contains("(https://getrad.dev/llms-full.txt)"),
+        "the full file is listed"
+    );
+    for page in &site.pages {
+        let url = radian_tui::site_docs::page_url(&page.stem);
+        let line = format!("- [{}]({url})", page.title);
+        assert_eq!(
+            index.matches(&line).count(),
+            1,
+            "{} is listed once",
+            page.name
+        );
+        assert!(
+            index.contains(&format!("{line}: {}", page.description)),
+            "{} is listed with its description",
+            page.name
+        );
+        let header = format!("\nURL: {url}\n\n# ");
+        assert_eq!(
+            full.matches(&header).count(),
+            1,
+            "{} is in the full file once",
+            page.name
+        );
+    }
+    let urls: Vec<&str> = index
+        .lines()
+        .filter_map(|l| l.split_once("](https://getrad.dev/docs/").map(|(_, r)| r))
+        .collect();
+    assert_eq!(urls.len(), site.pages.len(), "exactly the manual pages");
 }
 
 /// The sidebar groups come from `index.md` and cover every page exactly once.

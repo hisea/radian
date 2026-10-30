@@ -9,13 +9,39 @@
 //! page's own directory. Links between pages (`foo.md`, `../foo.md`, `foo.md#bar`)
 //! resolve from the source page's directory, as GitHub renders them, and fail the build
 //! when the target page or heading does not exist; relative links out of the manual become
-//! `blob/main` URLs. No JavaScript is emitted on any page.
+//! `blob/main` URLs. No JavaScript is emitted on any page: the one `<script>` element is
+//! the `application/ld+json` `TechArticle` record a search engine reads, never run code.
+//!
+//! The same table also gives the two `llms.txt` files at the site root: `llms.txt` is the
+//! index (one line per page with its description, in sidebar order) and `llms-full.txt`
+//! is every page's Markdown in one file, each under its own URL.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 use std::collections::{HashMap, HashSet};
 
 /// The repo URL relative manual links resolve against.
 const REPO_BLOB: &str = "https://github.com/hisea/radian/blob/main";
+
+/// The repository the site links as the source.
+const REPO_URL: &str = "https://github.com/hisea/radian";
+
+/// The site origin, without a trailing slash.
+pub const SITE_URL: &str = "https://getrad.dev";
+
+/// The site's hand-written pages, for the `llms.txt` index: path under the origin and the
+/// one-line description. The home page is `index.html`, served at `/`.
+const HAND_WRITTEN_PAGES: [(&str, &str, &str); 2] = [
+    (
+        "/",
+        "radian",
+        "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks, skills and memory.",
+    ),
+    (
+        "/arc.html",
+        "arc",
+        "The plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.",
+    ),
+];
 
 /// The workspace root the generator runs from: the crate lives two levels below it.
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -57,6 +83,8 @@ pub struct RenderedPage {
     pub description: String,
     /// The article body HTML.
     pub body: String,
+    /// The page's Markdown after the frontmatter, as `llms-full.txt` prints it.
+    pub source: String,
     /// Every `##`+ heading, in order.
     pub headings: Vec<DocHeading>,
     /// Whether the source held raw HTML (escaped in the output).
@@ -140,6 +168,7 @@ pub fn render_site(pages: &[(&str, &str)]) -> Result<RenderedSite, SiteError> {
             title: titles[stem].clone(),
             description,
             body,
+            source: body_md.to_owned(),
             headings: ids[stem].clone(),
             raw_html: ctx.raw_html,
         });
@@ -166,6 +195,9 @@ pub fn page_html(site: &RenderedSite, index: usize) -> String {
     out.push_str("\">\n<meta property=\"og:title\" content=\"");
     escape_into(&page.title, &mut out);
     out.push_str(" · radian docs\">\n<meta property=\"og:type\" content=\"article\">\n");
+    out.push_str("<script type=\"application/ld+json\">");
+    out.push_str(&json_ld(page));
+    out.push_str("</script>\n");
     let assets = asset_prefix(&page.stem);
     out.push_str(&format!(
         "<link rel=\"icon\" href=\"{assets}favicon.svg\" type=\"image/svg+xml\">\n"
@@ -262,6 +294,111 @@ pub fn output_path(stem: &str) -> String {
     } else {
         format!("{stem}.html")
     }
+}
+
+/// The page's absolute URL: `https://getrad.dev/docs/` for the landing page, the directory
+/// URL for a subdirectory index (`docs/arc/`), `https://getrad.dev/docs/<stem>.html` otherwise.
+pub fn page_url(stem: &str) -> String {
+    if stem == "index" {
+        format!("{SITE_URL}/docs/")
+    } else if let Some(dir) = stem.strip_suffix("/index") {
+        format!("{SITE_URL}/docs/{dir}/")
+    } else {
+        format!("{SITE_URL}/docs/{stem}.html")
+    }
+}
+
+/// The page's Schema.org `TechArticle` record, serialised for a
+/// `<script type="application/ld+json">` element. `</` is written as `<\/` so no title or
+/// description can close the element early.
+fn json_ld(page: &RenderedPage) -> String {
+    let record = serde_json::json!({
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": page.title,
+        "description": page.description,
+        "url": page_url(&page.stem),
+        "inLanguage": "en",
+        "isPartOf": {
+            "@type": "WebSite",
+            "name": "radian",
+            "url": format!("{SITE_URL}/"),
+        },
+        "about": {
+            "@type": "SoftwareApplication",
+            "name": "radian",
+            "url": format!("{SITE_URL}/"),
+            "sameAs": REPO_URL,
+        },
+    });
+    record.to_string().replace("</", "<\\/")
+}
+
+/// The `llms.txt` index: the hand-written pages, then every manual page in sidebar order
+/// with its description, then the full-text file and the repository.
+pub fn llms_txt(site: &RenderedSite) -> String {
+    let mut out = String::new();
+    out.push_str("# radian\n\n");
+    out.push_str(
+        "> radian is a coding agent in one Rust binary. This file lists every page of getrad.dev; ",
+    );
+    out.push_str("llms-full.txt holds the whole user manual as Markdown.\n\n");
+    out.push_str("## Site\n\n");
+    for (path, title, description) in HAND_WRITTEN_PAGES {
+        out.push_str(&format!("- [{title}]({SITE_URL}{path}): {description}\n"));
+    }
+    let by_stem: HashMap<&str, &RenderedPage> =
+        site.pages.iter().map(|p| (p.stem.as_str(), p)).collect();
+    out.push_str("\n## Manual\n\n");
+    if let Some(home) = by_stem.get("index") {
+        llms_line(home, &mut out);
+    }
+    for group in &site.groups {
+        out.push_str(&format!("\n### {}\n\n", group.title));
+        for stem in &group.stems {
+            if stem == "index" {
+                continue;
+            }
+            if let Some(page) = by_stem.get(stem.as_str()) {
+                llms_line(page, &mut out);
+            }
+        }
+    }
+    out.push_str("\n## Optional\n\n");
+    out.push_str(&format!(
+        "- [Full manual]({SITE_URL}/llms-full.txt): every manual page in one Markdown file\n"
+    ));
+    out.push_str(&format!(
+        "- [Source]({REPO_URL}): the repository, MIT or Apache-2.0\n"
+    ));
+    out
+}
+
+/// One `llms.txt` line: the title, the URL and the description.
+fn llms_line(page: &RenderedPage, out: &mut String) {
+    out.push_str(&format!("- [{}]({})", page.title, page_url(&page.stem)));
+    if !page.description.is_empty() {
+        out.push_str(": ");
+        out.push_str(&page.description);
+    }
+    out.push('\n');
+}
+
+/// The `llms-full.txt` file: every manual page's Markdown, in table order, each after a
+/// line naming its URL and separated by a rule.
+pub fn llms_full_txt(site: &RenderedSite) -> String {
+    let mut out = String::new();
+    out.push_str("# radian manual\n\n");
+    out.push_str(&format!(
+        "The whole user manual of radian ({SITE_URL}/docs/) in one file. Each page starts with its URL.\n"
+    ));
+    for page in &site.pages {
+        out.push_str("\n---\n\n");
+        out.push_str(&format!("URL: {}\n\n", page_url(&page.stem)));
+        out.push_str(page.source.trim_matches('\n'));
+        out.push('\n');
+    }
+    out
 }
 
 /// The directory that holds a page's output (`arc` for `arc/loop`), empty at the root.
