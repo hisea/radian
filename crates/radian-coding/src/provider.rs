@@ -129,8 +129,8 @@ impl Default for Limits {
 /// Which of the built-in tools a session's request carries (ADR 0043 §4). A tool's
 /// description names another tool only when `ToolPresence` says that tool is mounted, so a
 /// restricted set (the hidden `--tools` list) never points the model at a tool it cannot call.
-/// [`ToolProvider::open_session`] uses [`ToolPresence::ALL`], which keeps today's text byte
-/// for byte.
+/// [`ToolProvider::open_session`] uses [`ToolPresence::ALL`]: the default request carries the
+/// full set, and its text is the same bytes an explicit `ToolPresence::ALL` emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolPresence {
     pub read: bool,
@@ -143,7 +143,7 @@ pub struct ToolPresence {
 }
 
 impl ToolPresence {
-    /// Every tool: the full set's descriptions and specs, unchanged.
+    /// Every tool: the full set, descriptions and specs included.
     pub const ALL: Self = Self {
         read: true,
         write: true,
@@ -180,7 +180,7 @@ impl ToolPresence {
         }
     }
 
-    /// The tools an allow-list names. `None` mounts every built-in (and keeps today's text).
+    /// The tools an allow-list names. `None` mounts every built-in.
     pub fn from_allow(allow: Option<&[String]>) -> Self {
         match allow {
             None => Self::ALL,
