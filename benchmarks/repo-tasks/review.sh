@@ -8,8 +8,8 @@
 # the repository.
 #
 # The result is `review.json`: whether a report parsed, its blocking items and
-# `review_ok` (parsed and no blocking item). Exit 0 passes, 1 blocks or is
-# unusable, 2 is a usage or setup error.
+# `review_ok` (a completed, exit-0 session that parsed and had no blocking
+# item). Exit 0 passes, 1 blocks or is unusable, 2 is a usage or setup error.
 #
 # Environment:
 #   REPO_TASKS_RUNS       output root (default: benchmarks/repo-tasks/runs)
@@ -50,12 +50,8 @@ TREE=$RUNS/trees/$arm-$task_id-$k
 python3 "$HERE/prompt.py" "$task" "$TREE" "$base" "$OUT/change.diff" \
   > "$OUT/review-prompt.md" || exit 2
 
-TIMEOUT_BIN=""
-if command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout
-elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN=timeout
-fi
 run_capped() {
-  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k 30 "$TIMEOUT" "$@"; else "$@"; fi
+  python3 "$HERE/timeout_run.py" --kill-after 30 "$TIMEOUT" -- "$@"
 }
 
 mkdir -p "$OUT/review-session"
@@ -84,16 +80,37 @@ import json, sys
 path, reviewer, agent, provider, model, rc, timed_out, log, here = sys.argv[1:]
 sys.path.insert(0, here)
 import lib
-parsed = lib.parse_review_text(open(log, encoding="utf-8", errors="replace").read())
+text = open(log, encoding="utf-8", errors="replace").read()
+parsed = lib.parse_review_text(text)
+# arc accepts a report only from a session that completed and exited 0. A
+# radian session ends with a `Result` line; a pi review has none, so its exit
+# code is the only signal.
+completed = None
+for line in reversed(text.splitlines()):
+    try:
+        value = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(value, dict) and value.get("type") == "Result":
+        completed = value.get("outcome") == "completed"
+        break
 result = {
     "reviewer": reviewer, "agent": agent, "provider": provider, "model": model,
     "exit_code": int(rc), "timed_out": timed_out == "1",
+    "session_completed": completed,
     "parsed": parsed["parsed"], "blocking": parsed["blocking"],
     "levels": parsed["levels"], "verdict": parsed["verdict"],
 }
-result["review_ok"] = parsed["parsed"] and parsed["blocking"] == 0
+result["review_ok"] = (
+    not result["timed_out"]
+    and result["exit_code"] == 0
+    and completed is not False
+    and parsed["parsed"]
+    and parsed["blocking"] == 0
+)
 json.dump(result, open(path, "w"), indent=1)
 print(json.dumps({key: result[key] for key in
-                  ("parsed", "blocking", "levels", "review_ok", "timed_out")}))
+                  ("parsed", "blocking", "levels", "review_ok", "timed_out",
+                   "session_completed")}))
 sys.exit(0 if result["review_ok"] else 1)
 EOF

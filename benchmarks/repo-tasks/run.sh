@@ -8,7 +8,8 @@
 #
 # The repository this script is started in is only read: the worktree is made in
 # the clone (`REPO_TASKS_CLONE`, default `runs/clone`), never in the caller's
-# repository, so its `.git/config` is not touched. `REPO_TASKS_SOURCE` names the
+# repository or in `REPO_TASKS_SOURCE`, so their `.git/config` is not touched.
+# A CLONE that resolves to either one is refused. `REPO_TASKS_SOURCE` names the
 # repository to clone from; it defaults to the repository holding this script.
 #
 # Environment:
@@ -43,6 +44,28 @@ TIMEOUT=${REPO_TASKS_TIMEOUT:-2700}
 RADIAN_BIN=${REPO_TASKS_RADIAN_BIN:-radian}
 PI_BIN=${REPO_TASKS_PI_BIN:-pi}
 
+# A repository's common git directory, canonical: equal for a repository, a
+# worktree of it, and any subdirectory of either.
+common_dir() {
+  local dir
+  dir=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case $dir in /*) ;; *) dir="$1/$dir" ;; esac
+  ( cd "$dir" 2>/dev/null && pwd -P )
+}
+
+# A separate clone. The caller's repository and the source are read only; a
+# worktree or a branch is never made in either one. `git worktree add` writes
+# the repository's `.git/config`, so a CLONE that is the source or the caller's
+# repository is refused before anything is created.
+clone_common=$(common_dir "$CLONE" || true)
+if [ -n "$clone_common" ]; then
+  source_common=$(common_dir "$SOURCE" || true)
+  caller_common=$(common_dir "$PWD" || true)
+  if [ "$clone_common" = "$source_common" ] || [ "$clone_common" = "$caller_common" ]; then
+    die "REPO_TASKS_CLONE ($CLONE) is the repository this run reads, not a separate clone; give another path"
+  fi
+fi
+
 # Validate names before creating anything: an unknown name lists the valid ones.
 agent=$(python3 "$LIB" arm "$arm" agent) || exit 2
 provider=$(python3 "$LIB" arm "$arm" provider) || exit 2
@@ -57,8 +80,6 @@ TREE=$RUNS/trees/$arm-$task_id-$k
 if [ -e "$TREE" ]; then die "worktree exists: $TREE (remove it first)"; fi
 mkdir -p "$OUT/session" "$RUNS/trees"
 
-# A separate clone. The caller's repository is read by `clone`/`fetch` only; a
-# worktree or a branch is never made in it.
 if [ ! -d "$CLONE/.git" ]; then
   mkdir -p "$(dirname "$CLONE")"
   git clone --quiet --shared --no-checkout "$SOURCE" "$CLONE" \
@@ -77,22 +98,10 @@ python3 "$LIB" brief "$task" > "$OUT/brief.md" || exit 2
 
 start=$(python3 -c 'import time; print(time.time())')
 
-# The wall-time cap. GNU coreutils installs `timeout`; on macOS Homebrew it is
-# `gtimeout`. Without either, run without a cap and say so.
-TIMEOUT_BIN=""
-if command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_BIN=gtimeout
-elif command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_BIN=timeout
-else
-  echo "run.sh: no gtimeout/timeout; running without a wall-time cap" >&2
-fi
+# The wall-time cap. `timeout_run.py` is the cap on every machine: it needs no
+# coreutils, so a run is never started without one.
 run_capped() {
-  if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" -k 30 "$TIMEOUT" "$@"
-  else
-    "$@"
-  fi
+  python3 "$HERE/timeout_run.py" --kill-after 30 "$TIMEOUT" -- "$@"
 }
 
 if [ "$agent" = "radian" ]; then

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -114,19 +113,6 @@ def _template(source: str, function: str) -> str:
     return literal
 
 
-def _levels(source: str) -> str:
-    """`REVIEW_LEVELS` rendered the way `report_format` renders it."""
-    match = re.search(
-        r"pub const REVIEW_LEVELS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", source, re.S
-    )
-    if match is None:
-        raise ValueError("REVIEW_LEVELS not found")
-    names = re.findall(r'"([^"]*)"', match.group(1))
-    if not names:
-        raise ValueError("REVIEW_LEVELS is empty")
-    return ", ".join(f"`{name}`" for name in names)
-
-
 def _unescape_braces(template: str) -> str:
     """A Rust format string's `{{`/`}}` are one literal brace."""
     return template.replace("{{", "{").replace("}}", "}")
@@ -135,7 +121,7 @@ def _unescape_braces(template: str) -> str:
 def report_format(review_rs: Path) -> str:
     source = review_rs.read_text(encoding="utf-8")
     template = _unescape_braces(_template(source, "report_format"))
-    levels = _levels((review_rs.parent / "verdict.rs").read_text(encoding="utf-8"))
+    levels = ", ".join(f"`{name}`" for name in lib.review_levels(review_rs.parent / "verdict.rs"))
     return template.replace("{levels}", levels)
 
 

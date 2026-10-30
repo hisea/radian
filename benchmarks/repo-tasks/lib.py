@@ -29,8 +29,12 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
 TASKS_DIR = Path(os.environ.get("REPO_TASKS_TASKS_DIR", HERE / "tasks"))
 ARMS_DIR = Path(os.environ.get("REPO_TASKS_ARMS_DIR", HERE / "arms"))
+# `crates/radian-arc/src/gate/verdict.rs` holds `REVIEW_LEVELS`, the one closed
+# list of levels arc's parser accepts.
+VERDICT_RS = REPO / "crates/radian-arc/src/gate/verdict.rs"
 
 TASK_KEYS = ("id", "slug", "base", "outcome", "crates")
 ARM_KEYS = ("agent", "provider", "model", "extra")
@@ -38,6 +42,22 @@ ARM_KEYS = ("agent", "provider", "model", "extra")
 
 class LookupError(Exception):
     """A task or arm name names no file; the message lists the valid names."""
+
+
+def review_levels(verdict_rs: Path | None = None) -> tuple[str, ...]:
+    """`REVIEW_LEVELS` from the repository source, in its own order."""
+    path = VERDICT_RS if verdict_rs is None else Path(verdict_rs)
+    match = re.search(
+        r"pub const REVIEW_LEVELS:\s*&\[&str\]\s*=\s*&\[(.*?)\];",
+        path.read_text(encoding="utf-8"),
+        re.S,
+    )
+    if match is None:
+        raise ValueError(f"{path}: REVIEW_LEVELS not found")
+    names = tuple(re.findall(r'"([^"]*)"', match.group(1)))
+    if not names:
+        raise ValueError(f"{path}: REVIEW_LEVELS is empty")
+    return names
 
 
 def _frontmatter(path: Path) -> tuple[dict[str, str], str]:
@@ -80,33 +100,128 @@ def parse_task(path: Path) -> dict[str, object]:
     return task
 
 
-def parse_review_text(text: str) -> dict:
-    """The last closed fenced `json` block of a review, as arc reads it.
+def _last_json_block(text: str) -> str | None:
+    """The body of the last closed fence whose info string is `json` or `jsonc`.
+
+    Line for line, this is `crates/radian-arc/src/gate/review.rs`'s
+    `last_json_block`: an unclosed fence at the end is not a block.
+    """
+    blocks: list[tuple[str, str]] = []
+    current: tuple[str, list[str]] | None = None
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if current is not None:
+            if trimmed == "```":
+                info, body = current
+                blocks.append((info, "".join(part + "\n" for part in body)))
+                current = None
+            else:
+                current[1].append(line)
+        elif trimmed.startswith("```"):
+            current = (trimmed[3:].strip(), [])
+    for info, body in reversed(blocks):
+        if info.lower() in ("json", "jsonc"):
+            return body
+    return None
+
+
+def _review_item(value, levels: tuple[str, ...]) -> dict | None:
+    """One `ReviewItem`: a plain string, or arc's object form, or None."""
+    if isinstance(value, str):
+        return {"level": None, "file": None, "line": None, "text": value}
+    if not isinstance(value, dict):
+        return None
+    text = value.get("text")
+    if not isinstance(text, str):
+        return None
+    level = value.get("level")
+    if level is not None and (not isinstance(level, str) or level not in levels):
+        return None
+    file = value.get("file")
+    if file is not None and not isinstance(file, str):
+        return None
+    line = value.get("line")
+    if line is not None and (
+        isinstance(line, bool)
+        or not isinstance(line, int)
+        or not 0 <= line <= 0xFFFFFFFF
+    ):
+        return None
+    pre_existing = value.get("pre_existing")
+    if pre_existing is not None and not isinstance(pre_existing, bool):
+        return None
+    return {"level": level, "file": file, "line": line, "text": text}
+
+
+def _review_items(value, levels: tuple[str, ...]) -> list[dict] | None:
+    if not isinstance(value, list):
+        return None
+    items = []
+    for entry in value:
+        item = _review_item(entry, levels)
+        if item is None:
+            return None
+        items.append(item)
+    return items
+
+
+def _unparsed() -> dict:
+    return {
+        "parsed": False,
+        "blocking": 0,
+        "levels": [],
+        "summary": None,
+        "verified": [],
+        "suggestions": 0,
+        "verdict": None,
+    }
+
+
+def parse_review_text(text: str, levels: tuple[str, ...] | None = None) -> dict:
+    """The last closed `json` block of a review, read exactly as arc reads it.
+
+    `crates/radian-arc/src/gate/review.rs`'s `parse_report` accepts the block
+    only when `summary` is a string, `blocking` and `suggestions` are lists of
+    items and `verified` is a list of strings; an item is a string or an object
+    with a string `text` and, when present, a known `level`. A missing or
+    malformed field is no report at all, so a reviewer that prints only
+    `{"blocking": []}` does not pass.
 
     `blocking` counts every item in the block, at every level: arc's review
     stage fails on any blocking item, whatever its `level`.
     """
-    blocks = re.findall(r"```([^\n`]*)\n(.*?)```", text, re.S)
-    verdict = None
-    for info, body in reversed(blocks):
-        if info.strip().lower() != "json":
-            continue
+    block = _last_json_block(text)
+    if block is None:
+        return _unparsed()
+    try:
+        value = json.loads(block)
+    except ValueError:
+        return _unparsed()
+    if not isinstance(value, dict):
+        return _unparsed()
+    if levels is None:
         try:
-            candidate = json.loads(body)
-        except ValueError:
-            continue
-        if isinstance(candidate, dict) and "blocking" in candidate:
-            verdict = candidate
-        break
-    items = (verdict or {}).get("blocking", [])
-    items = items if isinstance(items, list) else []
+            levels = review_levels()
+        except (OSError, ValueError):
+            return _unparsed()
+    summary = value.get("summary")
+    blocking = _review_items(value.get("blocking"), levels)
+    suggestions = _review_items(value.get("suggestions"), levels)
+    verified = value.get("verified")
+    if not isinstance(summary, str) or blocking is None or suggestions is None:
+        return _unparsed()
+    if not isinstance(verified, list) or not all(
+        isinstance(entry, str) for entry in verified
+    ):
+        return _unparsed()
     return {
-        "parsed": verdict is not None,
-        "blocking": len(items),
-        "levels": [
-            item.get("level") if isinstance(item, dict) else None for item in items
-        ],
-        "verdict": verdict,
+        "parsed": True,
+        "blocking": len(blocking),
+        "levels": [item["level"] for item in blocking],
+        "summary": summary,
+        "verified": verified,
+        "suggestions": len(suggestions),
+        "verdict": value,
     }
 
 

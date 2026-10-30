@@ -168,11 +168,13 @@ def aggregate(runs: list[dict]) -> dict:
     rows = [run["metrics"] for run in runs if run["metrics"]]
     tool_names: set[str] = set()
     for row in rows:
+        tool_names.update(row.get("tool_calls", {}))
         tool_names.update(row.get("tool_bytes", {}))
     totals: dict = {
         "runs": len(runs),
         "result": _status_cell(runs),
         "spread": _spread(runs),
+        "tool_calls": {},
         "tool_bytes": {},
         "outcomes": {},
     }
@@ -181,6 +183,9 @@ def aggregate(runs: list[dict]) -> dict:
     totals["fee_usd"] = _sum(row.get("fee_usd") for row in rows)
     totals["wall_seconds"] = _sum(row.get("wall_seconds") for row in rows)
     for name in sorted(tool_names):
+        totals["tool_calls"][name] = _sum(
+            row.get("tool_calls", {}).get(name) for row in rows
+        )
         totals["tool_bytes"][name] = _sum(
             row.get("tool_bytes", {}).get(name) for row in rows
         )
@@ -231,25 +236,27 @@ def _tool_names(tasks: dict) -> list[str]:
     names: set[str] = set()
     for arms in tasks.values():
         for totals in arms.values():
+            names.update(totals["tool_calls"])
             names.update(totals["tool_bytes"])
     return sorted(names)
 
 
 def _columns(tasks: dict) -> list[str]:
-    tool_names = _tool_names(tasks)
-    return [
-        *[label for _, label in TABLE_COLUMNS],
-        *(f"bytes.{name}" for name in tool_names),
-        "result_bytes",
-        "wall_s",
-    ]
+    """The table columns, with each tool's call and byte columns side by side."""
+    columns = [label for _, label in TABLE_COLUMNS]
+    for name in _tool_names(tasks):
+        columns.extend([f"calls.{name}", f"bytes.{name}"])
+    columns.extend(["result_bytes", "wall_s"])
+    return columns
 
 
 def _arm_row(totals: dict, columns: list[str]) -> list[str]:
     keys = {label: key for key, label in TABLE_COLUMNS}
     values = []
     for label in columns:
-        if label.startswith("bytes."):
+        if label.startswith("calls."):
+            values.append(_count(totals["tool_calls"].get(label[len("calls.") :])))
+        elif label.startswith("bytes."):
             values.append(_count(totals["tool_bytes"].get(label[len("bytes.") :])))
         elif label == "result_bytes":
             values.append(_count(totals["result_bytes"]))

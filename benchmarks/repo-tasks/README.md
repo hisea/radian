@@ -24,6 +24,7 @@ the repository it is started in.
 | `check.sh` | The task's crate-scoped fmt, clippy and nextest; `checks.json` and `checks.log` |
 | `review.sh` | arc's first-review prompt on `change.diff`, run by `arms/reviewer.md`; `review.json` |
 | `prompt.py` | Builds that prompt by reading `crates/radian-arc/src/gate/review.rs` and `verdict.rs` |
+| `timeout_run.py` | The portable wall-time cap the runner and the review use |
 | `report.py` | Per-task, totals and baseline-ratio tables from each run's session |
 | `eval.sh` | One arm end to end: every task, every k, checks, optional review, report |
 | `lib.py` | The task and arm file readers (also the CLI the shell scripts use) |
@@ -59,8 +60,13 @@ directory is removed.
 2. Makes `runs/clone` a clone of `REPO_TASKS_SOURCE` (default: the repository
    holding this script) if it is not one, and a detached worktree of the task's
    `base` sha at `runs/trees/<arm>-<task>-<k>`. `git worktree` and `git branch`
-   never run in the source repository, so its `.git/config` is untouched.
-3. Runs the agent in the worktree under a wall-time cap (default 2700 s):
+   never run in the source repository, so its `.git/config` is untouched. A
+   `REPO_TASKS_CLONE` that resolves to the source or to the repository `run.sh`
+   was started in is refused with exit 2, because `git worktree add` would write
+   that repository's `.git/config`.
+3. Runs the agent in the worktree under a wall-time cap (default 2700 s, measured
+   by the bundled `timeout_run.py`, so a machine without coreutils is still
+   capped):
 
    - radian: `radian exec --output jsonl --session-dir <out>/session --provider
      <provider> --model <model> <extra> -p -`, with the brief on stdin;
@@ -78,13 +84,13 @@ Environment inputs:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REPO_TASKS_SOURCE` | the repository of this script | repository cloned for the worktrees |
-| `REPO_TASKS_CLONE` | `<runs>/clone` | the separate clone; the source is never written |
+| `REPO_TASKS_CLONE` | `<runs>/clone` | the separate clone; the source is never written, and a clone that resolves to the source or the caller is refused |
 | `REPO_TASKS_RUNS` | `benchmarks/repo-tasks/runs` | the run root |
-| `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`gtimeout`/`timeout`) |
+| `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`timeout_run.py`) |
 | `REPO_TASKS_RADIAN_BIN` | `radian` | the radian binary |
 | `REPO_TASKS_PI_BIN` | `pi` | the pi binary |
 | `REPO_TASKS_CARGO` | `cargo` | the cargo binary the checks run |
-| `REPO_TASKS_MAX_JOBS` | unset | `cargo --jobs` for the checks |
+| `REPO_TASKS_MAX_JOBS` | unset | `--jobs` for clippy and nextest in the checks (never `cargo fmt`, which would pass it to rustfmt) |
 | `REPO_TASKS_TASKS_DIR` / `REPO_TASKS_ARMS_DIR` | `tasks` / `arms` | another task or arm set (tests) |
 | `REPO_TASKS_REVIEW_RS` | `crates/radian-arc/src/gate/review.rs` | the prompt source (tests) |
 | `REPO_TASKS_REVIEW` | `0` | `eval.sh` reviews each run when `1` |
@@ -103,6 +109,8 @@ cargo nextest run -p <crate> --locked --no-fail-fast
 
 Every listed crate is checked even after one fails: a two-crate task runs both,
 and either failure makes `checks.json`'s `checks_ok` false and the exit code 1.
+`REPO_TASKS_MAX_JOBS` is passed as `--jobs` to clippy and nextest; `cargo fmt`
+takes no job option, and passing one after `--` would reach rustfmt.
 
 ### Review
 
@@ -111,9 +119,13 @@ and either failure makes `checks.json`'s `checks_ok` false and the exit code 1.
 from `src/gate/verdict.rs`, so the text is the one arc writes, not a copy. The
 prompt holds the task, the brief, the base-head commits and the run's
 `change.diff`; it ends with arc's fenced `json` report. The reviewer is the
-arm-like `arms/reviewer.md` (read-only tools). A parsed report with no blocking
-item passes; a blocking item, an unparsable report or a timeout exits 1 and is
-recorded in `review.json`.
+arm-like `arms/reviewer.md` (read-only tools). A completed, exit-0 session that
+parses a report with no blocking item passes; a blocking item, an unparsable or
+incomplete report, a non-zero exit or a timeout exits 1 and is recorded in
+`review.json`. The report is read exactly as arc reads it: the last closed
+`json`/`jsonc` block, with a string `summary`, item lists for `blocking` and
+`suggestions`, a string list `verified`, and every item's `level` from arc's
+`REVIEW_LEVELS`.
 
 ## Columns
 
@@ -127,9 +139,10 @@ per-run rows per arm and task. It does not redefine "model calls", "input",
 
 The text tables show, for each arm: `runs`, the `result` counts, `calls`,
 `uncached_in`, `cache_read_in`, `total_in`, `output`, `reasoning`, `fee_usd`,
-`read_ranged`, `read_unranged`, `read_20kb`, `compactions`, `bytes.<tool>` for
-every tool the runs used, `result_bytes`, `wall_s`, and `in_spread` (the
-smallest and largest `total_in` over that arm's runs, the same-arm noise band).
+`read_ranged`, `read_unranged`, `read_20kb`, `compactions`, `calls.<tool>` and
+`bytes.<tool>` for every tool the runs used, `result_bytes`, `wall_s`, and
+`in_spread` (the smallest and largest `total_in` over that arm's runs, the
+same-arm noise band).
 `-` means no journal reported the value; it is never a zero.
 
 `report.py --baseline <arm>` adds a ratio table (`arm / baseline`) per task and
@@ -187,6 +200,8 @@ python3 benchmarks/repo-tasks/report.py --self-test   # the same tests
 No test calls a model: `run.sh` is driven with a stub radian and a temporary git
 repository, `check.sh` with a stub cargo, and the report and prompt tests read
 the checked-in task files and the real arc source. The tests cover the caller's
-`.git/config` staying byte-identical, an unknown arm/task naming the valid ones,
-a timeout staying in the report, a baseline with no runs, a two-crate check, and
-a prompt built from `review.rs`.
+`.git/config` staying byte-identical (including a clone path that points at the
+caller), an unknown arm/task naming the valid ones, a timeout staying in the
+report (also when `gtimeout`/`timeout` are absent), a baseline with no runs, a
+two-crate check with `--jobs`, the review parser and review pass rule, and a
+prompt built from `review.rs`.

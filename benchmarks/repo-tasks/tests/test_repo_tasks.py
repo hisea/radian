@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -113,9 +114,8 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def make_repo(root: Path) -> Path:
-    repo = root / "repo"
-    repo.mkdir()
+def init_repo(repo: Path) -> Path:
+    repo.mkdir(parents=True)
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "config", "user.name", "test")
@@ -123,6 +123,10 @@ def make_repo(root: Path) -> Path:
     git(repo, "add", "README.md")
     git(repo, "commit", "-q", "-m", "base")
     return repo
+
+
+def make_repo(root: Path) -> Path:
+    return init_repo(root / "repo")
 
 
 def radian_stub(directory: Path, body: str) -> Path:
@@ -194,6 +198,58 @@ if [ "$1" = "nextest" ] && [ "$crate" = "crate-b" ]; then exit 1; fi
 exit 0
 """
 
+# A cargo like the real one: `cargo fmt` forwards everything after `--` to
+# rustfmt, which rejects `--jobs`; the subcommands accept it as a Cargo option.
+CARGO_JOBS_STUB = """\
+#!/bin/sh
+echo "$@"
+if [ "$1" = "fmt" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "--jobs" ]; then echo "unknown rustfmt option" >&2; exit 1; fi
+  done
+fi
+exit 0
+"""
+
+VALID_REPORT = (
+    "```json\n"
+    '{"summary": "fine", "blocking": [], "suggestions": [], "verified": []}\n'
+    "```\n"
+)
+
+
+def reviewer_stub(directory: Path, body: str) -> Path:
+    path = write(
+        directory / "reviewer-stub.py",
+        "#!/usr/bin/env python3\n" + textwrap.dedent(body),
+    )
+    path.chmod(0o755)
+    return path
+
+
+def tool_journal(name="read", text="abcdef") -> str:
+    return journal(
+        [
+            {
+                "event": "ToolExecutionStarted",
+                "data": {
+                    "call_id": "c1",
+                    "name": name,
+                    "arguments": {"path": "x"},
+                },
+                "ts": "2026-10-01T00:00:01Z",
+            },
+            {
+                "event": "ToolExecutionSettled",
+                "data": {
+                    "call_id": "c1",
+                    "result": {"content": [{"text": {"text": text}}]},
+                },
+                "ts": "2026-10-01T00:00:02Z",
+            },
+        ]
+    )
+
 
 class ScratchCase(unittest.TestCase):
     def setUp(self):
@@ -262,21 +318,24 @@ class RunScriptTest(ScratchCase):
         arm_file(arms, "full")
         return repo, base, tasks, arms, radian_stub(self.root, stub)
 
-    def run_script(self, repo, tasks, arms, stub, *args, timeout="30"):
+    def run_script(self, repo, tasks, arms, stub, *args, timeout="30", clone=None, path_prefix=None, cwd=None):
+        env = self.env(
+            REPO_TASKS_TASKS_DIR=tasks,
+            REPO_TASKS_ARMS_DIR=arms,
+            REPO_TASKS_SOURCE=repo,
+            REPO_TASKS_RUNS=self.root / "runs",
+            REPO_TASKS_CLONE=clone or self.root / "clone",
+            REPO_TASKS_RADIAN_BIN=stub,
+            REPO_TASKS_TIMEOUT=timeout,
+        )
+        if path_prefix is not None:
+            env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
         return subprocess.run(
             ["bash", str(ROOT / "run.sh"), *args],
-            cwd=repo,
+            cwd=cwd or repo,
             capture_output=True,
             text=True,
-            env=self.env(
-                REPO_TASKS_TASKS_DIR=tasks,
-                REPO_TASKS_ARMS_DIR=arms,
-                REPO_TASKS_SOURCE=repo,
-                REPO_TASKS_RUNS=self.root / "runs",
-                REPO_TASKS_CLONE=self.root / "clone",
-                REPO_TASKS_RADIAN_BIN=stub,
-                REPO_TASKS_TIMEOUT=timeout,
-            ),
+            env=env,
         )
 
     def test_the_callers_repository_config_is_byte_identical(self):
@@ -296,6 +355,27 @@ class RunScriptTest(ScratchCase):
         self.assertFalse(data["timed_out"])
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["journal"])
+
+    def test_a_clone_pointing_at_the_callers_repository_is_refused(self):
+        repo, _, tasks, arms, stub = self.prepare()
+        before = (repo / ".git" / "config").read_bytes()
+        before_worktrees = git(repo, "worktree", "list", "--porcelain")
+        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1", clone=repo)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("separate clone", result.stderr)
+        self.assertEqual((repo / ".git" / "config").read_bytes(), before)
+        self.assertEqual(git(repo, "worktree", "list", "--porcelain"), before_worktrees)
+        self.assertFalse((self.root / "runs" / "full" / "T1" / "1" / "run.json").exists())
+
+    def test_a_clone_that_is_the_source_is_refused_even_from_elsewhere(self):
+        repo, _, tasks, arms, stub = self.prepare()
+        before = (repo / ".git" / "config").read_bytes()
+        result = self.run_script(
+            repo, tasks, arms, stub, "full", "T1", "1", clone=repo, cwd=self.root
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("separate clone", result.stderr)
+        self.assertEqual((repo / ".git" / "config").read_bytes(), before)
 
     def test_a_task_with_two_crates_runs_both_checks(self):
         repo, _, tasks, arms, stub = self.prepare()
@@ -338,6 +418,22 @@ class RunScriptTest(ScratchCase):
         self.assertEqual(built["runs"][0]["result"], "timeout")
         self.assertIn("timeout=1", report.format_report(built))
 
+    def test_the_cap_does_not_depend_on_gtimeout(self):
+        """A machine without coreutils is still capped: the runner never calls one."""
+        repo, _, tasks, arms, stub = self.prepare(STUB_TIMEOUT)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        for name in ("gtimeout", "timeout"):
+            fake = write(bin_dir / name, "#!/bin/sh\necho called >&2\nexit 3\n")
+            fake.chmod(0o755)
+        result = self.run_script(
+            repo, tasks, arms, stub, "full", "T1", "1", timeout="1", path_prefix=bin_dir
+        )
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        data = json.loads((self.root / "runs" / "full" / "T1" / "1" / "run.json").read_text())
+        self.assertTrue(data["timed_out"], result.stderr)
+        self.assertEqual(data["status"], "timeout")
+
     def test_unknown_arm_and_task_exit_nonzero_and_name_the_valid_ones(self):
         repo, _, tasks, arms, stub = self.prepare()
         bad_arm = self.run_script(repo, tasks, arms, stub, "nope", "T1", "1")
@@ -377,11 +473,40 @@ class CheckScriptTest(ScratchCase):
         self.assertTrue(data["checks_ok"])
         self.assertEqual(data["crates"], ["crate-a", "crate-b"])
 
+    def test_max_jobs_reaches_cargo_and_not_rustfmt(self):
+        tasks, run, _ = self.make_run_tree()
+        cargo = write(self.root / "cargo-jobs-stub.sh", CARGO_JOBS_STUB)
+        cargo.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(ROOT / "check.sh"), "full", "T1", "1"],
+            capture_output=True,
+            text=True,
+            env=self.env(
+                REPO_TASKS_TASKS_DIR=tasks,
+                REPO_TASKS_RUNS=self.root / "runs",
+                REPO_TASKS_CARGO=cargo,
+                REPO_TASKS_MAX_JOBS=2,
+            ),
+        )
+        # `cargo fmt` would forward `--jobs` to rustfmt, which rejects it.
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (run / "checks.log").read_text()
+        fmt_line = next(
+            line for line in log.splitlines() if line.startswith("===") and " fmt " in line
+        )
+        self.assertNotIn("--jobs", fmt_line)
+        self.assertIn("clippy --jobs 2 -p crate-a", log)
+        self.assertIn("nextest run --jobs 2 -p crate-a", log)
+        data = json.loads((run / "checks.json").read_text())
+        self.assertTrue(data["checks_ok"])
+
 
 class ReportTest(ScratchCase):
-    def make_run(self, arm, task, k, input_tokens=100, timed_out=False):
+    def make_run(self, arm, task, k, input_tokens=100, timed_out=False, extra_journal=""):
         out = self.root / "runs" / arm / task / str(k)
-        journal_path = write(out / "session" / "s.jsonl", session_journal(input_tokens))
+        journal_path = write(
+            out / "session" / "s.jsonl", session_journal(input_tokens) + extra_journal
+        )
         write(
             out / "run.json",
             json.dumps(
@@ -454,6 +579,23 @@ class ReportTest(ScratchCase):
         self.assertIn("RATIOS (arm / full)", text)
         self.assertIn("0.500", text)
 
+    def test_a_per_tool_call_column_joins_its_byte_column(self):
+        self.make_run("full", "T1", 1, extra_journal=tool_journal())
+        built = report.build(self.root / "runs")
+        self.assertEqual(built["totals"]["full"]["tool_calls"], {"read": 1})
+        self.assertEqual(built["totals"]["full"]["tool_bytes"], {"read": 6})
+        columns = report._columns(built["tasks_totals"])
+        self.assertIn("calls.read", columns)
+        self.assertIn("bytes.read", columns)
+        row = report._arm_row(built["totals"]["full"], columns)
+        self.assertEqual(row[columns.index("calls.read")], "1")
+        self.assertEqual(row[columns.index("bytes.read")], "6")
+        header = next(
+            line for line in report.format_report(built).splitlines() if line.startswith("arm ")
+        )
+        self.assertIn("calls.read", header)
+        self.assertIn("bytes.read", header)
+
 
 class PromptTest(ScratchCase):
     def test_the_prompt_is_read_from_review_rs(self):
@@ -522,6 +664,174 @@ class ReviewTextTest(unittest.TestCase):
 
     def test_no_json_block_is_unparsed(self):
         self.assertFalse(lib.parse_review_text("no report here")["parsed"])
+
+    def test_a_report_missing_arcs_fields_is_unparsed(self):
+        # arc's `parse_report` needs summary, blocking, suggestions and verified.
+        parsed = lib.parse_review_text('```json\n{"blocking": []}\n```\n')
+        self.assertFalse(parsed["parsed"])
+        self.assertEqual(parsed["blocking"], 0)
+        self.assertFalse(parsed["verdict"])
+
+    def test_a_report_without_verified_is_unparsed(self):
+        parsed = lib.parse_review_text(
+            '```json\n{"summary": "s", "blocking": [], "suggestions": []}\n```\n'
+        )
+        self.assertFalse(parsed["parsed"])
+
+    def test_a_level_outside_review_levels_is_unparsed(self):
+        parsed = lib.parse_review_text(
+            "```json\n"
+            '{"summary": "s", "blocking": [{"level": "severe", "text": "x"}], '
+            '"suggestions": [], "verified": []}\n'
+            "```\n"
+        )
+        self.assertFalse(parsed["parsed"])
+
+    def test_an_item_without_text_is_unparsed(self):
+        parsed = lib.parse_review_text(
+            '```json\n{"summary": "s", "blocking": [{"level": "major"}], '
+            '"suggestions": [], "verified": []}\n```\n'
+        )
+        self.assertFalse(parsed["parsed"])
+
+    def test_a_suggestion_must_be_an_item(self):
+        parsed = lib.parse_review_text(
+            '```json\n{"summary": "s", "blocking": [], "suggestions": [7], '
+            '"verified": []}\n```\n'
+        )
+        self.assertFalse(parsed["parsed"])
+
+    def test_a_jsonc_block_is_read_like_arc(self):
+        parsed = lib.parse_review_text(
+            "```jsonc\n"
+            '{"summary": "s", "blocking": [], "suggestions": [], "verified": []}\n'
+            "```\n"
+        )
+        self.assertTrue(parsed["parsed"])
+        self.assertEqual(parsed["blocking"], 0)
+
+    def test_an_unclosed_block_is_unparsed(self):
+        parsed = lib.parse_review_text(
+            '```json\n{"summary": "s", "blocking": [], "suggestions": [], '
+            '"verified": []}\n'
+        )
+        self.assertFalse(parsed["parsed"])
+
+
+class TimeoutRunTest(unittest.TestCase):
+    def test_the_cap_ends_a_slow_command_and_exits_124(self):
+        start = time.monotonic()
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "timeout_run.py"),
+                "--kill-after",
+                "2",
+                "1",
+                "--",
+                sys.executable,
+                "-c",
+                "import time; time.sleep(30)",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertLess(time.monotonic() - start, 20)
+
+    def test_the_command_status_passes_through(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "timeout_run.py"),
+                "10",
+                "--",
+                sys.executable,
+                "-c",
+                "import sys; sys.exit(7)",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 7, result.stderr)
+
+
+class ReviewScriptTest(ScratchCase):
+    def prepare(self):
+        runs = self.root / "runs"
+        tree = init_repo(runs / "trees" / "full-T1-1")
+        base = git(tree, "rev-parse", "HEAD")
+        tasks = self.root / "tasks"
+        arms = self.root / "arms"
+        task_file(tasks, "T1-demo", base, crates="crate-a")
+        arm_file(arms, "reviewer")
+        out = runs / "full" / "T1" / "1"
+        write(out / "run.json", json.dumps({"arm": "full", "task": "T1", "k": 1}))
+        write(out / "change.diff", "diff --git a/x b/x\n+new\n")
+        return tasks, arms, out
+
+    def review(self, tasks, arms, stub, timeout="30"):
+        return subprocess.run(
+            ["bash", str(ROOT / "review.sh"), "full", "T1", "1"],
+            capture_output=True,
+            text=True,
+            env=self.env(
+                REPO_TASKS_TASKS_DIR=tasks,
+                REPO_TASKS_ARMS_DIR=arms,
+                REPO_TASKS_RUNS=self.root / "runs",
+                REPO_TASKS_RADIAN_BIN=stub,
+                REPO_TASKS_TIMEOUT=timeout,
+            ),
+        )
+
+    def test_a_completed_review_with_no_blocking_item_passes(self):
+        tasks, arms, out = self.prepare()
+        stub = reviewer_stub(
+            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n"
+        )
+        result = self.review(tasks, arms, stub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads((out / "review.json").read_text())
+        self.assertTrue(data["parsed"])
+        self.assertTrue(data["review_ok"])
+
+    def test_a_nonzero_reviewer_exit_fails_even_with_a_valid_report(self):
+        tasks, arms, out = self.prepare()
+        stub = reviewer_stub(
+            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(1)\n"
+        )
+        result = self.review(tasks, arms, stub)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        data = json.loads((out / "review.json").read_text())
+        self.assertTrue(data["parsed"])
+        self.assertFalse(data["review_ok"])
+
+    def test_a_timed_out_reviewer_fails(self):
+        tasks, arms, out = self.prepare()
+        stub = reviewer_stub(
+            self.root,
+            f"import sys, time\nsys.stdout.write({VALID_REPORT!r})\n"
+            "sys.stdout.flush()\ntime.sleep(30)\nsys.exit(0)\n",
+        )
+        result = self.review(tasks, arms, stub, timeout="1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        data = json.loads((out / "review.json").read_text())
+        self.assertTrue(data["timed_out"])
+        self.assertFalse(data["review_ok"])
+
+    def test_an_incomplete_session_fails_even_with_a_valid_report(self):
+        result_line = json.dumps({"type": "Result", "outcome": "incomplete"}) + "\n"
+        tasks, arms, out = self.prepare()
+        stub = reviewer_stub(
+            self.root,
+            f"import sys\nsys.stdout.write({result_line!r})\n"
+            f"sys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n",
+        )
+        result = self.review(tasks, arms, stub)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        data = json.loads((out / "review.json").read_text())
+        self.assertTrue(data["parsed"])
+        self.assertFalse(data["review_ok"])
 
 
 if __name__ == "__main__":

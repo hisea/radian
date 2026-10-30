@@ -13,7 +13,8 @@
 # Environment:
 #   REPO_TASKS_RUNS      output root (default: benchmarks/repo-tasks/runs)
 #   REPO_TASKS_CARGO     cargo binary (default: cargo; tests use a stub)
-#   REPO_TASKS_MAX_JOBS  passed to cargo as `--jobs` (optional)
+#   REPO_TASKS_MAX_JOBS  passed to cargo clippy and nextest as `--jobs` (optional;
+#                        never to `cargo fmt`, which would forward it to rustfmt)
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,6 +39,8 @@ TREE=$RUNS/trees/$arm-$task_id-$k
 mkdir -p "$OUT"
 cd "$TREE" || die "cannot enter $TREE"
 unset CARGO_TARGET_DIR
+# `cargo fmt` forwards anything after `--` to rustfmt, which has no `--jobs`, so
+# the option goes to clippy and nextest only.
 JOBS=""
 if [ -n "${REPO_TASKS_MAX_JOBS:-}" ]; then JOBS="--jobs $REPO_TASKS_MAX_JOBS"; fi
 
@@ -54,7 +57,7 @@ step() {
   return $rc
 }
 
-step "$CARGO" fmt --all -- --check $JOBS || fmt_rc=1
+step "$CARGO" fmt --all -- --check || fmt_rc=1
 
 index=0
 for crate in ${crates//,/ }; do
