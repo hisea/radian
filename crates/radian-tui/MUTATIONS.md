@@ -3388,3 +3388,4 @@ confirmed byte-identical with `shasum -a 256`; the named test ran with
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0248-M5 | `list_manual` prints every page for either manual instead of the manual's own pages | ✅ 1 failed (rc=100) | `radian_docs_prints_the_radian_manual_and_the_arc_entry` (the listing included every arc page) |
+| TK0248-M6 | the `arc: ...` line is deleted from the documented `radian docs` listing in `docs/user/cli.md` | ✅ 1 failed (rc=100) | `the_manual_states_the_exact_radian_docs_output` (the documented block no longer matched stdout) |

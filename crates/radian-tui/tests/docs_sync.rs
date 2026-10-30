@@ -460,6 +460,36 @@ fn item_section<'a>(footer_md: &'a str, name: &str) -> &'a str {
     &footer_md[start..end]
 }
 
+/// The `## `radian docs`` section of `cli.md`: from its heading to the next `## ` heading.
+fn radian_docs_section(cli_md: &str) -> &str {
+    let heading = "## `radian docs`";
+    let start = cli_md
+        .find(heading)
+        .unwrap_or_else(|| panic!("cli.md has a `{heading}` section"));
+    let rest = &cli_md[start + heading.len()..];
+    let end = rest
+        .find("\n## ")
+        .map(|index| start + heading.len() + index)
+        .unwrap_or(cli_md.len());
+    &cli_md[start..end]
+}
+
+/// Every fenced block of `lang` in a section, in order, each with its trailing newline.
+fn fenced_blocks(section: &str, lang: &str) -> Vec<String> {
+    let open = format!("```{lang}\n");
+    let mut blocks = Vec::new();
+    let mut rest = section;
+    while let Some(index) = rest.find(&open) {
+        let after = &rest[index + open.len()..];
+        let end = after
+            .find("\n```")
+            .unwrap_or_else(|| panic!("a {lang} block is closed"));
+        blocks.push(format!("{}\n", &after[..end]));
+        rest = &after[end + "\n```".len()..];
+    }
+    blocks
+}
+
 /// The first fenced `toml` block of a section, with its trailing newline restored.
 fn fenced_toml(section: &str) -> String {
     let start = section
@@ -602,6 +632,39 @@ fn radian_docs_lists_the_arc_manual_and_reads_nested_pages() {
         err.contains("unknown docs topic `arc-loop`") && err.contains("arc/loop"),
         "the refusal names the topic and lists the new path: {err}"
     );
+}
+
+/// `cli.md` states the exact `radian docs` output in two `text` blocks: the radian-manual
+/// topics with the single `arc` entry, then the arc-manual topics. The binary prints exactly
+/// those lines, in that order.
+#[test]
+fn the_manual_states_the_exact_radian_docs_output() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cli_md =
+        std::fs::read_to_string(manifest.join("../../docs/user/cli.md")).expect("cli.md exists");
+    let blocks = fenced_blocks(radian_docs_section(&cli_md), "text");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the `radian docs` section has two `text` blocks: the radian listing and the arc listing"
+    );
+    let bin = env!("CARGO_BIN_EXE_radian");
+    for (args, documented) in [
+        (&["docs"][..], &blocks[0]),
+        (&["docs", "arc"][..], &blocks[1]),
+    ] {
+        let output = std::process::Command::new(bin)
+            .args(args)
+            .output()
+            .expect("radian docs runs");
+        assert!(output.status.success(), "radian {args:?}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            *documented,
+            "cli.md states the exact output of `radian {}`",
+            args.join(" ")
+        );
+    }
 }
 
 /// An unknown topic exits 2 and lists the pages.
