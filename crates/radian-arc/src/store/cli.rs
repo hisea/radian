@@ -1223,10 +1223,14 @@ fn reset_budget(id: &str) -> Result<u8, Error> {
     Ok(emit(format!("{id}: {} task(s) ready\n", reset.tasks.len())))
 }
 
-/// `radian arc merge <task>`: the owner's approval, integration, and the push to main.
+/// `radian arc merge <task>`: the owner's approval, integration, and the merge into the
+/// target branch. A merge command that answers `pending` prints that the merge is pending and
+/// exits `3`: the task stays `review.integrating` and a later run continues it (ADR 0048
+/// decisions 1 and 6).
 fn merge(task: &str) -> Result<u8, Error> {
     let store = open()?;
     let merged = crate::review::merge(&store, task)?;
+    let pending = merged.pending;
     let mut text = format!("{}\n", merged.line());
     if let Some(warning) = &merged.warning {
         text.push_str(&format!("warning: {warning}\n"));
@@ -1237,7 +1241,15 @@ fn merge(task: &str) -> Result<u8, Error> {
     for warning in run_own_hooks(&store)? {
         text.push_str(&format!("warning: {warning}\n"));
     }
-    Ok(emit(text))
+    let code = emit(text);
+    if code != Exit::Ok.code() {
+        return Ok(code);
+    }
+    Ok(if pending {
+        Exit::State.code()
+    } else {
+        Exit::Ok.code()
+    })
 }
 
 /// `radian arc reject <task> --note <text>`: the owner's note, and back to rework.

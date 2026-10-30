@@ -618,13 +618,24 @@ same command, while `review::merge_step` starts the integration in a background 
 next pass calls `finish_integration`. A flow removed or a `gate_profile` changed after the gate
 ran therefore changes neither the approval's required stages nor the integration; only a
 verification from before the record existed resolves the flow's current profile. Either
-path moves to `review.ready_to_merge` and pushes `<candidate>:refs/heads/<target>` without
-force. A target branch that moved after integration, or a rejected push, makes it integrate again
-(one round per pass in the loop; at most three runs per `radian arc merge` command). Before
-`done.merged`, `finish_integration` checks what landed: for `merge`, the remote target is the
-candidate and contains `head_sha`; for `squash` and `rebase`, the remote target's tree is the
-candidate's tree. A failed check records the reason and moves the task to
-`review.rework_pending`; it never reaches `done.merged`. On
+path moves to `review.ready_to_merge`. `[integration] method` then decides the merge:
+`push` pushes `<candidate>:refs/heads/<target>` without force, and a target branch that moved
+after integration, or a rejected push, makes it integrate again (one round per pass in the
+loop; at most three runs per `radian arc merge` command). `command` runs `[integration]
+command` in the repository root with the hooks' environment plus `ARC_CANDIDATE_SHA` (and
+without the repository variables of arc's own process: `run_shell` removes
+`git::REPOSITORY_ENV`, so the command's git calls name the repository root it runs in), logs to
+`runs/<task>/attempts/<attempt>/merge-command.log`, and reads its last non-empty line
+(`last_non_empty_line`, with a CRLF's `\r` trimmed): a 40-hex sha is checked by
+`check_command_landed` (after a fetch the sha is on the remote target, equal to its tip or in
+its history, and its tree is the candidate's tree; exact sha equality is not required),
+`pending` leaves the task in `review.integrating` (the next pass reuses the passing integration
+verdict while its `base_sha` is still the remote target, so the command runs again without
+rebuilding the candidate), and `closed` or any other line is a failed integration. A non-zero
+exit or timeout wins over the last line. Before `done.merged`, the `push` path checks what
+landed: for `merge`, the remote target is the candidate and contains `head_sha`; for `squash`
+and `rebase`, the remote target's tree is the candidate's tree. A failed check records the
+reason and moves the task to `review.rework_pending`; it never reaches `done.merged`. On
 success the task is `done.merged`; the same write records the `after_merge` hook and the merged
 sha, and arc itself removes nothing. `TaskFile::enter` records the point of every move that
 reaches one of the five hook phases (`after_merge`, `after_fail`, `after_rework`,

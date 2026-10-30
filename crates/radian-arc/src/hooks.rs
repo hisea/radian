@@ -60,6 +60,25 @@ pub const HOOK_ENV: &[&str] = &[
     "ARC_HOOK",
 ];
 
+/// The point name the integration command's `ARC_HOOK` carries. It is not a hook point: the
+/// `[integration] command` runs at merge, and only its environment overlaps the hooks'.
+pub(crate) const INTEGRATION_POINT: &str = "integration";
+
+/// The environment the `[integration] command` receives (ADR 0048 decisions 6 and 10): the
+/// hook variables, with `ARC_HOOK=integration` and `ARC_STATE` naming the phase the merge
+/// runs in, plus `ARC_CANDIDATE_SHA`. `ARC_MERGED_SHA` belongs to `after_merge` and is not
+/// set: the command runs before there is a merged sha.
+pub(crate) fn command_env(
+    store: &Store,
+    config: &Config,
+    task: &TaskFile,
+    candidate: &str,
+) -> Vec<(&'static str, String)> {
+    let mut env = env_for(store, config, task, INTEGRATION_POINT);
+    env.push(("ARC_CANDIDATE_SHA", candidate.to_owned()));
+    env
+}
+
 /// Runs every pending hook of every task, in task-id order, and returns one message for each
 /// command that failed or ran past its timeout. The caller prints each as a `warning:` line.
 /// The caller holds `runner.lock`; this function does not take it.
@@ -109,7 +128,7 @@ fn run_point(
     let timeout = Duration::from_secs(config.gate.command_timeout_secs);
     for (index, line) in commands.iter().enumerate() {
         let log = log_dir.join(format!("{point}-{:02}.log", index + 1));
-        match run_shell(store.repo(), line, timeout, &log, &env, None) {
+        match run_shell(store.repo(), line, timeout, &log, &env, &[], None) {
             Ok(outcome) if outcome.outcome == SeriesOutcome::Passed => {}
             Ok(outcome) => {
                 let reason = if outcome.outcome == SeriesOutcome::TimedOut {
