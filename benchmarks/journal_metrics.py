@@ -70,20 +70,31 @@ COLUMNS = (
     {
         "name": "input_uncached",
         "definition": (
-            "Input tokens billed at the full price. A radian record marked "
-            "`input_includes_cache: true` subtracts `cache_read` from `input`; "
-            "an unmarked radian record and a pi record report `input` alone."
+            "Input tokens billed at the full price (ADR 0007 `uncached_input()`). "
+            "A radian record marked `input_includes_cache: true` subtracts both "
+            "`cache_read` and `cache_write` from `input`; a record marked false "
+            "and an unmarked one report `input` alone, as does a pi record."
         ),
         "unit": "tokens",
     },
     {
         "name": "input_cache_read",
-        "definition": "Input tokens served from the provider cache (`cache_read`).",
+        "definition": (
+            "Input tokens served from the provider cache (`cache_read`). An "
+            "unmarked radian record's value is reported but not added to "
+            "`input_total` (it may already sit inside `input`)."
+        ),
         "unit": "tokens",
     },
     {
         "name": "input_total",
-        "definition": "`input_uncached + input_cache_read`: the same input basis for every row.",
+        "definition": (
+            "The whole prompt the provider saw (ADR 0007 `prompt_total()`): "
+            "`input` when it is marked `input_includes_cache: true` or unmarked, "
+            "`input + cache_read + cache_write` when marked false. A cache write "
+            "has no column of its own, so the total can exceed "
+            "`input_uncached + input_cache_read`."
+        ),
         "unit": "tokens",
     },
     {
@@ -364,32 +375,52 @@ def _read_is_ranged(arguments: dict[str, Any]) -> bool:
 
 
 def _radian_inputs(usage: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
-    """(uncached, cache_read, total) for a radian usage object (ADR 0007 J11)."""
+    """(uncached, cache_read, prompt total) for a radian usage object (ADR 0007 J11).
+
+    These are exactly `ModelUsage::uncached_input()` and `prompt_total()`:
+
+    - `input_includes_cache: true` (OpenAI-compatible): `input` is the whole
+      prompt, so the full-price part subtracts **both** cache counters and the
+      total is `input` itself.
+    - `input_includes_cache: false` (Anthropic): `input` is the uncached part
+      and the cache counters are its siblings, so the total adds both.
+    - unmarked (a record written before ADR 0007): `input` stands alone both as
+      the full-price part and as the prompt total. Its `cache_read` is still
+      reported, but it is not added again: it may already be inside `input`,
+      and adding it would double-count.
+    """
     input_tokens = _int(usage.get("input"))
     cache_read = _int(usage.get("cache_read"))
+    cache_write = _int(usage.get("cache_write"))
     includes = usage.get("input_includes_cache")
     if input_tokens is None:
         return None, cache_read, None
-    if includes is True and cache_read is not None:
-        # OpenAI-compatible: `input` (prompt_tokens) already counts cache hits.
-        return max(0, input_tokens - cache_read), cache_read, input_tokens
-    return input_tokens, cache_read, input_tokens + (cache_read or 0)
+    cache = (cache_read or 0) + (cache_write or 0)
+    if includes is True:
+        return max(0, input_tokens - cache), cache_read, input_tokens
+    if includes is False:
+        return input_tokens, cache_read, input_tokens + cache
+    return input_tokens, cache_read, input_tokens
 
 
 def _pi_inputs(usage: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
-    """(uncached, cache_read, total) for a pi usage object.
+    """(uncached, cache_read, prompt total) for a pi usage object.
 
-    pi reports `input` without the cache read (the separate `cacheRead` field is
-    why), so the total is their sum.
+    pi reports `input` without the cache counters (the separate `cacheRead` and
+    `cacheWrite` fields are why), so the total adds both.
     """
     input_tokens = _first_int(usage, ("input", "input_tokens", "inputTokens"))
     cache_read = _first_int(
         usage,
         ("cacheRead", "cache_read", "cache_read_input_tokens", "cacheReadInputTokens"),
     )
+    cache_write = _first_int(
+        usage,
+        ("cacheWrite", "cache_write", "cache_creation_input_tokens", "cacheWriteInputTokens"),
+    )
     if input_tokens is None:
         return None, cache_read, None
-    return input_tokens, cache_read, input_tokens + (cache_read or 0)
+    return input_tokens, cache_read, input_tokens + (cache_read or 0) + (cache_write or 0)
 
 
 def _pi_cost(usage: dict[str, Any]) -> float | None:
@@ -444,6 +475,7 @@ def _facts(path: Path) -> dict[str, Any]:
         # `latency` ({bucket: {calls, p50_ms, p90_ms}}).
         "_latencies": {},
         "_latency_anchor": None,
+        "_input_total": None,
         "_fee_micros": None,
         "_anchor": None,
         "_pending": {},
@@ -518,6 +550,7 @@ def _usage(
     uncached, cache_read, total = inputs
     row["input_uncached"] = _add(row["input_uncached"], uncached)
     row["input_cache_read"] = _add(row["input_cache_read"], cache_read)
+    row["_input_total"] = _add(row["_input_total"], total)
     output = _int(usage.get("output"))
     if output is not None:
         row["output"] = _add(row["output"], output)
@@ -664,10 +697,9 @@ def _pi_message(row: dict[str, Any], record: dict[str, Any]) -> None:
 
 
 def _finish_inputs(row: dict[str, Any]) -> None:
-    if row["input_uncached"] is None and row["input_cache_read"] is None:
-        row["input_total"] = None
-    else:
-        row["input_total"] = _add(row["input_uncached"], row["input_cache_read"])
+    """Publish the per-record prompt total and fold in a radian fee."""
+    if "_input_total" in row:
+        row["input_total"] = row["_input_total"]
     if isinstance(row.get("_fee_micros"), int):
         row["fee_usd"] = _add(row["fee_usd"], row["_fee_micros"] / 1_000_000)
 
@@ -712,6 +744,7 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "calls",
             "input_uncached",
             "input_cache_read",
+            "input_total",
             "output",
             "reasoning",
             "fee_usd",
@@ -745,12 +778,23 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
     return totals
 
 
-def collect_files(inputs: list[str | Path], prefix: str | None = None) -> list[Path]:
-    """Every journal file named by the inputs, sorted and de-duplicated."""
+def collect_files(
+    inputs: list[str | Path], prefix: str | None = None, recursive: bool = True
+) -> list[Path]:
+    """Every journal file named by the inputs, sorted and de-duplicated.
+
+    A directory contributes its `*.jsonl` files recursively by default. With
+    `recursive=False` only the directory's own files are read, which is what the
+    Harbor report does: a nested JSONL artifact in a session directory is not a
+    session journal.
+    """
     files: list[Path] = []
     seen: set[str] = set()
     for raw in map(Path, inputs):
-        candidates = sorted(raw.rglob("*.jsonl")) if raw.is_dir() else [raw]
+        if raw.is_dir():
+            candidates = sorted(raw.rglob("*.jsonl") if recursive else raw.glob("*.jsonl"))
+        else:
+            candidates = [raw]
         for path in candidates:
             if prefix is not None and not path.name.startswith(prefix):
                 continue
@@ -764,10 +808,10 @@ def collect_files(inputs: list[str | Path], prefix: str | None = None) -> list[P
 
 
 def build_report(
-    inputs: list[str | Path], prefix: str | None = None
+    inputs: list[str | Path], prefix: str | None = None, recursive: bool = True
 ) -> dict[str, Any]:
     """The computed rows: one per journal plus the totals row. One source for both outputs."""
-    facts_rows = [_facts(path) for path in collect_files(inputs, prefix)]
+    facts_rows = [_facts(path) for path in collect_files(inputs, prefix, recursive)]
     return {
         "journals": [public_row(facts) for facts in facts_rows],
         "totals": _totals(facts_rows),
@@ -775,7 +819,7 @@ def build_report(
 
 
 def usage_metrics(
-    inputs: list[str | Path], prefix: str | None = None
+    inputs: list[str | Path], prefix: str | None = None, recursive: bool = True
 ) -> dict[str, Any]:
     """The Harbor report's journal summary, kept byte-for-byte compatible.
 
@@ -789,7 +833,7 @@ def usage_metrics(
     generation = tool = 0.0
     fee_micros = None
     max_tokens = False
-    for path in collect_files(inputs, prefix):
+    for path in collect_files(inputs, prefix, recursive):
         facts = _facts(path)
         calls += facts["calls"]
         output = _add(output, facts["output"])

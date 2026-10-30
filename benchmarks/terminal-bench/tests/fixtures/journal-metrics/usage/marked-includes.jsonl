@@ -1,0 +1,2 @@
+{"event":"MessageAppended","ts":"2026-01-01T00:00:05Z","data":{"index":0,"message":{"assistant":{"content":[{"text":{"text":"a"}}]}}}}
+{"event":"ModelUsageRecorded","ts":"2026-01-01T00:00:05Z","data":{"usage":{"input":1000,"output":10,"cache_read":200,"cache_write":300,"input_includes_cache":true}}}

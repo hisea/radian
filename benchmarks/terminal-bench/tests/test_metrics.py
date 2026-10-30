@@ -38,6 +38,10 @@ LATENCY = JOURNAL_METRICS / "latency" / "boundary.jsonl"
 READ_RANGES = JOURNAL_METRICS / "read" / "ranges.jsonl"
 TORN = JOURNAL_METRICS / "torn" / "torn.jsonl"
 PREFIX = JOURNAL_METRICS / "prefix"
+# ADR 0007 cache accounting: one journal per `input_includes_cache` state.
+USAGE = JOURNAL_METRICS / "usage"
+# A session directory with a nested JSONL artifact that is not a session journal.
+NESTED = JOURNAL_METRICS / "nested"
 
 
 def find(report, agent, task):
@@ -746,6 +750,44 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertTrue(only_a["journals"][0]["journal"].endswith("run-a.jsonl"))
         self.assertEqual(only_a["journals"][0]["input_uncached"], 10)
 
+    def test_cache_accounting_follows_adr_0007(self):
+        rows = {
+            Path(row["journal"]).name: row
+            for row in journal_metrics.build_report([USAGE])["journals"]
+        }
+        # `input_includes_cache: true`: `input` is the whole prompt, and both
+        # cache counters are inside it (ADR 0007 `uncached_input()`).
+        includes = rows["marked-includes.jsonl"]
+        self.assertEqual(includes["input_uncached"], 500)
+        self.assertEqual(includes["input_cache_read"], 200)
+        self.assertEqual(includes["input_total"], 1_000)
+        # `false`: `input` is the uncached part; both counters are siblings.
+        excludes = rows["marked-excludes.jsonl"]
+        self.assertEqual(excludes["input_uncached"], 1_000)
+        self.assertEqual(excludes["input_cache_read"], 200)
+        self.assertEqual(excludes["input_total"], 1_500)
+        # Unmarked (written before ADR 0007): `input` stands alone, so its
+        # cache read is reported but not added into the total again.
+        unmarked = rows["unmarked.jsonl"]
+        self.assertEqual(unmarked["input_uncached"], 1_000)
+        self.assertEqual(unmarked["input_cache_read"], 200)
+        self.assertEqual(unmarked["input_total"], 1_000)
+        # pi's `input` never includes cache, so both counters add to the total.
+        pi = rows["pi-cache-write.jsonl"]
+        self.assertEqual(pi["input_uncached"], 1_000)
+        self.assertEqual(pi["input_cache_read"], 200)
+        self.assertEqual(pi["input_total"], 1_500)
+
+    def test_journal_metrics_reads_only_the_session_directory(self):
+        # The Harbor report read `sessions_dir.glob("*.jsonl")`: a nested JSONL
+        # artifact must not become a model call or a token.
+        values = metrics._journal_metrics(NESTED)
+        self.assertEqual(values["model_calls"], 1)
+        self.assertEqual(values["output_tokens"], 10)
+        self.assertEqual(values["reasoning_tokens"], None)
+        self.assertAlmostEqual(values["cost_usd"], 0.001)
+        self.assertEqual(values["max_tokens"], False)
+
     def test_journal_metrics_keeps_the_harbor_report_values(self):
         fix_git = JOBS / "radian" / "2026-01-01T00-00-00" / "fix-git__radian001"
         prove = JOBS / "radian" / "2026-01-01T00-00-00" / "prove-plus-comm__radian002"
@@ -780,7 +822,7 @@ class JournalMetricsTest(unittest.TestCase):
         )
         self.assertEqual(
             metrics._journal_metrics(sessions),
-            journal_metrics.usage_metrics([sessions]),
+            journal_metrics.usage_metrics([sessions], recursive=False),
         )
 
     def test_the_help_and_readme_carry_the_generated_column_table(self):

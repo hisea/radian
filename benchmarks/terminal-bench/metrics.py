@@ -229,16 +229,18 @@ def _journal_metrics(sessions_dir: Path) -> dict[str, Any]:
     """Calls, tokens and timing from one trial's radian session journals.
 
     The fixed definitions live in `benchmarks/journal_metrics.py`; this function
-    keeps the Harbor report's keys and values unchanged. Generation time runs
-    from the request boundary (a tool settling, a user message, a turn start,
-    or the previous response) to the assistant message that ends it. Tool time
-    is the sum of each matched `ToolExecutionStarted` -> `ToolExecutionSettled`
-    pair; parallel calls are summed, so tool minutes can exceed the trial's wall
-    time. A torn tail (no final LF) is not a committed record and is dropped,
-    like the Rust reader. The journal is streamed, so one trial's memory use is
-    one line, not the file.
+    keeps the Harbor report's keys and values unchanged. Only the directory's own
+    `*.jsonl` files are read: a nested JSONL artifact is not a session journal,
+    which is what the replaced `sessions_dir.glob("*.jsonl")` did. Generation
+    time runs from the request boundary (a tool settling, a user message, a turn
+    start, or the previous response) to the assistant message that ends it. Tool
+    time is the sum of each matched `ToolExecutionStarted` ->
+    `ToolExecutionSettled` pair; parallel calls are summed, so tool minutes can
+    exceed the trial's wall time. A torn tail (no final LF) is not a committed
+    record and is dropped, like the Rust reader. The journal is streamed, so one
+    trial's memory use is one line, not the file.
     """
-    source = journal_metrics.usage_metrics([sessions_dir])
+    source = journal_metrics.usage_metrics([sessions_dir], recursive=False)
     return {
         "model_calls": source["model_calls"],
         "output_tokens": source["output_tokens"],

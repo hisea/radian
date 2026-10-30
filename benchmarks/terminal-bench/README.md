@@ -221,9 +221,9 @@ and the code differ.
 | `journal` | The journal file that produced the row; `TOTAL` on the totals row. | path |
 | `source` | `radian` for a radian session journal, `pi` for a pi session JSONL. | name |
 | `calls` | Model calls, equal to steps: radian assistant messages plus `CompactionUsageRecorded` summary calls; pi assistant messages. | calls |
-| `input_uncached` | Input tokens billed at the full price. A radian record marked `input_includes_cache: true` subtracts `cache_read` from `input`; an unmarked radian record and a pi record report `input` alone. | tokens |
-| `input_cache_read` | Input tokens served from the provider cache (`cache_read`). | tokens |
-| `input_total` | `input_uncached + input_cache_read`: the same input basis for every row. | tokens |
+| `input_uncached` | Input tokens billed at the full price (ADR 0007 `uncached_input()`). A radian record marked `input_includes_cache: true` subtracts both `cache_read` and `cache_write` from `input`; a record marked false and an unmarked one report `input` alone, as does a pi record. | tokens |
+| `input_cache_read` | Input tokens served from the provider cache (`cache_read`). An unmarked radian record's value is reported but not added to `input_total` (it may already sit inside `input`). | tokens |
+| `input_total` | The whole prompt the provider saw (ADR 0007 `prompt_total()`): `input` when it is marked `input_includes_cache: true` or unmarked, `input + cache_read + cache_write` when marked false. A cache write has no column of its own, so the total can exceed `input_uncached + input_cache_read`. | tokens |
 | `output` | Reported output tokens, raw: radian `usage.output`; pi `usage.output`. | tokens |
 | `reasoning` | The reasoning part of `output`, from the provider usage object (`reasoning_tokens`, `reasoning_output_tokens` or `thinking_tokens`). | tokens |
 | `fee_usd` | Fee in USD: radian `fee.micros / 1,000,000` (including summary calls); pi `usage.cost.total`. | USD |
