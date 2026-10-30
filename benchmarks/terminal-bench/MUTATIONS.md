@@ -35,3 +35,20 @@ non-zero exit, restore the file from a backup under `.radian/`.
 | TK0253-M8 | `check.sh` appends `$JOBS` after `cargo fmt -- --check`, so rustfmt receives `--jobs` | `CheckScriptTest.test_max_jobs_reaches_cargo_and_not_rustfmt` (fmt exits 1, checks fail) | ✅ failed |
 | TK0253-M9 | `run.sh` runs the agent without `timeout_run.py`, so a machine without coreutils has no wall-time cap | `RunScriptTest.test_the_cap_does_not_depend_on_gtimeout` (`timed_out` false after the cap) | ✅ failed |
 
+## TK0256: eval-metrics follow-ups
+
+Base: `work/TK0256-eval-metrics-followups` · method: apply the mutation to the
+named file under `benchmarks/`, run the named test (`cd benchmarks/terminal-bench/tests
+&& python3 -m unittest test_metrics.<Class>.<test>` for the first two rows,
+`python3 benchmarks/repo-tasks/tests/test_repo_tasks.py <Class>.<test>` for the
+rest), expect a non-zero exit, restore the file from a backup under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0256-M1 | a pi `compaction` record does not note its timestamp, so a compaction cannot bound `wall_seconds` | `JournalMetricsTest.test_a_pi_compaction_bounds_the_session_time` (`wall_seconds` 0.0 instead of 35) | ✅ failed |
+| TK0256-M2 | the command line prints a zero row for a path that names no journal instead of exiting 1 | `JournalMetricsTest.test_a_missing_file_is_an_error_that_names_it`, `test_a_missing_directory_is_an_error_that_names_it`, `test_a_directory_with_no_journal_after_the_prefix_is_an_error` (exit 0 instead of 1) | ✅ failed |
+| TK0256-M3 | the text table keeps the old header aliases (`uncached_in`, `read_ranged`, `read_20kb`, `det_compactions`, `wall_s`) | `JournalMetricsTest.test_text_table_headers_use_the_fixed_column_names` (8 headers not a `COLUMNS` name) | ✅ failed |
+| TK0256-M4 | `review.sh` parses the JSONL stdout for a radian reviewer instead of its session journal | `ReviewScriptTest.test_a_radian_reviewer_report_is_read_from_its_session` (exit 1, `parsed` false) | ✅ failed |
+| TK0256-M5 | `run.sh` refuses every directory inside the caller or source, not only a repository or worktree root | `RunScriptTest.test_a_plain_directory_inside_the_caller_is_allowed_as_the_clone` (exit 2, "not a separate clone") | ✅ failed |
+| TK0256-M6 | `timeout_run.py` installs no signal handler, so an interrupt kills only the wrapper | `TimeoutRunTest.test_an_interrupt_is_forwarded_to_the_command` (exit -15 instead of 143; the command outlives the wrapper) | ✅ failed |
+

@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"pi-compaction","timestamp":"2026-01-01T00:00:00Z","cwd":"/app"}
+{"type":"compaction","id":"k1","timestamp":"2026-01-01T00:00:05Z","summary":"earlier work","firstKeptEntryId":"e0","tokensBefore":90000}
+{"type":"message","id":"e1","timestamp":"2026-01-01T00:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"after the first compaction"}],"usage":{"input":1000,"output":10,"cost":{"total":0.001}},"stopReason":"stop"}}
+{"type":"compaction","id":"k2","timestamp":"2026-01-01T00:00:40Z","summary":"later work","firstKeptEntryId":"e1","tokensBefore":80000}

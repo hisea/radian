@@ -10,7 +10,10 @@ its own process group, receives SIGTERM (to the whole group) when SECONDS
 elapse, and SIGKILL after `--kill-after` more seconds (default 30). Any run that
 reached the cap exits 124, like GNU `timeout`, so `run.sh` and `review.sh`
 record it as `timeout`; otherwise the command's own exit code passes through
-(128 + the signal when a signal ended it).
+(128 + the signal when a signal ended it). A SIGINT or SIGTERM the wrapper
+itself receives is forwarded to the command's group (as GNU `timeout` does), so
+an interrupted runner does not leave the command running without a cap; the
+wrapper then exits 128 + that signal.
 
 Stdlib only.
 """
@@ -53,23 +56,48 @@ def main(argv: list[str]) -> int:
     except OSError as error:
         print(f"timeout_run.py: {error}", file=sys.stderr)
         return 127
-    try:
-        returncode = process.wait(timeout=max(0.0, seconds))
-    except subprocess.TimeoutExpired:
-        # The session leader's pid is the group id `start_new_session` made.
+    # A signal sent to the wrapper goes to the command's group, like GNU `timeout`:
+    # otherwise an interrupt would kill only this process and leave the command in
+    # its own session, running with no cap. The cap below still applies while the
+    # forwarded signal is being waited out.
+    interrupted: list[int] = []
+
+    def forward(signum: int, _frame: object) -> None:
+        interrupted.append(signum)
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signum)
         except ProcessLookupError:
             pass
+
+    previous = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
         try:
-            process.wait(timeout=max(0.0, kill_after))
+            previous[signum] = signal.signal(signum, forward)
+        except (ValueError, OSError):  # not the main thread: no handler to install
+            pass
+    try:
+        try:
+            returncode = process.wait(timeout=max(0.0, seconds))
         except subprocess.TimeoutExpired:
+            # The session leader's pid is the group id `start_new_session` made.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            process.wait()
-        return 124
+            try:
+                process.wait(timeout=max(0.0, kill_after))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            return 124
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    if interrupted:
+        return 128 + interrupted[0]
     return 128 - returncode if returncode < 0 else returncode
 
 

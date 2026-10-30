@@ -38,20 +38,21 @@ import journal_metrics  # noqa: E402
 
 DEFAULT_RUNS = HERE / "runs"
 
-# The tool names the tables always show a byte column for, when the runs have
-# them. Other tools add their own column.
+# The fixed numeric columns every table shows, by their `journal_metrics.COLUMNS`
+# names. The per-tool `calls.<tool>` and `bytes.<tool>` columns are added by
+# `_columns` for every tool the runs used, so this tuple names no tool.
 TABLE_COLUMNS = (
-    ("calls", "calls"),
-    ("input_uncached", "uncached_in"),
-    ("input_cache_read", "cache_read_in"),
-    ("input_total", "total_in"),
-    ("output", "output"),
-    ("reasoning", "reasoning"),
-    ("fee_usd", "fee_usd"),
-    ("read_ranged_calls", "read_ranged"),
-    ("read_unranged_calls", "read_unranged"),
-    ("read_large_calls", "read_20kb"),
-    ("compactions", "compactions"),
+    "calls",
+    "input_uncached",
+    "input_cache_read",
+    "input_total",
+    "output",
+    "reasoning",
+    "fee_usd",
+    "read_ranged_calls",
+    "read_unranged_calls",
+    "read_large_calls",
+    "compactions",
 )
 
 
@@ -178,7 +179,7 @@ def aggregate(runs: list[dict]) -> dict:
         "tool_bytes": {},
         "outcomes": {},
     }
-    for key, _ in TABLE_COLUMNS:
+    for key in TABLE_COLUMNS:
         totals[key] = _sum(row.get(key) for row in rows)
     totals["fee_usd"] = _sum(row.get("fee_usd") for row in rows)
     totals["wall_seconds"] = _sum(row.get("wall_seconds") for row in rows)
@@ -243,15 +244,14 @@ def _tool_names(tasks: dict) -> list[str]:
 
 def _columns(tasks: dict) -> list[str]:
     """The table columns, with each tool's call and byte columns side by side."""
-    columns = [label for _, label in TABLE_COLUMNS]
+    columns = list(TABLE_COLUMNS)
     for name in _tool_names(tasks):
         columns.extend([f"calls.{name}", f"bytes.{name}"])
-    columns.extend(["result_bytes", "wall_s"])
+    columns.extend(["result_bytes", "wall_seconds"])
     return columns
 
 
 def _arm_row(totals: dict, columns: list[str]) -> list[str]:
-    keys = {label: key for key, label in TABLE_COLUMNS}
     values = []
     for label in columns:
         if label.startswith("calls."):
@@ -260,12 +260,12 @@ def _arm_row(totals: dict, columns: list[str]) -> list[str]:
             values.append(_count(totals["tool_bytes"].get(label[len("bytes.") :])))
         elif label == "result_bytes":
             values.append(_count(totals["result_bytes"]))
-        elif label == "wall_s":
+        elif label == "wall_seconds":
             values.append(_count(totals["wall_seconds"]))
         elif label == "fee_usd":
             values.append(_money(totals.get("fee_usd")))
         else:
-            values.append(_count(totals.get(keys.get(label, label))))
+            values.append(_count(totals.get(label)))
     return values
 
 
@@ -304,12 +304,12 @@ def build(runs_dir: Path, baseline: str | None = None) -> dict:
                 arm_totals = cells.get(arm)
                 if arm_totals is None or baseline_totals is None:
                     row[arm] = {key: "-" for key in (
-                        "total_in", "calls", "output", "fee_usd", "wall_seconds",
+                        "input_total", "calls", "output", "fee_usd", "wall_seconds",
                         "result_bytes",
                     )}
                     continue
                 row[arm] = {
-                    "total_in": _ratio(arm_totals["input_total"], baseline_totals["input_total"]),
+                    "input_total": _ratio(arm_totals["input_total"], baseline_totals["input_total"]),
                     "calls": _ratio(arm_totals["calls"], baseline_totals["calls"]),
                     "output": _ratio(arm_totals["output"], baseline_totals["output"]),
                     "fee_usd": _ratio(arm_totals["fee_usd"], baseline_totals["fee_usd"]),
@@ -356,12 +356,12 @@ def format_report(report: dict) -> str:
         totals_rows.append([arm, str(totals["runs"]), totals["result"], *_arm_row(totals, columns), totals["spread"]])
     blocks.append("TOTALS\n" + _table(headers, totals_rows))
     if report["baseline"] is not None:
-        ratio_headers = ["task", "arm", "total_in", "calls", "output", "fee_usd", "wall_s", "result_bytes"]
+        ratio_headers = ["task", "arm", "input_total", "calls", "output", "fee_usd", "wall_seconds", "result_bytes"]
         rows = []
         for task in [*report["tasks"], "TOTAL"]:
             for arm, values in report["ratios"].get(task, {}).items():
                 rows.append([
-                    task, arm, values["total_in"], values["calls"], values["output"],
+                    task, arm, values["input_total"], values["calls"], values["output"],
                     values["fee_usd"], values["wall_seconds"], values["result_bytes"],
                 ])
         blocks.append(

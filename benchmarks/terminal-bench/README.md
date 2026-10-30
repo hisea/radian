@@ -207,9 +207,11 @@ python3 benchmarks/journal_metrics.py SESSION_DIR [MORE...] [--prefix PREFIX] [-
 ```
 
 Each input is a journal file or a directory searched recursively for
-`*.jsonl`; `--prefix` keeps only files whose name starts with it. The output is
-one row per journal plus a `TOTAL` row. `--json` prints the same computed rows
-(`{"journals": [...], "totals": {...}}`) instead of the table.
+`*.jsonl`; `--prefix` keeps only files whose name starts with it. A path that
+names no journal (a missing file or directory, or a directory with no file after
+the prefix filter) exits 1 and names the path, so a typo cannot read as an empty
+run. The output is one row per journal plus a `TOTAL` row. `--json` prints the
+same computed rows (`{"journals": [...], "totals": {...}}`) instead of the table.
 `terminal-bench/metrics.py` uses this module for its journal summary
 (`_journal_metrics`), so the two reports cannot define "model calls", "input"
 or "result bytes" differently. The table below is generated from the script's

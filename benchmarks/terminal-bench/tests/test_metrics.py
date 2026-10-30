@@ -38,6 +38,8 @@ LATENCY = JOURNAL_METRICS / "latency" / "boundary.jsonl"
 READ_RANGES = JOURNAL_METRICS / "read" / "ranges.jsonl"
 TORN = JOURNAL_METRICS / "torn" / "torn.jsonl"
 PREFIX = JOURNAL_METRICS / "prefix"
+# A pi session whose first and last committed entries are compactions.
+PI_COMPACTION = JOURNAL_METRICS / "pi-compaction" / "session.jsonl"
 # ADR 0007 cache accounting: one journal per `input_includes_cache` state.
 USAGE = JOURNAL_METRICS / "usage"
 # A session directory with a nested JSONL artifact that is not a session journal.
@@ -667,6 +669,14 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(row["latency"]["0-99999"]["p50_ms"], 9_500)
         self.assertAlmostEqual(row["latency"]["0-99999"]["p90_ms"], 9_900)
 
+    def test_a_pi_compaction_bounds_the_session_time(self):
+        # The first and last committed records are compactions, so they are the
+        # first and last timestamps `wall_seconds` measures between.
+        row = self.row(PI_COMPACTION)
+        self.assertEqual(row["source"], "pi")
+        self.assertEqual(row["compactions"], 2)
+        self.assertEqual(row["wall_seconds"], 35)
+
     def test_latency_uses_a_bucket_per_100k_prompt_tokens(self):
         row = self.row(LATENCY)
         self.assertEqual(sorted(row["latency"]), ["0-99999", "100000-199999"])
@@ -824,6 +834,52 @@ class JournalMetricsTest(unittest.TestCase):
             metrics._journal_metrics(sessions),
             journal_metrics.usage_metrics([sessions], recursive=False),
         )
+
+    def test_a_missing_file_is_an_error_that_names_it(self):
+        missing = JOURNAL_METRICS / "no-such-journal.jsonl"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = journal_metrics._main([str(missing)])
+        self.assertEqual(status, 1)
+        self.assertIn(str(missing), error.getvalue())
+
+    def test_a_missing_directory_is_an_error_that_names_it(self):
+        missing = JOURNAL_METRICS / "no-such-directory"
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = journal_metrics._main([str(missing)])
+        self.assertEqual(status, 1)
+        self.assertIn(str(missing), error.getvalue())
+
+    def test_a_directory_with_no_journal_after_the_prefix_is_an_error(self):
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            status = journal_metrics._main([str(PREFIX), "--prefix", "run-z"])
+        self.assertEqual(status, 1)
+        self.assertIn(str(PREFIX), error.getvalue())
+        self.assertIn("run-z", error.getvalue())
+
+    def test_text_table_headers_use_the_fixed_column_names(self):
+        report = journal_metrics.build_report([FULL, PI_SESSION])
+        tools = {
+            column.split(".", 1)[1]
+            for column in journal_metrics._tool_columns(report)
+        }
+        buckets = journal_metrics._buckets(report)
+        fixed = set()
+        for column in journal_metrics.COLUMNS:
+            name = column["name"]
+            if "<tool>" in name:
+                fixed.update(name.replace("<tool>", tool) for tool in tools)
+            elif "<bucket>" in name:
+                fixed.update(name.replace("<bucket>", bucket) for bucket in buckets)
+            else:
+                fixed.add(name)
+        headers = journal_metrics.format_report(report).splitlines()[0].split()
+        self.assertTrue(headers)
+        for header in headers:
+            with self.subTest(header=header):
+                self.assertIn(header, fixed)
 
     def test_the_help_and_readme_carry_the_generated_column_table(self):
         output = io.StringIO()
