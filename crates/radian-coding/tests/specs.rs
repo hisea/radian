@@ -95,6 +95,77 @@ async fn the_read_spec_offers_offset_and_limit() {
     );
 }
 
+/// The description teaches how a read spends context: a whole file costs its full size, so
+/// the model locates lines with `grep` and reads the range with `offset` and `limit`. The old
+/// "read one part at a time" sentence said how without saying why, and workers read whole
+/// files instead. Dropping the guidance fails here.
+#[tokio::test]
+async fn the_read_description_teaches_ranged_reads() {
+    let dir = TempDir::new("read-guidance");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let read = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "read")
+        .expect("the read spec");
+    for name in ["`grep`", "`offset`", "`limit`"] {
+        assert!(
+            read.description.contains(name),
+            "the description must name {name}: {}",
+            read.description
+        );
+    }
+    assert!(
+        read.description
+            .contains("A whole file enters the context at its full size"),
+        "the description says what a whole file costs: {}",
+        read.description
+    );
+    assert!(
+        read.description
+            .contains("only when it is small or the task needs all of it"),
+        "the description says when a whole read is right: {}",
+        read.description
+    );
+}
+
+/// TK0246: the wording changed, the arguments did not. The property names, the `required`
+/// list and `additionalProperties` are exactly the ones the tool always validated.
+#[tokio::test]
+async fn the_read_schema_keeps_its_argument_set() {
+    let dir = TempDir::new("read-schema-set");
+    let root = dir.file("ws");
+    std::fs::create_dir_all(&root).unwrap();
+    let coding = tools(&root);
+    let session = coding.open_session().await.unwrap();
+    let read = session
+        .tool_specs()
+        .iter()
+        .find(|spec| spec.name == "read")
+        .expect("the read spec");
+    let mut names: Vec<&str> = read.input_schema["properties"]
+        .as_object()
+        .expect("the schema has properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["limit", "max_bytes", "offset", "path"]);
+    assert_eq!(
+        read.input_schema["required"],
+        serde_json::json!(["path"]),
+        "only `path` is required"
+    );
+    assert_eq!(
+        read.input_schema["additionalProperties"],
+        serde_json::json!(false),
+        "no extra argument is accepted"
+    );
+}
+
 /// `write` creates a missing parent directory, and its description says so instead of the old
 /// "parent directory must exist" rule (ADR 0039 decision 2).
 #[tokio::test]
@@ -180,12 +251,12 @@ async fn the_read_spec_names_directory_listing() {
         read.description
     );
     // The size budget: the directory description fit 1078 bytes (measured 2026-10-20); the
-    // image branch adds its format, limits and error code, which cannot fit under the old
-    // 1100. The pin leaves a little room above the measured 1430.
+    // image branch took it to 1430, and the range guidance the model must hear takes it to
+    // 1705. The pin leaves a little room above the measured 1705.
     let bytes = serde_json::to_vec(read).unwrap().len();
     assert!(
-        bytes <= 1500,
-        "the read definition grew to {bytes} bytes, past the 1500 budget"
+        bytes <= 1800,
+        "the read definition grew to {bytes} bytes, past the 1800 budget"
     );
     // No removed name is advertised: a call to one is an unknown tool.
     for name in [

@@ -948,3 +948,17 @@ byte-identical with `shasum -a 256`; the named test ran alone with
 |---|---|---|---|
 | TK0245-M1 | the cap comparison `>` → `>=` (a file of exactly 262144 bytes is skipped too) | ✅ 1 failed (rc=100) | `grep_searches_a_file_at_the_size_cap_and_skips_one_byte_over` (the note named `at.txt` and `over.txt`, so the boundary file was not searched) |
 
+
+## TK0246: read's description teaches ranged reads (2026-10-29, branch `work/TK0246-read-description-ranges`)
+
+The `read` description now says a whole file enters the context at its full size, that `grep`
+locates lines and `offset`/`limit` read the range, and that a whole file is for a small file or
+a task that needs all of it; `grep` is named only when it is mounted (ADR 0043 §4). The
+mutation was applied by hand to `crates/radian-coding/src/read.rs`, backed up under
+`.radian/read.rs.orig` and restored from that copy (never `git checkout`), confirmed
+byte-identical with `shasum -a 256`; the named test ran alone with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test specs -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0246-M1 | the `grep` arm of the locate hint → `"after locating lines"` (the description no longer names `grep` even when it is mounted) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` (``the description must name `grep` ``) |
