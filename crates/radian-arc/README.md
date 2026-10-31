@@ -543,7 +543,7 @@ first); every other stage runs in the list's order. This build runs `commands` a
 profile or task that lists `mutation` or `ci` is refused with `stage <name> is not built yet`
 and the task stays in `review.verifying`. An existing verdict for the current attempt and
 stage is reused, so a gate that died between stages resumes. A passing verification writes the
-profile it ran under (its name, stages, `commands` and `key_commands`) to the attempt's
+profile it ran under (its name, stages, `commands`, `reviewer` and `key_commands`) to the attempt's
 `profile.json`, next to the verdicts; the approval and the integration of that attempt read it
 instead of resolving the flow again.
 
