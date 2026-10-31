@@ -82,8 +82,8 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// ADR 0018 §2: a chat route sends `max_tokens = min(limit.output, ⌊C/4⌋)`, and that sent
-/// value is what `R` and `B` count.
+/// ADR 0018 §2: a chat route sends `max_tokens = min(limit.output, max(⌊0.15·C⌋, min(16384,
+/// ⌊C/4⌋)))` when both are known, and that sent value is what `R` and `B` count.
 #[tokio::test]
 async fn a_chat_route_reserves_its_catalog_max_tokens() {
     let cache = scratch("chat-cap");
@@ -93,14 +93,14 @@ async fn a_chat_route_reserves_its_catalog_max_tokens() {
     let window = resolve(&q).await;
     assert_eq!(
         window.request_output,
-        Some(250_000),
-        "min(384000, 1000000 / 4)"
+        Some(150_000),
+        "min(384000, max(150000, min(16384, 1000000 / 4)))"
     );
-    assert_eq!(window.reservation, 250_000);
+    assert_eq!(window.reservation, 150_000);
     assert_eq!(
         window.budget,
-        Some(750_000),
-        "min(922000, 1000000 - 250000)"
+        Some(850_000),
+        "min(922000, 1000000 - 150000)"
     );
     // The output ceiling did not raise R on its own: an unknown output or a request that
     // sends nothing keeps the safety quarter.

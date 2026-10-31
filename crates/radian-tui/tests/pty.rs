@@ -5069,9 +5069,9 @@ async fn pty_the_startup_notice_names_the_window_source() {
 }
 
 /// ADR 0018 §2: the chat route's output reservation `R` is the catalog cap the request sends
-/// (`min(output, C/4)`), so `B` counts what is really sent. The TUI resolves that cap once, at
-/// startup; a stale `RouteOutput::None` reports `R 16384` / `B 922000` and sends no
-/// `max_tokens`.
+/// (`min(output, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`), so `B` counts what is really sent. The TUI
+/// resolves that cap once, at startup; a stale `RouteOutput::None` reports `R 16384` / `B 922000`
+/// and sends no `max_tokens`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     let dir = TempDir::new("catalog-cap");
@@ -5119,12 +5119,12 @@ async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("R 250000", wait_positive()),
+        pty.wait_for_screen("R 150000", wait_positive()),
         "the startup notice does not count the sent cap as R:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("B 750000", wait_positive()),
+        pty.wait_for_screen("B 850000", wait_positive()),
         "the startup notice does not name B:\n{}",
         pty.screen()
     );
@@ -5136,8 +5136,87 @@ async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     );
     assert_eq!(
         server.requests()[0].json()["max_tokens"],
-        serde_json::json!(250000),
+        serde_json::json!(150000),
         "the catalog cap is sent as max_tokens"
+    );
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
+}
+
+/// ADR 0018 §2: an explicit `max_tokens` in `RADIAN_EXTRA_BODY` wins on the wire, so the TUI's
+/// reservation counts it. `--context-window 128000` with O = 384000 would send 19200, but the
+/// body's 32000 is what the request sends, so `R` is 32000 and `B` is 96000.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_an_explicit_max_tokens_raises_the_reservation_it_counts() {
+    let dir = TempDir::new("override-cap");
+    let home = TempDir::new("override-cap-home");
+    let cache = home.path().join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("models.json"),
+        serde_json::json!({
+            "opencode": {
+                "id": "opencode",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "id": "deepseek-v4.1-flash",
+                        "limit": {"context": 1000000, "input": 922000, "output": 384000}
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let server = MockServer::start(vec![text_reply("OVERRIDE-OK")]).await;
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--model",
+            "deepseek-v4.1-flash",
+            "--base-url",
+            &server.base_url,
+            "--catalog-provider",
+            "opencode",
+            "--offline-catalog",
+            "--context-window",
+            "128000",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "override-cap",
+            "--profile",
+            "full",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("RADIAN_EXTRA_BODY", r#"{"max_tokens":32000}"#),
+        ],
+        "schema_version = 1\n",
+        30,
+        110,
+    );
+    pty.expand_startup();
+    assert!(
+        pty.wait_for_screen("R 32000", wait_positive()),
+        "the startup notice does not count the explicit max_tokens as R:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("B 96000", wait_positive()),
+        "the startup notice does not reserve the explicit max_tokens:\n{}",
+        pty.screen()
+    );
+    pty.send(b"hi\r");
+    assert!(
+        pty.wait_for_screen("OVERRIDE-OK", wait_positive()),
+        "the turn did not complete:\n{}",
+        pty.screen()
+    );
+    assert_eq!(
+        server.requests()[0].json()["max_tokens"],
+        serde_json::json!(32000),
+        "the explicit value is what the request sends"
     );
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());

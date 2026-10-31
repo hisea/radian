@@ -3416,3 +3416,15 @@ and restored from that copy (never `git checkout`), confirmed byte-identical wit
 | zh-split-M2 | `set_url_metas` does not insert the `hreflang` alternates | ✅ 1 failed (rc=100) | `the_split_pages_point_at_each_other` |
 | zh-split-M3 | the Chinese page keeps `favicon.svg` and `media/` relative | ✅ 1 failed (rc=100) | `the_split_pages_name_files_the_site_serves` |
 | zh-split-M4 | a missing `title:zh` meta defaults to an empty title instead of failing | ✅ 1 failed (rc=100) | `a_source_without_its_chinese_title_fails_the_build` |
+
+## TK0257: the TUI reservation counts an explicit max_tokens (2026-10-31)
+
+Branch `work/TK0257-chat-reserve-15-percent` (rework 2). The mutation was applied to
+`src/cli/run_resolve.rs`, the `radian` binary rebuilt, and the test run with `cargo nextest run
+-p radian-tui --test pty --locked --profile sandbox --no-fail-fast -E
+'test(pty_an_explicit_max_tokens_raises_the_reservation_it_counts)'`; the source was restored
+from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0257-M5 | the TUI's `request_output` drops `.with_explicit(...)` (the pre-fix separation between the window and the model build) | ✅ 1 failed (rc=100) | `pty_an_explicit_max_tokens_raises_the_reservation_it_counts` (the startup notice showed `R 19200, B 108800` while the body sends 32000) |

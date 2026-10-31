@@ -837,14 +837,18 @@ impl RouteContext {
             Some(self.max_tokens),
         );
         let reasoning_replay = resolve_reasoning_replay(&provider_ref, model);
-        // ADR 0018 §2: the chat route sends `min(limit.output, ⌊C/4⌋)` when the catalog knows
-        // both. The same number goes into the model and into the switched route's budget
-        // (`RouteContext::output_for`), so the sent value and `R` cannot drift.
+        // ADR 0018 §2: the chat route sends `min(limit.output, max(⌊0.15·C⌋,
+        // min(16384, ⌊C/4⌋)))` when the catalog knows both. An explicit `max_tokens` in the
+        // extra body wins on the wire and replaces it. The same number goes into the model and
+        // into the switched route's budget (`RouteContext::output_for`), so the sent value and
+        // `R` cannot drift.
         let limit = catalog.limit(provider_name, model);
-        let max_output_tokens = crate::route_output(adapter, &base_url, self.max_tokens).resolve(
-            limit.and_then(|limit| limit.context),
-            limit.and_then(|limit| limit.output),
-        );
+        let max_output_tokens = crate::route_output(adapter, &base_url, self.max_tokens)
+            .with_explicit(crate::explicit_max_tokens(&self.extra_body))
+            .resolve(
+                limit.and_then(|limit| limit.context),
+                limit.and_then(|limit| limit.output),
+            );
         Ok(ModelArgs {
             provider: adapter,
             base_url,
@@ -871,9 +875,10 @@ impl RouteContext {
     }
 
     /// The output a switched route's request sends (ADR 0018 §2), for the driver's budget
-    /// resolver: Anthropic's `max_tokens`, the catalog-derived chat cap, or none. The budget
-    /// query uses the route's own protocol and endpoint, so a cross-provider switch does not
-    /// inherit the startup route's reservation.
+    /// resolver: Anthropic's `max_tokens`, the catalog-derived chat cap, the extra body's
+    /// explicit `max_tokens` when one wins, or none. The budget query uses the route's own
+    /// protocol and endpoint, so a cross-provider switch does not inherit the startup route's
+    /// reservation.
     pub fn output_for(&self, provider_name: &str, model: &str) -> crate::RouteOutput {
         let Ok(route) = resolve_route_name(
             provider_name,
@@ -893,6 +898,7 @@ impl RouteContext {
             .endpoint_for(model, route.protocol, auth_base_url)
             .unwrap_or_default();
         crate::route_output(route.protocol.adapter(), &base_url, self.max_tokens)
+            .with_explicit(crate::explicit_max_tokens(&self.extra_body))
     }
 }
 

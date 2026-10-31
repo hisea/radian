@@ -90,6 +90,15 @@ impl ExtraBody {
     }
 }
 
+/// The numeric `max_tokens` an explicit body sets (ADR 0026 D13). The OpenAI-compatible and
+/// Responses adapters do not reserve the key, so it wins over the computed chat cap on the
+/// wire; the host therefore counts it as the output the request really sends (ADR 0018 §2).
+/// A missing, non-numeric, negative or fractional value cannot be reserved for and is ignored.
+pub fn explicit_max_tokens(fields: &Map<String, Value>) -> Option<u32> {
+    let value = fields.get("max_tokens")?.as_u64()?;
+    Some(value.min(u64::from(u32::MAX)) as u32)
+}
+
 /// Reads and validates the variable. Empty counts as unset.
 pub fn read_extra_body() -> Result<Option<ExtraBody>, String> {
     parse_extra_body(std::env::var(EXTRA_BODY_ENV).ok())
@@ -231,5 +240,32 @@ mod tests {
         );
         assert_eq!(extra.settings_warning(&json!({"unrelated": 1})), None);
         assert_eq!(extra.settings_warning(&Value::Null), None);
+    }
+
+    #[test]
+    fn the_explicit_max_tokens_is_read_as_the_output_it_sends() {
+        // The chat route's builder merges `max_tokens` from the body and skips its computed
+        // cap, so this is the output the request really carries.
+        let extra = parsed(r#"{"max_tokens":32000}"#);
+        assert_eq!(explicit_max_tokens(extra.fields()), Some(32_000));
+        // A value beyond `u32` is clamped: the reservation is a `u32` and must still see it.
+        let huge = parsed(&json!({"max_tokens": u64::from(u32::MAX) + 1}).to_string());
+        assert_eq!(explicit_max_tokens(huge.fields()), Some(u32::MAX));
+        // Zero is a number the request sends; the window cap still reserves `R`.
+        let zero = parsed(r#"{"max_tokens":0}"#);
+        assert_eq!(explicit_max_tokens(zero.fields()), Some(0));
+        // Anything that is not a non-negative integer cannot be reserved for.
+        for raw in [
+            r#"{"max_tokens":-1}"#,
+            r#"{"max_tokens":1.5}"#,
+            r#"{"max_tokens":"32000"}"#,
+            r#"{"temperature":0.2}"#,
+        ] {
+            assert_eq!(
+                explicit_max_tokens(parsed(raw).fields()),
+                None,
+                "not a usable output: {raw}"
+            );
+        }
     }
 }

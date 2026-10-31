@@ -142,7 +142,8 @@ pub use diagnostics::{
 };
 pub use errors::{CONTEXT_OVERFLOW_HELP, CONTEXT_OVERFLOW_PREFIX, is_context_overflow};
 pub use extra_body::{
-    EXTRA_BODY_ENV, ExtraBody, parse_extra_body, read_extra_body, reserved_keys_for,
+    EXTRA_BODY_ENV, ExtraBody, explicit_max_tokens, parse_extra_body, read_extra_body,
+    reserved_keys_for,
 };
 pub use headers::{
     CHILD_HEADERS_ENV, SESSION_PLACEHOLDER, encode_child_headers, parse_headers,
