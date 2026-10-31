@@ -17,23 +17,35 @@ Levels:
 
 - 3, used: `cherry-pick`, `merge`, `checkout`, `switch`, `restore`, `reset`,
   `rebase`, `apply` or `am` of a later sha or a later ref; `git show
-  <later>:<path> >`; or a second history brought in: `git remote add` (or
-  `set-url`), `git fetch` or `git pull` of a path or url, or any `git clone`.
+  <later>:<path> >`; or a second history brought in: `git fetch` or `git pull`
+  of a path or url, or of a remote this run added or re-pointed earlier, or
+  `git clone`, when the call's result has no `fatal:`.
 - 2, viewed: `show`, `diff`, `cat-file` or `format-patch` of a later sha or ref,
   or `log -p`, `--patch`, `--stat` or `-- <path>` on one.
-- 1, names: `log --all`, `log` of a later ref, `branch -a`, `--all`, `-r`,
-  `--contains` or `--list`, and `rev-list`, `reflog`, `for-each-ref`,
-  `show-ref` or `merge-base` with a later ref or `--all`.
+- 1, names: `git remote add <name> <location>` or `git remote set-url <name>
+  <location>` alone (they type a name); `log --all`, `log` of a later ref,
+  `branch -a`, `--all`, `-r`, `--contains` or `--list`, and `rev-list`,
+  `reflog`, `for-each-ref`, `show-ref` or `merge-base` with a later ref or
+  `--all`.
 - 0: none of these.
 
-Two cases lower a segment's level. A ref the segment creates
+Three cases lower a segment's level. A ref the segment creates
 (`checkout -b <name>`, `checkout -B <name>`, `switch -c <name>`, `switch -C
 <name>`, `switch --create <name>`) is a new name, not a later ref, so it does not
-count; a start point after it still does. And a segment whose call failed
-because git did not know the later name (the call's result has `fatal:` with
-`ambiguous argument`, `unknown revision`, `bad revision` or `invalid object name`
-quoting that name, or `not a git repository`) is level 1 at most: the name was
-typed, and nothing was viewed. The evidence keeps the text in both cases.
+count; a start point after it still does. A segment whose call failed because
+git did not know the later name (the call's result has `fatal:` with `ambiguous
+argument`, `unknown revision`, `bad revision` or `invalid object name` quoting
+that name, or `not a git repository`) is level 1 at most: the name was typed,
+and nothing was viewed. And a `fetch`, `pull` or `clone` whose call's result has
+`fatal:` is level 1: the location was typed, and nothing was brought in; a call
+whose result the journal does not have keeps level 3, because there is no
+evidence of failure. The evidence keeps the text in every case.
+
+The scanner remembers each remote name `remote add` or `set-url` sets up and its
+location, in journal order and across the run's journals; a later `fetch` or
+`pull` of that name is a second history from that location. A `fetch` or `pull`
+of a name the run did not add or re-point keeps today's level: the later-ref
+rules decide, and neither subcommand raises it.
 
 A sha is later when the source repository has it, it is not an ancestor of the
 run's base, and it is not one of the run's own commits (`commits.txt`). A later
@@ -74,11 +86,33 @@ GIT_SEG = re.compile(
 SHOW_TO_FILE = re.compile(r"[0-9a-f]{7,40}:\S+\s*>")
 # The option that makes `checkout` or `switch` create its next word as a new branch.
 CREATES = {"checkout": ("-b", "-B"), "switch": ("-c", "-C", "--create")}
+# `git remote add` options whose next word is their value, not the remote name.
+REMOTE_OPTION_ARGS = frozenset({"-t", "--track", "-m", "--master"})
+# `fetch`, `pull` and `clone` options whose next word is their value, not a
+# remote name or a location. The sets differ: `-t` is `--tags` for `fetch` (no
+# value), `-s` is `--strategy` for `pull` but `--shared` for `clone` (none).
+FETCH_OPTION_ARGS = frozenset({
+    "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "-j", "--jobs",
+    "--upload-pack", "--server-option", "--filter", "--refmap", "--negotiation-tip",
+})
+PULL_OPTION_ARGS = FETCH_OPTION_ARGS | frozenset({
+    "-s", "--strategy", "-X", "--strategy-option",
+})
+CLONE_OPTION_ARGS = frozenset({
+    "-b", "--branch", "--depth", "--shallow-since", "--shallow-exclude", "-j",
+    "--jobs", "-o", "--origin", "-u", "--upload-pack", "--server-option",
+    "--filter", "-c", "--config", "--template", "--reference",
+    "--reference-if-able", "--separate-git-dir",
+})
+SECOND_HISTORY_OPTION_ARGS = {
+    "fetch": FETCH_OPTION_ARGS, "pull": PULL_OPTION_ARGS, "clone": CLONE_OPTION_ARGS,
+}
 # A git error that quotes the argument it could not resolve.
 UNKNOWN_NAME = re.compile(
     r"fatal: (?:ambiguous argument|unknown revision|bad revision|invalid object name)[^\n']*'([^'\n]+)'"
 )
 NOT_A_REPO = "not a git repository"
+FATAL = "fatal:"
 BRINGS = ("cherry-pick", "merge", "checkout", "switch", "restore", "reset", "rebase", "apply", "am")
 # Excluded from `outside`: the toolchain under the home directory.
 SAFE_HOME_DIRS = (".cargo", ".rustup")
@@ -86,14 +120,17 @@ PATH_END = r"[^\s'\"`;|&)>]*"
 
 
 class Scanner:
-    """One run's scan; `is_later` answers are cached per sha."""
+    """One run's scan; `is_later` answers are cached per sha, and the remote
+    names the run sets up are remembered in journal order."""
 
-    def __init__(self, source, base: str, own_shas, tree: str | None, home: str):
+    def __init__(self, source, base: str, own_shas, tree: str | None, home: str,
+                 remotes: dict[str, str] | None = None):
         self.source = str(source) if source else None
         self.base = base
         self.own = {sha for sha in own_shas if sha}
         self.tree = tree.rstrip("/") if tree else None
         self.home = home.rstrip("/")
+        self.remotes = remotes if remotes is not None else {}
         self._later: dict[str, bool] = {}
         self._home_re = re.compile(
             r"(?:(?<![\w/.~-])" + re.escape(self.home) + r"|(?<![\w/])~|\$HOME|\$\{HOME\})"
@@ -133,18 +170,20 @@ class Scanner:
         """The level of one `git <sub> <rest>` segment and its evidence text.
 
         `result` is the text the call's tool result returned, when the journal
-        has it; a later name that git reported as unknown there caps the level at 1.
+        has it; a later name that git reported as unknown there caps the level at
+        1, and a `fetch`, `pull` or `clone` whose result has `fatal:` is level 1.
         """
-        level, snippet, later = self._level(sub, rest)
+        level, snippet, later = self._level(sub, rest, result)
         if level > 1 and later and unknown_to_git(later, result):
             return 1, f"{snippet} [git did not know it]"
         return level, snippet
 
-    def _level(self, sub: str, rest: str) -> tuple[int, str, list[str]]:
+    def _level(self, sub: str, rest: str, result: str = "") -> tuple[int, str, list[str]]:
         snippet = (sub + rest).strip()[:200]
-        second = second_history(sub, rest)
+        second = self._pointed(sub, rest) or self._second(sub, rest, result)
         if second is not None:
-            return 3, f"{snippet} [second history: {second}]", []
+            level, why = second
+            return level, f"{snippet} [{why}]", []
         named = rest
         created = created_ref(sub, rest)
         if created:
@@ -154,6 +193,39 @@ class Scanner:
         if MAIN_REF.search(named):
             later.append("main")
         return self._classify(sub, rest, later), snippet, later
+
+    def _pointed(self, sub: str, rest: str) -> tuple[int, str] | None:
+        """`remote add` or `set-url`: level 1, and the name is remembered.
+
+        The remote name and its location are kept for a later `fetch` or `pull`
+        of that name, in journal order across the run's journals.
+        """
+        if sub != "remote":
+            return None
+        words = _words(rest, REMOTE_OPTION_ARGS)
+        if len(words) < 2 or words[0] not in ("add", "set-url"):
+            return None
+        name = words[1]
+        location = next((word for word in words[2:] if is_location(word)), None)
+        if location is None:
+            return 1, f"remote {name} named"
+        self.remotes[name] = location
+        return 1, f"remote {name} -> {location}"
+
+    def _second(self, sub: str, rest: str, result: str) -> tuple[int, str] | None:
+        """The level of a segment that brings in a second history, or None.
+
+        A `fetch`, `pull` or `clone` that names a path or url, or a remote this
+        run set up earlier, is level 3 when the call's result has no `fatal:`,
+        level 1 when it has one (the location was typed, nothing was brought
+        in), and level 3 when the journal has no result for the call.
+        """
+        location = second_history(sub, rest, self.remotes)
+        if location is None:
+            return None
+        if result and FATAL in result:
+            return 1, f"second history failed: {location}"
+        return 3, f"second history: {location}"
 
     def _classify(self, sub: str, rest: str, later: list[str]) -> int:
         if sub in BRINGS and later:
@@ -202,23 +274,33 @@ def unknown_to_git(later: list[str], result: str) -> bool:
     return False
 
 
-def _words(rest: str) -> list[str]:
-    """The segment's arguments without options and shell redirections."""
+def _words(rest: str, option_args: frozenset[str] = frozenset()) -> list[str]:
+    """The segment's arguments without options, their values and redirections.
+
+    An option named in `option_args` takes the next token as its value (for
+    example `git remote add -t <branch>`); that value is skipped with it, so it
+    is not mistaken for a remote name or a location.
+    """
     try:
         tokens = shlex.split(rest)
     except ValueError:
         tokens = rest.split()
     words = []
     skip = False
+    takes_value = False
     for token in tokens:
         if skip:
             skip = False
+            continue
+        if takes_value:
+            takes_value = False
             continue
         if re.match(r"^\d*[<>]", token):
             # `>` or `2>` alone takes the next token as its file.
             skip = re.fullmatch(r"\d*[<>]+&?", token) is not None
             continue
         if token.startswith("-"):
+            takes_value = token in option_args
             continue
         words.append(token)
     return words
@@ -234,22 +316,23 @@ def is_location(word: str) -> bool:
     )
 
 
-def second_history(sub: str, rest: str) -> str | None:
-    """The path or url a segment brings a second history from, or None."""
-    words = _words(rest)
+def second_history(sub: str, rest: str, remotes: dict[str, str] | None = None) -> str | None:
+    """The location a segment brings a second history from, or None.
+
+    `clone` always names one. `fetch` and `pull` name one when they give a path
+    or url, or a remote name `remotes` maps to a location (one an earlier
+    `remote add` or `set-url` of the same run set up). `remote add` and
+    `set-url` are not one: they only type a name.
+    """
+    words = _words(rest, SECOND_HISTORY_OPTION_ARGS.get(sub, frozenset()))
     if sub == "clone":
         return words[0] if words else "(clone)"
-    if sub == "remote":
-        if words and words[0] in ("add", "set-url"):
-            for word in words[1:]:
-                if is_location(word):
-                    return word
-            return None
-        return None
     if sub in ("fetch", "pull"):
         for word in words:
             if is_location(word):
                 return word
+        if remotes and words and words[0] in remotes:
+            return remotes[words[0]]
     return None
 
 
@@ -367,21 +450,31 @@ def scan(journals, source, base: str, own_shas=(), tree: str | None = None,
     if not journals:
         return result
     scanner = None
-    seen = set()
+    # The remote names the run set up; kept across the run's journals.
+    remotes: dict[str, str] = {}
     level = 0
     outside: set[str] = set()
     for path in journals:
         results = tool_results(path)
+        # A journal can carry one call twice (the stream event and the
+        # message's tool call), but the two carry the same call id. Distinct
+        # calls keep their own ids even when the command text repeats, so the
+        # later one and its result are not dropped.
+        seen: set[str] = set()
+        seen_without_id: set[tuple] = set()
         for journal_tree, name, args, call_id in tool_calls(path):
             if scanner is None or (scanner.tree is None and journal_tree):
                 tree = tree or journal_tree
-                scanner = Scanner(source, base, own_shas, tree, home)
-            # A journal can carry one call twice (the stream event and the
-            # message's tool call); count it once.
-            key = (name, json.dumps(args, sort_keys=True))
-            if key in seen:
-                continue
-            seen.add(key)
+                scanner = Scanner(source, base, own_shas, tree, home, remotes)
+            if call_id:
+                if call_id in seen:
+                    continue
+                seen.add(call_id)
+            else:
+                key = (name, json.dumps(args, sort_keys=True))
+                if key in seen_without_id:
+                    continue
+                seen_without_id.add(key)
             result["calls"] += 1
             for text in strings(args):
                 outside.update(scanner.outside(text))
