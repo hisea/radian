@@ -1375,7 +1375,9 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `radian-exec` 
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
   linked" with the `radian memory project new`/`relink` hint) and the per-index caps
   (ADR 0021 D2/D6). The two index files are injected into the system prompt once per process;
-  a line past a cap sends one rewrite notice before the next call, and a
+  a line past a cap sends one rewrite notice before the next call. The permission profile
+  allows `write` and `patch` in the memory scope directories in both tiers (ADR 0012; ADR
+  0021 invariant 5); no model memory tool exists (ADR 0021 D7). A
   default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
   ) is shown as a `Notice` transcript entry — one line naming the new project and
   its identity key — because stderr would be drawn over by the fullscreen UI. Tested by

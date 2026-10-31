@@ -23,18 +23,35 @@ The `full` tier runs without built in prompts.
 Deny rules still deny in both tiers.
 The sandbox still applies in `workspace` when approval is automatic.
 
-The file tools read the workspace, read-only roots, and more under `full`.
+The file tools read the workspace, read-only roots, the memory scopes, and more under `full`.
 A workspace path is a relative path, or an absolute path inside the workspace: an absolute path under the workspace root, in either spelling of the root, is taken as its relative remainder, in every tier.
 Name a read-only root as an absolute path or with `~`, in either tier.
 Read-only roots are the cargo registry sources, every toolchain's sources, and each discovered skill's directory.
+The memory scopes are the global memory directory and, when the workspace maps to a project, that project's memory directory.
+`read`, `grep`, `glob`, `write` and `patch` take an absolute or `~` path under a memory scope in either tier.
+Everything else under the memory directory is refused like any other outside path, and under `full` it is in the deny set.
 Name any other absolute or `~` path only under `full`.
 The file tools never read the sandbox's deny set, in either tier.
 The deny set is, under `$HOME`: `.ssh`, `.aws`, `.gnupg`, `.netrc`, `.npmrc`, `.config/gcloud`, `.docker/config.json`, `Library/Application Support/Google/Chrome`, `Library/Application Support/Firefox`, `Library/Safari`, and `Library/Cookies`.
 Under `~/.radian` (or `$RADIAN_HOME`) it is the sessions directory (or the one `--session-dir` names), `memory/`, `credentials/`, `trust/`, and `access/`.
+The two memory scopes are the one exception to the `memory/` entry; the shell has no exception and cannot read any of it.
 The check follows symbolic links, so a link that points into the deny set is refused too.
 A refused read says the path is in the sandbox's deny set.
 Under `full` the shell is not limited by the deny set; use `workspace` to keep it from the shell too.
-Writes stay in the workspace in every tier.
+Writes stay in the workspace in every tier, except a memory file written under a memory scope directory.
+
+`write` and `patch` do not ask for a path under the two memory scope directories in either
+tier: `<memory root>/global/` and `<memory root>/projects/<project id>/` are allowed.
+`<memory root>` is `~/.radian/memory` (or `$RADIAN_HOME/memory`). The rule matches the
+resolved path, so a path that leaves those directories through `..` or a symbolic link is
+not covered. The registry file `<memory root>/projects.jsonl`, a file directly in
+`<memory root>/projects/`, and any other directory under `<memory root>` are not covered.
+When there is no memory directory, the rule is absent. Under the `workspace` tier the sandbox
+keeps the `shell` tool out of the memory directories: a read is refused, macOS refuses a
+write, and Linux sends a write into a throw-away temporary directory instead of the real
+one. Under `full` no sandbox runs, so the shell can read and write them as you can.
+This rule only decides whether the call asks; the file tools' own root still decides
+whether it reaches the file.
 
 Trust controls project resources.
 A new repository starts untrusted.

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use radian_coding::{CodingTools, DenySet, ReadRoots};
+use radian_coding::{CodingTools, DenySet, MemoryRoots, ReadRoots};
 use radian_core::Hooks;
 use radian_permissions::{PermissionHooks, Preset};
 #[cfg(test)]
@@ -102,23 +102,44 @@ pub(super) fn open_journal(
     }
 }
 
+/// The host inputs that decide which paths outside the workspace the file tools reach
+/// (ADR 0039 decision 4): the skill roots, the memory scope directories, and the deny-read
+/// list the sandbox policy shares. One struct keeps [`build_coding_tools`]'s parameter list
+/// inside the lint's bound.
+pub(super) struct FileRoots<'a> {
+    /// The discovered skill directories (project skills only when trusted).
+    pub(super) skill_dirs: &'a [PathBuf],
+    /// The memory scopes this session may read and write.
+    pub(super) memory_scope_dirs: &'a [PathBuf],
+    /// The sandbox's deny-read list, shared with the file tools' `full`-tier deny set.
+    pub(super) deny_read: &'a [PathBuf],
+}
+
 pub(super) fn build_coding_tools(
     workspace: Option<&Path>,
     sandbox: SandboxSlot,
     jobs_dir: &Path,
     harden_git: bool,
-    skill_dirs: &[PathBuf],
-    deny_read: &[PathBuf],
+    roots: FileRoots<'_>,
     image_support: radian_coding::ImageSupport,
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
+    let FileRoots {
+        skill_dirs,
+        memory_scope_dirs,
+        deny_read,
+    } = roots;
     match workspace {
         Some(dir) => {
             // ADR 0039 decision 4: the file tools' read-only roots are the cargo and toolchain
             // sources plus each discovered skill's directory (project skills only when
-            // trusted — the same set discovery loads); their `full`-tier deny set is the
-            // host's deny-read list, the same source the sandbox policy uses.
+            // trusted — the same set discovery loads); their writable roots are the memory
+            // scopes the service passed. Their `full`-tier deny set is the host's deny-read
+            // list, the same source the sandbox policy uses, with the memory scopes as its one
+            // documented exception — the sandbox itself keeps denying all of `memory/`.
             let read_roots = ReadRoots::from_env_and_skills(skill_dirs);
-            let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read);
+            let memory_roots = MemoryRoots::from_dirs(memory_scope_dirs);
+            let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read)
+                .allowing(&memory_roots);
             // The slot decides whether `shell` exists: an empty slot means no shell
             // advertised, a non-empty one is a sandbox the shell can run under. The
             // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
@@ -127,15 +148,22 @@ pub(super) fn build_coding_tools(
             // except the deny set at every call, `workspace` keeps outside paths to the
             // roots (ADR 0039 decision 4).
             let tools = if sandbox.is_some() {
-                CodingTools::with_sandbox_slot_and_access(dir, sandbox, read_roots, deny).map_err(
+                CodingTools::with_sandbox_slot_and_roots(
+                    dir,
+                    sandbox,
+                    read_roots,
+                    memory_roots,
+                    deny,
+                )
+                .map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
+            } else {
+                CodingTools::with_roots_and_deny(dir, read_roots, memory_roots, deny).map_err(
                     |error| {
                         SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                     },
                 )?
-            } else {
-                CodingTools::with_read_roots_and_deny(dir, read_roots, deny).map_err(|error| {
-                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-                })?
             };
             // ADR 0039 decision 1: the jobs directory is the **session's own** directory, in
             // the sessions dir the sandbox already denies reading. It is created 0700 with the
@@ -261,8 +289,11 @@ mod tests {
             slot,
             &jobs_dir,
             false,
-            &[],
-            &[],
+            FileRoots {
+                skill_dirs: &[],
+                memory_scope_dirs: &[],
+                deny_read: &[],
+            },
             radian_coding::images_allowed(),
         )
         .expect("tools");

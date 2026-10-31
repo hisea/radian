@@ -289,3 +289,23 @@ fn a_deterministic_compaction_is_noted_in_the_exports() {
         "the JSON carries the flag: {json}"
     );
 }
+
+/// ADR 0006 §6(d): an unknown future `stop_reason` lives only in memory; an export writes the
+/// original wire text back, never the normalized `unknown` spelling.
+#[test]
+fn an_unknown_stop_reason_exports_its_original_text() {
+    let session = Session::open(common::fixture("model-stop-reasons.jsonl")).unwrap();
+    let json = export_json(&session, &ExportOptions::new()).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let events = doc["events"].as_array().unwrap();
+    let data_at = |seq: u64| {
+        events
+            .iter()
+            .find(|event| event["seq"] == seq)
+            .unwrap_or_else(|| panic!("event {seq} is exported"))["data"]
+            .clone()
+    };
+    // The future value at seq 9 keeps its text; a known value is untouched.
+    assert_eq!(data_at(9)["stop_reason"], "some_future_reason");
+    assert_eq!(data_at(1)["stop_reason"], "end_turn");
+}

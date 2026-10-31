@@ -8,7 +8,7 @@ Status: accepted
 2. **Memory never changes session facts.** Memory never modifies session journals, compaction records, or their recovery semantics. A memory failure must never corrupt a session or block a dialogue turn.
 3. **The host judges sources, and sources never rewrite.** A memory record source (user, import; old logs also carry agent-tool-written records) is fixed by the host at write time. The code never trusts a model-claimed source. An original source never changes after write (confirmation records separately).
 4. **Memory is low-trust data.** Memory injected into the model is labeled data, never instructions. It never bypasses tool permissions, sandboxes, tiers, or user instructions.
-5. **The sandbox cannot read memory**: under the `workspace` tier the memory store is unreadable. Only Radian injection and user commands reach it. The sandbox denylist enforces it (ADR 0020). The escape matrix verifies it.
+5. **The sandbox cannot read or write memory.** Under the `workspace` tier the memory store is unreadable and unwritable to `shell`. The model writes it only through the host's `write` and `patch` tools, which the permission profile allows in both tiers (D7) and which reach the two scope directories in both tiers, `global/` and this workspace's project directory, and nothing else under `memory/` (ADR 0039 decision 4). Radian injection and user commands reach the store directly. The sandbox denylist keeps the whole directory from the shell (ADR 0020), and the escape matrix verifies it.
 6. **User records win.** The agent never modifies, archives, deletes, or overwrites user-created records.
 
 ## Decisions
@@ -83,7 +83,7 @@ Each record is one Markdown file. Its frontmatter has these fields:
 
 - The model has no memory tool. `memory_search` no longer registers or advertises: a call to it is an unknown tool, like `memory_save`.
 - No `memory_save`, `memory_revise`, or `memory_get` exist: these names never register and never advertise. Calls to them are unknown tools.
-- Permissions: no memory tool exists, so no memory tool needs `allow` or `ask`.
+- Permissions: `write` and `patch` to `<memory root>/global/` and `<memory root>/projects/<ProjectId>/` are `allow` in both tiers. Under `workspace` the sandbox deny set keeps `shell` out of the memory store (invariant 5); `full` runs no sandbox. No memory tool exists, so no memory tool needs `allow` or `ask`.
 - User commands (CLI and TUI): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `relink`, `split`, `merge`, `project`. `forget`, `purge`, `split`, and `merge` need confirmation.
 
 ### D8 Service contract
@@ -96,7 +96,7 @@ Each record is one Markdown file. Its frontmatter has these fields:
 
 - Memory and compaction stay fully independent (ADR 0018 Memory boundary). No automatic extraction exists: only explicit writes.
 - Any automatic extraction reads only **committed** session facts (ADR 0019: uncommitted replacements and candidate-only compactions never read). It uses `MemoryInjected` to separate "injected memory echoed by the model" from "new independent evidence".
-- The sandbox denylist enforces memory unreadability through the ADR 0020 `memory/` entry. With Memory off, Core, compaction, and session-restore test results stay unchanged.
+- The sandbox denylist enforces memory unreadability for the shell through the ADR 0020 `memory/` entry. The host file tools reach the two scope directories only (ADR 0039 decision 4). With Memory off, Core, compaction, and session-restore test results stay unchanged.
 
 ## Verification
 

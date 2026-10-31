@@ -383,6 +383,14 @@ enum RadianCommand {
         command: Option<ArcCommand>,
     },
 
+    /// The hub: the registry of repositories one hub process manages.
+    /// `radian hub add`, `remove` and `list` write and read `~/.radian/hub/repos.toml`.
+    /// A bare `radian hub` does not start the loop or the API in this build.
+    Hub {
+        #[command(subcommand)]
+        command: Option<HubCommand>,
+    },
+
     /// Footer tools: `radian footer export <preset>`
     /// prints a built-in preset's TOML exactly, so a user can copy and edit it.
     Footer {
@@ -439,6 +447,32 @@ enum FooterCommand {
         /// The preset to print: one of `deck`, `full`, `pi`, `classic`.
         #[arg(value_name = "PRESET")]
         preset: String,
+    },
+}
+
+/// The `radian hub` subcommands: the registry a hub process reads.
+#[derive(clap::Subcommand, Debug)]
+enum HubCommand {
+    /// Register a repository. The name defaults to the directory's base name.
+    Add {
+        /// The repository root: a directory with a `.radian/arc/`.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// The name to register it under: 1 to 48 characters from `a-z`, `0-9` and `-`.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Remove a registered repository by name.
+    Remove {
+        /// The registered name.
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// List the registered repositories, in file order.
+    List {
+        /// Print a JSON array of `{ "name": ..., "path": ... }`.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1037,6 +1071,7 @@ fn run_subcommand(command: RadianCommand, config: Option<&Path>) -> ExitCode {
         )),
         RadianCommand::Theme { command } => run_theme(command),
         RadianCommand::Arc { command } => run_arc(command, config),
+        RadianCommand::Hub { command } => run_hub(command),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
         RadianCommand::Attach {
@@ -1154,6 +1189,75 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
             }
         }
     }
+}
+
+/// Runs `radian hub` (ADR 0048): the repository registry. A bare `radian hub` exits `3` with
+/// one line, because the loop and the API are not built yet. A registry error exits `1` and
+/// prints one `radian hub:` line on stderr.
+fn run_hub(command: Option<HubCommand>) -> ExitCode {
+    let Some(command) = command else {
+        eprintln!("radian hub: the hub loop and the API are not built yet");
+        return ExitCode::from(3);
+    };
+    let registry = match radian_arc::hub::Registry::open() {
+        Ok(registry) => registry,
+        Err(error) => return hub_error(&error),
+    };
+    match command {
+        HubCommand::Add { path, name } => match registry.add(&path, name.as_deref()) {
+            Ok(entry) => {
+                let line = format!("added {}  {}", entry.name, entry.path.display());
+                if let Err(error) = radian_host::write_line(&line) {
+                    return stdout_error(error);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => hub_error(&error),
+        },
+        HubCommand::Remove { name } => match registry.remove(&name) {
+            Ok(entry) => {
+                if let Err(error) = radian_host::write_line(&format!("removed {}", entry.name)) {
+                    return stdout_error(error);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => hub_error(&error),
+        },
+        HubCommand::List { json } => match registry.list() {
+            Ok(entries) => {
+                let text = if json {
+                    match serde_json::to_string(&entries) {
+                        Ok(mut text) => {
+                            text.push('\n');
+                            text
+                        }
+                        Err(error) => {
+                            eprintln!("radian hub: cannot render the registry as JSON: {error}");
+                            return ExitCode::from(1);
+                        }
+                    }
+                } else {
+                    let mut text = String::new();
+                    for entry in &entries {
+                        text.push_str(&format!("{}  {}\n", entry.name, entry.path.display()));
+                    }
+                    text
+                };
+                if let Err(error) = radian_host::write_stdout(&text) {
+                    return stdout_error(error);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => hub_error(&error),
+        },
+    }
+}
+
+/// Prints one registry error on stderr and maps it to its exit code (1 for a registry error,
+/// 2 for an invalid argument value).
+fn hub_error(error: &radian_arc::store::Error) -> ExitCode {
+    eprintln!("radian hub: {}", error.message());
+    ExitCode::from(error.exit().code())
 }
 
 /// Runs `radian footer export <preset>` (ADR 0027): prints the
@@ -2608,13 +2712,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         assert!(
-            doc.contains(&format!("`level` is one of {listed}")),
-            "arc/gate-review.md does not say `level` is one of {listed}"
+            doc.contains(&format!("`severity` is one of {listed}")),
+            "arc/gate-review.md does not say `severity` is one of {listed}"
         );
-        // The report's example is the object form the parser reads.
+        // The report's example is the finding form the parser reads.
         assert!(
-            doc.contains("\"blocking\": [{\"level\""),
-            "arc/gate-review.md's report example is not the object form"
+            doc.contains("\"findings\": [{\"severity\""),
+            "arc/gate-review.md's report example is not the finding form"
         );
     }
 

@@ -152,12 +152,24 @@ project scope's `MEMORY.md`, then the global scope's, as one system-prompt secti
 D6). Each index is capped by `[memory] index_max_lines` (default 200) and
 `[memory] index_max_bytes` (default 25600); a dropped line sends one `System`-source rewrite
 notice before the next call, once per session per scope. The bodies are not injected: the
-model reads a record with `read`. The section is computed **once per process**, so every
-request of a session carries the same system-prompt bytes and a provider's prefix cache stays
-valid; a change to an index file takes effect in the next session or on resume. The host
-writes one `MemoryInjected` audit record naming each injected index (path, sha256 of the capped
-text, lines, bytes); it never copies the text. A memory read failure is a `[memory]` warning,
-never a failed turn. Startup prints `[memory]` with the project state and the caps.
+model reads a record with `read`.
+
+A model has no memory write tool: memory records are written with the ordinary `write` and
+`patch`, which reach the two memory scope directories in both tiers (ADR 0039 decision 4) and
+which the permission profile allows in both tiers (ADR 0012; ADR 0021 invariant 5); whether a
+call reaches the file is the file tools' root boundary. Old `source: agent` records in existing
+logs stay readable. When the user asks the model to remember something, the model routes it by
+content (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
+`AGENTS.md`, a procedure useful across projects becomes a user-level skill at
+`~/.agents/skills/<name>/SKILL.md`, and a cross-project preference is written as a memory
+record under `global/`.
+
+The section is computed **once per process**, so every request of a session carries the same
+system-prompt bytes and a provider's prefix cache stays valid; a change to an index file takes
+effect in the next session or on resume. The host writes one `MemoryInjected` audit record
+naming each injected index (path, sha256 of the capped text, lines, bytes); it never copies the
+text. A memory read failure is a `[memory]` warning, never a failed turn. Startup prints
+`[memory]` with the project state and the caps.
 
 ## Input
 

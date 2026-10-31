@@ -17,6 +17,7 @@ radian exec <other flags and subcommands>
 radian acp                    Agent Client Protocol over stdio: one session, prompts and approvals over the protocol (ADR 0049)
 radian arc                    the arc TUI: plans and tasks across worker processes (ADR 0048)
 radian arc <subcommand>       one arc CLI operation (ADR 0048)
+radian hub <subcommand>       the hub's repository registry: add, remove, list (ADR 0048)
 radian login | logout | memory | config import-pi | trust | theme | footer | docs   management commands at top level
 ```
 

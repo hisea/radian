@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "stage": "review",
+  "sha": "0000000000000000000000000000000000000000",
+  "result": "fail",
+  "reason": "review_findings",
+  "commands": [],
+  "started_at": "2026-10-31T00:00:00.000000Z",
+  "ended_at": "2026-10-31T00:00:01.000000Z",
+  "review": {
+    "summary": "the change adds one file",
+    "findings": [
+      {
+        "severity": "major",
+        "file": "src/a.rs",
+        "line": 2,
+        "summary": "the line is wrong"
+      },
+      {
+        "severity": "major",
+        "summary": "a plain major item"
+      },
+      {
+        "severity": "minor",
+        "file": "src/a.rs",
+        "line": 5,
+        "summary": "a nit"
+      },
+      {
+        "severity": "minor",
+        "summary": "another nit"
+      }
+    ],
+    "verified": ["it compiles"]
+  }
+}

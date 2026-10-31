@@ -878,6 +878,13 @@ class ColumnsDocTest(unittest.TestCase):
         end = readme.index("\n## ", start + 1)
         return readme[start:end]
 
+    def displayed(self) -> list[str]:
+        """The names the section claims the text tables display, in order."""
+        section = self.section()
+        start = section.index("names —") + len("names —")
+        end = section.index("— plus", start)
+        return [part.strip() for part in section[start:end].split("`")[1::2]]
+
     def test_the_columns_section_names_every_fixed_column(self):
         section = self.section()
         missing = [
@@ -886,6 +893,11 @@ class ColumnsDocTest(unittest.TestCase):
             if f"`{column['name']}`" not in section
         ]
         self.assertEqual(missing, [])
+
+    def test_the_displayed_names_are_exactly_the_table_columns(self):
+        # The sentence claims one column for each displayed name; the report's own
+        # `TABLE_COLUMNS` is the authority, so the list must equal it in both directions.
+        self.assertEqual(self.displayed(), list(report.TABLE_COLUMNS))
 
 
 def radian_call(command: str, call_id: str = "c9") -> str:
@@ -1161,13 +1173,69 @@ class LeakTest(ScratchCase):
         self.assertEqual([row["level"] for row in result["evidence"]], [1, 1, 3])
         self.assertEqual(result["calls"], 3)
 
+    def test_a_rewritten_call_is_scanned_with_its_final_arguments(self):
+        # The assistant message carries the arguments before a `before_tool_call` rewrite;
+        # `ToolExecutionStarted` carries the final ones. Both share a call id, so the scanner
+        # must keep the last representation (the command that really ran) rather than the
+        # first, or the rewrite hides a second history from the scan.
+        url = "https://example.com/x.git"
+        text = journal([
+            {"event": "SessionCreated", "data": {"workspace": self.tree}},
+            {
+                "event": "MessageAppended",
+                "data": {"message": {"assistant": {"tool_calls": [{
+                    "id": "c1", "name": "shell",
+                    "arguments": json.dumps({"command": f"git remote add origin {url}"}),
+                }]}}},
+            },
+            {
+                "event": "ToolExecutionStarted",
+                "data": {
+                    "call_id": "c1", "name": "shell",
+                    "arguments": json.dumps({"command": f"git remote add origin {url}"}),
+                },
+            },
+            {
+                "event": "MessageAppended",
+                "data": {"message": {"assistant": {"tool_calls": [{
+                    "id": "c2", "name": "shell",
+                    "arguments": json.dumps({"command": "git status"}),
+                }]}}},
+            },
+            {
+                "event": "ToolExecutionStarted",
+                "data": {
+                    "call_id": "c2", "name": "shell",
+                    "arguments": json.dumps({"command": "git fetch origin"}),
+                },
+            },
+            {
+                "event": "ToolExecutionSettled",
+                "data": {
+                    "call_id": "c2",
+                    "result": {
+                        "call_id": "c2",
+                        "content": [{"text": {"text": " * [new branch] main -> origin/main"}}],
+                        "is_error": False,
+                    },
+                },
+            },
+        ])
+        result = self.level(text)
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+        self.assertEqual(result["calls"], 2)
+
     def test_fetch_options_that_take_a_value_do_not_shadow_the_remote(self):
         url = "https://example.com/x.git"
         for command in (
             "git fetch --depth 1 origin",
             "git fetch --upload-pack /usr/bin/git-upload-pack origin",
+            "git fetch -o foo origin",
+            "git fetch --server-option foo origin",
             "git pull --depth 1 --ff-only origin main",
             "git pull -s recursive origin main",
+            "git pull -o foo origin main",
         ):
             with self.subTest(command=command):
                 result = self.steps(f"git remote add origin {url}", (command, "done"))

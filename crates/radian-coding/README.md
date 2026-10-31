@@ -10,11 +10,11 @@ via `GIT_CONFIG_*` in untrusted projects, ADR 0039 decision 5). See the crate do
 
 | Tool | Concurrency | What it does |
 |---|---|---|
-| `read` | `Shared` | Read a UTF-8 file, a directory, or an image, bounded by `max_bytes` (default 16 KiB, hard cap 1 MiB) and, for a text file, 200 lines by default. Every returned text line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections; a `radian://docs/` page has its own 64 KiB budget and no line cap, so a page reads whole. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. **An image** (PNG/JPEG/GIF/WebP by magic number, never the extension) returns a text line plus the image part: raw bytes ≤ 5 MiB and each side ≤ 8000 px (`image_too_large`), an image is read whole (`offset`/`limit` are ignored and said once), and a model the catalog knows takes no images gets only the text line with the omission sentence. A file under a read-only root (cargo-registry or toolchain sources, or a discovered skill's directory) may also be named as an absolute or `~` path (read-only; see below); in the `full` tier any other absolute or `~` path reads too, except the sandbox's deny set. A directory path lists it instead: sorted entries with kind and size, symlinks shown but not followed; `limit` then caps entries (default 500, hard cap 5000), `offset`/`max_bytes` are ignored and said once. |
-| `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). A missing parent directory is created level by level with `mkdirat` on the parent fd. Never follows a symlink at any level. |
-| `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. |
-| `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore`/`.ignore` respected (workspace root down to the search base), `.git` skipped, symlinks never followed; capped by `max_results`. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
-| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore`/`.ignore` respected (workspace root down to the search base), binary files skipped; capped per file, in total matches, and in total output bytes (16 KiB, context lines dropped before matches, each cut named in the text); a directory or `glob` search skips a regular file over 256 KiB and names it in one trailing note, while a file named as `path` is always searched. `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
+| `read` | `Shared` | Read a UTF-8 file, a directory, or an image, bounded by `max_bytes` (default 16 KiB, hard cap 1 MiB) and, for a text file, 200 lines by default. Every returned text line is prefixed with its file line number, `N: ` (that prefix is not file content). `offset` (1-based first line) and `limit` (lines) read a large file in sections; a `radian://docs/` page has its own 64 KiB budget and no line cap, so a page reads whole. Reports `start_line`/`end_line`/`line_truncated` and, when not finished, `next_offset`; a missing file names up to three close names in its directory; refuses non-UTF-8. **An image** (PNG/JPEG/GIF/WebP by magic number, never the extension) returns a text line plus the image part: raw bytes ≤ 5 MiB and each side ≤ 8000 px (`image_too_large`), an image is read whole (`offset`/`limit` are ignored and said once), and a model the catalog knows takes no images gets only the text line with the omission sentence. A file under a read-only root (cargo-registry or toolchain sources, or a discovered skill's directory) may also be named as an absolute or `~` path (read-only; see below), and so may a file under a memory scope directory; in the `full` tier any other absolute or `~` path reads too, except the sandbox's deny set. A directory path lists it instead: sorted entries with kind and size, symlinks shown but not followed; `limit` then caps entries (default 500, hard cap 5000), `offset`/`max_bytes` are ignored and said once. |
+| `write` | `Exclusive` | Create or overwrite a file with exact content (no newline added). A missing parent directory is created level by level with `mkdirat` on the parent fd. Never follows a symlink at any level. A memory-scope path (absolute or `~`) is accepted in both tiers; there the file is created `0600` and no subdirectory is created (a scope is flat). |
+| `patch` | `Exclusive` | Replace `old` with `new`, or apply an `edits` array atomically. A match is located by layer (exact, then typographic normalisation, then line-by-line ignoring trailing whitespace) and must be unique unless `replace_all` is set. With `edits`, every edit is located in the original file, ranges must be disjoint, and if any edit fails nothing is written. A CRLF file is matched on an LF view and stays CRLF. Zero matches refuse the edit and report the closest region with line numbers. A memory-scope path is accepted in both tiers. |
+| `glob` | `Shared` | Find files whose **workspace-relative path** matches a glob (`src/**/*.rs`); sorted; `.gitignore`/`.ignore` respected (workspace root down to the search base), `.git` skipped, symlinks never followed; capped by `max_results`. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does a memory-scope base, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
+| `grep` | `Shared` | Regex search file contents; `path:line:text` per match, `path-line-text` for `context` lines, `--` between groups; `.gitignore`/`.ignore` respected (workspace root down to the search base), binary files skipped; capped per file, in total matches, and in total output bytes (16 KiB, context lines dropped before matches, each cut named in the text); a directory or `glob` search skips a regular file over 256 KiB and names it in one trailing note, while a file named as `path` is always searched. `output: "files"` lists one line per matching file with its count, `output: "count"` prints only the totals; the default `content` is unchanged. A read-only root base (registry/toolchain sources, a skill's directory) works too, as does a memory-scope base, as does any other absolute or `~` path in the `full` tier except the sandbox's deny set, and its results are absolute paths. |
 | `shell` | `Exclusive` | `/bin/sh -c <command>` **through a sandbox**, with `cwd` (workspace-relative, or absolute inside the workspace), `timeout_secs`, `max_output_bytes` and `background`. Present only when the host built the tools with a `Sandbox`. `background: true` returns at once with a job id (no default timeout, and `timeout_secs` is ignored — ADR 0037: bound the command itself or stop it with `job`); `job` below is the only way to read it (ADR 0037 decision 4). Its output goes to the session's own jobs directory, outside the workspace and unreadable from inside the sandbox (ADR 0039 decision 1). The model runs git through `shell`; in a project the user has not trusted, every shell child carries the host git hardening as environment (`GIT_CONFIG_*`, ADR 0039 decision 5). |
 | `job` | `Shared` | Read or stop one `shell` job by its job id (`read`, `wait` or `kill`). Plain `read` returns the output since the last call plus a `[status: …]` line; `tail_lines`, `from_line`/`max_lines` or `pattern` page the full file by line. `wait` blocks (default 30 s, max 600 s) and never kills; `kill` SIGTERMs the job's process group, then SIGKILLs after 3 s. A truncated foreground result is a settled entry under a normal job id — the same reader. No list tool: job ids are already in context. |
 | `ask_user` | `Exclusive` | Ask the user one or more structured questions (single/multi/text) and wait for the answers. Its **own** provider (`AskTools`, not part of `CodingTools`): a host mounts it only when a human is there to answer, and it exists whether or not the host has a workspace (ADR 0024 Q5). The wait races the turn's cancellation and never fabricates an answer. |
@@ -133,7 +133,7 @@ naming the byte limit, what was dropped, and how to narrow the search (a narrowe
 and `output: "count"` prints only the totals (`N matches in M files`); the per-file, total-match
 and total-byte caps apply in every mode, and the default `content` output is unchanged.
 
-## Read-only roots outside the workspace (ADR 0039)
+## Roots outside the workspace (ADR 0039)
 
 `read`, `grep` and `glob` also read roots outside the workspace, **read-only**:
 
@@ -141,9 +141,19 @@ and total-byte caps apply in every mode, and the default `content` output is unc
 - every installed toolchain's `$RUSTUP_HOME/toolchains/*/lib/rustlib/src` (default `~/.rustup`);
 - each discovered skill's directory (the directory holding its `SKILL.md`), in both tiers.
 
+Two more directories are roots and these are **writable**: the memory scopes
+`$RADIAN_HOME/memory/global/` and, when the workspace maps to a project,
+`$RADIAN_HOME/memory/projects/<ProjectId>/`. The host passes the ones that apply
+(`MemoryService::file_tool_roots`; a read never registers a project). `read`, `grep`, `glob`,
+`write` and `patch` accept them in both tiers; `write` creates a file `0600` (ADR 0021 D3),
+never a subdirectory. Everything else under `memory/` — `projects.jsonl`, another project's
+directory — is not a root and stays in the deny set below; the sandbox (the shell) has no
+exception at all.
+
 In the `full` tier they also read any other absolute or `~` path, except the sandbox's deny
 set (the `DEFAULT_DENY_READ` entries under `$HOME`, plus the sessions directory, `memory/`,
-`credentials/` and `trust/` under `$RADIAN_HOME`). The deny check runs on the `realpath`ed
+`credentials/` and `trust/` under `$RADIAN_HOME`). The deny set's one exception is the two
+memory scope directories. The deny check runs on the `realpath`ed
 path, so a symlink into a denied directory refuses; the file itself opens with `O_NOFOLLOW`
 on its last component. A refusal names the denied path and says it is in the sandbox's
 deny set.
@@ -157,9 +167,10 @@ way `CARGO_HOME` was set still matches when canonicalization rewrites it (`/tmp`
 `grep`/`glob` results are rendered with the root's prefix (absolute) so they can be passed
 straight back to `read`. A source that does not exist is simply not readable.
 
-`write`, `patch` and `shell`'s `cwd` never accept these roots: a `write`/`patch` destination is
-resolved against the workspace only. In the `workspace` tier any other absolute path is refused
-(`path_outside_workspace`) with a message naming the readable roots, including the skill
+`write`, `patch` and `shell`'s `cwd` never accept the read-only roots: a `write`/`patch`
+destination is resolved against the workspace or a memory scope only. In the `workspace` tier
+any other absolute path is refused (`path_outside_workspace`) with a message naming the
+readable roots, including the skill
 directories. `tests/read_roots.rs` sets
 `CARGO_HOME`/`RUSTUP_HOME`/`HOME` to a private tree once per binary and never reads the
 developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
@@ -190,7 +201,8 @@ developer's real `~/.cargo`/`~/.rustup`; `tests/common`'s `tools()` builds with
 Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
 
 - an absolute path outside the workspace and any `..` are refused before any filesystem
-  access (`path_outside_workspace`); an absolute path inside the workspace root, in either
+  access (`path_outside_workspace`), except a memory-scope path for `read`/`grep`/`glob`/
+  `write`/`patch`; an absolute path inside the workspace root, in either
   spelling, is the workspace-relative path and takes every check below (ADR 0039 decision 6);
 - `read`/`grep`/`glob` additionally read **read-only** roots outside the workspace
   (ADR 0039): `$CARGO_HOME/registry/src`, every
@@ -200,6 +212,10 @@ Enforced (each with tests in `tests/escaping.rs` and `tests/mutation.rs`):
   the `workspace` tier a path under none of the roots is refused with a
   message naming them (skill directories included). `write`/`patch` and `shell`'s `cwd` never accept them
   (`tests/read_roots.rs`);
+- the memory scopes are the same kind of root but writable (ADR 0039 decision 4):
+  `$RADIAN_HOME/memory/global/` and the workspace's project directory. The same fd walk opens
+  them, `write` creates files `0600`, and a write creates no subdirectory; the sandbox's
+  `memory/` deny entry keeps the shell out of all of it (`tests/memory_roots.rs`);
 - **every path is opened through the workspace root's directory fd** (`safe_fs`, ADR 0039
   decision 2): one `openat(dirfd, name, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)` per parent, the
   leaf with `O_NOFOLLOW` (`O_CREAT` for `write`), and the tool reads or writes through that fd.

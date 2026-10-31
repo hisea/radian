@@ -104,6 +104,7 @@ pub(super) fn build_session_inputs(
         let deny_read = sandbox_deny_read.clone();
         let sockets = allow_unix_sockets.to_vec();
         let allow_env = config.sandbox.allow_env.clone();
+        let memory_root = memory_root.clone();
         std::sync::Arc::new(move |preset: radian_permissions::Preset| {
             radian_tui::profile::build_access(
                 preset,
@@ -112,6 +113,7 @@ pub(super) fn build_session_inputs(
                 &deny_read,
                 &sockets,
                 &allow_env,
+                memory_root.as_deref(),
             )
         })
     };
@@ -173,6 +175,7 @@ pub(super) fn build_session_inputs(
         workspace_path,
         &cli.allow_shell_command,
         sandbox.as_ref(),
+        memory_root.as_deref(),
     )?
     .with_approval(startup_approval.policy);
 

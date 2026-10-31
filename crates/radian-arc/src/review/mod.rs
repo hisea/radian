@@ -35,9 +35,10 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, IntegrationRun, PreviousReview, REVIEW_BLOCKING, REVIEW_UNAVAILABLE, ReviewItem,
-    ReviewRun, ReviewSettings, Stage, StageSpec, Verdict, attempt_dir, effective_stages,
-    merge_ready, required_passed, run_shell, verdict_path, verdict_set_digest,
+    CommandRun, Finding, IntegrationRun, PreviousReview, REVIEW_BLOCKING, REVIEW_FINDINGS,
+    REVIEW_LEVELS, REVIEW_UNAVAILABLE, ReviewRun, ReviewSettings, Stage, StageSpec, Verdict,
+    attempt_dir, effective_stages, level_rank, merge_ready, required_passed, run_shell,
+    verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
 use crate::store::config::{Config, IntegrationStyle};
@@ -81,6 +82,18 @@ pub const REVIEW_RETRY_AFTER_MAX_SECS: u64 = 6 * 60 * 60;
 /// [`ReviewRun::program`] gives the synchronous path. A test sets it on the `radian arc run`
 /// process, which its gate child inherits. Never set by arc.
 pub const REVIEW_PROGRAM_ENV: &str = "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM";
+
+/// The failing findings of a review verdict: at or above its `fix_level`, not `pre_existing`;
+/// for a verdict that failed with `review_blocking`, every item of its old `blocking` list,
+/// whatever its level (ADR 0048 decision 10).
+fn failing_findings(verdict: &Verdict) -> Vec<Finding> {
+    verdict.review_failing().into_iter().cloned().collect()
+}
+
+/// The rest of a review verdict's findings: below its `fix_level`, or `pre_existing`.
+fn other_findings(verdict: &Verdict) -> Vec<Finding> {
+    verdict.review_rest().into_iter().cloned().collect()
+}
 
 /// Why a verify or merge did not advance the task: a stage that failed, a branch that
 /// moved, or a stage this build does not run yet.
@@ -203,13 +216,13 @@ fn conflict_line(task: &str, conflict: &Conflict) -> String {
 }
 
 /// The review rework arc wrote itself (ADR 0048 decision 9): the task went to `todo.ready`
-/// with a brief that lists the review's blocking items.
+/// with a brief that lists the round's failing findings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewRework {
     /// The attempt's review verdict, which the brief tells the worker to read.
     pub verdict: PathBuf,
-    /// The blocking items the brief lists, as the verdict recorded them.
-    pub items: Vec<ReviewItem>,
+    /// The failing findings the brief lists, as the verdict recorded them.
+    pub findings: Vec<Finding>,
 }
 
 /// The one line a review rework's transition prints.
@@ -866,11 +879,7 @@ fn run_stage(
                 .map(|file| store.repo().join(file));
             let earlier = earlier.as_ref().map(|(_, verdict)| PreviousReview {
                 sha: verdict.sha.clone(),
-                blocking: verdict
-                    .review
-                    .as_ref()
-                    .map(|review| review.blocking.clone())
-                    .unwrap_or_default(),
+                findings: failing_findings(verdict),
             });
             ReviewRun {
                 repository: store.repo(),
@@ -1925,12 +1934,12 @@ fn conflict_rework_brief(conflict: &Conflict) -> String {
     )
 }
 
-/// The review rework arc writes itself (ADR 0048 decision 9): a `review` stage that failed with
-/// blocking items and a plan whose `auto` is not `off` returns the task to `todo.ready` with
+/// The review rework arc writes itself (ADR 0048 decision 9): a `review` stage that failed on
+/// a failing finding and a plan whose `auto` is not `off` returns the task to `todo.ready` with
 /// the next attempt's brief, or pauses the plan at `max_auto_rework` and leaves the task in
 /// `review.rework_pending`.
 ///
-/// `None` when the verdict is not a review failure with blocking items, the plan is at
+/// `None` when the verdict is not a review failure with a failing finding, the plan is at
 /// `auto` `off`, or the attempt is a worker-less reverify (its failure never counts, decision
 /// 9): the caller then keeps the path to `review.rework_pending`.
 fn review_auto_rework(
@@ -1939,13 +1948,16 @@ fn review_auto_rework(
     verdict: &Verdict,
     path: &Path,
 ) -> Result<Option<(ReviewRework, Option<Paused>)>, Error> {
-    if verdict.stage != Stage::Review || verdict.reason.as_deref() != Some(REVIEW_BLOCKING) {
+    let reason = verdict.reason.as_deref();
+    let review_failure = matches!(reason, Some(REVIEW_FINDINGS) | Some(REVIEW_BLOCKING));
+    if verdict.stage != Stage::Review || !review_failure {
         return Ok(None);
     }
-    let Some(review) = verdict.review.as_ref() else {
+    if verdict.review.is_none() {
         return Ok(None);
-    };
-    if review.blocking.is_empty() {
+    }
+    let findings = failing_findings(verdict);
+    if findings.is_empty() {
         return Ok(None);
     }
     let plan = store.load_plan(&task.plan)?;
@@ -1964,7 +1976,7 @@ fn review_auto_rework(
     let paused = crate::store::attempt_ops::record_auto_rework(store, &task.id)?;
     let rework = ReviewRework {
         verdict: path.to_path_buf(),
-        items: review.blocking.clone(),
+        findings,
     };
     if paused.is_some() {
         return Ok(Some((rework, paused)));
@@ -1979,18 +1991,18 @@ fn review_auto_rework(
     Ok(Some((rework, None)))
 }
 
-/// The fixed brief of a review rework (ADR 0048 decision 9): what to fix, the blocking items as
-/// `[level] path:line text`, and the verdict to read for detail.
+/// The fixed brief of a review rework (ADR 0048 decision 9): what to fix, the failing findings
+/// as `[severity] path:line summary — trigger`, and the verdict to read for detail.
 fn review_rework_brief(rework: &ReviewRework) -> String {
-    let items = rework
-        .items
+    let findings = rework
+        .findings
         .iter()
-        .map(|item| format!("- {item}"))
+        .map(|finding| format!("- {finding}"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "The review found these items. Fix them and nothing else, append commits to the \
-         branch, and do not rebase.\n\n{items}\n\nRead the verdict for detail: `{}`",
+         branch, and do not rebase.\n\n{findings}\n\nRead the verdict for detail: `{}`",
         rework.verdict.display()
     )
 }
@@ -2006,8 +2018,8 @@ struct FollowupRound {
     attempt: u32,
     /// The verdict file the brief names.
     path: PathBuf,
-    /// The `suggestions` the round left; the `pre_existing` items arc moved are here.
-    items: Vec<ReviewItem>,
+    /// The rest of the round's findings: below its `fix_level`, or `pre_existing`.
+    items: Vec<Finding>,
 }
 
 /// The task's `review` verdicts across every attempt, oldest first, with their paths. The
@@ -2032,11 +2044,7 @@ fn followup_rounds(reviews: &[(PathBuf, Verdict)]) -> Vec<FollowupRound> {
             number: index + 1,
             attempt: verdict_attempt(path).unwrap_or(index as u32 + 1),
             path: path.clone(),
-            items: verdict
-                .review
-                .as_ref()
-                .map(|review| review.suggestions.clone())
-                .unwrap_or_default(),
+            items: other_findings(verdict),
         })
         .collect()
 }
@@ -2048,14 +2056,14 @@ fn verdict_attempt(path: &Path) -> Option<u32> {
     attempt.rsplit_once('-')?.1.parse().ok()
 }
 
-/// What two follow-up items are the same by: `file`, `line`, and the `text` without a tag
-/// that repeats the item's own level and with its whitespace collapsed (ADR 0048 decision
-/// 10). An item with the same place and other text is a different item.
-fn followup_item_key(item: &ReviewItem) -> (Option<&str>, Option<u32>, String) {
+/// What two follow-up items are the same by: `file`, `line`, and the `summary` without a tag
+/// that repeats the finding's own severity and with its whitespace collapsed (ADR 0048
+/// decision 10). A finding with the same place and other text is a different item.
+fn followup_item_key(item: &Finding) -> (Option<&str>, Option<u32>, String) {
     (
         item.file.as_deref(),
         item.line,
-        item.text_without_level_tag()
+        item.summary_without_severity_tag()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" "),
@@ -2065,8 +2073,8 @@ fn followup_item_key(item: &ReviewItem) -> (Option<&str>, Option<u32>, String) {
 /// The items the follow-up carries, in round order, with the round each kept copy came from.
 /// A repeat replaces the earlier copy, so the newest one is kept and grouped under its own
 /// round.
-fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, ReviewItem)> {
-    let mut kept: Vec<(usize, ReviewItem)> = Vec::new();
+fn followup_items(rounds: &[FollowupRound]) -> Vec<(usize, Finding)> {
+    let mut kept: Vec<(usize, Finding)> = Vec::new();
     for (index, round) in rounds.iter().enumerate() {
         for item in &round.items {
             let key = followup_item_key(item);
@@ -2089,7 +2097,7 @@ struct FollowupSource {
     /// Every review round of the task, oldest first.
     rounds: Vec<FollowupRound>,
     /// The kept items, each with the index of the round it came from.
-    items: Vec<(usize, ReviewItem)>,
+    items: Vec<(usize, Finding)>,
 }
 
 /// The plan's review follow-up (ADR 0048 decision 10): when no task of the plan is open, the
@@ -2296,7 +2304,7 @@ fn followup_brief(plan: &str, sources: &[FollowupSource]) -> String {
     for source in sources {
         brief.push_str(&format!("\n\nFrom {}", source.task));
         for (index, round) in source.rounds.iter().enumerate() {
-            let group: Vec<&ReviewItem> = source
+            let group: Vec<&Finding> = source
                 .items
                 .iter()
                 .filter(|(from, _)| *from == index)
@@ -3595,8 +3603,8 @@ fn approve(
 }
 
 /// The text of a failed stage: its reason, and the conflicted paths when it is `conflict`.
-/// A `review_blocking` failure lists its blocking items, because the rework reason is how the
-/// lead learns what to fix.
+/// A `review_findings` failure (or the old `review_blocking` one) lists its failing findings,
+/// highest severity first, because the rework reason is how the lead learns what to fix.
 fn failure_text(verdict: &Verdict) -> String {
     let reason = verdict
         .reason
@@ -3605,19 +3613,21 @@ fn failure_text(verdict: &Verdict) -> String {
     if reason == "conflict" && !verdict.conflict_paths.is_empty() {
         return format!("conflict: {}", verdict.conflict_paths.join(", "));
     }
-    if reason == REVIEW_BLOCKING
-        && let Some(review) = &verdict.review
-        && !review.blocking.is_empty()
-    {
-        return format!(
-            "{REVIEW_BLOCKING}: {}",
-            review
-                .blocking
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
+    if (reason == REVIEW_FINDINGS || reason == REVIEW_BLOCKING) && verdict.review.is_some() {
+        let mut findings = verdict.review_failing();
+        if !findings.is_empty() {
+            findings.sort_by_key(|finding| {
+                level_rank(&finding.severity).unwrap_or(REVIEW_LEVELS.len())
+            });
+            return format!(
+                "{reason}: {}",
+                findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
     }
     reason
 }
@@ -4200,11 +4210,12 @@ mod tests {
     /// verdict path.
     #[test]
     fn the_followup_brief_names_the_plan_the_tasks_the_items_and_the_verdicts() {
-        let item = ReviewItem {
-            level: Some("minor".to_owned()),
+        let item = Finding {
+            severity: "minor".to_owned(),
             file: Some("a.rs".to_owned()),
             line: Some(7),
-            text: "a nicer name".to_owned(),
+            summary: "a nicer name".to_owned(),
+            trigger: String::new(),
             pre_existing: true,
         };
         let rounds = vec![FollowupRound {
@@ -4240,20 +4251,21 @@ mod tests {
     /// stays part of the text.
     #[test]
     fn the_followup_item_key_ignores_a_duplicated_level_tag_and_whitespace() {
-        let first = ReviewItem {
-            level: Some("minor".to_owned()),
+        let first = Finding {
+            severity: "minor".to_owned(),
             file: Some("a.rs".to_owned()),
             line: Some(7),
-            text: "a   nicer\n name".to_owned(),
+            summary: "a   nicer\n name".to_owned(),
+            trigger: String::new(),
             pre_existing: false,
         };
-        let repeat = ReviewItem {
-            text: "[Minor] a nicer name".to_owned(),
+        let repeat = Finding {
+            summary: "[Minor] a nicer name".to_owned(),
             ..first.clone()
         };
         assert_eq!(followup_item_key(&first), followup_item_key(&repeat));
-        let other_tag = ReviewItem {
-            text: "[major] a nicer name".to_owned(),
+        let other_tag = Finding {
+            summary: "[major] a nicer name".to_owned(),
             ..first.clone()
         };
         assert_ne!(followup_item_key(&first), followup_item_key(&other_tag));

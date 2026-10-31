@@ -30,9 +30,10 @@ pub(crate) fn schema() -> serde_json::Value {
                                 workspace, searches the workspace and gives relative results. \
                                 A read-only absolute or `~` directory under a read-only root \
                                 (cargo registry or Rust toolchain sources, or a discovered \
-                                skill's directory) is also accepted; in the `full` tier any other \
-                                absolute or `~` path is searched too, except the sandbox's deny \
-                                set, and its results are absolute."
+                                skill's directory) is also accepted, and so is one under a memory \
+                                scope directory; in the `full` tier any other absolute or `~` path \
+                                is searched too, except the sandbox's deny set, and its results \
+                                are absolute."
             },
             "max_results": {
                 "type": "integer",

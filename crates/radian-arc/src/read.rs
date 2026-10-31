@@ -136,7 +136,9 @@ pub struct StageView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReviewSummaryView {
     pub summary: String,
+    /// The failing findings: at or above the verdict's `fix_level`, not `pre_existing`.
     pub blocking: Vec<String>,
+    /// The rest: below the `fix_level`, or `pre_existing`.
     pub suggestions: Vec<String>,
     pub verified: Vec<String>,
 }
@@ -966,12 +968,21 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
                 None => true,
             })
             .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
-            .and_then(|(_, verdict)| verdict.review.as_ref())
-            .map(|report| ReviewSummaryView {
-                summary: report.summary.clone(),
-                blocking: report.blocking.iter().map(ToString::to_string).collect(),
-                suggestions: report.suggestions.iter().map(ToString::to_string).collect(),
-                verified: report.verified.clone(),
+            .and_then(|(_, verdict)| {
+                verdict.review.as_ref().map(|report| ReviewSummaryView {
+                    summary: report.summary.clone(),
+                    blocking: verdict
+                        .review_failing()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    suggestions: verdict
+                        .review_rest()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    verified: report.verified.clone(),
+                })
             })
     } else {
         None

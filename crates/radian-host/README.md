@@ -165,6 +165,12 @@ injection never call it**, so they only ever read Global on an unregistered work
 (`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). Every user
 command is `Source::User`.
 
+`file_tool_roots()` names the two scope directories the file tools may read and write in both
+tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,
+`<root>/projects/<ProjectId>/`. It resolves through `state()`, so a read never registers a
+project; an unlinked workspace gets the global directory only. Each directory is created 0700
+on first use (ADR 0021 D3).
+
 `candidate_name` is the comparison behind "同名仓库": the identity key's final path component,
 except that a git common dir (`.git`) is named by its parent directory — the repository name —
 so a moved repository still matches its old project.
@@ -224,6 +230,7 @@ naming it and the index caps, and is otherwise ignored.
 | A retired `[memory.injection]` key warns and the session starts | `the_retired_injection_keys_warn_and_are_ignored`, `a_retired_memory_injection_key_warns_and_the_session_starts` | `tests/config_fixtures.rs`, `radian-exec/tests/cli.rs` |
 | `memory_save` and `memory_search` are unknown tools and the turn still succeeds | `a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
 | `[memory]` carries `enabled`/`scopes`/`index_max_lines`/`index_max_bytes` | `the_memory_keys_are_read` | `tests/config_fixtures.rs` |
+| `write`/`patch` are `allow` in the memory scope directories in both tiers; `..`, a symlink out, the registry, a sibling directory and a file directly in `projects/` are not; the inert `memory_search` allow rule stays; no memory root adds no rule | `write_to_a_global_memory_file_is_allowed_in_every_tier`, `write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier`, `a_memory_write_outside_the_scope_directories_is_not_matched`, `a_memory_write_that_escapes_with_dotdot_is_not_matched`, `a_symlink_out_of_the_memory_store_is_not_matched`, `a_memory_write_directly_in_the_projects_directory_is_not_matched`, `memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks`, `a_profile_without_a_memory_root_has_no_memory_rule` | `radian-permissions/src/profile.rs` |
 
 ## The startup description
 

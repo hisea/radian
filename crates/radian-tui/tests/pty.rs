@@ -5222,7 +5222,47 @@ async fn pty_an_explicit_max_tokens_raises_the_reservation_it_counts() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
-/// ADR 0015 (a zero window is unset): `[model] context_window = 0` leaves the window unknown in
+/// ADR 0026 D13 + ADR 0018: a key the startup route reserves is refused before the window's
+/// `C <= R` check, so the message names the real cause instead of blaming `--context-window`.
+#[test]
+fn pty_a_reserved_extra_body_key_is_refused_before_the_window_check() {
+    let dir = TempDir::new("reserved-before-window");
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--model",
+            "claude",
+            "--provider",
+            "anthropic",
+            "--context-window",
+            "20000",
+            "--session-dir",
+            session_dir.to_str().unwrap(),
+            "--session-id",
+            "reserved-before-window",
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-reserved"),
+            ("RADIAN_EXTRA_BODY", r#"{"max_tokens":32000}"#),
+        ],
+        20,
+        100,
+    );
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the app did not refuse the reserved key"
+    );
+    assert_eq!(pty.app_exit_code(), Some(2));
+    let raw = String::from_utf8_lossy(&pty.raw()).to_string();
+    assert!(raw.contains("RADIAN_EXTRA_BODY"), "{raw}");
+    assert!(raw.contains("which the request builder owns"), "{raw}");
+    assert!(
+        !raw.contains("not larger than the output reservation"),
+        "the window check hid the real cause: {raw}"
+    );
+    assert_session_dir_empty(&session_dir);
+}
 /// the TUI too, exactly like the key being absent — the startup notice says there is no budget,
 /// and no number is invented. The reader maps the key's zero to `None` before either host sees
 /// it, so only a reader that refused `0` would fail here.

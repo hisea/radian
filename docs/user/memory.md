@@ -10,6 +10,13 @@ Project records belong to one project directory; global records belong to
 you. The model receives each scope's `MEMORY.md` index in its system prompt,
 project first, then global; see "What the model sees".
 
+The model reads and writes its memory files with the ordinary file tools
+(`read`, `grep`, `glob`, `write`, `patch`) in both tiers. The tools reach
+only the two scope directories: the global memory directory and, when the
+workspace maps to a project, that project's directory. Every other path
+under the memory directory stays denied, and the shell cannot read any of
+it. See `permissions` for the exact rule.
+
 ## Kinds
 
 A record is one kind: `preference`, `decision`, `fact` or `lesson`. The

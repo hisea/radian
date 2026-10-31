@@ -52,8 +52,9 @@ pub struct OpenAiCompatibleConfig {
     /// The output cap the request sends as `max_tokens` (ADR 0018), from
     /// [`catalog_max_tokens`]: `min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))` when the route knows
     /// both, `min(16384, ⌊C/4⌋)` when it knows only the window. `None` sends no field. An
-    /// explicit `max_tokens` in `extra_body` or in the request settings wins and is never
-    /// overwritten.
+    /// explicit output cap in `extra_body` or in the request settings (`max_tokens`, or
+    /// `max_completion_tokens`) wins and is never overwritten, and neither spelling makes the
+    /// adapter add a `max_tokens` beside it.
     pub max_tokens: Option<u32>,
     /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
     /// `None` sends no key, which is byte-identical to the adapter before the feature.
