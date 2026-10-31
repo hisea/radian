@@ -617,6 +617,67 @@ def write_journal(path, records, final_newline=True):
     path.write_text(text, encoding="utf-8")
 
 
+def journal_event(event, ts=None, **data):
+    """One radian journal record. A missing `ts` leaves the record untimed."""
+    record = {"event": event, "data": data}
+    if ts is not None:
+        record["ts"] = ts
+    return record
+
+
+def journal_time(seconds):
+    """A timestamp `seconds` into a fixed minute."""
+    return f"2026-01-01T00:00:{seconds:02d}Z"
+
+
+def read_started(call_id, path, ts=None):
+    return journal_event(
+        "ToolExecutionStarted",
+        ts,
+        call_id=call_id,
+        name="read",
+        arguments={"path": path},
+    )
+
+
+def compaction_records(
+    revision=1,
+    *,
+    usage_ts=None,
+    candidate_ts=None,
+    commit_ts=None,
+    retained_reads=None,
+    usage=True,
+    commit=True,
+):
+    """A compaction's usage, candidate and (optionally) commit records."""
+    records = []
+    if usage:
+        records.append(
+            journal_event(
+                "CompactionUsageRecorded",
+                usage_ts,
+                revision=revision,
+                usage={"input": 1},
+            )
+        )
+    candidate = {"event": "ContextCompacted", "data": {"revision": revision}}
+    if retained_reads is not None:
+        candidate["data"]["retained_reads"] = retained_reads
+    if candidate_ts is not None:
+        candidate["ts"] = candidate_ts
+    records.append(candidate)
+    if commit:
+        committed = {
+            "event": "TranscriptReplacementCommitted",
+            "data": {"revision": revision, "len": 0},
+        }
+        if commit_ts is not None:
+            committed["ts"] = commit_ts
+        records.append(committed)
+    return records
+
+
 class JournalMetricsTest(unittest.TestCase):
     """The fixed-definition extractor on its own small fixtures."""
 
@@ -645,6 +706,13 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertEqual(row["read_large_calls"], 0)
         self.assertEqual(row["compactions"], 1)
         self.assertEqual(row["deterministic_compactions"], 0)
+        # The fixture's `ContextCompacted` has no commit, so no compaction counts
+        # for the five compaction columns.
+        self.assertEqual(row["rereads_after_compaction"], 0)
+        self.assertIsNone(row["rereads_after_compaction_max"])
+        self.assertEqual(row["retained_reads"], 0)
+        self.assertEqual(row["compaction_seconds"], 0)
+        self.assertIsNone(row["compaction_wall_share"])
         self.assertEqual(row["outcomes"], {"failed": 1})
         self.assertEqual(row["wall_seconds"], 17)
         self.assertEqual(row["latency"]["0-99999"]["calls"], 3)
@@ -946,6 +1014,303 @@ class JournalMetricsTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(journal_metrics.columns_markdown(), readme)
+
+
+class CompactionMetricsTest(unittest.TestCase):
+    """The five columns that read a committed compaction and its five-call tail."""
+
+    def stats(self, records):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "j.jsonl"
+        write_journal(path, records)
+        return journal_metrics.build_report([path])["journals"][0]
+
+    def test_rereads_after_compaction_counts_the_calls_before_the_session_ends(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    usage_ts=journal_time(1),
+                    candidate_ts=journal_time(2),
+                    commit_ts=journal_time(3),
+                ),
+                journal_event("ModelUsageRecorded", journal_time(4), usage={"input": 1}),
+                read_started("r1", "a", journal_time(4)),
+                journal_event("ModelUsageRecorded", journal_time(5), usage={"input": 1}),
+                read_started("r2", "a", journal_time(5)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 2)
+        self.assertEqual(row["rereads_after_compaction_max"], 2)
+
+    def test_overlapping_compaction_windows_count_a_read_once_for_each(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    usage_ts=journal_time(1),
+                    candidate_ts=journal_time(2),
+                    commit_ts=journal_time(3),
+                ),
+                journal_event("ModelUsageRecorded", journal_time(4), usage={"input": 1}),
+                read_started("r1", "a", journal_time(4)),
+                journal_event("ModelUsageRecorded", journal_time(5), usage={"input": 1}),
+                read_started("r2", "a", journal_time(5)),
+                journal_event("ModelUsageRecorded", journal_time(6), usage={"input": 1}),
+                read_started("r3", "a", journal_time(6)),
+                # Three calls after the first compaction.
+                *compaction_records(
+                    2,
+                    usage_ts=journal_time(7),
+                    candidate_ts=journal_time(8),
+                    commit_ts=journal_time(9),
+                ),
+                journal_event("ModelUsageRecorded", journal_time(10), usage={"input": 1}),
+                read_started("r4", "a", journal_time(10)),
+            ]
+        )
+        # The first compaction sees calls 1-4; the second sees call 4 again.
+        self.assertEqual(row["rereads_after_compaction"], 5)
+        self.assertEqual(row["rereads_after_compaction_max"], 4)
+
+    def test_a_read_first_seen_after_the_compaction_is_not_a_reread(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    usage_ts=journal_time(1),
+                    candidate_ts=journal_time(2),
+                    commit_ts=journal_time(3),
+                ),
+                journal_event("ModelUsageRecorded", journal_time(4), usage={"input": 1}),
+                read_started("r1", "a", journal_time(4)),
+                journal_event("ModelUsageRecorded", journal_time(5), usage={"input": 1}),
+                read_started("r2", "new", journal_time(5)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 1)
+        self.assertEqual(row["rereads_after_compaction_max"], 1)
+
+    def test_a_retained_path_read_again_still_counts(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    usage_ts=journal_time(1),
+                    candidate_ts=journal_time(2),
+                    commit_ts=journal_time(3),
+                    retained_reads=["a"],
+                ),
+                journal_event("ModelUsageRecorded", journal_time(4), usage={"input": 1}),
+                read_started("r1", "a", journal_time(4)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 1)
+        self.assertEqual(row["retained_reads"], 1)
+
+    def test_an_uncommitted_compaction_candidate_is_not_a_compaction(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    usage_ts=journal_time(1),
+                    candidate_ts=journal_time(2),
+                    retained_reads=["a"],
+                    commit=False,
+                ),
+                journal_event("ModelUsageRecorded", journal_time(3), usage={"input": 1}),
+                read_started("r1", "a", journal_time(3)),
+                journal_event("ModelUsageRecorded", journal_time(4), usage={"input": 1}),
+                read_started("r2", "a", journal_time(4)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 0)
+        self.assertIsNone(row["rereads_after_compaction_max"])
+        self.assertEqual(row["retained_reads"], 0)
+        self.assertEqual(row["compaction_seconds"], 0)
+        self.assertIsNone(row["compaction_wall_share"])
+
+    def test_a_journal_without_a_compaction_has_zero_sums_and_empty_max_and_share(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                journal_event("ModelUsageRecorded", journal_time(1), usage={"input": 1}),
+                read_started("r1", "a", journal_time(1)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 0)
+        self.assertIsNone(row["rereads_after_compaction_max"])
+        self.assertEqual(row["retained_reads"], 0)
+        self.assertEqual(row["compaction_seconds"], 0)
+        self.assertIsNone(row["compaction_wall_share"])
+
+    def test_a_pi_journal_leaves_the_compaction_columns_empty(self):
+        row = journal_metrics.build_report([PI_COMPACTION])["journals"][0]
+        self.assertEqual(row["source"], "pi")
+        for column in (
+            "rereads_after_compaction",
+            "rereads_after_compaction_max",
+            "retained_reads",
+            "compaction_seconds",
+            "compaction_wall_share",
+        ):
+            with self.subTest(column=column):
+                self.assertIsNone(row[column])
+
+    def test_compaction_seconds_run_from_the_record_before_the_first_usage(self):
+        row = self.stats(
+            [
+                journal_event(
+                    "MessageAppended",
+                    journal_time(0),
+                    message={"user": {"content": []}},
+                ),
+                journal_event(
+                    "CompactionUsageRecorded",
+                    journal_time(10),
+                    revision=1,
+                    usage={"input": 1},
+                ),
+                # A retry records a second real call; the first one starts the clock.
+                journal_event(
+                    "CompactionUsageRecorded",
+                    journal_time(20),
+                    revision=1,
+                    usage={"input": 1},
+                ),
+                journal_event("ContextCompacted", journal_time(30), revision=1),
+                journal_event(
+                    "TranscriptReplacementCommitted",
+                    journal_time(31),
+                    revision=1,
+                    len=0,
+                ),
+            ]
+        )
+        self.assertEqual(row["compaction_seconds"], 30)
+
+    def test_a_committed_compaction_without_a_usage_record_adds_no_seconds(self):
+        row = self.stats(
+            [
+                read_started("pre", "a", journal_time(0)),
+                *compaction_records(
+                    1,
+                    candidate_ts=journal_time(10),
+                    commit_ts=journal_time(11),
+                    retained_reads=["a", "b"],
+                    usage=False,
+                ),
+                journal_event("ModelUsageRecorded", journal_time(12), usage={"input": 1}),
+                read_started("r1", "a", journal_time(12)),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 1)
+        self.assertEqual(row["rereads_after_compaction_max"], 1)
+        self.assertEqual(row["retained_reads"], 2)
+        self.assertEqual(row["compaction_seconds"], 0)
+        self.assertEqual(row["compaction_wall_share"], 0)
+
+    def test_a_journal_without_timestamps_leaves_seconds_and_share_empty(self):
+        row = self.stats(
+            [
+                read_started("pre", "a"),
+                *compaction_records(1, retained_reads=["a"]),
+                journal_event("ModelUsageRecorded", usage={"input": 1}),
+                read_started("r1", "a"),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 1)
+        self.assertEqual(row["rereads_after_compaction_max"], 1)
+        self.assertEqual(row["retained_reads"], 1)
+        self.assertIsNone(row["compaction_seconds"])
+        self.assertIsNone(row["compaction_wall_share"])
+
+    def test_a_timestampless_compaction_without_a_usage_record_is_empty(self):
+        # An old fixture can also hold a deterministic fallback: no summary call
+        # and no timestamp, so the seconds are missing rather than 0.
+        row = self.stats(
+            [
+                read_started("pre", "a"),
+                *compaction_records(1, usage=False, retained_reads=["a"]),
+                journal_event("ModelUsageRecorded", usage={"input": 1}),
+                read_started("r1", "a"),
+            ]
+        )
+        self.assertEqual(row["rereads_after_compaction"], 1)
+        self.assertEqual(row["retained_reads"], 1)
+        self.assertIsNone(row["compaction_seconds"])
+        self.assertIsNone(row["compaction_wall_share"])
+
+    def test_the_compaction_window_ends_after_five_model_calls(self):
+        records = [
+            read_started("pre", "a", journal_time(0)),
+            *compaction_records(
+                1,
+                usage_ts=journal_time(1),
+                candidate_ts=journal_time(2),
+                commit_ts=journal_time(3),
+            ),
+        ]
+        for index in range(1, 7):
+            ts = journal_time(3 + index)
+            records.append(journal_event("ModelUsageRecorded", ts, usage={"input": 1}))
+            records.append(read_started(f"r{index}", "a", ts))
+        row = self.stats(records)
+        self.assertEqual(row["rereads_after_compaction"], 5)
+        self.assertEqual(row["rereads_after_compaction_max"], 5)
+
+    def test_the_totals_sum_and_recompute_the_compaction_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_journal(
+                root / "one.jsonl",
+                [
+                    read_started("pre", "a", journal_time(0)),
+                    *compaction_records(
+                        1,
+                        usage_ts=journal_time(1),
+                        candidate_ts=journal_time(2),
+                        commit_ts=journal_time(3),
+                        retained_reads=["a"],
+                    ),
+                    journal_event(
+                        "ModelUsageRecorded", journal_time(4), usage={"input": 1}
+                    ),
+                    read_started("r1", "a", journal_time(4)),
+                    journal_event(
+                        "ModelUsageRecorded", journal_time(5), usage={"input": 1}
+                    ),
+                    read_started("r2", "a", journal_time(5)),
+                ],
+            )
+            write_journal(
+                root / "two.jsonl",
+                [
+                    read_started("pre", "b", journal_time(0)),
+                    *compaction_records(
+                        1,
+                        usage_ts=journal_time(1),
+                        candidate_ts=journal_time(2),
+                        commit_ts=journal_time(3),
+                    ),
+                    journal_event(
+                        "ModelUsageRecorded", journal_time(4), usage={"input": 1}
+                    ),
+                    read_started("r1", "b", journal_time(4)),
+                ],
+            )
+            totals = journal_metrics.build_report([root])["totals"]
+        self.assertEqual(totals["rereads_after_compaction"], 3)
+        self.assertEqual(totals["rereads_after_compaction_max"], 2)
+        self.assertEqual(totals["retained_reads"], 1)
+        self.assertEqual(totals["compaction_seconds"], 4)
+        self.assertEqual(totals["compaction_wall_share"], round(4 / 9, 3))
 
 
 def read_bound_docs():
