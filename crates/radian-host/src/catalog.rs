@@ -325,6 +325,16 @@ impl RouteOutput {
             Self::CatalogChat => catalog_max_tokens(context, output),
         }
     }
+
+    /// An explicit `max_tokens` the request carries (`RADIAN_EXTRA_BODY`) wins on the wire, so
+    /// it replaces the route's own output. `R` then counts this value, not the computed cap
+    /// (ADR 0018 §2). The Anthropic route reserves the key, so a host refuses it before here.
+    pub fn with_explicit(self, explicit: Option<u32>) -> Self {
+        match explicit {
+            Some(value) => Self::Fixed(value),
+            None => self,
+        }
+    }
 }
 
 // The cap rule itself lives in the adapter (it is the wire contract), so the host and the
@@ -1355,6 +1365,31 @@ mod tests {
         assert_eq!(output, Some(19_200));
         assert_eq!(output_reservation(Some(128_000), output), 19_200);
         assert_eq!(input_budget(Some(128_000), None, output), Ok(Some(108_800)));
+    }
+
+    #[test]
+    fn an_explicit_max_tokens_override_decides_the_reservation() {
+        // C = 128000, O = 384000: the computed cap is 19200, but `RADIAN_EXTRA_BODY` sets
+        // 32000, which wins on the wire. `R` counts the value actually sent, so B = 96000.
+        let output = RouteOutput::CatalogChat
+            .with_explicit(Some(32_000))
+            .resolve(Some(128_000), Some(384_000));
+        assert_eq!(output, Some(32_000));
+        assert_eq!(output_reservation(Some(128_000), output), 32_000);
+        assert_eq!(input_budget(Some(128_000), None, output), Ok(Some(96_000)));
+        // A smaller override replaces the computed cap too; the window cap still reserves R.
+        let output = RouteOutput::CatalogChat
+            .with_explicit(Some(4_000))
+            .resolve(Some(128_000), Some(384_000));
+        assert_eq!(output, Some(4_000));
+        assert_eq!(output_reservation(Some(128_000), output), 16_384);
+        // No override leaves the computed cap and the old arithmetic alone.
+        assert_eq!(
+            RouteOutput::CatalogChat
+                .with_explicit(None)
+                .resolve(Some(128_000), Some(384_000)),
+            Some(19_200)
+        );
     }
 
     #[test]

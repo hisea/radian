@@ -470,13 +470,15 @@ pub(crate) async fn setup(
     let replays_reasoning = reasoning_replay.is_some();
     // ADR 0018 §2: the output the request will really send. The chat route sends the
     // catalog-derived `max_tokens` (`min(limit.output, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`),
-    // the Anthropic route its `max_tokens`, and the Responses route none. `R` and `B` count
-    // exactly this value.
+    // the Anthropic route its `max_tokens`, and the Responses route none. An explicit
+    // `max_tokens` in `RADIAN_EXTRA_BODY` wins on the wire, so it replaces the computed value
+    // and `R` counts it. `B` counts exactly this value.
     let request_output = radian_host::route_output(
         route.adapter(),
         &route.base_url,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-    );
+    )
+    .with_explicit(radian_host::explicit_max_tokens(&extra_fields));
     // The catalog groups by provider id: the resolved provider's own id when it is not the
     // generic descriptor (so a `chatgpt` route resolves through the descriptor table, which is
     // the only window source models.dev cannot answer for), else the hostname rule.

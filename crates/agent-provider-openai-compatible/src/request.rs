@@ -699,7 +699,7 @@ mod tests {
         assert!(build_body(&req, &cfg, false).is_err());
     }
     #[test]
-    fn the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window() {
+    fn the_catalog_output_cap_is_the_ceiling_and_the_window_share() {
         // ADR 0018: C = 1000000, O = 384000 → 150000; C = 128000, O = 16384 → 16384.
         assert_eq!(
             catalog_max_tokens(Some(1_000_000), Some(384_000)),

@@ -723,3 +723,15 @@ Unmutated, the lib's nine `acp::` tests pass.
 
 1/1 caught. The mutation is the pre-fix `send`: `tokio::select!` with both branches ready picks
 at random, so a deliverable message disappeared once `close` had run.
+
+## TK0257: the startup reservation counts an explicit max_tokens (2026-10-31)
+
+Branch `work/TK0257-chat-reserve-15-percent` (rework 2). The mutation was applied to
+`src/setup.rs`, the `radian` binary rebuilt, and the test run with `cargo nextest run -p
+radian-exec --test cli --locked --profile sandbox --no-fail-fast -E
+'test(an_explicit_max_tokens_raises_the_reservation_it_counts)'`; the source was restored from
+a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0257-M4 | the startup `request_output` drops `.with_explicit(...)` (the pre-fix separation between the window and the body merge) | ✅ 1 failed (rc=100) | `an_explicit_max_tokens_raises_the_reservation_it_counts` (`R 19200, B 108800` while the body sends 32000) |
