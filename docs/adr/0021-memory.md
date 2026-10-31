@@ -96,7 +96,7 @@ addition_budget = 500
 
 - The agent tool set holds only `memory_search` (keyword search, or read by id). **It mounts only when Active records at session start exceed `[memory.injection] max_tokens` in estimated tokens**: what fits stays fully in the fixed section, and search has no use. Estimation uses the injection ruler (ADR 0015 conservative estimate), taking Project and Global Active records per D1 read order. The mount decision runs once at session start and never changes in-session (ADR 0036: tool definitions stay fixed in-session). Resume judges again.
 - No `memory_save`, `memory_revise`, or `memory_get` exist: these names never register and never advertise. Calls to them are unknown tools.
-- Permissions: `write` and `patch` to `<memory root>/global/` and `<memory root>/projects/<ProjectId>/` are `allow` in both tiers. `shell` never reaches the memory store (invariant 5).
+- Permissions: `write` and `patch` to `<memory root>/global/` and `<memory root>/projects/<ProjectId>/` are `allow` in both tiers. Under `workspace` the sandbox deny set keeps `shell` out of the memory store (invariant 5); `full` runs no sandbox.
 - User commands (CLI and TUI): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `relink`, `split`, `merge`, `project`. `forget`, `purge`, `split`, and `merge` need confirmation.
 
 ### D8 Service contract
