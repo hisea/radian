@@ -340,6 +340,74 @@ async fn a_compaction_reuses_the_previous_summary() {
     assert!(!session.transcript()[0].text().contains("old summary text"));
 }
 
+/// ADR 0018: a large previous summary is one **input** to a consolidated rewrite, not text the
+/// summarizer keeps: 6k tokens in, a 1k summary out, and the request the summarizer saw carries
+/// the consolidate rule instead of the append rule.
+#[tokio::test]
+async fn a_large_previous_summary_is_consolidated_into_a_small_one() {
+    // About 6k tokens by the default 4-bytes-per-token ruler.
+    let previous = "p".repeat(24_000);
+    // About 1k tokens: the answer the scripted summarizer returns.
+    let returned = "s".repeat(4_000);
+    let model = ScriptedModel::new([summary_reply(&returned, 50), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let history = compaction::compacted_history(
+        &previous,
+        &[],
+        &[
+            Message::user("y".repeat(12_000)),
+            Message::assistant("ok"),
+            Message::user("last"),
+        ],
+    )
+    .unwrap();
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(compacted_records(&journal).len(), 1);
+    assert!(
+        !compacted_records(&journal)[0].0,
+        "the model's summary, not the deterministic fallback"
+    );
+
+    // The 1k summary replaced the 6k one in the committed transcript.
+    let committed = summary_text(session.transcript());
+    assert!(committed.contains(&returned), "{committed}");
+    assert!(!committed.contains(&"p".repeat(100)), "{committed}");
+    assert!(
+        compaction::message_tokens(&Message::user(&committed)) < 2_048,
+        "the committed summary is small"
+    );
+
+    // The request the summarizer saw carries the previous summary as input and the consolidate
+    // instruction, not the old append rule.
+    let request = &model.requests()[0];
+    let body = request.messages[0].text();
+    assert!(body.contains(&previous), "the previous summary is an input");
+    assert!(
+        body.contains(compaction::SUMMARY_ONE_CONSOLIDATED),
+        "{body}"
+    );
+    assert!(
+        body.contains(compaction::SUMMARY_NEWER_MESSAGES_WIN),
+        "{body}"
+    );
+    assert!(
+        !body.contains("preserving what is still relevant"),
+        "{body}"
+    );
+    assert!(!body.contains("rolling update"), "{body}");
+}
+
 // ---------- 4. atomic tool unit across the cut ----------
 
 /// A compaction cut never splits an assistant message from its tool results.

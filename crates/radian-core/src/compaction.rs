@@ -54,16 +54,25 @@ pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
 pub const SUMMARY_PLANS_ARE_NOT_FACTS: &str =
     "Plans, assumptions and intentions are not facts and must not appear here";
 
-/// The rule that `Verified facts` is chronological (oldest first, new facts appended at the
-/// end), so "delete the oldest first" has a defined meaning. Quoted in the summary prompt and
-/// the shorten body; the stable substring a test asserts.
-pub const SUMMARY_FACTS_ORDER_RULE: &str =
-    "list the facts in chronological order, oldest first, and append each new fact at the end";
+/// The rule that `Verified facts` is chronological (oldest first), so "delete the oldest
+/// first" has a defined meaning without telling the model to keep every older fact. Quoted in
+/// the summary prompt and the shorten body; the stable substring a test asserts.
+pub const SUMMARY_FACTS_ORDER_RULE: &str = "list the facts in chronological order, oldest first, with each newer fact placed after the older ones";
 
 /// The rule for choosing which fact to delete when the section is over its ceiling: the
 /// oldest one, and only when it is no longer relevant to the Goal and the current work. Quoted
 /// in the summary prompt and the shorten body; the stable substring a test asserts.
 pub const SUMMARY_FACTS_DELETE_OLDEST: &str = "delete the oldest fact first";
+
+/// The stable phrase for the rewrite rule (ADR 0018): a summary request that carries a previous
+/// summary asks for one merged summary that covers the whole conversation, not the old text plus
+/// additions. Quoted in [`summary_request`]'s update paragraph and in
+/// [`summary_system_prompt`]; the stable substring a test asserts.
+pub const SUMMARY_ONE_CONSOLIDATED: &str = "one consolidated summary";
+
+/// The stable phrase for which side wins a disagreement (ADR 0018): the newer history. Quoted
+/// beside [`SUMMARY_ONE_CONSOLIDATED`]; the stable substring a test asserts.
+pub const SUMMARY_NEWER_MESSAGES_WIN: &str = "newer messages win";
 
 /// The fixed part of the summary system prompt (ADR 0018 §摘要 / plan B). It asks
 /// for the sections by name and forbids inventing anything, because the summary becomes part of
@@ -88,7 +97,7 @@ What is partly done.
 What is not started.
 
 ## Verified facts (do not re-check)
-Only facts the conversation actually verified belong here: commands that ran with their results, and conclusions drawn from code that was read. Plans, assumptions and intentions are not facts and must not appear here. State how each fact was verified (which command, or which file and line), and do not re-check these facts later. Keep the section ordered: list the facts in chronological order, oldest first, and append each new fact at the end (a rolling update keeps that order). When the summary is over the length limit, first drop stale details from the other sections; delete a fact only when it is no longer relevant to the Goal and to the Pending or In progress work, and then delete the oldest fact first.
+Only facts the conversation actually verified belong here: commands that ran with their results, and conclusions drawn from code that was read. Plans, assumptions and intentions are not facts and must not appear here. State how each fact was verified (which command, or which file and line), and do not re-check these facts later. Keep the section ordered: list the facts in chronological order, oldest first, with each newer fact placed after the older ones. When the summary is over the length limit, first drop stale details from the other sections; delete a fact only when it is no longer relevant to the Goal and to the Pending or In progress work, and then delete the oldest fact first.
 
 ## Current work
 The one thing being worked on right before this summary, down to the file and the function.
@@ -143,7 +152,9 @@ pub fn summary_system_prompt(max_tokens: u64) -> String {
          Verified facts section alone must be at most {facts} tokens (about {} English words; \
          same approximation). When the summary is over the limit, drop stale details from the \
          other sections first, then follow the Verified facts deletion rule above. This applies \
-         when updating a previous summary too: shorten it, do not only append.",
+         when updating a previous summary too: write {SUMMARY_ONE_CONSOLIDATED} that covers the \
+         whole conversation so far, not the old text with additions, and where the new messages \
+         contradict it, {SUMMARY_NEWER_MESSAGES_WIN}.",
         approx_words(max_tokens),
         approx_words(facts)
     )
@@ -162,7 +173,7 @@ pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (o
 
 /// The summary length ceiling for an input budget `B` (dogfood9):
 /// `min(K, max(8192, ⌊B/8⌋))` with `K = keep_target(B)`. The old fixed [`DEFAULT_SUMMARY_MAX_TOKENS`]
-/// was too small for a large window: the rolling summary grows with every compaction, and at
+/// was too small for a large window: a summary can carry a large part of the history, and at
 /// 120K (`B = 103616`) the shortening retry still produced 8725 tokens, over 8192, and failed
 /// the whole turn. The ceiling now grows with the window — 12952 there — while never exceeding
 /// the keep target. A smaller window keeps `K` (`B = 16000` → 4000). When there is **no
@@ -351,8 +362,9 @@ pub fn check_summary(text: &str, max_tokens: u64) -> Result<String, SummaryError
 /// sees the raw tool-call/result shapes, so it cannot produce a broken pairing. Each tool
 /// result, and each call's JSON arguments, is cut to [`TOOL_RESULT_LIMIT_CHARS`] characters
 /// (never mid-character) and the cut is stated. An assistant's `reasoning` is left out: it is provider-invisible and not part
-/// of the visible history (ADR 0014). `previous_summary` is the rolling summary of an earlier
-/// compaction; `instructions` is the optional `/compact` note. No tools are sent.
+/// of the visible history (ADR 0014). `previous_summary` is the last summary from an earlier
+/// compaction, an input to the rewrite; `instructions` is the optional `/compact` note. No tools
+/// are sent.
 pub fn summary_request(
     previous_summary: Option<&str>,
     to_summarize: &[Message],
@@ -365,10 +377,13 @@ pub fn summary_request(
         body.push_str("<previous-summary>\n");
         body.push_str(previous);
         body.push_str("\n</previous-summary>\n\n");
-        body.push_str(
-            "The messages below are NEW conversation messages. Update the previous summary \
-             above with them, preserving what is still relevant.\n\n",
-        );
+        body.push_str(&format!(
+            "The messages below are NEW conversation messages. Write {SUMMARY_ONE_CONSOLIDATED} \
+             that covers the whole conversation so far. The previous summary above is one of the \
+             inputs, not text to keep: merge it with the new messages, and where they contradict \
+             it, {SUMMARY_NEWER_MESSAGES_WIN}. Drop any item that is no longer relevant to the \
+             Goal or to the Pending and In progress work.\n\n"
+        ));
     }
     body.push_str("Conversation to summarize:\n\n");
     body.push_str(&summarize_text(to_summarize));
@@ -404,7 +419,7 @@ pub fn shorten_request(
          When the summary is over the limit, first drop stale details from the other sections; \
          delete a fact only when it is no longer relevant to the Goal and to the Pending or In \
          progress work, and then delete the oldest fact first (list the facts in chronological \
-         order, oldest first, and append each new fact at the end). The whole summary must be \
+         order, oldest first, with each newer fact placed after the older ones). The whole summary must be \
          shorter than {target_tokens} tokens (about {} English words; that is an approximation, \
          1 token ≈ 0.75 words), and the Verified facts section alone must be at most {facts} \
          tokens (about {} English words). Do not add new content and do not only append: the \
@@ -653,7 +668,7 @@ fn is_compaction_summary_origin(message: &Message) -> bool {
     value.get("kind").and_then(Value::as_str) == Some("compaction_summary")
 }
 
-/// The rolling **model** summary of a compaction-summary message: the fixed
+/// The **model** summary of a compaction-summary message: the fixed
 /// [`SUMMARY_MESSAGE_PREFIX`] removed, and everything from [`USER_MESSAGES_HEADING`] on cut
 /// off (the verbatim user messages are not part of the model's summary). `None` when `message`
 /// is not one.
