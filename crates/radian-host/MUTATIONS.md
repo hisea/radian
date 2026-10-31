@@ -1892,3 +1892,16 @@ the source was restored from a backup under `.radian/`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0286-M9 | `parse_extra_body` drops the oversized-output-cap refusal, so the body parses again | ✅ 1 failed (rc=100) | `extra_body::tests::an_output_cap_the_reservation_cannot_hold_is_refused_at_startup` (`expect_err`: `{"max_tokens":4294967296}` parsed) |
+## TK0277: subtree context files (2026-10-31)
+
+Branch `work/TK0277-subtree-context-files`. Each mutation was applied in place, the
+`radian` binary rebuilt (`cargo build -p radian-tui --bin radian`, the CLI tests refuse a
+stale one) and the named tests run with `cargo nextest run ... --profile sandbox
+--no-fail-fast -E 'test(<name>)'`. Each source was restored from a backup under `.radian/mut/`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0277-M1 | `SubtreeContext::discover` does not insert an appended path into the already-loaded set | ✅ 2 failed (rc=100) | `context::tests::a_subtree_file_appends_once_and_a_deeper_file_follows` (the second read appended `crates/x/AGENTS.md` again) and `cli::a_subtree_context_file_appends_once_before_the_next_request` (two `ContextFileAppended` events and two blocks) |
+| TK0277-M2 | `open_session` seeds the loaded set without the startup chain (`Vec::new()`) | ✅ 1 failed (rc=100) | `cli::a_startup_context_file_is_never_appended_again` (the workspace `AGENTS.md` was appended again) |
+| TK0277-M3 | `open_session` passes `true` to `ContextHooks` instead of `[context] subtree_files` | ✅ 1 failed (rc=100) | `cli::the_subtree_switch_turns_the_append_off` (the disabled switch still appended) |

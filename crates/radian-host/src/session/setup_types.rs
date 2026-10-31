@@ -128,6 +128,8 @@ pub struct SessionSetup {
     /// The memory injection configuration (ADR 0021). The host builds it
     /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
     pub memory_injection: InjectionConfig,
+    /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
+    pub subtree_files: bool,
     /// The resolved `[hooks]` section (ADR 0045 slice A): user-level external command hooks.
     /// The host copies it from the config; `open_session` builds the [`crate::CommandHooks`]
     /// from it and chains it after the permissions.

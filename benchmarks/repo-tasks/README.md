@@ -198,7 +198,8 @@ These tables do not show every fixed column the module defines. The rest keep
 their `journal_metrics.COLUMNS` names and meanings, and a reader who needs one
 takes it from a `build_report` row like every other number: `journal`,
 `source`, `max_tokens_responses`, `read_ranged_bytes`, `read_unranged_bytes`,
-`p50ms.<bucket>`, `p90ms.<bucket>`, `deterministic_compactions`,
+`memory_reads` and `memory_writes` (whether a session read or wrote a memory
+file), `p50ms.<bucket>`, `p90ms.<bucket>`, `deterministic_compactions`,
 `rereads_after_compaction`, `rereads_after_compaction_max`, `retained_reads`,
 `compaction_seconds`, `compaction_wall_share` and `outcomes` (the tables' own
 `result` counts a run's outcome from `run.json`, `checks.json` and `review.json`, not a
