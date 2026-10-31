@@ -104,6 +104,7 @@ const VALID_FIXTURES: &[&str] = &[
     "replace-resets-index.jsonl",
     "compaction-committed.jsonl",
     "compaction-candidate-only.jsonl",
+    "compaction-retained-reads.jsonl",
     "fork-parent.jsonl",
     "fork-child.jsonl",
 ];

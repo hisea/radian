@@ -1003,6 +1003,7 @@ fn a_candidate_without_a_commit_recovers_the_old_history() {
         below_target: false,
         model: "current".into(),
         deterministic: false,
+        retained_reads: Vec::new(),
     });
     records.push(JournalRecord::TranscriptReplaced {
         revision: 1,
@@ -1110,6 +1111,7 @@ fn a_compaction_record_inside_a_pending_segment_is_corruption() {
         below_target: false,
         model: "current".into(),
         deterministic: false,
+        retained_reads: Vec::new(),
     };
     let open = JournalRecord::TranscriptReplaced {
         revision: 1,
@@ -2067,4 +2069,454 @@ async fn a_compaction_that_reaches_the_goal_allows_another_extra_compaction() {
     assert_eq!(outcome.status, RunStatus::Completed);
     let flags: Vec<bool> = compaction_targets(&journal).iter().map(|t| t.0).collect();
     assert_eq!(flags, vec![true, false, false, true, false]);
+}
+
+// ---------- ADR 0018: retained reads ----------
+
+fn read_unit(id: &str, path: &str, text: &str) -> Vec<Message> {
+    use radian_core::{MessageMeta, ToolCall, ToolResult};
+
+    vec![
+        Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": path }),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success(id, vec![ContentPart::text(text)]),
+            meta: MessageMeta::default(),
+        },
+    ]
+}
+
+fn read_error_unit(id: &str, path: &str) -> Vec<Message> {
+    use radian_core::{MessageMeta, ToolCall, ToolResult};
+
+    vec![
+        Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": path }),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        },
+        Message::Tool {
+            result: ToolResult::error(id, "read_failed", "no such file"),
+            meta: MessageMeta::default(),
+        },
+    ]
+}
+
+/// The `retained_reads` list of every `ContextCompacted` candidate in the journal.
+fn retained_paths(journal: &RecordingJournal) -> Vec<Vec<String>> {
+    journal
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::ContextCompacted { retained_reads, .. } => Some(retained_reads.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The token size of one unit under the ADR 0015 default ruler.
+fn unit_tokens(history: &[Message], range: &std::ops::Range<usize>) -> u64 {
+    history[range.clone()]
+        .iter()
+        .map(compaction::message_tokens)
+        .sum()
+}
+
+/// Case 1 — Three paths, each read twice before the cut: the three newest read units are kept, in
+/// order, and `retained_reads` names the three paths newest first.
+#[test]
+fn the_newest_read_of_each_path_is_kept_newest_first() {
+    let mut history = Vec::new();
+    for round in 0..2 {
+        for path in ["a", "b", "c"] {
+            history.extend(read_unit(
+                &format!("{path}{round}"),
+                &format!("/work/example/{path}"),
+                "body",
+            ));
+        }
+    }
+    let units = compaction::units(&history).unwrap();
+    let kept = compaction::retained_read_units(&history, history.len(), 100_000).unwrap();
+
+    assert_eq!(
+        kept.paths,
+        vec!["/work/example/c", "/work/example/b", "/work/example/a"]
+    );
+    assert_eq!(
+        kept.units,
+        units[units.len() - 3..].to_vec(),
+        "the three newest units, in original order"
+    );
+}
+
+/// Case 2 — Budget for only two of the three: the oldest path's unit is not kept.
+#[test]
+fn a_budget_for_two_keeps_only_the_two_newest_paths() {
+    let mut history = Vec::new();
+    for round in 0..2 {
+        for path in ["a", "b", "c"] {
+            history.extend(read_unit(
+                &format!("{path}{round}"),
+                &format!("/work/example/{path}"),
+                "body",
+            ));
+        }
+    }
+    let units = compaction::units(&history).unwrap();
+    // Exactly the size of the two newest units, so only they fit.
+    let keep = 2 * (unit_tokens(&history, &units[4]) + unit_tokens(&history, &units[5]));
+    let kept = compaction::retained_read_units(&history, history.len(), keep).unwrap();
+
+    assert_eq!(kept.paths, vec!["/work/example/c", "/work/example/b"]);
+    assert_eq!(kept.units, vec![units[4].clone(), units[5].clone()]);
+}
+
+/// Case 3 — The newest read of P is larger than the budget left, and an older read of P would fit:
+/// neither is kept (the older one is superseded).
+#[test]
+fn a_superseded_read_that_would_fit_is_still_not_kept() {
+    let small = read_unit("p1", "/work/example/p", "small");
+    let small_tokens = small.iter().map(compaction::message_tokens).sum::<u64>();
+    let mut history = small;
+    history.extend(read_unit("p2", "/work/example/p", &"L".repeat(50_000)));
+    // The budget is exactly the old read's size: it would fit, but it has been superseded.
+    let kept = compaction::retained_read_units(&history, history.len(), 2 * small_tokens).unwrap();
+
+    assert!(kept.units.is_empty(), "{kept:?}");
+    assert!(kept.paths.is_empty(), "{kept:?}");
+}
+
+/// Case 4 — A read whose result is an error is not kept.
+#[test]
+fn an_error_read_is_not_kept() {
+    let history = read_error_unit("p1", "/work/example/p");
+    let kept = compaction::retained_read_units(&history, history.len(), 100_000).unwrap();
+    assert!(kept.units.is_empty(), "{kept:?}");
+    assert!(kept.paths.is_empty(), "{kept:?}");
+}
+
+/// Case 5 — The newest read of P is in the kept tail: P is not kept a second time.
+#[test]
+fn a_path_whose_newest_read_is_in_the_kept_tail_takes_nothing() {
+    let mut history = read_unit("p1", "/work/example/p", "old");
+    let first_kept = history.len();
+    history.extend(read_unit("p2", "/work/example/p", "new"));
+    let kept = compaction::retained_read_units(&history, first_kept, 100_000).unwrap();
+
+    assert!(kept.units.is_empty(), "{kept:?}");
+    assert!(kept.paths.is_empty(), "{kept:?}");
+}
+
+/// Case 10 — An assistant message with a `read` of P and a `shell` call in one unit: the unit is
+/// kept whole, with both results.
+#[test]
+fn a_unit_with_another_call_is_kept_whole() {
+    use radian_core::{MessageMeta, ToolCall, ToolResult};
+
+    let history = vec![
+        Message::user("task"),
+        Message::Assistant {
+            content: Vec::new(),
+            reasoning: Vec::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "r1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "/work/example/p" }),
+                },
+                ToolCall {
+                    id: "s1".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({ "command": "true" }),
+                },
+            ],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success("r1", vec![ContentPart::text("body")]),
+            meta: MessageMeta::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success("s1", vec![ContentPart::text("ok")]),
+            meta: MessageMeta::default(),
+        },
+    ];
+    let kept = compaction::retained_read_units(&history, history.len(), 100_000).unwrap();
+
+    assert_eq!(kept.paths, vec!["/work/example/p"]);
+    assert_eq!(
+        kept.units,
+        vec![1..4],
+        "the whole unit, both results included"
+    );
+}
+
+/// Case 6 — A 32k window (`B = 24576`, `K = 6144`, budget 3072) whose newest read is larger than
+/// 3072 tokens: nothing is retained, and the compaction succeeds exactly as before.
+#[tokio::test]
+async fn a_32k_window_retains_no_read_over_its_budget() {
+    let model = ScriptedModel::new([summary_reply("summary of the task", 10), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = small_window_agent(model.clone(), 24_576, 0);
+    let mut history = vec![Message::user("x".repeat(100_000))];
+    history.extend(read_unit("r1", "/work/example/a.txt", &"r".repeat(13_000)));
+    // The newest unit (after the turn input) is large enough to fill `K`, so the read unit is
+    // summarized, where the retention rule looks.
+    history.push(Message::user("y".repeat(20_000)));
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the compaction committed");
+    assert_eq!(
+        retained_paths(&journal),
+        vec![Vec::<String>::new()],
+        "3072 tokens do not fit a 3250-token read"
+    );
+    assert!(
+        !session.transcript().iter().any(
+            |message| matches!(message, Message::Tool { result, .. } if result.call_id == "r1")
+        ),
+        "the read unit stayed in the summary"
+    );
+}
+
+/// Case 7 — A retained unit with a result over 2000 characters, while the kept part alone is over
+/// `K`: the retained result stays whole, and the kept-tail result is cut.
+#[tokio::test]
+async fn a_retained_result_is_not_cut_when_the_kept_tail_is() {
+    let model = ScriptedModel::new([
+        common::calls(vec![common::call("b1", "big", serde_json::json!({}))]),
+        summary_reply("summary of the task", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = small_window_agent(model.clone(), 24_576, 76_000);
+    let mut history = vec![Message::user("x".repeat(24_000))];
+    history.extend(read_unit("r1", "/work/example/a.txt", &"r".repeat(3_000)));
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        retained_paths(&journal),
+        vec![vec!["/work/example/a.txt".to_owned()]]
+    );
+
+    let transcript = session.transcript();
+    let retained = transcript
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool { result, .. } if result.call_id == "r1" => Some(result.text()),
+            _ => None,
+        })
+        .expect("the retained read is in the view");
+    assert_eq!(
+        retained,
+        "r".repeat(3_000),
+        "the retained result stays whole"
+    );
+    let kept = big_result(transcript);
+    assert!(kept.contains("[truncated"), "the kept-tail result is cut");
+    assert!(kept.chars().count() <= radian_core::TOOL_RESULT_LIMIT_CHARS);
+
+    // The retained unit sits right after the summary and before the kept tail.
+    let read_at = transcript
+        .iter()
+        .position(
+            |message| matches!(message, Message::Tool { result, .. } if result.call_id == "r1"),
+        )
+        .unwrap();
+    let big_at = transcript
+        .iter()
+        .position(
+            |message| matches!(message, Message::Tool { result, .. } if result.call_id == "b1"),
+        )
+        .unwrap();
+    assert_eq!(read_at, 2, "summary, assistant read, result");
+    assert!(read_at < big_at, "{read_at} < {big_at}");
+}
+
+/// An agent whose `T` and keep target use the same default 4-bytes-per-token ruler.
+fn default_ruler_agent(
+    model: Arc<ScriptedModel>,
+    budget: u64,
+) -> Arc<Agent<Arc<ScriptedModel>, NoTools, ()>> {
+    Arc::new(Agent::new(model, NoTools).with_config(AgentConfig {
+        context_budget: Some(ContextBudget::new(budget)),
+        auto_compact: true,
+        retries: 0,
+        ..Default::default()
+    }))
+}
+
+/// Case 8 — Retaining pushes `T_after` over 0.75·B: the committed view has no retained unit and is
+/// not marked `below_target`.
+#[tokio::test]
+async fn retaining_that_misses_the_goal_measures_again_without() {
+    let large = Reply::Respond(ModelResponse {
+        limits: None,
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text("a".repeat(108_000))],
+        tool_calls: vec![common::call("e1", "echo", serde_json::json!({}))],
+        provider_payload: None,
+        stop_reason: StopReason::ToolUse,
+        usage: None,
+    });
+    let model = ScriptedModel::new([large, summary_reply("summary", 10), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = default_ruler_agent(model.clone(), 40_000);
+    let mut history = vec![Message::user("x".repeat(70_000))];
+    history.extend(read_unit("r1", "/work/example/a.txt", &"r".repeat(4_000)));
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let targets = compaction_targets(&journal);
+    assert_eq!(targets.len(), 1, "{targets:?}");
+    assert!(
+        !targets[0].0,
+        "the version without the retained unit reaches the goal: {targets:?}"
+    );
+    assert_eq!(retained_paths(&journal), vec![Vec::<String>::new()]);
+    assert!(
+        !session.transcript().iter().any(
+            |message| matches!(message, Message::Tool { result, .. } if result.call_id == "r1")
+        ),
+        "no retained unit is committed"
+    );
+}
+
+/// Case 9 — Two compactions in one session: a unit retained by the first is in the summarized part
+/// of the second, and it is chosen again only by the same rule. It never appears twice.
+#[tokio::test]
+async fn a_retained_unit_is_chosen_again_but_never_duplicated() {
+    let model = ScriptedModel::new([
+        summary_reply(&"s".repeat(20_000), 10),
+        summary_reply("second summary", 10),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = Arc::new(Agent::new(model.clone(), NoTools).with_config(AgentConfig {
+        retries: 0,
+        ..Default::default()
+    }));
+    let mut history = vec![Message::user("x".repeat(40_000))];
+    history.extend(read_unit("r1", "/work/example/a.txt", &"r".repeat(4_000)));
+    history.push(Message::user("z".repeat(5_000)));
+    // The newest unit alone is over `K`, so both compactions cut at the unit before it and
+    // the read unit stays in the summarized part.
+    history.push(Message::assistant("a".repeat(60_000)));
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+    let budget = Some(ContextBudget::new(40_000));
+
+    for round in 0..2 {
+        let outcome = session
+            .compact_now(None, &CancellationToken::new(), &recorder, budget, None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, radian_core::CompactionOutcome::Compacted { .. }),
+            "round {round}: {outcome:?}"
+        );
+    }
+    assert_eq!(session.transcript_revision(), 2);
+    assert_eq!(
+        retained_paths(&journal),
+        vec![
+            vec!["/work/example/a.txt".to_owned()],
+            vec!["/work/example/a.txt".to_owned()],
+        ],
+        "the second compaction chooses the same newest read again"
+    );
+    let transcript = session.transcript();
+    assert_eq!(
+        transcript
+            .iter()
+            .filter(
+                |message| matches!(message, Message::Tool { result, .. } if result.call_id == "r1")
+            )
+            .count(),
+        1,
+        "the retained unit appears once: {transcript:?}"
+    );
+    assert_eq!(
+        transcript[1..3],
+        *read_unit("r1", "/work/example/a.txt", &"r".repeat(4_000))
+    );
+}
+
+/// Case 11 — The deterministic fallback after an over-long summary: no retained unit.
+#[tokio::test]
+async fn the_deterministic_fallback_keeps_no_retained_unit() {
+    let model = ScriptedModel::new([empty_reply(), empty_reply(), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_500, true);
+    let mut history = vec![Message::user("x".repeat(8_000))];
+    history.extend(read_unit("r1", "/work/example/a.txt", &"r".repeat(100)));
+    history.push(Message::user("y".repeat(3_000)));
+    history.push(Message::user("last"));
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert_eq!(retained_paths(&journal), vec![Vec::<String>::new()]);
+    assert!(
+        !session.transcript().iter().any(
+            |message| matches!(message, Message::Tool { result, .. } if result.call_id == "r1")
+        ),
+        "the fallback keeps no retained unit"
+    );
 }

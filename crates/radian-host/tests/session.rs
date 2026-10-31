@@ -589,6 +589,7 @@ async fn a_resumed_history_matches_the_disk_fold_through_compaction_and_replacem
             below_target: false,
             model: "mock".to_owned(),
             deterministic: false,
+            retained_reads: Vec::new(),
         },
         JournalRecord::TranscriptReplaced {
             revision: 1,

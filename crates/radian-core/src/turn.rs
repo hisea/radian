@@ -729,18 +729,83 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             // ADR 0018: on an automatic path, a kept part that alone is over the keep target
             // (the newest atomic unit carries a large tool result) has every over-long tool
             // result cut, as in the deterministic fallback's first step. The model saw the full
-            // result one step earlier; what goes is the replay.
+            // result one step earlier; what goes is the replay. The cut applies to the kept tail
+            // only, never to a retained read unit.
             let mut kept = transcript[plan.first_kept..].to_vec();
             if deterministic_allowed && plan.kept_tokens > keep {
                 compaction::truncate_kept_tool_results(&mut kept);
             }
-            let history = self.compacted_view(&summary, &user_messages, &kept, events)?;
+            // ADR 0018: keep the newest `read` of each path from the summarized part, within
+            // ⌊K/2⌋ tokens. They sit between the summary and the kept tail, and count toward
+            // `T_after`.
+            let retained = match compaction::retained_read_units(&transcript, plan.first_kept, keep)
+            {
+                Ok(retained) => retained,
+                Err(error) => {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: error.to_string(),
+                    });
+                    return Err(CompactionFailure::Compaction(
+                        CompactionError::InvalidSummary(error.to_string()),
+                    ));
+                }
+            };
+            let retained_messages: Vec<Message> = retained
+                .units
+                .iter()
+                .flat_map(|range| transcript[range.clone()].iter().cloned())
+                .collect();
+            let history =
+                self.compacted_view(&summary, &user_messages, &retained_messages, &kept, events)?;
             let size_after = match self
                 .rebuild_and_measure(request, &history, hcx, interrupt, events)
                 .await?
             {
                 Measured::Cancelled(reason) => return Ok(CompactionStep::Cancelled(reason)),
                 Measured::Size(size) => size,
+            };
+            let tokens_after = self.tokens_of(size_after);
+            let below_target = matches!(
+                gain,
+                Gain::Budget { input_budget }
+                    if tokens_after.saturating_mul(4) > input_budget.saturating_mul(3)
+            );
+            if self.gain_ok(gain, tokens_before, tokens_after) && !below_target {
+                return self
+                    .finish_compaction(
+                        history,
+                        summary,
+                        false,
+                        0,
+                        plan.first_kept,
+                        tokens_before,
+                        tokens_after,
+                        size_after,
+                        gain,
+                        retained.paths,
+                        source_revision,
+                        source_len,
+                        revision,
+                        events,
+                    )
+                    .await;
+            }
+            // ADR 0018 "target first": retaining reads never turns a compaction that would
+            // reach the target, or pass the gain check, into one that does not. Measure again
+            // without any retained unit and commit that version, which behaves exactly as
+            // before.
+            let (history, size_after) = if retained_messages.is_empty() {
+                (history, size_after)
+            } else {
+                let history = self.compacted_view(&summary, &user_messages, &[], &kept, events)?;
+                let size_after = match self
+                    .rebuild_and_measure(request, &history, hcx, interrupt, events)
+                    .await?
+                {
+                    Measured::Cancelled(reason) => return Ok(CompactionStep::Cancelled(reason)),
+                    Measured::Size(size) => size,
+                };
+                (history, size_after)
             };
             let tokens_after = self.tokens_of(size_after);
             if self.gain_ok(gain, tokens_before, tokens_after) {
@@ -755,6 +820,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         tokens_after,
                         size_after,
                         gain,
+                        Vec::new(),
                         source_revision,
                         source_len,
                         revision,
@@ -835,7 +901,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             let dropped = first_kept - start - carried;
             let summary =
                 compaction::deterministic_summary(kept_summary.as_deref(), dropped, truncated);
-            let history = self.compacted_view(&summary, &user_messages, &kept, events)?;
+            let history = self.compacted_view(&summary, &user_messages, &[], &kept, events)?;
             let size_after = match self
                 .rebuild_and_measure(request, &history, hcx, interrupt, events)
                 .await?
@@ -857,6 +923,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                         tokens_after,
                         size_after,
                         gain,
+                        Vec::new(),
                         source_revision,
                         source_len,
                         revision,
@@ -1036,10 +1103,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         &self,
         summary: &str,
         user_messages: &[compaction::RetainedUserMessage],
+        retained: &[Message],
         kept: &[Message],
         events: &dyn EventSink,
     ) -> Result<Vec<Message>, CompactionFailure> {
-        match compaction::compacted_history(summary, user_messages, kept) {
+        match compaction::compacted_history_with_retained(summary, user_messages, retained, kept) {
             Ok(history) => Ok(history),
             Err(error) => {
                 events.emit(AgentEvent::CompactionFailed {
@@ -1138,6 +1206,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         tokens_after: u64,
         size_after: RequestSize,
         gain: Gain,
+        retained_reads: Vec<String>,
         source_revision: u64,
         source_len: usize,
         revision: u64,
@@ -1180,6 +1249,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                     below_target,
                     model: compaction::COMPACTION_MODEL_CURRENT.to_owned(),
                     deterministic,
+                    retained_reads,
                 })
                 .await
         {

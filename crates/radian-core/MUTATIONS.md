@@ -113,3 +113,16 @@ compaction test binaries were run, and the source was restored from `.radian/com
 |---|---|---|---|
 | TK0259-M1 | the update paragraph restored to the old "Update the previous summary above with them, preserving what is still relevant" | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
 | TK0259-M2 | the "newer messages win" sentence removed from the update paragraph | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
+
+## Retained reads across a compaction (TK0260, 2026-10-31)
+
+Branch `work/TK0260-compaction-keeps-latest-reads`. Each mutation was applied in place, only
+`tests/compaction_flow.rs` was run, and the source was restored from `.radian/compaction.rs.bak`
+or `.radian/turn.rs.bak` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0260-M1 | dedup removed: every read unit becomes a candidate (`if seen.insert(path.clone())` → `if true` in `retained_read_units`) | ✅ 1 failed | `tests/compaction_flow.rs::the_newest_read_of_each_path_is_kept_newest_first` (both reads of each path are kept, so six units and duplicate paths) |
+| TK0260-M2 | the budget check removed (`if used.saturating_add(size) > budget` → `if false && …`) | ✅ 2 failed | `tests/compaction_flow.rs::a_budget_for_two_keeps_only_the_two_newest_paths` (the oldest path is kept too) and `a_32k_window_retains_no_read_over_its_budget` (the 3250-token read is retained with a 3072-token budget) |
+| TK0260-M3 | the kept-part cut applied to retained units (a `truncate_kept_tool_results` call on `retained_messages` when `plan.kept_tokens > keep`) | ✅ 1 failed | `tests/compaction_flow.rs::a_retained_result_is_not_cut_when_the_kept_tail_is` (the retained 3000-character result comes back cut) |
+| TK0260-M4 | the "measure again without" step removed (`if retained_messages.is_empty()` → `if true \|\| …`) | ✅ 1 failed | `tests/compaction_flow.rs::retaining_that_misses_the_goal_measures_again_without` (the committed view keeps the retained unit and is marked `below_target`) |
