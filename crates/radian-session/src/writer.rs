@@ -1514,6 +1514,7 @@ mod tests {
             "PermissionResolved",
             "ApprovalPolicyChanged",
             "MemoryInjected",
+            "ContextFileAppended",
             "ModelUsageRecorded",
             "SessionForked",
             "ProjectTrustChanged",

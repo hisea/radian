@@ -247,6 +247,17 @@ addition_budget = 500
 |---|---|---|---|
 | `control.enabled` | boolean | `true` | Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`. `false` turns the port off for the process. A non-boolean is refused. |
 
+## `[context]`
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `context.subtree_files` | boolean | `true` | Append a subtree's context file when a file tool first works under its directory. `false` appends nothing. Read at session start. A non-boolean is refused. |
+
+```toml
+[context]
+subtree_files = false
+```
+
 ## `[integrations]`
 
 | Key | Type | Default | What it does |

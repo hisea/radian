@@ -43,7 +43,17 @@ LARGE_READ_BYTES = 20 * 1024
 
 # A usage record with more output tokens than this is counted for the existing
 # Harbor report (`metrics._journal_metrics`), not as a table column.
-OVER_16K_TOKENS = 16_000# A journal is streamed line by line. The cap matches `terminal-bench/metrics.py`
+OVER_16K_TOKENS = 16_000
+
+# A tool call's `path` argument names a memory file when it carries the
+# `memory/global` or `memory/projects` components under `<root>` (the
+# memory-files design). `<root>` is `~/.radian/memory` by default, which the
+# script cannot know: the components match wherever the home is. A
+# `SessionCreated` record that names a `RADIAN_HOME` override adds that root in
+# `_memory_roots`; it is normally absent, so the components are what match.
+MEMORY_PATH_COMPONENTS = ("global", "projects")
+
+# A journal is streamed line by line. The cap matches `terminal-bench/metrics.py`
 # so both readers drop the same over-long line.
 MAX_LINE_CHARS = 16 * 1024 * 1024
 
@@ -170,6 +180,29 @@ COLUMNS = (
     {
         "name": "read_large_calls",
         "definition": "`read` results whose text is 20,480 bytes or more (20 KiB).",
+        "unit": "calls",
+    },
+    {
+        "name": "memory_reads",
+        "definition": (
+            "`read` calls, and `grep`/`glob` calls, whose `path` argument names "
+            "a memory directory or a file under it: `<root>/global/` or "
+            "`<root>/projects/<ProjectId>/`, where `<root>` is "
+            "`~/.radian/memory` (matched as `memory/global` or "
+            "`memory/projects` path components, since the script does not know "
+            "the user's home) or the `RADIAN_HOME` override's `memory/` when the "
+            "journal's `SessionCreated` record carries one (`radian_home`). "
+            "`MEMORY.md` and `SESSIONS.md` reads count too. Empty for a pi journal."
+        ),
+        "unit": "calls",
+    },
+    {
+        "name": "memory_writes",
+        "definition": (
+            "`write` and `patch` calls whose `path` argument is under a memory "
+            "directory (the same paths as `memory_reads`), counted only when the "
+            "tool result was not an error. Empty for a pi journal."
+        ),
         "unit": "calls",
     },
     {
@@ -506,6 +539,89 @@ def _add_tool(
             row["read_large_calls"] += 1
 
 
+# The tools whose `path` argument names a directory or file in memory.
+MEMORY_READ_TOOLS = ("read", "grep", "glob")
+MEMORY_WRITE_TOOLS = ("write", "patch")
+
+
+def _memory_roots(data: dict[str, Any]) -> tuple[str, ...]:
+    """The memory roots a `SessionCreated` record names, as given.
+
+    A journal normally carries none: the default root is `~/.radian/memory`,
+    which [`MEMORY_PATH_COMPONENTS`] matches wherever the home is. A host may
+    record the `RADIAN_HOME` override instead (in the event data or in its
+    `config_snapshot`); the override's `memory/` is then a root of its own.
+    """
+    roots: list[str] = []
+    for source in (data, _dict(data.get("config_snapshot"))):
+        home = source.get("radian_home")
+        if isinstance(home, str) and home:
+            roots.append(home.rstrip("/") + "/memory")
+    return tuple(roots)
+
+
+def _is_memory_path(path: Any, roots: tuple[str, ...] = ()) -> bool:
+    """Whether a tool's `path` argument names a memory directory or a path under it.
+
+    The path is compared as given, split into components: a workspace file that
+    merely has `memory` in its directory name is not a memory file. The
+    component pair also matches the scope directory itself, which is what a
+    `grep` or `glob` names when it searches memory.
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    parts = path.split("/")
+    for index in range(len(parts) - 1):
+        if parts[index] == "memory" and parts[index + 1] in MEMORY_PATH_COMPONENTS:
+            return True
+    for root in roots:
+        for scope in MEMORY_PATH_COMPONENTS:
+            base = f"{root}/{scope}"
+            if path == base or path.startswith(base + "/"):
+                return True
+    return False
+
+
+def _result_is_error(result: Any) -> bool:
+    """Whether a settled tool result is an error: a radian `is_error` field.
+
+    A result without the field is not an error, so an old or partial record does
+    not become a denied write.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("is_error") is True
+
+
+def _add_memory(
+    row: dict[str, Any],
+    name: str,
+    arguments: dict[str, Any],
+    is_error: bool,
+) -> None:
+    """Add one settled radian tool call to the two memory columns.
+
+    A `read`, `grep` or `glob` counts when its `path` is in memory, whether or
+    not the call failed; a `write` or `patch` counts only when the result was
+    not an error, so a denied write is not a write.
+    """
+    roots = row["_memory_roots"]
+    path = arguments.get("path")
+    if name in MEMORY_READ_TOOLS:
+        if _is_memory_path(path, roots):
+            row["memory_reads"] += 1
+    elif name in MEMORY_WRITE_TOOLS:
+        if not is_error and _is_memory_path(path, roots):
+            row["memory_writes"] += 1
+
+
+def _finish_memory_columns(row: dict[str, Any]) -> None:
+    """A pi journal has no memory directory: its two columns stay empty."""
+    if row["source"] != "radian":
+        row["memory_reads"] = None
+        row["memory_writes"] = None
+
+
 def _facts(path: Path) -> dict[str, Any]:
     """Every field for one journal, plus the private aggregates the old report needs."""
     row: dict[str, Any] = {
@@ -526,6 +642,8 @@ def _facts(path: Path) -> dict[str, Any]:
         "read_unranged_calls": 0,
         "read_unranged_bytes": 0,
         "read_large_calls": 0,
+        "memory_reads": 0,
+        "memory_writes": 0,
         "compactions": 0,
         "deterministic_compactions": 0,
         "rereads_after_compaction": None,
@@ -544,6 +662,7 @@ def _facts(path: Path) -> dict[str, Any]:
         "_anchor": None,
         "_pending": {},
         "_tool_starts": {},
+        "_memory_roots": (),
         "_generation_seconds": 0.0,
         "_tool_seconds": 0.0,
         "_over_16k_calls": 0,
@@ -596,6 +715,7 @@ def _facts(path: Path) -> dict[str, Any]:
     if row["_first_ts"] is not None and row["_last_ts"] is not None:
         row["wall_seconds"] = _seconds(row["_first_ts"], row["_last_ts"])
     _finish_compaction_columns(row)
+    _finish_memory_columns(row)
     if row["source"] == "pi" and row["_pi_stop_reason"] is not None:
         outcome = PI_OUTCOMES.get(row["_pi_stop_reason"], row["_pi_stop_reason"])
         row["outcomes"][outcome] = row["outcomes"].get(outcome, 0) + 1
@@ -664,7 +784,11 @@ def _radian_record(
     # is where a compaction's summary call starts (it may carry no timestamp).
     previous_ts = row["_prev_ts"]
     _note_time(row, ts)
-    if event == "ToolExecutionStarted":
+    if event == "SessionCreated":
+        # A host may record the `RADIAN_HOME` override here; the default root needs
+        # no record because `MEMORY_PATH_COMPONENTS` matches it anywhere.
+        row["_memory_roots"] = _memory_roots(data)
+    elif event == "ToolExecutionStarted":
         call_id = data.get("call_id")
         name = data.get("name")
         if isinstance(call_id, str) and isinstance(name, str):
@@ -685,6 +809,7 @@ def _radian_record(
             name, arguments = row["_pending"].pop(call_id, (None, {}))
         if isinstance(name, str):
             _add_tool(row, name, _tool_result_text(data.get("result")), arguments)
+            _add_memory(row, name, arguments, _result_is_error(data.get("result")))
         elapsed = _seconds(
             row["_tool_starts"].pop(call_id, None) if isinstance(call_id, str) else None,
             ts,
@@ -928,6 +1053,8 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "read_unranged_calls": 0,
         "read_unranged_bytes": 0,
         "read_large_calls": 0,
+        "memory_reads": None,
+        "memory_writes": None,
         "compactions": 0,
         "deterministic_compactions": 0,
         "rereads_after_compaction": None,
@@ -956,6 +1083,8 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "read_unranged_calls",
             "read_unranged_bytes",
             "read_large_calls",
+            "memory_reads",
+            "memory_writes",
             "compactions",
             "deterministic_compactions",
             "rereads_after_compaction",
@@ -1197,6 +1326,8 @@ def format_report(report: dict[str, Any]) -> str:
         "read_unranged_calls",
         "read_unranged_bytes",
         "read_large_calls",
+        "memory_reads",
+        "memory_writes",
         *(f"p50ms.{bucket}" for bucket in buckets),
         *(f"p90ms.{bucket}" for bucket in buckets),
         "compactions",
@@ -1234,6 +1365,8 @@ def format_report(report: dict[str, Any]) -> str:
                 _count(row["read_unranged_calls"]),
                 _count(row["read_unranged_bytes"]),
                 _count(row["read_large_calls"]),
+                _count(row["memory_reads"]),
+                _count(row["memory_writes"]),
             ]
         )
         for bucket in buckets:

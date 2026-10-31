@@ -1882,3 +1882,16 @@ Each source was restored from a backup under `.radian/mut-backup/` (`git status`
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0269-M4 | restore the legacy `RuntimeEvent::MemoryInjected { records }` writer and the hook's `record()` call (the old four-argument `MemoryHooks::new`) | ✅ 1 failed (rc=100) | the mutation-time twin of `tests/memory_injection.rs::the_block_reaches_the_system_prompt_and_writes_no_legacy_record` (temporary `mut_legacy.rs`, same assertions: 1 `MemoryInjected` event where 0 is expected) |
+## TK0277: subtree context files (2026-10-31)
+
+Branch `work/TK0277-subtree-context-files`. Each mutation was applied in place, the
+`radian` binary rebuilt (`cargo build -p radian-tui --bin radian`, the CLI tests refuse a
+stale one) and the named tests run with `cargo nextest run ... --profile sandbox
+--no-fail-fast -E 'test(<name>)'`. Each source was restored from a backup under `.radian/mut/`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0277-M1 | `SubtreeContext::discover` does not insert an appended path into the already-loaded set | ✅ 2 failed (rc=100) | `context::tests::a_subtree_file_appends_once_and_a_deeper_file_follows` (the second read appended `crates/x/AGENTS.md` again) and `cli::a_subtree_context_file_appends_once_before_the_next_request` (two `ContextFileAppended` events and two blocks) |
+| TK0277-M2 | `open_session` seeds the loaded set without the startup chain (`Vec::new()`) | ✅ 1 failed (rc=100) | `cli::a_startup_context_file_is_never_appended_again` (the workspace `AGENTS.md` was appended again) |
+| TK0277-M3 | `open_session` passes `true` to `ContextHooks` instead of `[context] subtree_files` | ✅ 1 failed (rc=100) | `cli::the_subtree_switch_turns_the_append_off` (the disabled switch still appended) |

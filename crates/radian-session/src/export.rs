@@ -223,6 +223,17 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                     ));
                 }
             }
+            EventData::ContextFileAppended {
+                path,
+                bytes,
+                truncated,
+            } => {
+                out.push_str(&format!(
+                    "- context file appended: {path} ({bytes} bytes{}) (seq {})\n",
+                    if *truncated { ", truncated" } else { "" },
+                    event.seq
+                ));
+            }
             _ => {}
         }
     }
@@ -463,6 +474,11 @@ fn event_data_value(
                 json!({"indexes": indexes})
             }
         }
+        EventData::ContextFileAppended {
+            path,
+            bytes,
+            truncated,
+        } => json!({"path": path, "bytes": bytes, "truncated": truncated}),
         EventData::ProjectTrustChanged { path, decision } => {
             json!({"path": path, "decision": decision})
         }
