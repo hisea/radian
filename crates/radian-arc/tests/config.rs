@@ -554,7 +554,8 @@ fn init_writes_the_default_reviewer_and_yesterdays_file_still_loads() {
 }
 
 /// A `[gate.reviewers.default]` section and a legacy `[gate.review]` session key are one
-/// setting in two places: the file is refused and names both keys.
+/// setting in two places: the file is refused and names both keys. Every legacy session key
+/// the parser refuses has a case here.
 #[test]
 fn a_legacy_review_key_beside_the_default_reviewer_is_refused_by_both_names() {
     for (addition, keys) in [
@@ -570,10 +571,24 @@ fn a_legacy_review_key_beside_the_default_reviewer_is_refused_by_both_names() {
             vec!["gate.review.exec_args", "gate.reviewers.default.exec_args"],
         ),
         (
+            "[gate.review]\nprompt_file = \"review.md\"\n[gate.reviewers.default]\n",
+            vec![
+                "gate.review.prompt_file",
+                "gate.reviewers.default.prompt_file",
+            ],
+        ),
+        (
             "[gate.review.first]\nexec_args = []\n[gate.reviewers.default]\n",
             vec![
                 "gate.review.first.exec_args",
                 "gate.reviewers.default.first.exec_args",
+            ],
+        ),
+        (
+            "[gate.review.first]\ntimeout_secs = 10\n[gate.reviewers.default]\n",
+            vec![
+                "gate.review.first.timeout_secs",
+                "gate.reviewers.default.first.timeout_secs",
             ],
         ),
     ] {
