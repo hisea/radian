@@ -11,9 +11,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::*;
+use radian_arc::gate::{Stage, Verdict, verdict_path};
 use radian_arc::mcp::ArcServer;
+use radian_arc::review;
 use radian_arc::store::Store;
 use radian_arc::store::config::{self, DEFAULT_FLOW};
+use radian_arc::store::model::TaskState;
 use radian_arc::store::plan_ops;
 use serde_json::{Value, json};
 
@@ -1635,4 +1638,85 @@ fn a_repository_without_flows_uses_the_default_flows_false() {
         serde_json::from_str(&repo.radian(&["arc", "show", &explicit, "--json"]).stdout).unwrap();
     assert_eq!(shown["allow_noop"], json!(true), "{shown}");
     assert_eq!(shown["allow_noop_source"], json!("task"), "{shown}");
+}
+
+/// A flow's `gate_profile` decides the reviewer its tasks' reviews use: the `art` profile names
+/// `cheap`, and the review runs with `cheap`'s arguments and records the name.
+#[test]
+fn a_flows_gate_profile_selects_the_reviewer_of_its_tasks() {
+    let repo = TestRepo::new("flows-reviewer");
+    Store::init(&repo.repo, false).expect("arc init");
+    let store = Store::open(&repo.repo).expect("the store opens");
+    let path = store.root().join("config.toml");
+    let mut text = fs::read_to_string(&path).expect("config.toml");
+    text.push_str(
+        "\n[gate.reviewers.cheap]\n\
+         exec_args = [\"--model\", \"cheap\", \"--base-url\", \"http://127.0.0.1:9\"]\n\
+         timeout_secs = 60\n\
+         \n\
+         [gate.profiles.art]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         before_attempt = []\n\
+         reviewer = \"cheap\"\n\
+         \n\
+         [flows.art]\n\
+         gate_profile = \"art\"\n",
+    );
+    fs::write(&path, text).expect("write config.toml");
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task_with_flow(
+            &plan,
+            "art",
+            "Art",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("art"),
+        )
+        .expect("add the art task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.rev("main");
+    let branch = format!("work/{task}");
+    let head = repo.commit_on(&branch, &base, "art.txt", "art\n");
+    repo.git(&["push", "origin", &branch]);
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.attempt_id = Some(format!("{task}-1", task = task.id));
+            task.token = Some("token-1".to_owned());
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .expect("the task is in review.verifying");
+    let fake = FakeReview::new(
+        "flows-reviewer",
+        &[review_message("the art change is fine", &[], &[])],
+        0,
+    );
+
+    review::verify_with(&store, &task, Some(fake.program())).expect("the art gate runs");
+    let verdict = Verdict::read(
+        &verdict_path(store.repo(), &task, &format!("{task}-1"), Stage::Review)
+            .expect("the review verdict path"),
+    )
+    .expect("the review verdict reads");
+    assert_eq!(verdict.profile.as_deref(), Some("art"));
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.reviewer, "cheap");
+    assert_eq!(settings.exec_args, "gate.reviewers.cheap.exec_args");
+    assert_eq!(settings.timeout_secs, 60);
+    let argv = fake.argv(1);
+    let model = argv
+        .iter()
+        .position(|arg| arg == "--model")
+        .and_then(|index| argv.get(index + 1));
+    assert_eq!(model.map(String::as_str), Some("cheap"));
 }

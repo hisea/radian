@@ -1884,3 +1884,19 @@ and the file was restored from a copy under `.radian/`, which `cmp` found identi
 |---|---|---|---|
 | TK0249-M1 | `auto_reverify_tasks` prints the literal `main` in the automatic reverify line instead of the configured target branch | `run::an_automatic_reverify_names_the_target_branch` (the line read `main moved (f8dbd9c)` for a `release` that moved) | ✅ 1 failed |
 | TK0249-M2 | `finish_integration` says `main moved after integration` instead of naming `context.target_branch` | `review::an_integration_that_keeps_moving_names_the_target_branch` (the reason read `main moved after integration`) | ✅ 1 failed |
+
+## TK0264: reviewer profiles (2026-10-31, branch `work/TK0264-reviewer-profiles-config`)
+
+A gate profile's `reviewer` selects a `[gate.reviewers.<name>]` section, and a file without a
+`[gate.reviewers.default]` section reads `[gate.review]`'s session keys as that reviewer's
+values. Each mutation was applied by hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test config` or `--test
+gate_profile`, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0264-M1 | `config::parse` no longer builds the `default` reviewer from the legacy `[gate.review]` keys | `config::the_legacy_review_table_is_the_default_reviewers_values` (the parse failed: no `[gate.reviewers.default]` section) | ✅ 1 failed |
+| TK0264-M2 | the review stage looks up the reviewer name `default` instead of `plan.profile.reviewer` | `gate_profile::each_profiles_review_uses_the_reviewer_it_names` (`settings.reviewer` read `default`, not `one`) | ✅ 1 failed |
+| TK0264-M3 | `config::parse` no longer checks that each profile's `reviewer` names a section | `config::a_profile_names_a_missing_reviewer_is_refused` (the file parsed with reviewer `cheap` absent) | ✅ 1 failed |
+
+3/3 caught.

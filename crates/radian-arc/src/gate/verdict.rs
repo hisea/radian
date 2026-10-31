@@ -234,13 +234,22 @@ pub struct ReviewReport {
 pub struct ReviewSettings {
     /// `first` for a task's first review, `rework` for a later one.
     pub round: String,
-    /// The config key the session's `exec_args` came from: `gate.review.first.exec_args`,
-    /// `gate.review.exec_args` or `worker.exec_args`.
+    /// The reviewer whose `[gate.reviewers.<name>]` section the session used (ADR 0048
+    /// decision 15). Absent on a verdict written before the field existed.
+    #[serde(default)]
+    pub reviewer: String,
+    /// The reviewer's `fix_level` (ADR 0048 decision 15): the recorded value, which no stage
+    /// reads yet. Absent on a verdict written before the field existed.
+    #[serde(default)]
+    pub fix_level: String,
+    /// The config key the session's `exec_args` came from: `gate.reviewers.<name>.first.exec_args`,
+    /// `gate.reviewers.<name>.exec_args`, their `gate.review` legacy spellings, or
+    /// `worker.exec_args`.
     pub exec_args: String,
     /// The wall-time limit of one session, in seconds.
     pub timeout_secs: u64,
-    /// The config key `timeout_secs` came from: `gate.review.first.timeout_secs` or
-    /// `gate.review.timeout_secs`.
+    /// The config key `timeout_secs` came from: `gate.reviewers.<name>.first.timeout_secs`,
+    /// `gate.reviewers.<name>.timeout_secs`, or their `gate.review` legacy spellings.
     pub timeout: String,
 }
 
