@@ -185,14 +185,25 @@ Every number in the report comes from that module: `report.py` calls
 per-run rows per arm and task. It does not redefine "model calls", "input",
 "result bytes" or "wall".
 
-The text tables show, for each arm: `runs`, the `result` counts, and the fixed
-column names from `journal_metrics.COLUMNS` — `calls`, `input_uncached`,
-`input_cache_read`, `input_total`, `output`, `reasoning`, `fee_usd`,
-`read_ranged_calls`, `read_unranged_calls`, `read_large_calls`, `compactions` —
-plus `calls.<tool>` and `bytes.<tool>` for every tool the runs used,
-`result_bytes`, `wall_seconds`, and `in_spread` (the smallest and largest
+The text tables show, for each arm: `runs`, the `result` counts, and one
+column for each of these fixed `journal_metrics.COLUMNS` names — `calls`,
+`input_uncached`, `input_cache_read`, `input_total`, `output`, `reasoning`,
+`fee_usd`, `read_ranged_calls`, `read_unranged_calls`, `read_large_calls`,
+`compactions` — plus `calls.<tool>` and `bytes.<tool>` for every tool the runs
+used, `result_bytes`, `wall_seconds`, and `in_spread` (the smallest and largest
 `input_total` over that arm's runs, the same-arm noise band).
 `-` means no journal reported the value; it is never a zero.
+
+These tables do not show every fixed column the module defines. The rest keep
+their `journal_metrics.COLUMNS` names and meanings, and a reader who needs one
+takes it from a `build_report` row like every other number: `journal`,
+`source`, `max_tokens_responses`, `read_ranged_bytes`, `read_unranged_bytes`,
+`p50ms.<bucket>`, `p90ms.<bucket>`, `deterministic_compactions`,
+`rereads_after_compaction`, `rereads_after_compaction_max`, `retained_reads`,
+`compaction_seconds`, `compaction_wall_share` and `outcomes` (the tables' own
+`result` counts a run's outcome from `run.json`, not a journal's turn
+outcomes). Their definitions are in `journal_metrics.py` and in
+[the Terminal-Bench page](../terminal-bench/README.md#journal-metrics-extractor).
 
 The `leak` column counts the arm's runs by leak level: `L0` to `L3`, and `no
 journal` for a run whose agent left no journal (that is not `L0`). It counts

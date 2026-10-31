@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use radian_core::{
-    AgentEvent, ContentPart, EventSink, Model, ModelContext, ModelError, ModelRequest,
-    ModelResponse, StopReason, ToolCall, ToolConcurrency, ToolContext, ToolError, ToolFailure,
-    ToolOutput, ToolProvider, ToolSession, ToolSpec,
+    AgentEvent, ContentPart, EventSink, Message, Model, ModelContext, ModelError, ModelRequest,
+    ModelResponse, SUMMARY_MIN_TOKENS, StopReason, ToolCall, ToolConcurrency, ToolContext,
+    ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession, ToolSpec, message_tokens,
 };
 use radian_runtime::{ConfigQueue, ConfigSlot};
 use radian_session::SessionCreatedData;
@@ -252,6 +252,17 @@ impl Model for ScriptedModel {
             .pop_front()
             .ok_or_else(|| ModelError::Protocol("script exhausted".into()))
     }
+}
+
+/// A summarizer reply the ADR 0018 check accepts: a `## ` heading and at least
+/// [`SUMMARY_MIN_TOKENS`] tokens, so a long history clears the floor and a short one has an
+/// honest short summary. `label` stays in the text so a test can look for it on the wire.
+pub fn valid_summary(label: &str) -> String {
+    let mut text = format!("## Goal\n{label}\n## Progress\n");
+    while message_tokens(&Message::user(&text)) < SUMMARY_MIN_TOKENS {
+        text.push_str(" more detail");
+    }
+    text
 }
 
 pub fn text(s: &str) -> ModelResponse {

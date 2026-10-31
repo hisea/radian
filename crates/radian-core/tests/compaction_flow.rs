@@ -11,10 +11,39 @@ use radian_core::testing::RecordingJournal;
 use radian_core::{
     Agent, AgentConfig, AgentEvent, CancellationToken, CompactionError, CompactionFailure,
     ContentPart, ContextBudget, JournalRecord, Message, ModelResponse, ModelUsage, NoTools,
-    RunStatus, StopReason, TurnOptions, compaction,
+    RunStatus, StopReason, TurnOptions, compaction, message_tokens,
 };
 
+/// The local model's prose answer: 21 tokens, no section, not a summary.
+const PROSE: &str = "Let me continue reading the key parts of the turn.rs file.";
+
 fn summary_reply(summary: &str, input: u64) -> Reply {
+    Reply::Respond(ModelResponse {
+        limits: None,
+        reasoning: Vec::new(),
+        content: vec![ContentPart::text(common::valid_summary(summary))],
+        tool_calls: vec![],
+        provider_payload: None,
+        stop_reason: StopReason::EndTurn,
+        usage: Some(ModelUsage {
+            input: Some(input),
+            ..Default::default()
+        }),
+    })
+}
+
+/// A text whose `message_tokens` is exactly `tokens`.
+fn text_with_tokens(tokens: u64, prefix: &str) -> String {
+    let mut text = prefix.to_owned();
+    while message_tokens(&Message::user(&text)) < tokens {
+        text.push('x');
+    }
+    assert_eq!(message_tokens(&Message::user(&text)), tokens);
+    text
+}
+
+/// A raw summarizer reply, exactly as the model wrote it: for tests of the validity checks.
+fn raw_summary_reply(summary: &str, input: u64) -> Reply {
     Reply::Respond(ModelResponse {
         limits: None,
         reasoning: Vec::new(),
@@ -110,7 +139,7 @@ fn label(record: &JournalRecord) -> String {
 async fn a_request_over_the_budget_is_compacted_and_committed() {
     let model = ScriptedModel::new([summary_reply("short summary", 50), text("done")]);
     let journal = Arc::new(RecordingJournal::new());
-    let agent = compaction_agent(model.clone(), 3_000, true);
+    let agent = compaction_agent(model.clone(), 6_000, true);
     let mut session = agent
         .open_session_with_journal(big_history(), journal.clone())
         .await
@@ -766,7 +795,7 @@ async fn a_summarization_call_without_usage_reports_nothing() {
     let no_usage = Reply::Respond(ModelResponse {
         limits: None,
         reasoning: Vec::new(),
-        content: vec![ContentPart::text("a real summary")],
+        content: vec![ContentPart::text(common::valid_summary("a real summary"))],
         tool_calls: vec![],
         provider_payload: None,
         stop_reason: StopReason::EndTurn,
@@ -1308,6 +1337,301 @@ async fn an_empty_summary_resends_the_original_request() {
             .contains("<summary-to-shorten>")
     );
     assert_eq!(compaction_usage_count(&journal), 2);
+}
+
+/// The local model answered with prose (21 tokens, no heading): that is not a summary. The
+/// retry resends the original request (not a shortening one) and the second answer commits.
+#[tokio::test]
+async fn a_prose_answer_resends_the_original_request_and_the_retry_commits() {
+    let valid = text_with_tokens(100, "## Goal\n");
+    let model = ScriptedModel::new([
+        raw_summary_reply(PROSE, 50),
+        raw_summary_reply(&valid, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        session.transcript_revision(),
+        1,
+        "the second answer committed"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3, "summary, resend, compacted conversation");
+    assert_eq!(
+        requests[1].messages, requests[0].messages,
+        "a too-short answer resends the original request"
+    );
+    assert!(
+        !requests[1].messages[0]
+            .text()
+            .contains("<summary-to-shorten>")
+    );
+    assert!(
+        summary_text(session.transcript()).contains(&valid),
+        "{}",
+        summary_text(session.transcript())
+    );
+    assert_eq!(compaction_usage_count(&journal), 2, "both attempts billed");
+}
+
+/// Two non-summary replies fall back deterministically. The fallback keeps the previous summary
+/// whole, so `too_long` was not set; both real calls are billed.
+#[tokio::test]
+async fn two_non_summaries_fall_back_without_too_long() {
+    let no_heading = text_with_tokens(300, "**Goal**\n**Progress**\n");
+    let previous = "P".repeat(7_000);
+    let model = ScriptedModel::new([
+        raw_summary_reply(PROSE, 50),
+        raw_summary_reply(&no_heading, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(history_with_summary(&previous), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    assert!(compacted_records(&journal)[0].0, "deterministic");
+    assert_eq!(compaction_usage_count(&journal), 2, "both attempts billed");
+    assert!(
+        summary_text(session.transcript()).starts_with(&format!("{previous}\n\n")),
+        "too_long was not set, so the previous summary stays whole: {}",
+        summary_text(session.transcript())
+    );
+}
+
+/// The first answer is over the cap and the shortened answer is under the floor: only one
+/// attempt was too long, so the fallback's `too_long` is not set and the previous summary stays
+/// whole.
+#[tokio::test]
+async fn an_overlong_then_too_short_summary_falls_back_without_too_long() {
+    let overlong = "L".repeat(9_000);
+    let short = text_with_tokens(60, "## Goal\n");
+    let previous = "P".repeat(7_000);
+    let model = ScriptedModel::new([
+        raw_summary_reply(&overlong, 50),
+        raw_summary_reply(&short, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(history_with_summary(&previous), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(session.transcript_revision(), 1, "the fallback committed");
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "summary, shorten, compacted conversation"
+    );
+    assert!(
+        requests[1].messages[0]
+            .text()
+            .contains("<summary-to-shorten>")
+    );
+    assert_eq!(compaction_usage_count(&journal), 2, "both attempts billed");
+    assert!(
+        summary_text(session.transcript()).starts_with(&format!("{previous}\n\n")),
+        "only one attempt was too long, so the previous summary stays whole: {}",
+        summary_text(session.transcript())
+    );
+}
+
+/// A manual `/compact` never falls back: two non-summary replies report `InvalidSummary` whose
+/// message names the floor (the token count and the minimum).
+#[tokio::test]
+async fn a_manual_compact_with_two_non_summaries_names_the_floor() {
+    let model = ScriptedModel::new([raw_summary_reply(PROSE, 50), raw_summary_reply(PROSE, 10)]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model, 3_000, true);
+    let history = vec![
+        Message::user("x".repeat(20_000)),
+        Message::assistant("ok"),
+        Message::user("last"),
+    ];
+    let mut session = agent
+        .open_session_with_journal(history, journal)
+        .await
+        .unwrap();
+
+    let error = session
+        .compact_now(
+            None,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    let CompactionFailure::Compaction(CompactionError::InvalidSummary(message)) = &error else {
+        panic!("expected InvalidSummary: {error:?}");
+    };
+    assert!(
+        message.contains("tokens"),
+        "names the token count: {message}"
+    );
+    assert!(message.contains("min"), "names the floor: {message}");
+    assert_eq!(session.transcript_revision(), 0, "nothing committed");
+}
+
+/// A `ContextCompacted` summary written before the floor existed (21 tokens) replays and
+/// resumes unchanged: the floor applies only to a new summarizer reply, never to a journal.
+#[tokio::test]
+async fn an_old_compacted_summary_under_the_floor_replays_and_resumes() {
+    let old_summary = PROSE;
+    let view = compaction::compacted_history(old_summary, &[], &[Message::user("last")]).unwrap();
+    let mut records = vec![JournalRecord::Message {
+        index: 0,
+        message: Message::user("old"),
+    }];
+    records.push(JournalRecord::ContextCompacted {
+        revision: 1,
+        source_revision: 0,
+        source_len: 1,
+        summary: old_summary.into(),
+        first_kept: 1,
+        tokens_before: 10,
+        tokens_after: 5,
+        below_target: false,
+        model: "current".into(),
+        deterministic: false,
+        retained_reads: Vec::new(),
+    });
+    records.push(JournalRecord::TranscriptReplaced {
+        revision: 1,
+        len: view.len(),
+    });
+    for (index, message) in view.iter().enumerate() {
+        records.push(JournalRecord::Message {
+            index,
+            message: message.clone(),
+        });
+    }
+    records.push(JournalRecord::TranscriptReplacementCommitted {
+        revision: 1,
+        len: view.len(),
+    });
+
+    let recovered = radian_core::recover(&records).unwrap();
+    assert_eq!(recovered, view, "the old summary replays unchanged");
+
+    let model = ScriptedModel::new([text("done")]);
+    let agent = compaction_agent(model, 8_000, true);
+    let mut session = agent.open_session_with_history(recovered).await.unwrap();
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &Recorder::default())
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed, "it resumes");
+}
+
+/// A short history may have a short summary: a manual `/compact` of about 300 tokens commits a
+/// 60-token answer with a heading, because the floor does not apply below 1000 tokens.
+#[tokio::test]
+async fn a_manual_compact_of_a_short_history_accepts_a_short_summary() {
+    let prefix = text_with_tokens(300, "");
+    let summary = text_with_tokens(60, "## Goal\n");
+    let model = ScriptedModel::new([raw_summary_reply(&summary, 10)]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model, 8_000, true);
+    let history = vec![Message::assistant(prefix), Message::user("y".repeat(7_600))];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+
+    let outcome = session
+        .compact_now(
+            None,
+            &CancellationToken::new(),
+            &Recorder::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, radian_core::CompactionOutcome::Compacted { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(session.transcript_revision(), 1);
+    assert!(
+        summary_text(session.transcript()).contains(&summary),
+        "{}",
+        summary_text(session.transcript())
+    );
+}
+
+/// A 2000-token history answered with the same 60-token summary is `TooShort`, and the original
+/// request is resent (not a shortening one).
+#[tokio::test]
+async fn a_short_summary_of_a_long_history_resends_the_original_request() {
+    let short = text_with_tokens(60, "## Goal\n");
+    let valid = text_with_tokens(100, "## Goal\n");
+    let model = ScriptedModel::new([
+        raw_summary_reply(&short, 50),
+        raw_summary_reply(&valid, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 3_000, true);
+    let mut session = agent
+        .open_session_with_journal(big_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        session.transcript_revision(),
+        1,
+        "the second answer committed"
+    );
+    let requests = model.requests();
+    assert_eq!(requests.len(), 3, "summary, resend, compacted conversation");
+    assert_eq!(
+        requests[1].messages, requests[0].messages,
+        "a too-short answer resends the original request"
+    );
+    assert!(
+        !requests[1].messages[0]
+            .text()
+            .contains("<summary-to-shorten>")
+    );
 }
 
 /// Both model summaries are over the limit: the deterministic fallback commits instead of

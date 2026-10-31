@@ -26,7 +26,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use common::{Recorder, TempDir, created};
+use common::{Recorder, TempDir, created, valid_summary};
 use radian_core::{Agent, AgentConfig, ContextBudget, InputSource, NoTools, TurnOptions};
 use radian_runtime::{Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
@@ -172,13 +172,17 @@ macro_rules! e2e_scenario {
             let m1 = first_message();
             let a2 = big_reply('y');
             let a3 = big_reply('w');
+            // The summaries must be valid under ADR 0018: a `## ` heading and, for these
+            // long histories, at least `SUMMARY_MIN_TOKENS` tokens.
+            let summary1 = valid_summary(SUMMARY1);
+            let summary2 = valid_summary(SUMMARY2);
             let server = <$server>::start(vec![
                 $reply(A1),
                 $reply(&a2),
                 $reply(&a3),
-                $reply(SUMMARY1),
+                $reply(&summary1),
                 $reply("FOURTH-ASSISTANT-REPLY"),
-                $reply(SUMMARY2),
+                $reply(&summary2),
                 $reply("FIFTH-ASSISTANT-REPLY"),
             ])
             .await;
@@ -214,7 +218,7 @@ macro_rules! e2e_scenario {
             let bodies = $bodies(&server);
             let body = bodies.last().expect("turn 4 sent a request").clone();
             let text = request_text(&body);
-            assert!(text.contains(SUMMARY1), "the summary is sent");
+            assert!(text.contains(&summary1), "the summary is sent");
             assert!(text.contains(m1), "the first user message verbatim");
             assert!(text.contains(M2), "the second user message verbatim");
             assert!(text.contains(M3), "the third user message verbatim");
@@ -227,7 +231,7 @@ macro_rules! e2e_scenario {
                 "the kept (huge) assistant reply stays, unlike the compressed one"
             );
             assert!(
-                text.find(SUMMARY1).unwrap() < text.find(M4).unwrap(),
+                text.find(&summary1).unwrap() < text.find(M4).unwrap(),
                 "the summary precedes the new message"
             );
             // ADR 0005: host meta is invisible to adapters. The transcript messages do carry
@@ -265,7 +269,7 @@ macro_rules! e2e_scenario {
                 text.contains(m1),
                 "the first user's words survive the second compaction"
             );
-            assert!(text.contains(SUMMARY2), "the rolling summary is sent");
+            assert!(text.contains(&summary2), "the rolling summary is sent");
             assert!(text.contains(M5), "the fifth message is sent");
             stop(inbox, handle).await;
             drop(journal);

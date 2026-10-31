@@ -167,6 +167,25 @@ pub fn text(s: &str) -> Reply {
     })
 }
 
+/// Makes `text` a summary the ADR 0018 check accepts: a `## ` heading when it has none, and at
+/// least [`SUMMARY_MIN_TOKENS`] tokens. Empty text stays empty (the empty-summary tests need
+/// it). A test that needs an invalid reply builds it explicitly instead of through this helper.
+pub fn valid_summary(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = if text.lines().any(|line| line.starts_with("## ")) {
+        text.to_owned()
+    } else {
+        format!("## Goal\n{text}")
+    };
+    while message_tokens(&Message::user(&out)) < SUMMARY_MIN_TOKENS {
+        out.push_str(" and more detail");
+    }
+    out
+}
+
 pub fn slow_text(ms: u64, s: &str) -> Reply {
     let Reply::Respond(r) = text(s) else {
         unreachable!()

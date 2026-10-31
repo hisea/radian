@@ -959,7 +959,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
     /// Asks the current model for a summary (ADR 0018 §摘要), with one controlled retry that
     /// depends on why the first answer was invalid (dogfood7): an over-long answer gets a
     /// **shortening** request carrying only that answer (not the conversation again), while an
-    /// empty answer resends the original request.
+    /// empty, too-short or heading-less answer resends the original request.
     ///
     /// On an automatic path (`deterministic_allowed`) a failure is returned as
     /// [`SummarizeOutcome::Fallback`] so the caller can run the deterministic fallback; a manual
@@ -984,6 +984,19 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
         let summary_max = summary_budget
             .map(compaction::summary_max_tokens)
             .unwrap_or(compaction::DEFAULT_SUMMARY_MAX_TOKENS);
+        // The floor (ADR 0018): a long history must not be replaced by a prose sentence. The
+        // history is measured by the same ruler as the summary, over the messages being
+        // summarized plus the previous summary.
+        let history_tokens = to_summarize
+            .iter()
+            .map(compaction::message_tokens)
+            .sum::<u64>()
+            + previous_summary
+                .map(str::trim)
+                .filter(|summary| !summary.is_empty())
+                .map(|summary| compaction::message_tokens(&Message::user(summary)))
+                .unwrap_or(0);
+        let summary_min = compaction::summary_min_tokens(history_tokens);
         let mut summary_request = compaction::summary_request(
             previous_summary,
             to_summarize,
@@ -997,8 +1010,9 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             // with the turn's conversation call, but each of the two sumlen attempts gets its
             // own retry budget and its own 60 s cap (the helper is called once per attempt).
             // The empty-response rule stays off here (`retry_empty = false`): ADR 0018 handles
-            // an empty summary itself — `check_summary` resends the original request once,
-            // immediately, and every attempt's usage is recorded below. The retries are
+            // an invalid summary itself — `check_summary` resends the original request once,
+            // immediately, for an empty, too-short or heading-less answer, and every attempt's
+            // usage is recorded below. The retries are
             // announced to nobody: `ModelRetrying` makes a host clear its live projection, which
             // is wrong mid-compaction, and a failed attempt has no usage to report (ADR 0017
             // ).
@@ -1057,7 +1071,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 });
             }
             let text = text_of(&response.content);
-            match compaction::check_summary(&text, summary_max) {
+            match compaction::check_summary(&text, summary_max, summary_min) {
                 Ok(checked) => return Ok(SummarizeOutcome::Model(checked)),
                 Err(error) if attempt == 0 => {
                     first_too_long = matches!(error, compaction::SummaryError::TooLong { .. });
@@ -1067,8 +1081,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                             compaction::shorten_target(summary_max),
                             settings.clone(),
                         ),
-                        // Empty (and the only other variant) resends the original request.
-                        compaction::SummaryError::Empty => compaction::summary_request(
+                        // Empty, too short and heading-less all resend the original request:
+                        // none of them gives the shortening retry anything to shorten.
+                        compaction::SummaryError::Empty
+                        | compaction::SummaryError::TooShort { .. }
+                        | compaction::SummaryError::NoHeading => compaction::summary_request(
                             previous_summary,
                             to_summarize,
                             instructions,
