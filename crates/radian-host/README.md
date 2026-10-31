@@ -260,7 +260,7 @@ line's skipped list.
 | `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
 | A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `radian-exec/tests/cli.rs` |
 | `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |
-| `memory_search` is `allow` in both tiers; no memory tool asks | `memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` | `radian-permissions/src/profile.rs` |
+| `write`/`patch` are `allow` in the memory scope directories in both tiers; `..`, a symlink out, the registry, a sibling directory and a file directly in `projects/` are not; `memory_search` stays `allow`; no memory root adds no rule | `write_to_a_global_memory_file_is_allowed_in_every_tier`, `write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier`, `a_memory_write_outside_the_scope_directories_is_not_matched`, `a_memory_write_that_escapes_with_dotdot_is_not_matched`, `a_symlink_out_of_the_memory_store_is_not_matched`, `a_memory_write_directly_in_the_projects_directory_is_not_matched`, `memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks`, `a_profile_without_a_memory_root_has_no_memory_rule` | `radian-permissions/src/profile.rs` |
 
 ## The startup description
 

@@ -148,15 +148,17 @@ key. Writes default to Project; `--global` writes a Global record.
 ### The agent's own memory tool and injection (ADR 0021 D5/D6)
 
 During a conversation the model gets one tool, and only past the injection budget:
-`memory_search` (a keyword search, or a full read of records by `ids`; **allowed** by the
-rules) mounts when the Active records' estimated total exceeds `[memory.injection]
-max_tokens` (ADR 0021 D7). There is no model-writable memory path: a user record is never
-modified by the model, and old `source: agent` records in existing logs stay readable.
-When the user asks the model to remember something, the model routes it to a file instead
+`memory_search` (a keyword search, or a full read of records by `ids`) mounts when the Active
+records' estimated total exceeds `[memory.injection] max_tokens` (ADR 0021 D7). The permission
+profile allows the model's `write` and `patch` to the two memory scope directories in both
+tiers (ADR 0012; ADR 0021 invariant 5); whether a call reaches the file is the file tools'
+root boundary (ADR 0039 §4). Memory records are written with those ordinary file tools —
+there is no dedicated memory-write tool — and old `source: agent` records in existing logs stay
+readable. When the user asks the model to remember something, the model routes it by content
 (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
 `AGENTS.md`, a procedure useful across projects becomes a user-level skill at
-`~/.agents/skills/<name>/SKILL.md`, a cross-project preference is the user's to save
-with `/memory add` (the model only suggests the command).
+`~/.agents/skills/<name>/SKILL.md`, and a cross-project preference is written as a memory
+record under `global/`.
 
 Each request carries the memory **fixed block** in the **system prompt** (never the
 transcript): Active records in the D6 order, up to 2000 tokens (Global 500 / Project 1500 soft

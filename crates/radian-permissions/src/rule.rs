@@ -53,6 +53,12 @@ pub enum ResourceMatcher {
     Any,
     /// A file path, matched after resolution against the canonical prefix.
     PathUnder(PathBuf),
+    /// Like [`ResourceMatcher::PathUnder`], but the resolved path must lie at least two
+    /// components below the prefix: a directory and then an entry inside it. A path
+    /// directly in the prefix directory does not match. The memory project scope uses it,
+    /// so `<memory root>/projects/<ProjectId>/<name>.md` matches but
+    /// `<memory root>/projects/<name>.md` (no project-id directory) does not.
+    PathUnderNested(PathBuf),
     /// A `.git` executable entry under one discovered git directory (ADR 0038 decision 3):
     /// matches when the resolved path is `config`, `config.worktree`, `hooks/...`, a
     /// submodule's `config` or `hooks/...`, or a linked worktree's `gitdir`/`commondir`/
@@ -157,6 +163,11 @@ pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated 
             (ResourceMatcher::PathUnder(prefix), Resource::Path(raw)) => {
                 resolve(workspace, raw).starts_with(prefix)
             }
+            (ResourceMatcher::PathUnderNested(prefix), Resource::Path(raw)) => {
+                resolve(workspace, raw)
+                    .strip_prefix(prefix)
+                    .is_ok_and(|rest| rest.components().count() >= 2)
+            }
             (ResourceMatcher::GitExec(git_dir), Resource::Path(raw)) => {
                 radian_sandbox::is_git_exec_entry(git_dir, &resolve(workspace, raw))
             }
@@ -198,8 +209,17 @@ pub(crate) fn resolve(workspace: &Path, raw: &str) -> PathBuf {
     } else {
         workspace.join(path)
     };
-    let resolved = canonicalize_existing_prefix(&joined).unwrap_or(joined);
-    lexical_normalize(&resolved)
+    resolve_path(&joined)
+}
+
+/// Resolves an **already joined** path the way [`resolve`] does: symlinks in the existing
+/// part are resolved and `.`/`..` are removed lexically. A rule prefix is resolved with this
+/// too, so a prefix such as a memory root matches the same spelling a call's path takes.
+pub(crate) fn resolve_path(path: &Path) -> PathBuf {
+    match canonicalize_existing_prefix(path) {
+        Some(resolved) => lexical_normalize(&resolved),
+        None => lexical_normalize(path),
+    }
 }
 
 fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {

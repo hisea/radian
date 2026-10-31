@@ -8,7 +8,7 @@ Status: accepted
 2. **Memory never changes session facts.** Memory never modifies session journals, compaction records, or their recovery semantics. A memory failure must never corrupt a session or block a dialogue turn.
 3. **The host judges sources, and sources never rewrite.** A memory record source (user, import; old logs also carry agent-tool-written records) is fixed by the host at write time. The code never trusts a model-claimed source. An original source never changes after write (confirmation records separately).
 4. **Memory is low-trust data.** Memory injected into the model is labeled data, never instructions. It never bypasses tool permissions, sandboxes, tiers, or user instructions.
-5. **The sandbox cannot read memory**: under the `workspace` tier the memory store is unreadable. Only Radian injection, `memory_search`, and user commands reach it. The sandbox denylist enforces it (ADR 0020). The escape matrix verifies it.
+5. **The sandbox cannot read or write memory.** Under the `workspace` tier the memory store is unreadable and unwritable to `shell`. The model writes it only through the host's `write` and `patch` tools, which the permission profile allows in both tiers (D7). Radian injection and user commands reach the store directly. The sandbox denylist enforces the shell boundary (ADR 0020), and the escape matrix verifies it.
 6. **User records win.** The agent never modifies, archives, deletes, or overwrites user-created records.
 
 ## Decisions
@@ -96,7 +96,7 @@ addition_budget = 500
 
 - The agent tool set holds only `memory_search` (keyword search, or read by id). **It mounts only when Active records at session start exceed `[memory.injection] max_tokens` in estimated tokens**: what fits stays fully in the fixed section, and search has no use. Estimation uses the injection ruler (ADR 0015 conservative estimate), taking Project and Global Active records per D1 read order. The mount decision runs once at session start and never changes in-session (ADR 0036: tool definitions stay fixed in-session). Resume judges again.
 - No `memory_save`, `memory_revise`, or `memory_get` exist: these names never register and never advertise. Calls to them are unknown tools.
-- Permissions: `memory_search` is `allow` in both tiers. No memory tool needs `ask`.
+- Permissions: `write` and `patch` to `<memory root>/global/` and `<memory root>/projects/<ProjectId>/` are `allow` in both tiers. Under `workspace` the sandbox deny set keeps `shell` out of the memory store (invariant 5); `full` runs no sandbox.
 - User commands (CLI and TUI): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `relink`, `split`, `merge`, `project`. `forget`, `purge`, `split`, and `merge` need confirmation.
 
 ### D8 Service contract
