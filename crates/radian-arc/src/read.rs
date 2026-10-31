@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{Stage, Verdict};
+use super::gate::{Finding, Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -136,10 +136,9 @@ pub struct StageView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReviewSummaryView {
     pub summary: String,
-    /// The failing findings: at or above the verdict's `fix_level`, not `pre_existing`.
-    pub blocking: Vec<String>,
-    /// The rest: below the `fix_level`, or `pre_existing`.
-    pub suggestions: Vec<String>,
+    /// Every finding of the verdict, highest severity first; an old-shape verdict reads
+    /// through the same mapping as a new one.
+    pub findings: Vec<Finding>,
     pub verified: Vec<String>,
 }
 
@@ -971,16 +970,7 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
             .and_then(|(_, verdict)| {
                 verdict.review.as_ref().map(|report| ReviewSummaryView {
                     summary: report.summary.clone(),
-                    blocking: verdict
-                        .review_failing()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                    suggestions: verdict
-                        .review_rest()
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
+                    findings: report.sorted_by_severity().into_iter().cloned().collect(),
                     verified: report.verified.clone(),
                 })
             })

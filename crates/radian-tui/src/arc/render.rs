@@ -1718,32 +1718,54 @@ fn summary_lines(
         for text in crate::render::wrap(&review.summary, inner) {
             lines.push(rail(theme, Line::from(Span::styled(text, theme.text))));
         }
-        let groups = [
-            ("blocking", &review.blocking, '×', theme.status_error),
-            ("suggestions", &review.suggestions, '•', theme.text),
-            ("verified", &review.verified, '✓', theme.status_ok),
-        ];
-        for (label, items, glyph, style) in groups {
-            if items.is_empty() {
+        // One heading per severity that has findings, highest first: `critical`, `major`,
+        // `minor`. The marker and the colour follow the old rows: a `critical` or `major`
+        // finding is an error, a `minor` one is ordinary text (ADR 0048 decision 10).
+        for severity in radian_arc::gate::REVIEW_LEVELS {
+            let findings: Vec<&radian_arc::gate::Finding> = review
+                .findings
+                .iter()
+                .filter(|finding| finding.severity == *severity)
+                .collect();
+            if findings.is_empty() {
                 continue;
             }
             lines.push(rail(theme, Line::default()));
             lines.push(rail(
                 theme,
-                Line::from(Span::styled(label.to_owned(), theme.notice_label)),
+                Line::from(Span::styled((*severity).to_owned(), theme.notice_label)),
             ));
-            for item in items {
-                for (index, text) in crate::render::wrap(&format!("{glyph} {item}"), inner)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let text = if index == 0 {
-                        text
-                    } else {
-                        format!("  {text}")
-                    };
-                    lines.push(rail(theme, Line::from(Span::styled(text, style))));
+            let (glyph, style) = if *severity == "minor" {
+                ('•', theme.text)
+            } else {
+                ('×', theme.status_error)
+            };
+            for finding in findings {
+                let mut text = format!("{glyph} {}", finding.summary_line());
+                if finding.pre_existing {
+                    text.push_str(" (pre_existing)");
                 }
+                push_wrapped(lines, &text, inner, style, theme);
+                if !finding.trigger.is_empty() {
+                    // The trigger is its own indented row under the finding. `wrap` drops
+                    // leading spaces, so the indent is added to each row it returns.
+                    for row in crate::render::wrap(&finding.trigger, inner.saturating_sub(2)) {
+                        lines.push(rail(
+                            theme,
+                            Line::from(Span::styled(format!("  {row}"), theme.hint)),
+                        ));
+                    }
+                }
+            }
+        }
+        if !review.verified.is_empty() {
+            lines.push(rail(theme, Line::default()));
+            lines.push(rail(
+                theme,
+                Line::from(Span::styled("verified", theme.notice_label)),
+            ));
+            for item in &review.verified {
+                push_wrapped(lines, &format!("✓ {item}"), inner, theme.status_ok, theme);
             }
         }
     } else {
@@ -1771,6 +1793,21 @@ fn summary_lines(
         ));
     }
     lines.push(frame_bottom(theme));
+}
+
+/// One item of a summary group, wrapped to `inner` and behind the frame's rail, with its
+/// continuation rows indented under the text after the marker.
+fn push_wrapped(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    inner: usize,
+    style: Style,
+    theme: &Theme,
+) {
+    for (index, row) in crate::render::wrap(text, inner).into_iter().enumerate() {
+        let row = if index == 0 { row } else { format!("  {row}") };
+        lines.push(rail(theme, Line::from(Span::styled(row, style))));
+    }
 }
 
 /// `N commands`, `1 session`.
