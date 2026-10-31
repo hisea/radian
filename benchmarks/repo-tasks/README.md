@@ -14,9 +14,9 @@ round can make compaction fire several times in one task; read its checks as
 that, not as a first-pass baseline.
 
 Nothing here holds a credential. An arm names the agent, the provider and the
-model; radian and pi read their own stored keys. `run.sh` clones the repository
-into `runs/clone` (or `REPO_TASKS_CLONE`) and makes its worktrees there, never in
-the repository it is started in.
+model; radian and pi read their own stored keys. `run.sh` makes each run tree
+from the task's base sha alone, outside every repository, and never writes the
+repository it reads from.
 
 ## Files
 
@@ -24,17 +24,19 @@ the repository it is started in.
 |---|---|
 | `tasks/<id>-<slug>.md` | One task: frontmatter (`id`, `slug`, `base`, `outcome`, `crates`) and the worker brief verbatim under `## Brief` |
 | `arms/<name>.md` | One arm: `agent`, `provider`, `model`, `extra` (the agent's own flags) |
-| `run.sh` | One run: worktree, agent, wall-time cap, `change.diff`, session, `run.json` |
+| `run.sh` | One run: run tree, agent, wall-time cap, `change.diff`, session, `run.json`, `leak.json` |
 | `check.sh` | The task's crate-scoped fmt, clippy and nextest; `checks.json` and `checks.log` |
 | `review.sh` | arc's first-review prompt on `change.diff`, run by `arms/reviewer.md`; `review.json` |
 | `prompt.py` | Builds that prompt by reading `crates/radian-arc/src/gate/review.rs` and `verdict.rs` |
 | `timeout_run.py` | The portable wall-time cap the runner and the review use |
 | `report.py` | Per-task, totals and baseline-ratio tables from each run's session |
+| `leak.py` | Whether a run reached the task's later commits: its leak level and `leak.json` |
 | `eval.sh` | One arm end to end: every task, every k, checks, optional review, report |
-| `lib.py` | The task and arm file readers (also the CLI the shell scripts use) |
+| `lib.py` | The task and arm file readers, the run root and the run tree (also the CLI the shell scripts use) |
 | `tests/test_repo_tasks.py` | The tests; no model is called |
 
-`runs/` is output and is not committed.
+The run root holds the output. Its default is outside the repository, so
+nothing there is committed.
 
 ## One arm end to end, one command
 
@@ -55,21 +57,45 @@ python3 benchmarks/repo-tasks/report.py --baseline full
 ```
 
 `run.sh <arm> <task> <k>` takes the task's id or its full file stem. A second
-run of the same `(arm, task, k)` refuses until its `runs/<arm>/<task>/<k>`
-directory is removed.
+run of the same `(arm, task, k)` refuses until its `<runs>/<arm>/<task>/<k>`
+directory and its `<runs>/trees/<arm>-<task>-<k>` tree are removed.
 
 ### What the runner does
 
 1. Reads the arm and the task; an unknown name exits 2 and lists the valid ones.
-2. Makes `runs/clone` a clone of `REPO_TASKS_SOURCE` (default: the repository
-   holding this script) if it is not one, and a detached worktree of the task's
-   `base` sha at `runs/trees/<arm>-<task>-<k>`. `git worktree` and `git branch`
-   never run in the source repository, so its `.git/config` is untouched. A
-   `REPO_TASKS_CLONE` that is the source, the caller's repository or a worktree
-   of either is refused with exit 2, because `git worktree add` would write that
-   repository's `.git/config`. An existing plain directory (even inside one of
-   those repositories) is allowed: cloning into it creates its own `.git`.
-3. Runs the agent in the worktree under a wall-time cap (default 2700 s, measured
+2. Refuses a run root inside any git checkout (exit 2; the message names the
+   checkout). That covers the source, the repository the script is started in
+   and any other repository: an agent that leaves its tree must not find a
+   history there. One run did, and ran `git checkout work/...` in the harness
+   checkout that held the old default run root.
+3. Makes the run tree `<runs>/trees/<arm>-<task>-<k>` holding the task's `base`
+   sha and nothing else:
+
+   ```sh
+   git init <tree>
+   git -C <tree> fetch --depth 1 --no-tags \
+     --upload-pack 'git -c uploadpack.allowReachableSHA1InWant=true -c uploadpack.allowAnySHA1InWant=true upload-pack' \
+     <source> <base>
+   git -C <tree> checkout --detach FETCH_HEAD
+   ```
+
+   and then removes `.git/FETCH_HEAD`, which names the source path. The base
+   need not be a branch tip. The tree has no remote, no branch, no tag and no
+   commit after its base: `git log --all` shows one commit, and the task's
+   merged fix is not in it.
+
+   There is no clone because a clone carries the answers. The old runner made
+   each tree a worktree of a full clone, which had `origin/main` with every
+   task's merged fix and the source's `work/*` branches. Every arm runs with
+   `--profile full`, so no sandbox stopped an agent, and runs used it: `git
+   cherry-pick HEAD..origin/work/TK0223-...`, `git checkout
+   origin/work/TK0228-... -- <files>`, `git show <the original fix>`.
+
+   The source is only read. The upload-pack options are on the fetch's command
+   line, so the source's `.git/config` is never written (workers in a shared
+   clone fail when it changes). `git rev-list --count HEAD` is checked before
+   the agent starts; anything but 1 refuses the run.
+4. Runs the agent in the tree under a wall-time cap (default 2700 s, measured
    by the bundled `timeout_run.py`, so a machine without coreutils is still
    capped):
 
@@ -77,22 +103,25 @@ directory is removed.
      <out>/session --provider <provider> --model <model> <extra> -p -`, with the
      brief on stdin (without `--workspace` the session has no file, shell or job
      tools);
-   - pi: `pi --model <provider>/<model> <extra> -p "<brief>"`.
+   - pi: `pi --model <provider>/<model> --session-dir <out>/session <extra>
+     -p "<brief>"`.
 
    An arm's `extra` is the agent's own flag string, which is how an arm sets
    `--tools read,write,patch,shell` or `--profile full --approval auto`.
-4. Saves `brief.md`, the agent's stdout and stderr, `session/`, `change.diff`
+5. Saves `brief.md`, the agent's stdout and stderr, `session/`, `change.diff`
    (committed and uncommitted against the base), `commits.txt`,
-   `status-after.txt`, and `run.json` (`status` is `ok`, `failed` or `timeout`).
-   A run killed by the cap is `timeout`: the report keeps it.
+   `status-after.txt`, and `run.json` (`status` is `ok`, `failed` or `timeout`;
+   `tree` is the run tree; `tree_commits` is the tree's commit count before the
+   agent started, always 1). A run killed by the cap is `timeout`: the report
+   keeps it.
+6. Runs `leak.py` on the run and saves `leak.json` (see [Leak level](#leak-level)).
 
 Environment inputs:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `REPO_TASKS_SOURCE` | the repository of this script | repository cloned for the worktrees |
-| `REPO_TASKS_CLONE` | `<runs>/clone` | the separate clone; the source is never written, and a clone that is the source or the caller repository (or a worktree of either) is refused |
-| `REPO_TASKS_RUNS` | `benchmarks/repo-tasks/runs` | the run root |
+| `REPO_TASKS_SOURCE` | the repository of this script | the repository each tree's base is fetched from, and where `leak.py` looks up later shas; it is never written |
+| `REPO_TASKS_RUNS` | `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs` | the run root; `run.sh` refuses (exit 2) a run root inside any git checkout. `check.sh`, `review.sh` and `report.py` read the same default |
 | `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`timeout_run.py`) |
 | `REPO_TASKS_RADIAN_BIN` | `radian` | the radian binary |
 | `REPO_TASKS_PI_BIN` | `pi` | the pi binary |
@@ -105,7 +134,7 @@ Environment inputs:
 
 ### Checks
 
-`check.sh` reads the task's `crates` list and runs, in the run's worktree and
+`check.sh` reads the task's `crates` list and runs, in the run's tree and
 target directory:
 
 ```sh
@@ -158,10 +187,47 @@ plus `calls.<tool>` and `bytes.<tool>` for every tool the runs used,
 `input_total` over that arm's runs, the same-arm noise band).
 `-` means no journal reported the value; it is never a zero.
 
+The `leak` column counts the arm's runs by leak level: `L0` to `L3`, and `no
+journal` for a run whose agent left no journal (that is not `L0`). It counts
+every run, also the excluded ones. A run at level 2 or 3 is left out of
+`runs`, `result`, every number, `in_spread` and the ratios, and the table says
+`<arm>: excluded N (leak)` under it.
+
 `report.py --baseline <arm>` adds a ratio table (`arm / baseline`) per task and
 for the totals, over `input_total`, `calls`, `output`, `fee_usd`,
 `wall_seconds` and `result_bytes`. A baseline with no runs is a clear error that
 lists the arms that do have runs.
+
+## Leak level
+
+`leak.py <run dir>` reads every tool call in the run's session journals (radian
+and pi formats), parses each `git <subcommand> ...` in their string arguments,
+and writes `leak.json`: `level`, `evidence` (each line that raised the level),
+`outside` (absolute paths under `$HOME` that are not inside the run's tree;
+`~/.cargo` and `~/.rustup` do not count), `calls` and the `source` it used.
+`report.py` scans every run the same way. `--source <repo>` names the
+repository later shas are looked up in; the default is `REPO_TASKS_SOURCE`,
+else this repository.
+
+A sha is **later** when the source repository has it, it is not an ancestor of
+the run's base, and it is not one of the run's own commits (`commits.txt`). A
+**later ref** is `origin/*`, `remotes/*`, `work/TK*`, `refs/heads/work/*` or
+`main`.
+
+| Level | Name | What raises it |
+|---|---|---|
+| 3 | used | `cherry-pick`, `merge`, `checkout`, `switch`, `restore`, `reset`, `rebase`, `apply` or `am` of a later sha or ref; `git show <later>:<path> >`; a second history: `git remote add` or `set-url`, `git fetch` or `git pull` of a path or url, any `git clone` (the evidence names the path or url, even if no sha from it is named later) |
+| 2 | viewed | `show`, `diff`, `cat-file` or `format-patch` of a later sha or ref; `log -p`, `--patch`, `--stat` or `-- <path>` on one |
+| 1 | names | `log --all`, `log` of a later ref, `branch -a`, `--all`, `-r`, `--contains` or `--list`, and `rev-list`, `reflog`, `for-each-ref`, `show-ref` or `merge-base` with a later ref or `--all` |
+| 0 | clean | none of these |
+| null | no journal | the run has no journal |
+
+`outside` does not change the level. The scan cannot see content read without
+`git` (`.git/objects` read directly), a sha built at run time by a shell
+substitution, or a repository reached through a relative path. Read level 1 as
+suspect, not clean: a subject line alone can point at the fix. With the run
+tree above, a later sha or ref cannot be found in the tree; a level above 0 is
+then an attempt, or a second history brought in.
 
 ## Decision rules
 
@@ -180,6 +246,10 @@ numbers are in:
 4. **Write the rule in the round's brief before the run.** State which arm wins
    and on how many tasks; do not turn a mixed result into a conclusion
    afterwards.
+5. **A run with leak level ≥ 2 is excluded.** It saw or used the task's later
+   commits, so it measures the answer, not the agent. The report leaves it out
+   of every total and ratio and says how many it left out. If that leaves an arm
+   with fewer than two runs on a task, rerun it; do not read the task.
 
 ## Adding a task
 
@@ -211,10 +281,14 @@ python3 benchmarks/repo-tasks/report.py --self-test   # the same tests
 ```
 
 No test calls a model: `run.sh` is driven with a stub radian and a temporary git
-repository, `check.sh` with a stub cargo, and the report and prompt tests read
-the checked-in task files and the real arc source. The tests cover the caller's
-`.git/config` staying byte-identical (including a clone path that points at the
-caller), an unknown arm/task naming the valid ones, a timeout staying in the
-report (also when `gtimeout`/`timeout` are absent), a baseline with no runs, a
-two-crate check with `--jobs`, the review parser and review pass rule, and a
-prompt built from `review.rs`.
+repository, `check.sh` with a stub cargo, the leak tests read small radian and
+pi fixture journals, and the report and prompt tests read the checked-in task
+files and the real arc source. The tests cover the run tree (one commit, no
+ref, no later sha, a mid-history base, the agent's commits listed from base to
+head), the source's `.git/config` staying byte-identical, a run root inside the
+source, the caller's or another checkout being refused, every leak level in
+both journal formats (the run's own commit, a second history), a run with no
+journal, a level-2 run left out of the totals, an unknown arm/task naming the
+valid ones, a timeout staying in the report (also when `gtimeout`/`timeout`
+are absent), a baseline with no runs, a two-crate check with `--jobs`, the
+review parser and review pass rule, and a prompt built from `review.rs`.
