@@ -133,6 +133,9 @@ pub enum EventData {
         /// ADR 0018: `true` for the deterministic fallback; absent in a
         /// model summary's record (and in an old record) and read back as `false`.
         deterministic: bool,
+        /// ADR 0018: the paths whose newest `read` unit the compaction kept, newest first.
+        /// Absent in an old record and read back as an empty list.
+        retained_reads: Vec<String>,
     },
     // Runtime events (ADR 0006 §5.5–§5.7). They are typed so a round trip is exact, and
     // they are deliberately **not** mapped to `JournalRecord`: they are not transcript
@@ -726,6 +729,7 @@ impl LineScanner {
                         below_target: d.below_target,
                         model: d.model.clone(),
                         deterministic: d.deterministic,
+                        retained_reads: d.retained_reads.clone(),
                     },
                     path,
                     self.lineno,
@@ -741,6 +745,7 @@ impl LineScanner {
                     below_target: d.below_target,
                     model: d.model,
                     deterministic: d.deterministic,
+                    retained_reads: d.retained_reads,
                 }
             }
             "PermissionResolved" => {
@@ -1154,6 +1159,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
             below_target,
             model,
             deterministic,
+            retained_reads,
         } => Some(JournalRecord::ContextCompacted {
             revision: *revision,
             source_revision: *source_revision,
@@ -1165,6 +1171,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
             below_target: *below_target,
             model: model.clone(),
             deterministic: *deterministic,
+            retained_reads: retained_reads.clone(),
         }),
         // Runtime events are not transcript records: `replay`/`repair`/`recover`
         // must never see them (ADR 0006 §10).
@@ -1298,6 +1305,9 @@ struct ContextCompactedData {
     /// ADR 0018: optional on disk; absent is `false`.
     #[serde(default)]
     deterministic: bool,
+    /// ADR 0018: optional on disk; absent is an empty list.
+    #[serde(default)]
+    retained_reads: Vec<String>,
 }
 
 #[derive(Deserialize)]

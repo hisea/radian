@@ -202,6 +202,16 @@ EXPECT = {
         uncommitted=[],
         repair={},
     ),
+    "compaction-retained-reads.jsonl": dict(
+        outcome="accept",
+        events=11,
+        skips=[],
+        replacement=(6, 1, 4),
+        uncommitted=[],
+        repair={},
+        # ADR 0018：保留的 read 路径列表，最新在前；字段可缺省（缺省即空列表）。
+        retained_reads=["/work/example/a.txt"],
+    ),
     "policy-approval.jsonl": dict(
         outcome="accept",
         events=4,
@@ -739,6 +749,19 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望一条 deterministic:true 的 ContextCompacted")
         if any(e["event"] == "CompactionUsageRecorded" for e in events):
             raise Corruption(f"{name}: 确定性兜底不得写 CompactionUsageRecorded")
+    if "retained_reads" in exp:
+        # ADR 0018：`retained_reads` 是 `ContextCompacted` 的**可选**字符串数组（保留的 read
+        # 路径，最新在前）。缺省即空列表；出现时必须是字符串数组。
+        compacted = [e for e in events if e["event"] == "ContextCompacted"]
+        if len(compacted) != 1:
+            raise Corruption(f"{name}: 期望一条 ContextCompacted")
+        value = compacted[0]["data"].get("retained_reads")
+        if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+            raise Corruption(f"{name}: retained_reads 必须是字符串数组")
+        if value != exp["retained_reads"]:
+            raise Corruption(
+                f"{name}: retained_reads {value!r} != 期望 {exp['retained_reads']!r}"
+            )
     if "usage_fees" in exp:
         # ADR 0027 / ADR 0007：`fee` 是 usage 记录里**可选**的兄弟字段
         # （micro-dollars 与 incomplete），缺省即旧记录（恢复方按当前目录重算并标估算）。

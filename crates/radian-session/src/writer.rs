@@ -1037,6 +1037,15 @@ struct ContextCompactedData<'a> {
     /// a model summary (a forward reader defaults it to `false`).
     #[serde(skip_serializing_if = "is_false")]
     deterministic: bool,
+    /// ADR 0018: the paths whose newest `read` unit was kept, newest first. Absent when the
+    /// list is empty (a reader defaults a missing field to an empty list).
+    #[serde(skip_serializing_if = "is_empty_slice")]
+    retained_reads: &'a [String],
+}
+
+/// `skip_serializing_if` for the retained-read path list: omit it when empty.
+fn is_empty_slice<T>(value: &[T]) -> bool {
+    value.is_empty()
 }
 
 /// `skip_serializing_if` for the deterministic flag: omit it when `false`.
@@ -1169,6 +1178,7 @@ fn render_record(
             below_target,
             model,
             deterministic,
+            retained_reads,
         } => (
             EVT_CONTEXT_COMPACTED,
             Render::ContextCompacted(ContextCompactedData {
@@ -1182,6 +1192,7 @@ fn render_record(
                 below_target: *below_target,
                 model,
                 deterministic: *deterministic,
+                retained_reads,
             }),
         ),
         _ => return None,
