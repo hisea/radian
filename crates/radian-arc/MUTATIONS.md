@@ -1917,8 +1917,10 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 | TK0265-M4 | the rework round's `PreviousReview` holds every previous finding, so the 10-line window is measured from below-threshold and `pre_existing` ones too | `review::a_rework_round_anchors_on_failing_findings_only` (the below-threshold minor was in the prompt and kept the new `major` from being demoted) | ✅ 1 failed |
 | TK0265-M5 | a session's report is parsed like a verdict arc wrote (`ReviewReport::from_session_json` calls `parse(value, true, false)`), so the session's `pre_existing` is kept | `gate::review::tests::a_session_cannot_mark_a_finding_pre_existing_but_a_verdict_keeps_it`, `review::a_session_supplied_pre_existing_is_ignored` (the `major` finding failed nothing and the stage passed) | ✅ 2 failed |
 | TK0265-M6 | an old verdict's `blocking` items are decided by `fix_level` again (`ReviewReport::failing_in_old_verdict` passes `false`) | `gate::review::tests::an_old_verdicts_blocking_items_fail_whatever_their_level`, `review::an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing` (the minor blocking item was missing from the prompt and the failure text, and was not a window anchor) | ✅ 2 failed |
+| TK0265-M7 | an old-shape verdict's `suggestions` are decided by `fix_level` again (`failing_with` ORs `finding.at_or_above(fix_level)` into the `Some(count)` old-verdict arm) | `gate::review::tests::an_old_verdicts_blocking_items_fail_whatever_their_level`, `review::an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing` (the `minor` suggestion was named in the failure text and listed in the prompt, and anchored the next round's 10-line window) | ✅ 2 failed |
 
-6/6 caught. M1–M4 were added in the first round; M5 and M6 were added in the fix round and each ran twice with
+7/7 caught. M1–M4 were added in the first round; M5 and M6 were added in the fix round and each ran twice with
 `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E '…'` and
 `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '…'`. Each file was
-restored from `.radian/mut/` and `cmp` found it identical to the backup.
+restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
+second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.

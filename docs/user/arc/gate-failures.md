@@ -31,7 +31,7 @@ The class is recorded in `runs/<task>/attempts/<attempt id>/attempt_result.json`
 
 A worker attempt that ends on an unavailable model waits the same way the review stage does; see [A worker wait on an unavailable model](#a-worker-wait-on-an-unavailable-model).
 
-A `review` stage fails with `review_findings` when a finding is at or above the reviewer's `fix_level` and is not `pre_existing`; its other reasons are `review_output`, `review_timeout` and `review_unavailable` (see [the review stage](gate-review.md#the-review-stage)). `review_blocking` is the reason a verdict or task file written by an earlier build may carry, and this build never writes it; every item of such a verdict's old `blocking` list is a failing finding, whatever its level and the `fix_level`.
+A `review` stage fails with `review_findings` when a finding is at or above the reviewer's `fix_level` and is not `pre_existing`; its other reasons are `review_output`, `review_timeout` and `review_unavailable` (see [the review stage](gate-review.md#the-review-stage)). `review_blocking` is the reason a verdict or task file written by an earlier build may carry, and this build never writes it; every item of such a verdict's old `blocking` list is a failing finding, whatever its level and the `fix_level`, and its `suggestions` are never failing, whatever their level.
 
 ### A worker wait on an unavailable model
 

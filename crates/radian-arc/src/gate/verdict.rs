@@ -307,12 +307,15 @@ pub struct ReviewReport {
     pub findings: Vec<Finding>,
     /// What the session checked and found correct.
     pub verified: Vec<String>,
-    /// How many leading [`findings`](Self::findings) came from an old verdict's `blocking`
-    /// list. Never serialized: a verdict written now records `findings` only, and a session's
-    /// report is read with the `fix_level` rule. Only an old verdict that failed with
-    /// `review_blocking` uses it, because every item of that list failed whatever its level.
+    /// `Some(n)` when the report was read from an old verdict's `blocking` / `suggestions`
+    /// shape: the first `n` [`findings`](Self::findings) came from its `blocking` list, and
+    /// the rest from its `suggestions`. `None` for a report that carries `findings`, which a
+    /// verdict written now and a session's report always do. Never serialized. Only an old
+    /// verdict that failed with `review_blocking` uses it, because every item of that list
+    /// failed whatever its level, and the `fix_level` rule belongs to a report with
+    /// `findings`.
     #[serde(skip)]
-    pub old_blocking: usize,
+    pub old_blocking: Option<usize>,
 }
 
 impl ReviewReport {
@@ -344,7 +347,7 @@ impl ReviewReport {
         let (findings, old_blocking) = match value.get("findings") {
             Some(findings) => (
                 items(findings, |item| Finding::parse(item, trust_pre_existing))?,
-                0,
+                None,
             ),
             None => {
                 let blocking = items(value.get("blocking")?, |item| {
@@ -355,7 +358,7 @@ impl ReviewReport {
                 findings.extend(items(value.get("suggestions")?, |item| {
                     Finding::from_old_json(item, "minor", trust_pre_existing)
                 })?);
-                (findings, if old_blocking { count } else { 0 })
+                (findings, old_blocking.then_some(count))
             }
         };
         Some(Self {
@@ -375,8 +378,10 @@ impl ReviewReport {
 
     /// The failing findings of a verdict that failed with `review_blocking` before findings
     /// existed: every item of its old `blocking` list is failing, whatever its level and
-    /// whatever `fix_level` says, because that verdict already decided it. `fix_level`
-    /// decides the rest.
+    /// whatever `fix_level` says, because that verdict already decided it. Its `suggestions`
+    /// are never failing, and `fix_level` does not decide them either. A report that carries
+    /// `findings` is decided by `fix_level` whatever its reason, because the `fix_level` rule
+    /// belongs to a report with `findings`.
     #[must_use]
     pub fn failing_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
         self.failing_with(fix_level, true)
@@ -386,10 +391,9 @@ impl ReviewReport {
         self.findings
             .iter()
             .enumerate()
-            .filter(|(index, finding)| {
-                !finding.pre_existing
-                    && ((old_blocking && *index < self.old_blocking)
-                        || finding.at_or_above(fix_level))
+            .filter(|(index, finding)| match self.old_blocking {
+                Some(count) if old_blocking => *index < count,
+                _ => !finding.pre_existing && finding.at_or_above(fix_level),
             })
             .map(|(_, finding)| finding)
             .collect()
@@ -403,7 +407,7 @@ impl ReviewReport {
     }
 
     /// The rest of a verdict that failed with `review_blocking`: its old `blocking` items are
-    /// never here, whatever their level.
+    /// never here, and its `suggestions` always are, whatever their level.
     #[must_use]
     pub fn rest_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
         self.rest_with(fix_level, true)
@@ -413,10 +417,9 @@ impl ReviewReport {
         self.findings
             .iter()
             .enumerate()
-            .filter(|(index, finding)| {
-                finding.pre_existing
-                    || !((old_blocking && *index < self.old_blocking)
-                        || finding.at_or_above(fix_level))
+            .filter(|(index, finding)| match self.old_blocking {
+                Some(count) if old_blocking => *index >= count,
+                _ => finding.pre_existing || !finding.at_or_above(fix_level),
             })
             .map(|(_, finding)| finding)
             .collect()
@@ -616,7 +619,7 @@ impl Verdict {
     /// `fix_level` it recorded (the default when it recorded none, or a damaged one) and not
     /// `pre_existing`. A verdict that failed with `review_blocking` was decided before
     /// findings existed, so every item of its old `blocking` list is failing whatever its
-    /// level. Empty for a verdict with no report.
+    /// level, and its `suggestions` never are. Empty for a verdict with no report.
     #[must_use]
     pub fn review_failing(&self) -> Vec<&Finding> {
         let Some(report) = &self.review else {
@@ -630,8 +633,9 @@ impl Verdict {
         }
     }
 
-    /// The rest of this review verdict's findings: below the `fix_level`, or `pre_existing`.
-    /// Empty for a verdict with no report.
+    /// The rest of this review verdict's findings: below the `fix_level`, or `pre_existing`;
+    /// for a verdict that failed with `review_blocking`, its old `suggestions`. Empty for a
+    /// verdict with no report.
     #[must_use]
     pub fn review_rest(&self) -> Vec<&Finding> {
         let Some(report) = &self.review else {

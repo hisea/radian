@@ -567,7 +567,7 @@ reviewer's `fix_level` and not `pre_existing` fails with `review_findings`; the 
 recorded (`ReviewReport::failing` / `rest`). A verdict that failed with `review_blocking` was
 decided before findings existed: every item of its old `blocking` list fails whatever its level
 and whatever `fix_level` says (`ReviewReport::failing_in_old_verdict`, `Verdict::review_failing`),
-and `fix_level` decides a report that carries `findings`. A report in the old `blocking` / `suggestions`
+its `suggestions` never fail, and `fix_level` decides a report that carries `findings`. A report in the old `blocking` / `suggestions`
 shape maps to findings: `blocking` at its own `level` else `major`, `suggestions` at its own
 `level` else `minor`, `text` as the summary, no trigger. The digest is computed from the
 re-serialized verdict. Unusable output (no block, a missing field, a `severity` outside
@@ -581,7 +581,7 @@ A review that follows an earlier review of the task, of a different commit, is a
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
 gets the first review's prompt, though it reads the reviewer's own settings rather than its
 `first` table. A rework round's prompt holds the previous round's failing findings (an old
-`review_blocking` verdict contributes every item of its `blocking` list), the commits
+`review_blocking` verdict contributes every item of its `blocking` list, never a `suggestion`), the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, marks a finding `pre_existing`
 unless its `file:line` is within 3 lines of a line the task's own change added or changed, or

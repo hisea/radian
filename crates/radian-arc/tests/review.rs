@@ -12,8 +12,8 @@ use std::process::{Command, Stdio};
 
 use common::*;
 use radian_arc::gate::{
-    Finding, ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, effective_stages,
-    required_passed, verdict_path, verdict_set_digest,
+    Finding, ReviewReport, ReviewSettings, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult,
+    effective_stages, required_passed, verdict_path, verdict_set_digest,
 };
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
@@ -4548,7 +4548,7 @@ fn suggestions(items: Vec<Finding>) -> ReviewReport {
         summary: "the change adds feature.txt".to_owned(),
         findings: items,
         verified: Vec::new(),
-        old_blocking: 0,
+        old_blocking: None,
     }
 }
 
@@ -6266,7 +6266,7 @@ fn a_blocking_item_is_never_carried_into_the_followup() {
             summary: "the change adds feature.txt".to_owned(),
             findings: vec![graded("major", "feature.txt", 1, "this must change")],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         },
     );
     assert_eq!(
@@ -6555,7 +6555,7 @@ fn a_round_with_only_blocking_items_carries_nothing() {
             summary: "the rework adds two.txt".to_owned(),
             findings: vec![item("major", "feature.txt", 2, "a blocking item round two")],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         },
     );
     assert_eq!(
@@ -8444,7 +8444,9 @@ fn a_session_supplied_pre_existing_is_ignored() {
 
 /// An old verdict that failed with `review_blocking` keeps every item of its `blocking` list
 /// failing, whatever its recorded level: the rework prompt lists it, the failure text names
-/// it, and it anchors the next round's 10-line window.
+/// it, and it anchors the next round's 10-line window. Its `suggestions` are never failing,
+/// whatever their level and the recorded `fix_level`: they are not named, not listed, and do
+/// not anchor.
 #[test]
 fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
     /// The old shape exactly as a build before findings wrote it.
@@ -8453,7 +8455,9 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
         "blocking": [
             {"level": "minor", "file": "anchor.txt", "line": 30, "text": "the old minor item"}
         ],
-        "suggestions": [],
+        "suggestions": [
+            {"level": "minor", "file": "suggestion.txt", "line": 60, "text": "an old minor suggestion"}
+        ],
         "verified": []
     }"#;
 
@@ -8483,7 +8487,14 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
         review_cost_micros: None,
         review_model_error: None,
         review_pre_existing: None,
-        review_settings: None,
+        review_settings: Some(ReviewSettings {
+            round: "rework".to_owned(),
+            reviewer: "default".to_owned(),
+            fix_level: "minor".to_owned(),
+            exec_args: "gate.review.exec_args".to_owned(),
+            timeout_secs: 0,
+            timeout: "gate.review.timeout_secs".to_owned(),
+        }),
         profile: Some("default".to_owned()),
         integration_style: None,
     };
@@ -8512,6 +8523,10 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
         reason.contains("[minor] anchor.txt:30 the old minor item"),
         "the failure text lost the blocking item: {reason}"
     );
+    assert!(
+        !reason.contains("an old minor suggestion"),
+        "the failure text named a suggestion as failing: {reason}"
+    );
 
     // The next round lists the item and uses it as a window anchor.
     fixture.rework(&first, "two.txt", "two\n");
@@ -8522,6 +8537,13 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
             &[
                 finding_json("major", "anchor.txt", 35, "still the old problem", ""),
                 finding_json("major", "two.txt", 1, "a new problem", ""),
+                finding_json(
+                    "major",
+                    "suggestion.txt",
+                    65,
+                    "beside the old suggestion",
+                    "",
+                ),
             ],
         )],
         0,
@@ -8534,12 +8556,16 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
         prompt.contains("- [minor] anchor.txt:30 the old minor item"),
         "the prompt lost the old blocking item:\n{prompt}"
     );
+    assert!(
+        !prompt.contains("an old minor suggestion"),
+        "the prompt listed a suggestion as failing:\n{prompt}"
+    );
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
     assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(
         verdict.review_pre_existing,
-        Some(0),
-        "a finding 5 lines from the old blocking item was demoted"
+        Some(1),
+        "the finding 5 lines from the old suggestion was not demoted"
     );
     let report = verdict.review.expect("a report");
     let anchored = report
@@ -8550,5 +8576,14 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
     assert!(
         !anchored.pre_existing,
         "the old blocking item is not a window anchor: {report:?}"
+    );
+    let beside = report
+        .findings
+        .iter()
+        .find(|finding| finding.summary == "beside the old suggestion")
+        .expect("the finding beside the suggestion");
+    assert!(
+        beside.pre_existing,
+        "the old suggestion anchored a window: {report:?}"
     );
 }

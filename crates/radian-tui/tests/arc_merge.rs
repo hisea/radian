@@ -370,7 +370,7 @@ fn report(findings: Vec<Finding>, verified: Vec<&str>) -> ReviewReport {
             .to_owned(),
         findings,
         verified: verified.into_iter().map(str::to_owned).collect(),
-        old_blocking: 0,
+        old_blocking: None,
     }
 }
 

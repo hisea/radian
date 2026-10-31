@@ -310,7 +310,7 @@ fn write_verdict(
                 })
                 .collect(),
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         }),
         review_session_ids: Vec::new(),
         review_cost_micros: None,

@@ -304,7 +304,7 @@ impl ReviewRun<'_> {
                     summary: EMPTY_CHANGE_SUMMARY.to_owned(),
                     findings: Vec::new(),
                     verified: Vec::new(),
-                    old_blocking: 0,
+                    old_blocking: None,
                 });
             } else {
                 let (prompt, round) =
@@ -1218,8 +1218,9 @@ mod tests {
     }
 
     /// An old report read from a verdict records how many findings came from `blocking`, so a
-    /// `review_blocking` verdict's `minor` blocking item still fails; a session's old-shape
-    /// report has no such record and is decided by `fix_level` like any report.
+    /// `review_blocking` verdict's `minor` blocking item still fails and its `suggestions`
+    /// never do, whatever `fix_level` says; a session's old-shape report has no such record
+    /// and is decided by `fix_level` like any report.
     #[test]
     fn an_old_verdicts_blocking_items_fail_whatever_their_level() {
         let value: Value = serde_json::from_str(
@@ -1228,19 +1229,28 @@ mod tests {
         )
         .expect("the old report is JSON");
         let persisted = ReviewReport::from_json(&value).expect("the verdict reads");
-        assert_eq!(persisted.old_blocking, 1, "{persisted:?}");
+        assert_eq!(persisted.old_blocking, Some(1), "{persisted:?}");
         assert!(persisted.failing("major").is_empty());
         assert_eq!(
             persisted
-                .failing_in_old_verdict("major")
+                .failing_in_old_verdict("minor")
                 .iter()
                 .map(|finding| finding.summary.as_str())
                 .collect::<Vec<_>>(),
             vec!["a nit"]
         );
+        assert_eq!(
+            persisted
+                .rest_in_old_verdict("minor")
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["an idea"],
+            "an old verdict's suggestion was failing"
+        );
         let text = format!("```json\n{value}\n```");
         let session = parse_report(&text).expect("the session's report parses");
-        assert_eq!(session.old_blocking, 0, "{session:?}");
+        assert_eq!(session.old_blocking, None, "{session:?}");
         assert!(session.failing("major").is_empty());
     }
 
@@ -1316,7 +1326,7 @@ mod tests {
                 finding("minor", None, None, "n"),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         let summaries = |findings: Vec<&Finding>| {
             findings
@@ -1432,7 +1442,7 @@ mod tests {
                 finding("minor", None, None, "vague"),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         let marked: Vec<(&str, bool)> = report
@@ -1481,7 +1491,7 @@ mod tests {
                 ),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         let summaries: Vec<&str> = report
@@ -1523,7 +1533,7 @@ mod tests {
                 finding("minor", None, Some(4), "a minor finding with only a line"),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         assert_eq!(report.findings.len(), 3, "{:?}", report.findings);
@@ -1553,7 +1563,7 @@ mod tests {
                 finding("minor", Some("src/other.rs"), Some(5), "a nit"),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 2);
         assert_eq!(report.findings[0].severity, "major");
@@ -1589,7 +1599,7 @@ mod tests {
                 ),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
@@ -1617,7 +1627,7 @@ mod tests {
                 "another file",
             )],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         assert!(report.findings[0].pre_existing);
@@ -1644,7 +1654,7 @@ mod tests {
                 finding("minor", Some("src/kept.rs"), Some(23), "three lines away"),
             ],
             verified: Vec::new(),
-            old_blocking: 0,
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         assert_eq!(report.findings[0].summary, "four lines away");
