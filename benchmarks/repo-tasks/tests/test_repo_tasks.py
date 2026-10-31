@@ -266,9 +266,9 @@ class ScratchCase(unittest.TestCase):
 
 
 class TaskSetTest(ScratchCase):
-    def test_the_four_tasks_carry_every_field_and_the_brief(self):
+    def test_the_five_tasks_carry_every_field_and_the_brief(self):
         names = lib.task_names()
-        self.assertEqual(len(names), 4)
+        self.assertEqual(len(names), 5)
         bases = set()
         crates = set()
         for name in names:

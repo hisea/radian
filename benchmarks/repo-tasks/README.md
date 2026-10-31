@@ -5,9 +5,13 @@ crate-scoped checks, a review and a report. It exists so two A/B rounds can be
 compared: the tasks, the base shas and the column definitions stay fixed, and the
 only thing a round changes is an arm.
 
-The tasks are merged work, not invented fixtures: each was an arc task whose
-first attempt passed. The four here are the ones this repository measured in the
-2026-10-30 tool-set A/B; add more by the rule below.
+The tasks are merged work, not invented fixtures: each was an arc task. Four of
+them passed on the first attempt and are the ones this repository measured in the
+2026-10-30 tool-set A/B; add more by the rule below. The fifth, TK0236, is the
+long task: a 305-step worker run that touches five crates and whose first attempt
+failed the gate (`outcome: fail`). It breaks rules 2 and 3 on purpose, so a
+round can make compaction fire several times in one task; read its checks as
+that, not as a first-pass baseline.
 
 Nothing here holds a credential. An arm names the agent, the provider and the
 model; radian and pi read their own stored keys. `run.sh` clones the repository
