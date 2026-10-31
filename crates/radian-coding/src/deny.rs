@@ -10,20 +10,49 @@
 //!
 //! The deny check runs on the `realpath`ed path, so a symlink into a denied directory
 //! refuses; the file itself opens with `O_NOFOLLOW` on its last component.
+//!
+//! One exception (ADR 0039 decision 4): the two memory scope directories the file tools were
+//! given as writable roots. Everything else under `memory/` keeps the deny text, in the file
+//! tools; the sandbox policy (the shell) has no exception and denies the whole directory.
 
 use std::path::{Path, PathBuf};
 
-/// The denied paths, canonicalized the way the sandbox policy canonicalizes them.
+/// The denied paths, canonicalized the way the sandbox policy canonicalizes them, plus the
+/// one documented exception: the writable memory scopes (ADR 0039 decision 4).
 #[derive(Debug, Clone, Default)]
 pub struct DenySet {
     paths: Vec<PathBuf>,
+    /// The memory scope directories the file tools reach as roots. A path under one of them is
+    /// never denied **here**; the sandbox policy (the shell) has no exception and still denies
+    /// all of `memory/`.
+    except: Vec<PathBuf>,
 }
 
 impl DenySet {
     /// Nothing is denied. Tests and embedders that never exercise the `full` tier use this;
     /// the tier check refuses outside paths before the set is consulted.
     pub fn empty() -> Self {
-        Self { paths: Vec::new() }
+        Self {
+            paths: Vec::new(),
+            except: Vec::new(),
+        }
+    }
+
+    /// Adds the memory scope directories the file tools were given as roots (ADR 0039
+    /// decision 4): the deny set keeps `memory/` for the shell, but the two scope directories
+    /// are reachable through their own roots and so are the exception here. Each directory is
+    /// resolved like a denied entry, so a not-yet-created scope still binds once it exists.
+    pub fn allowing(mut self, scopes: &[PathBuf]) -> Self {
+        for path in scopes {
+            if let Some(resolved) = radian_sandbox::canonicalize_existing_prefix(path)
+                && !self.except.contains(&resolved)
+            {
+                self.except.push(resolved);
+            }
+        }
+        self.except.sort();
+        self.except.dedup();
+        self
     }
 
     /// The production set: the sandbox's default deny-read entries for `home` (usually the
@@ -46,12 +75,19 @@ impl DenySet {
         }
         paths.sort();
         paths.dedup();
-        Self { paths }
+        Self {
+            paths,
+            except: Vec::new(),
+        }
     }
 
     /// Whether `canonical` (already `realpath`ed by the caller) is denied: itself or under
-    /// one of the denied paths. Returns the matching denied path for the refusal message.
+    /// one of the denied paths, unless it is in a memory scope (the documented exception).
+    /// Returns the matching denied path for the refusal message.
     pub fn denies(&self, canonical: &Path) -> Option<&Path> {
+        if radian_sandbox::deny_read_match(&self.except, canonical).is_some() {
+            return None;
+        }
         radian_sandbox::deny_read_match(&self.paths, canonical).map(PathBuf::as_path)
     }
 }
@@ -87,6 +123,33 @@ mod tests {
         assert!(set.denies(&dir.join("other")).is_none());
         // `/a/bc` is not inside `/a/b`.
         assert!(set.denies(&dir.join("sessions-backup")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_memory_scope_is_the_exception_but_its_parent_and_siblings_are_denied() {
+        let dir = std::env::temp_dir().join(format!("radian-deny-except-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let memory = dir.join("memory");
+        std::fs::create_dir_all(memory.join("global")).unwrap();
+        std::fs::create_dir_all(memory.join("projects/P")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let memory = dir.join("memory");
+        let global = memory.join("global");
+        let project = memory.join("projects/P");
+        let set = DenySet::from_home_and_extra(None, std::slice::from_ref(&memory))
+            .allowing(&[global.clone(), project.clone()]);
+        assert!(set.denies(&global.join("x.md")).is_none());
+        assert!(set.denies(&project.join("MEMORY.md")).is_none());
+        // Everything else under `memory/` is still the sandbox's deny set.
+        assert_eq!(
+            set.denies(&memory.join("projects.jsonl")),
+            Some(memory.as_path())
+        );
+        assert_eq!(
+            set.denies(&memory.join("credentials/x")),
+            Some(memory.as_path())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

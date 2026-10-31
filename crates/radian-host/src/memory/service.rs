@@ -10,8 +10,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use radian_memory::{
-    Confirmer, ImportReport, Kind, MemoryError, MemoryId, MemoryRecord, MemoryStore, MoveReport,
-    ProjectId, ProjectRegistry, Provenance, Scope, SearchQuery, Source, search,
+    Confirmer, FileStore, ImportReport, Kind, MemoryError, MemoryId, MemoryRecord, MemoryStore,
+    MoveReport, ProjectId, ProjectRegistry, Provenance, Scope, SearchQuery, Source, search,
 };
 
 use super::identity::project_identity_key;
@@ -217,6 +217,30 @@ impl MemoryService {
                 candidates: self.candidates()?,
             }),
         }
+    }
+
+    /// The memory scope directories the file tools may read **and write** (ADR 0039 decision
+    /// 4): `<memory root>/global/` and, when this workspace is linked to a project,
+    /// `<memory root>/projects/<ProjectId>/`. Resolving never registers a project (ADR 0021
+    /// D2): an unlinked workspace, or a registry that cannot be read, gets `global/` only.
+    ///
+    /// Each directory is created 0700 on first use (ADR 0021 D3), so a model that writes a
+    /// memory file before any memory command ran still has a root the file tools can open; a
+    /// creation that fails leaves the directory absent and the tool build skips it.
+    pub fn file_tool_roots(&self) -> Vec<PathBuf> {
+        let mut scopes = vec![Scope::Global];
+        if let Ok(project) = self.project_id() {
+            scopes.push(Scope::Project(project));
+        }
+        let files = FileStore::open(self.store.root().to_path_buf());
+        scopes
+            .iter()
+            .map(|scope| {
+                let dir = files.scope_dir(scope);
+                let _ = crate::ensure_private_dir(&dir);
+                dir
+            })
+            .collect()
     }
 
     /// The current project, or the `Unlinked` error.

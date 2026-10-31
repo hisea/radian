@@ -242,6 +242,12 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         std::fs::create_dir_all(radian_home.join(dir))?;
         std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
     }
+    // ADR 0039 decision 4: the file tools reach the two memory scope directories, but the
+    // sandbox (the shell) has no exception and still denies all of `memory/`. The matrix
+    // creates a scope file so the shell case below shows the scope is denied too, not only
+    // the scope's parent.
+    std::fs::create_dir_all(radian_home.join("memory/global"))?;
+    std::fs::write(radian_home.join("memory/global/x.md"), "radian-data\n")?;
     // ADR 0025 ruling 1: `skills/` is deliberately **not** on the deny list — a skill's body is
     // read by the model and its scripts run inside the sandbox.
     std::fs::create_dir_all(radian_home.join("skills/greet"))?;
@@ -898,6 +904,16 @@ impl Rig {
             "memory_unreadable",
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
+        );
+        // ADR 0039 decision 4: the memory scope directories are a **file-tool** exception
+        // only. The sandbox has none, so a shell command cannot read a scope file either.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "memory_scope_unreadable",
+            Expect::MustFail,
+            &format!("cat {} > /dev/null", q(&radian.join("memory/global/x.md"))),
         );
         // ADR 0026 D4: `credentials/auth.json` is denied; the control (FullAccess) reads it,
         // so the denial is the sandbox, not a missing file.

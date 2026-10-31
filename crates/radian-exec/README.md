@@ -150,8 +150,9 @@ key. Writes default to Project; `--global` writes a Global record.
 During a conversation the model gets one tool, and only past the injection budget:
 `memory_search` (a keyword search, or a full read of records by `ids`; **allowed** by the
 rules) mounts when the Active records' estimated total exceeds `[memory.injection]
-max_tokens` (ADR 0021 D7). There is no model-writable memory path: a user record is never
-modified by the model, and old `source: agent` records in existing logs stay readable.
+max_tokens` (ADR 0021 D7). A model has no memory write tool: memory files are written
+with the ordinary `write` and `patch`, which reach the two scope directories in both tiers
+(ADR 0039 decision 4), and old `source: agent` records in existing logs stay readable.
 When the user asks the model to remember something, the model routes it to a file instead
 (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
 `AGENTS.md`, a procedure useful across projects becomes a user-level skill at
