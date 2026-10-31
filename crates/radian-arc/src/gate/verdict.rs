@@ -17,8 +17,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::config::{Profile, Stage, StageSpec, effective_stages};
+use super::config::{DEFAULT_FIX_LEVEL, Profile, Stage, StageSpec, effective_stages};
 use super::error::GateError;
+use super::review::REVIEW_BLOCKING;
 use crate::store::config::IntegrationStyle;
 
 /// The verdict schema version this crate writes and accepts.
@@ -122,11 +123,15 @@ impl Finding {
         }
     }
 
-    /// Reads the new shape. `None` when the value is not an object, when `severity` or
-    /// `summary` is missing or has the wrong type, when a present field has the wrong type,
-    /// or when `severity` is not in [`REVIEW_LEVELS`].
+    /// Reads the new shape from a verdict arc wrote. `None` when the value is not an object,
+    /// when `severity` or `summary` is missing or has the wrong type, when a present field has
+    /// the wrong type, or when `severity` is not in [`REVIEW_LEVELS`].
     #[must_use]
     pub fn from_json(value: &Value) -> Option<Self> {
+        Self::parse(value, true)
+    }
+
+    fn parse(value: &Value, trust_pre_existing: bool) -> Option<Self> {
         let object = value.as_object()?;
         let severity = REVIEW_LEVELS
             .iter()
@@ -140,9 +145,13 @@ impl Finding {
             Some(line) => Some(u32::try_from(line.as_u64()?).ok()?),
         };
         let trigger = optional_string(object.get("trigger"))?.unwrap_or_default();
-        let pre_existing = match object.get("pre_existing") {
-            None | Some(Value::Null) => false,
-            Some(flag) => flag.as_bool()?,
+        let pre_existing = if trust_pre_existing {
+            match object.get("pre_existing") {
+                None | Some(Value::Null) => false,
+                Some(flag) => flag.as_bool()?,
+            }
+        } else {
+            false
         };
         Some(Self {
             severity,
@@ -157,7 +166,11 @@ impl Finding {
     /// Reads an item of the shape a verdict written before findings holds: a plain string, or
     /// an object with a `text` and at most a `level`. `default_severity` fills in a missing
     /// `level`. An explicit `level` outside [`REVIEW_LEVELS`] makes the whole report unusable.
-    fn from_old_json(value: &Value, default_severity: &str) -> Option<Self> {
+    fn from_old_json(
+        value: &Value,
+        default_severity: &str,
+        trust_pre_existing: bool,
+    ) -> Option<Self> {
         if let Some(text) = value.as_str() {
             return Some(Self::new(default_severity, text));
         }
@@ -185,9 +198,13 @@ impl Finding {
             None | Some(Value::Null) => None,
             Some(line) => Some(u32::try_from(line.as_u64()?).ok()?),
         };
-        let pre_existing = match object.get("pre_existing") {
-            None | Some(Value::Null) => false,
-            Some(flag) => flag.as_bool()?,
+        let pre_existing = if trust_pre_existing {
+            match object.get("pre_existing") {
+                None | Some(Value::Null) => false,
+                Some(flag) => flag.as_bool()?,
+            }
+        } else {
+            false
         };
         Some(Self {
             severity,
@@ -279,8 +296,8 @@ fn optional_string(value: Option<&Value>) -> Option<Option<String>> {
 
 /// The findings a `review` session reported (ADR 0048 decision 10).
 ///
-/// Field order is the serialized order. A review verdict records all three fields, empty
-/// lists included. A verdict written before findings existed holds `blocking` and
+/// Field order is the serialized order. A review verdict records all three public fields,
+/// empty lists included. A verdict written before findings existed holds `blocking` and
 /// `suggestions` instead; [`ReviewReport::from_json`] maps them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReviewReport {
@@ -290,12 +307,18 @@ pub struct ReviewReport {
     pub findings: Vec<Finding>,
     /// What the session checked and found correct.
     pub verified: Vec<String>,
+    /// How many leading [`findings`](Self::findings) came from an old verdict's `blocking`
+    /// list. Never serialized: a verdict written now records `findings` only, and a session's
+    /// report is read with the `fix_level` rule. Only an old verdict that failed with
+    /// `review_blocking` uses it, because every item of that list failed whatever its level.
+    #[serde(skip)]
+    pub old_blocking: usize,
 }
 
 impl ReviewReport {
-    /// Reads the new shape, or maps the old `blocking` / `suggestions` shape to findings
-    /// (ADR 0048 decision 10). A report with `findings` ignores `blocking` and `suggestions`
-    /// if they are also present.
+    /// Reads the new shape from a verdict arc wrote, or maps the old `blocking` /
+    /// `suggestions` shape to findings (ADR 0048 decision 10). A report with `findings`
+    /// ignores `blocking` and `suggestions` if they are also present.
     ///
     /// An item of `blocking` becomes a finding at its own `level`, else `major`; an item of
     /// `suggestions` at its own `level`, else `minor`; its `text` becomes the summary without
@@ -304,24 +327,42 @@ impl ReviewReport {
     /// [`REVIEW_LEVELS`].
     #[must_use]
     pub fn from_json(value: &Value) -> Option<Self> {
+        Self::parse(value, true, true)
+    }
+
+    /// Reads a report a review session produced. `pre_existing` is arc's to set, so a value
+    /// the session supplies is ignored, and a report in the old shape is mapped for the
+    /// `fix_level` rule like any other session report. The rest is [`ReviewReport::from_json`].
+    #[must_use]
+    pub fn from_session_json(value: &Value) -> Option<Self> {
+        Self::parse(value, false, false)
+    }
+
+    fn parse(value: &Value, trust_pre_existing: bool, old_blocking: bool) -> Option<Self> {
         let summary = value.get("summary")?.as_str()?.to_owned();
         let verified = strings(value.get("verified")?)?;
-        let findings = match value.get("findings") {
-            Some(findings) => items(findings, Finding::from_json)?,
+        let (findings, old_blocking) = match value.get("findings") {
+            Some(findings) => (
+                items(findings, |item| Finding::parse(item, trust_pre_existing))?,
+                0,
+            ),
             None => {
-                let mut findings = items(value.get("blocking")?, |item| {
-                    Finding::from_old_json(item, "major")
+                let blocking = items(value.get("blocking")?, |item| {
+                    Finding::from_old_json(item, "major", trust_pre_existing)
                 })?;
+                let count = blocking.len();
+                let mut findings = blocking;
                 findings.extend(items(value.get("suggestions")?, |item| {
-                    Finding::from_old_json(item, "minor")
+                    Finding::from_old_json(item, "minor", trust_pre_existing)
                 })?);
-                findings
+                (findings, if old_blocking { count } else { 0 })
             }
         };
         Some(Self {
             summary,
             findings,
             verified,
+            old_blocking,
         })
     }
 
@@ -329,9 +370,28 @@ impl ReviewReport {
     /// These are the findings that send the task back.
     #[must_use]
     pub fn failing(&self, fix_level: &str) -> Vec<&Finding> {
+        self.failing_with(fix_level, false)
+    }
+
+    /// The failing findings of a verdict that failed with `review_blocking` before findings
+    /// existed: every item of its old `blocking` list is failing, whatever its level and
+    /// whatever `fix_level` says, because that verdict already decided it. `fix_level`
+    /// decides the rest.
+    #[must_use]
+    pub fn failing_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
+        self.failing_with(fix_level, true)
+    }
+
+    fn failing_with(&self, fix_level: &str, old_blocking: bool) -> Vec<&Finding> {
         self.findings
             .iter()
-            .filter(|finding| !finding.pre_existing && finding.at_or_above(fix_level))
+            .enumerate()
+            .filter(|(index, finding)| {
+                !finding.pre_existing
+                    && ((old_blocking && *index < self.old_blocking)
+                        || finding.at_or_above(fix_level))
+            })
+            .map(|(_, finding)| finding)
             .collect()
     }
 
@@ -339,9 +399,26 @@ impl ReviewReport {
     /// never send the task back.
     #[must_use]
     pub fn rest(&self, fix_level: &str) -> Vec<&Finding> {
+        self.rest_with(fix_level, false)
+    }
+
+    /// The rest of a verdict that failed with `review_blocking`: its old `blocking` items are
+    /// never here, whatever their level.
+    #[must_use]
+    pub fn rest_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
+        self.rest_with(fix_level, true)
+    }
+
+    fn rest_with(&self, fix_level: &str, old_blocking: bool) -> Vec<&Finding> {
         self.findings
             .iter()
-            .filter(|finding| finding.pre_existing || !finding.at_or_above(fix_level))
+            .enumerate()
+            .filter(|(index, finding)| {
+                finding.pre_existing
+                    || !((old_blocking && *index < self.old_blocking)
+                        || finding.at_or_above(fix_level))
+            })
+            .map(|(_, finding)| finding)
             .collect()
     }
 
@@ -533,6 +610,48 @@ impl Verdict {
     #[must_use]
     pub fn is_pass(&self) -> bool {
         self.result == VerdictResult::Pass
+    }
+
+    /// The failing findings of this review verdict (ADR 0048 decision 10): at or above the
+    /// `fix_level` it recorded (the default when it recorded none, or a damaged one) and not
+    /// `pre_existing`. A verdict that failed with `review_blocking` was decided before
+    /// findings existed, so every item of its old `blocking` list is failing whatever its
+    /// level. Empty for a verdict with no report.
+    #[must_use]
+    pub fn review_failing(&self) -> Vec<&Finding> {
+        let Some(report) = &self.review else {
+            return Vec::new();
+        };
+        let fix_level = self.recorded_fix_level();
+        if self.reason.as_deref() == Some(REVIEW_BLOCKING) {
+            report.failing_in_old_verdict(fix_level)
+        } else {
+            report.failing(fix_level)
+        }
+    }
+
+    /// The rest of this review verdict's findings: below the `fix_level`, or `pre_existing`.
+    /// Empty for a verdict with no report.
+    #[must_use]
+    pub fn review_rest(&self) -> Vec<&Finding> {
+        let Some(report) = &self.review else {
+            return Vec::new();
+        };
+        let fix_level = self.recorded_fix_level();
+        if self.reason.as_deref() == Some(REVIEW_BLOCKING) {
+            report.rest_in_old_verdict(fix_level)
+        } else {
+            report.rest(fix_level)
+        }
+    }
+
+    /// The `fix_level` this review verdict was decided with: `review_settings.fix_level`, else
+    /// the default for a verdict written before the field existed. An empty or damaged value
+    /// reads as the default through [`Finding::at_or_above`].
+    fn recorded_fix_level(&self) -> &str {
+        self.review_settings
+            .as_ref()
+            .map_or(DEFAULT_FIX_LEVEL, |settings| settings.fix_level.as_str())
     }
 
     /// Writes this verdict, refusing to replace an existing file.

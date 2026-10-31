@@ -35,7 +35,7 @@ The gate's `review` stage.
   A finding at or above the reviewer's `fix_level` and not `pre_existing` fails the stage with reason `review_findings`. The task goes to `review.rework_pending` and `rework_reason` lists the failing findings, highest severity first, each as `[severity] path:line summary — trigger` with the parts a finding does not have left out; the ` — trigger` part goes when the trigger is empty. A finding below `fix_level`, and a `pre_existing` one, is recorded and does not fail the stage.
   `fix_level` is the reviewer's [`fix_level`](config.md#configtoml): `critical`, `major` (the default) or `minor`. `critical` sends back only critical findings, `major` sends back critical and major ones, and `minor` sends back every finding.
   `verified` never fails the stage.
-  A verdict written before findings existed holds `blocking` and `suggestions`; it still reads back as findings: a `blocking` item at its own `level`, else `major`, a `suggestions` item at its own `level`, else `minor`, its `text` as the summary, and no trigger. A `text` that starts with a tag that repeats that level loses the tag. `show` prints the same items for such a verdict.
+  A verdict written before findings existed holds `blocking` and `suggestions`; it still reads back as findings: a `blocking` item at its own `level`, else `major`, a `suggestions` item at its own `level`, else `minor`, its `text` as the summary, and no trigger. A `text` that starts with a tag that repeats that level loses the tag. `show` prints the same items for such a verdict. A verdict that failed with reason `review_blocking` was decided before `fix_level` existed: every item of its `blocking` list is a failing finding whatever its level and whatever the `fix_level` says, for `show`, the rework reason, the rework prompt and the window anchors alike; the `fix_level` rule applies to a report that carries `findings`.
   No parsable block, a missing field, a `severity` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   A session whose `Result` carries a `model_error` with `kind` `unavailable` or `usage_limit` is **model unavailable**: the stage does not run it a second time, fails at once with reason `review_unavailable`, and its verdict records the session id, its summed cost and that `model_error` object as `review_model_error` (see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
   A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
@@ -59,13 +59,14 @@ A rework round's prompt holds the brief, the previous review's failing findings 
 It lists each failing finding as `[severity] path:line summary — trigger`, with the ` — trigger` part left out when the trigger is empty, and it does not list a finding below that round's `fix_level` or a `pre_existing` one.
 It asks the session to check that each failing finding is fixed, to review the increment, and to list every problem it finds; the session can read the files.
 
-A previous verdict in the old shape has no `findings`: its `blocking` items are the failing findings the prompt lists and the window anchors below, at their own `level`, else `major`.
+A previous verdict in the old shape has no `findings`: its `blocking` items are the failing findings the prompt lists and the window anchors below, at their own `level`, else `major`, whatever the level and the `fix_level`, because that verdict already failed on them.
 
 The increment is the task's own diff restricted to the hunks that hold a line the rework changed.
 A line is an increment line when it is a new-side line of `git diff <previous sha> <sha>` and also a new-side line of the task's own diff, which starts at the merge base of the remote target branch and `sha`.
 A line that came in only with a merge of main is not in the task's own diff, so it drops out.
 
 arc, not the session, decides whether a finding is pre-existing.
+A `pre_existing` value in the session's report is ignored: arc reads it only from a verdict it wrote.
 After a rework round's report is parsed, a finding is marked `"pre_existing": true` unless one of these holds:
 
 - its `file:line` is within 3 lines of a line the task's own change added or changed in that file (the new side of `git diff <the merge base of the remote target branch and the head>..<head>`): a problem in code the task itself wrote in an earlier attempt is the task's, not pre-existing, so the rework's increment does not decide this;

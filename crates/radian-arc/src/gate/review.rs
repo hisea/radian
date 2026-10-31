@@ -18,7 +18,8 @@
 //! `pre_existing` ([`ReworkRound`]) unless it is within [`PRE_EXISTING_WINDOW`] lines of a line
 //! the task's own change added or changed (not the rework's increment), within
 //! [`PREVIOUS_ITEM_WINDOW`] lines of a failing finding of the previous review in the same file,
-//! a `critical` finding, or a finding without a `file` or a `line`.
+//! a `critical` finding, or a finding without a `file` or a `line`. `pre_existing` is arc's to
+//! set: a value the session's report carries is ignored.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
 //! block. A finding at or above the reviewer's `fix_level` and not `pre_existing` fails the
@@ -303,6 +304,7 @@ impl ReviewRun<'_> {
                     summary: EMPTY_CHANGE_SUMMARY.to_owned(),
                     findings: Vec::new(),
                     verified: Vec::new(),
+                    old_blocking: 0,
                 });
             } else {
                 let (prompt, round) =
@@ -704,15 +706,16 @@ fn last_result(path: &Path) -> Option<Value> {
 ///
 /// The object is the report shape: `summary` a string, `findings` a list of finding objects
 /// and `verified` a list of strings. A `findings` entry needs a `severity` in
-/// [`REVIEW_LEVELS`] and a `summary`; `file`, `line`, `trigger` and `pre_existing` may be
-/// absent. The old `blocking` / `suggestions` shape is mapped to findings, so a verdict
-/// written before the change still reads. A missing field, a wrong type, a severity or level
+/// [`REVIEW_LEVELS`] and a `summary`; `file`, `line` and `trigger` may be absent. The old
+/// `blocking` / `suggestions` shape is mapped to findings, so a session that answers in it
+/// still reads. `pre_existing` is arc's to set, so a value the session supplies is ignored
+/// ([`ReviewReport::from_session_json`]). A missing field, a wrong type, a severity or level
 /// outside the list, an unclosed block, or no `json` block at all is `None`.
 #[must_use]
 pub fn parse_report(text: &str) -> Option<ReviewReport> {
     let block = last_json_block(text)?;
     let value: Value = serde_json::from_str(&block).ok()?;
-    ReviewReport::from_json(&value)
+    ReviewReport::from_session_json(&value)
 }
 
 /// The body of the last closed fence whose info string is `json`.
@@ -1201,6 +1204,46 @@ mod tests {
         );
     }
 
+    /// A session's report cannot mark a finding pre-existing: `pre_existing` is arc's to set.
+    /// A verdict arc wrote keeps its recorded value.
+    #[test]
+    fn a_session_cannot_mark_a_finding_pre_existing_but_a_verdict_keeps_it() {
+        let body = r#"{"summary": "s", "findings": [{"severity": "major", "summary": "m", "pre_existing": true}], "verified": []}"#;
+        let text = format!("```json\n{body}\n```");
+        let report = parse_report(&text).expect("the session's report parses");
+        assert!(!report.findings[0].pre_existing, "{report:?}");
+        let value: Value = serde_json::from_str(body).expect("the report is JSON");
+        let persisted = ReviewReport::from_json(&value).expect("the verdict reads");
+        assert!(persisted.findings[0].pre_existing, "{persisted:?}");
+    }
+
+    /// An old report read from a verdict records how many findings came from `blocking`, so a
+    /// `review_blocking` verdict's `minor` blocking item still fails; a session's old-shape
+    /// report has no such record and is decided by `fix_level` like any report.
+    #[test]
+    fn an_old_verdicts_blocking_items_fail_whatever_their_level() {
+        let value: Value = serde_json::from_str(
+            r#"{"summary": "s", "blocking": [{"level": "minor", "text": "a nit"}],
+               "suggestions": ["an idea"], "verified": []}"#,
+        )
+        .expect("the old report is JSON");
+        let persisted = ReviewReport::from_json(&value).expect("the verdict reads");
+        assert_eq!(persisted.old_blocking, 1, "{persisted:?}");
+        assert!(persisted.failing("major").is_empty());
+        assert_eq!(
+            persisted
+                .failing_in_old_verdict("major")
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a nit"]
+        );
+        let text = format!("```json\n{value}\n```");
+        let session = parse_report(&text).expect("the session's report parses");
+        assert_eq!(session.old_blocking, 0, "{session:?}");
+        assert!(session.failing("major").is_empty());
+    }
+
     /// A finding serializes in the new shape, and `trigger` and `pre_existing` appear only
     /// when set. A finding reads back.
     #[test]
@@ -1273,6 +1316,7 @@ mod tests {
                 finding("minor", None, None, "n"),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         let summaries = |findings: Vec<&Finding>| {
             findings
@@ -1388,6 +1432,7 @@ mod tests {
                 finding("minor", None, None, "vague"),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         let marked: Vec<(&str, bool)> = report
@@ -1436,6 +1481,7 @@ mod tests {
                 ),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         let summaries: Vec<&str> = report
@@ -1477,6 +1523,7 @@ mod tests {
                 finding("minor", None, Some(4), "a minor finding with only a line"),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         assert_eq!(report.findings.len(), 3, "{:?}", report.findings);
@@ -1506,6 +1553,7 @@ mod tests {
                 finding("minor", Some("src/other.rs"), Some(5), "a nit"),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 2);
         assert_eq!(report.findings[0].severity, "major");
@@ -1541,6 +1589,7 @@ mod tests {
                 ),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
         assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
@@ -1568,6 +1617,7 @@ mod tests {
                 "another file",
             )],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         assert!(report.findings[0].pre_existing);
@@ -1594,6 +1644,7 @@ mod tests {
                 finding("minor", Some("src/kept.rs"), Some(23), "three lines away"),
             ],
             verified: Vec::new(),
+            old_blocking: 0,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
         assert_eq!(report.findings[0].summary, "four lines away");

@@ -35,10 +35,10 @@ use serde_json::{Value, json};
 use sha2::Digest;
 
 use crate::gate::{
-    CommandRun, DEFAULT_FIX_LEVEL, Finding, IntegrationRun, PreviousReview, REVIEW_BLOCKING,
-    REVIEW_FINDINGS, REVIEW_LEVELS, REVIEW_UNAVAILABLE, ReviewRun, ReviewSettings, Stage,
-    StageSpec, Verdict, attempt_dir, effective_stages, level_rank, merge_ready, required_passed,
-    run_shell, verdict_path, verdict_set_digest,
+    CommandRun, Finding, IntegrationRun, PreviousReview, REVIEW_BLOCKING, REVIEW_FINDINGS,
+    REVIEW_LEVELS, REVIEW_UNAVAILABLE, ReviewRun, ReviewSettings, Stage, StageSpec, Verdict,
+    attempt_dir, effective_stages, level_rank, merge_ready, required_passed, run_shell,
+    verdict_path, verdict_set_digest,
 };
 use crate::store::attempt_ops::Paused;
 use crate::store::config::{Config, IntegrationStyle};
@@ -83,44 +83,16 @@ pub const REVIEW_RETRY_AFTER_MAX_SECS: u64 = 6 * 60 * 60;
 /// process, which its gate child inherits. Never set by arc.
 pub const REVIEW_PROGRAM_ENV: &str = "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM";
 
-/// The `fix_level` a review verdict was decided with: its recorded `review_settings.fix_level`,
-/// else the default for an old verdict (ADR 0048 decision 10). An empty recorded value reads
-/// as the default through [`Finding::at_or_above`].
-fn verdict_fix_level(verdict: &Verdict) -> &str {
-    verdict
-        .review_settings
-        .as_ref()
-        .map_or(DEFAULT_FIX_LEVEL, |settings| settings.fix_level.as_str())
-}
-
-/// The failing findings of a review verdict: at or above its `fix_level`, not `pre_existing`.
+/// The failing findings of a review verdict: at or above its `fix_level`, not `pre_existing`;
+/// for a verdict that failed with `review_blocking`, every item of its old `blocking` list,
+/// whatever its level (ADR 0048 decision 10).
 fn failing_findings(verdict: &Verdict) -> Vec<Finding> {
-    verdict
-        .review
-        .as_ref()
-        .map(|review| {
-            review
-                .failing(verdict_fix_level(verdict))
-                .into_iter()
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+    verdict.review_failing().into_iter().cloned().collect()
 }
 
 /// The rest of a review verdict's findings: below its `fix_level`, or `pre_existing`.
 fn other_findings(verdict: &Verdict) -> Vec<Finding> {
-    verdict
-        .review
-        .as_ref()
-        .map(|review| {
-            review
-                .rest(verdict_fix_level(verdict))
-                .into_iter()
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+    verdict.review_rest().into_iter().cloned().collect()
 }
 
 /// Why a verify or merge did not advance the task: a stage that failed, a branch that
@@ -3641,10 +3613,8 @@ fn failure_text(verdict: &Verdict) -> String {
     if reason == "conflict" && !verdict.conflict_paths.is_empty() {
         return format!("conflict: {}", verdict.conflict_paths.join(", "));
     }
-    if (reason == REVIEW_FINDINGS || reason == REVIEW_BLOCKING)
-        && let Some(review) = &verdict.review
-    {
-        let mut findings = review.failing(verdict_fix_level(verdict));
+    if (reason == REVIEW_FINDINGS || reason == REVIEW_BLOCKING) && verdict.review.is_some() {
+        let mut findings = verdict.review_failing();
         if !findings.is_empty() {
             findings.sort_by_key(|finding| {
                 level_rank(&finding.severity).unwrap_or(REVIEW_LEVELS.len())

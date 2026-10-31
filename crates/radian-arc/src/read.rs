@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{DEFAULT_FIX_LEVEL, Stage, Verdict};
+use super::gate::{Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -969,19 +969,15 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
             })
             .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
             .and_then(|(_, verdict)| {
-                let fix_level = verdict
-                    .review_settings
-                    .as_ref()
-                    .map_or(DEFAULT_FIX_LEVEL, |settings| settings.fix_level.as_str());
                 verdict.review.as_ref().map(|report| ReviewSummaryView {
                     summary: report.summary.clone(),
-                    blocking: report
-                        .failing(fix_level)
+                    blocking: verdict
+                        .review_failing()
                         .iter()
                         .map(ToString::to_string)
                         .collect(),
-                    suggestions: report
-                        .rest(fix_level)
+                    suggestions: verdict
+                        .review_rest()
                         .iter()
                         .map(ToString::to_string)
                         .collect(),

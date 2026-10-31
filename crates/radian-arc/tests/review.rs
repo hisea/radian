@@ -4548,6 +4548,7 @@ fn suggestions(items: Vec<Finding>) -> ReviewReport {
         summary: "the change adds feature.txt".to_owned(),
         findings: items,
         verified: Vec::new(),
+        old_blocking: 0,
     }
 }
 
@@ -6265,6 +6266,7 @@ fn a_blocking_item_is_never_carried_into_the_followup() {
             summary: "the change adds feature.txt".to_owned(),
             findings: vec![graded("major", "feature.txt", 1, "this must change")],
             verified: Vec::new(),
+            old_blocking: 0,
         },
     );
     assert_eq!(
@@ -6553,6 +6555,7 @@ fn a_round_with_only_blocking_items_carries_nothing() {
             summary: "the rework adds two.txt".to_owned(),
             findings: vec![item("major", "feature.txt", 2, "a blocking item round two")],
             verified: Vec::new(),
+            old_blocking: 0,
         },
     );
     assert_eq!(
@@ -8409,4 +8412,143 @@ fn a_rework_round_reads_an_old_shape_previous_verdict() {
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
     assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(verdict.review_pre_existing, Some(0));
+}
+
+/// A `pre_existing` value the session's own report carries is ignored: arc sets the field, so
+/// a first review of a `major` finding the session marked pre-existing still fails, and the
+/// verdict records the finding as not pre-existing.
+#[test]
+fn a_session_supplied_pre_existing_is_ignored() {
+    let fixture = Fixture::new("findings-session-pre-existing");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let mut finding = finding_json("major", "one.txt", 1, "the wrong result", "");
+    finding["pre_existing"] = json!(true);
+    let fake = FakeReview::new(
+        "findings-session-pre-existing-fake",
+        &[findings_message("the change adds one.txt", &[finding])],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    let report = verdict.review.expect("a report");
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    assert!(
+        !report.findings[0].pre_existing,
+        "the session's `pre_existing` was kept: {report:?}"
+    );
+}
+
+/// An old verdict that failed with `review_blocking` keeps every item of its `blocking` list
+/// failing, whatever its recorded level: the rework prompt lists it, the failure text names
+/// it, and it anchors the next round's 10-line window.
+#[test]
+fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
+    /// The old shape exactly as a build before findings wrote it.
+    const OLD_SHAPE: &str = r#"{
+        "summary": "the change adds changed.txt",
+        "blocking": [
+            {"level": "minor", "file": "anchor.txt", "line": 30, "text": "the old minor item"}
+        ],
+        "suggestions": [],
+        "verified": []
+    }"#;
+
+    let fixture = Fixture::new("old-blocking-minor");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "changed.txt", "changed\n");
+    fixture.set_verifying(&first);
+    let path = review_verdict_path(&fixture, &fixture.task, 1);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the verdict directory");
+    let at = "2026-01-01T00:00:00.000000Z".to_owned();
+    let verdict = Verdict {
+        schema_version: VERDICT_SCHEMA_VERSION,
+        stage: Stage::Review,
+        sha: first.clone(),
+        main_sha: Some(fixture.base.clone()),
+        result: VerdictResult::Fail,
+        reason: Some("review_blocking".to_owned()),
+        commands: Vec::new(),
+        started_at: at.clone(),
+        ended_at: at,
+        base_sha: None,
+        candidate_sha: Some(first.clone()),
+        conflict_paths: Vec::new(),
+        approver: None,
+        review: None,
+        review_session_ids: vec!["old".to_owned()],
+        review_cost_micros: None,
+        review_model_error: None,
+        review_pre_existing: None,
+        review_settings: None,
+        profile: Some("default".to_owned()),
+        integration_style: None,
+    };
+    let mut value = serde_json::to_value(&verdict).expect("the verdict serializes");
+    value["review"] = serde_json::from_str(OLD_SHAPE).expect("the fixture is JSON");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("the verdict serializes")
+        ),
+    )
+    .expect("the old verdict is written");
+
+    // The stage reuses the old verdict: the failure text names the item.
+    let verified =
+        review::verify_with(&fixture.store, &fixture.task, None).expect("verification runs");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("review", "rework_pending"),
+        "{verified:?}"
+    );
+    let task = fixture.store.load_task(&fixture.task).unwrap().item;
+    let reason = review::rework_reason(&fixture.store, &task).expect("a reason");
+    assert!(
+        reason.contains("[minor] anchor.txt:30 the old minor item"),
+        "the failure text lost the blocking item: {reason}"
+    );
+
+    // The next round lists the item and uses it as a window anchor.
+    fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "old-blocking-minor-second",
+        &[findings_message(
+            "the rework adds two.txt",
+            &[
+                finding_json("major", "anchor.txt", 35, "still the old problem", ""),
+                finding_json("major", "two.txt", 1, "a new problem", ""),
+            ],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let prompt = fake.prompt(1);
+    assert!(
+        prompt.contains("- [minor] anchor.txt:30 the old minor item"),
+        "the prompt lost the old blocking item:\n{prompt}"
+    );
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(
+        verdict.review_pre_existing,
+        Some(0),
+        "a finding 5 lines from the old blocking item was demoted"
+    );
+    let report = verdict.review.expect("a report");
+    let anchored = report
+        .findings
+        .iter()
+        .find(|finding| finding.summary == "still the old problem")
+        .expect("the anchored finding");
+    assert!(
+        !anchored.pre_existing,
+        "the old blocking item is not a window anchor: {report:?}"
+    );
 }
