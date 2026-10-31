@@ -1915,3 +1915,19 @@ gate_profile`, and the file was restored from a copy under `.radian/`.
 | TK0264-M3 | `config::parse` no longer checks that each profile's `reviewer` names a section | `config::a_profile_names_a_missing_reviewer_is_refused` (the file parsed with reviewer `cheap` absent) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0283: the hub's HTTP read routes and bearer token (2026-10-31, branch `work/TK0283-hub-http-read-and-token`)
+
+Every route requires the bearer token, a rotation is picked up without a restart, and a file's
+diff text is cut at 256 KiB. Each mutation was applied by hand to `crates/radian-arc/src/hub/http.rs`,
+the named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test hub_http`,
+after `cargo build -p radian-tui --bin radian` where the test drives the CLI, and the file was
+restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0283-M1 | `handle` accepts every request without checking the token (the `authorized` check replaced by `true`) | `hub_http::every_request_needs_a_bearer_token_and_a_bad_one_gets_an_empty_object` (`/v1/version` without a token answered `200`, expected `401`) | ✅ 1 failed |
+| TK0283-M2 | `TokenState::refresh` returns at once, so a rotated token is never re-read | `hub_http::a_rotated_token_takes_effect_on_the_next_request` (the old token still answered `200`, expected `401`) | ✅ 1 failed |
+| TK0283-M3 | `cap` returns the whole diff text and `truncated: false` | `hub_http::the_diff_route_lists_numstat_and_cuts_one_file_at_256_kib` (`truncated` read `false`, expected `true`) | ✅ 1 failed |
+
+3/3 caught.
