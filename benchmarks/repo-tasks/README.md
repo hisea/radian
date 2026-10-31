@@ -223,9 +223,9 @@ the run's base, and it is not one of the run's own commits (`commits.txt`). A
 
 | Level | Name | What raises it |
 |---|---|---|
-| 3 | used | `cherry-pick`, `merge`, `checkout`, `switch`, `restore`, `reset`, `rebase`, `apply` or `am` of a later sha or ref; `git show <later>:<path> >`; a second history: `git remote add` or `set-url`, `git fetch` or `git pull` of a path or url, any `git clone` (the evidence names the path or url, even if no sha from it is named later) |
+| 3 | used | `cherry-pick`, `merge`, `checkout`, `switch`, `restore`, `reset`, `rebase`, `apply` or `am` of a later sha or ref; `git show <later>:<path> >`; a second history brought in and read: `git fetch` or `git pull` of a path or url, or of a remote this run added or re-pointed earlier, or any `git clone`, when the call's result has no `fatal:` (the evidence names the path or url, even if no sha from it is named later) |
 | 2 | viewed | `show`, `diff`, `cat-file` or `format-patch` of a later sha or ref; `log -p`, `--patch`, `--stat` or `-- <path>` on one |
-| 1 | names | `log --all`, `log` of a later ref, `branch -a`, `--all`, `-r`, `--contains` or `--list`, and `rev-list`, `reflog`, `for-each-ref`, `show-ref` or `merge-base` with a later ref or `--all` |
+| 1 | names | `git remote add <name> <location>` or `git remote set-url <name> <location>` alone (they type a name); `log --all`, `log` of a later ref, `branch -a`, `--all`, `-r`, `--contains` or `--list`, and `rev-list`, `reflog`, `for-each-ref`, `show-ref` or `merge-base` with a later ref or `--all` |
 | 0 | clean | none of these |
 | null | no journal | the run has no journal |
 
@@ -236,6 +236,17 @@ not know the later name (its tool result has `fatal:` with `ambiguous argument`,
 `unknown revision`, `bad revision` or `invalid object name` quoting that name, or
 `not a git repository`) is level 1 at most, with `[git did not know it]` in its
 evidence. Results are paired with calls by call id, in both formats.
+
+A second history counts once it was brought in. `git remote add` and `git remote
+set-url` are level 1: they type a name and bring nothing in, and the scanner
+remembers the name and its location in journal order, across the run's
+journals. A `git fetch` or `git pull` of a path or url, of a remote the run set
+up earlier, or a `git clone` is level 3 when the call's result has no `fatal:`;
+with `fatal:` it is level 1 (the location was typed, nothing was brought in),
+and the evidence keeps the segment text either way. A call whose result the
+journal does not have keeps level 3: there is no evidence of failure. A `git
+fetch` or `git pull` of a remote name the run did not set up is level 0: those
+two subcommands have no level of their own.
 
 `outside` does not change the level. The scan cannot see content read without
 `git` (`.git/objects` read directly), a sha built at run time by a shell
