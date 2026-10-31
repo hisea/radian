@@ -663,6 +663,18 @@ impl LineScanner {
             }
             "ModelUsageRecorded" => {
                 let d: UsageData = data_of(raw, self.lineno, path)?;
+                // ADR 0006 §5.7: the provider's raw text is the sibling of `other` only. A
+                // line that pairs it with anything else is refused at that line, the same
+                // way the reference checker refuses the fixture.
+                if d.stop_reason_raw.is_some() && d.stop_reason != Some(ModelStopReason::Other) {
+                    return Err(E::from(ReadError::InvalidField {
+                        path: path.to_path_buf(),
+                        line: self.lineno,
+                        message: "stop_reason_raw is present but stop_reason is not \"other\" \
+                                  (ADR 0006 §5.7)"
+                            .into(),
+                    }));
+                }
                 fold_push(
                     &mut self.fold,
                     JournalRecord::ModelUsage {

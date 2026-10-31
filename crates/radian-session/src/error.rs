@@ -71,6 +71,15 @@ pub enum ReadError {
         event: String,
         call_id: String,
     },
+    /// A line whose fields are individually well-formed but whose combination is forbidden
+    /// by the record's shape (for example `stop_reason_raw` beside a value other than
+    /// `other`, ADR 0006 §5.7).
+    #[error("{path}: line {line}: {message}")]
+    InvalidField {
+        path: PathBuf,
+        line: u64,
+        message: String,
+    },
     #[error("replaying the journal: {0}")]
     Replay(#[from] radian_core::ReplayError),
 }

@@ -493,6 +493,21 @@ fn the_model_stop_reason_fixture_reads_every_value() {
     );
 }
 
+/// ADR 0006 §5.7: `stop_reason_raw` only accompanies `other`. A line that pairs it with any
+/// other value is refused at the line that carries it, exactly as `check-fixtures.sh` refuses
+/// the same fixture.
+#[test]
+fn a_stop_reason_raw_beside_any_value_but_other_refuses_the_file() {
+    let err = Session::open(fixture("model-stop-reason-raw-mismatch.jsonl")).unwrap_err();
+    let ReadError::InvalidField { line, .. } = &err else {
+        panic!("expected InvalidField, got {err:?}");
+    };
+    assert_eq!(*line, 2, "the 1-based line must be reported");
+    let text = err.to_string();
+    assert!(text.contains("stop_reason_raw"), "{text}");
+    assert!(text.contains("other"), "{text}");
+}
+
 /// ADR 0006 §5.7: a journal line written before the field existed reads as "not recorded",
 /// and the session still resumes (the missing field is not corruption).
 #[test]
