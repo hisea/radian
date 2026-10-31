@@ -12,7 +12,7 @@
 # item). Exit 0 passes, 1 blocks or is unusable, 2 is a usage or setup error.
 #
 # Environment:
-#   REPO_TASKS_RUNS       output root (default: benchmarks/repo-tasks/runs)
+#   REPO_TASKS_RUNS       output root (default: ${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs)
 #   REPO_TASKS_TIMEOUT    wall-time cap for the review in seconds (default: 1800)
 #   REPO_TASKS_RADIAN_BIN / REPO_TASKS_PI_BIN  agent binaries
 #   REPO_TASKS_REVIEW_RS  review.rs to read the prompt from (tests)
@@ -28,8 +28,7 @@ task=$2
 k=$3
 reviewer=${4:-reviewer}
 
-RUNS=${REPO_TASKS_RUNS:-$HERE/runs}
-case $RUNS in /*) ;; *) RUNS="$PWD/$RUNS" ;; esac
+RUNS=$(python3 "$LIB" runs-root) || exit 2
 TIMEOUT=${REPO_TASKS_TIMEOUT:-1800}
 RADIAN_BIN=${REPO_TASKS_RADIAN_BIN:-radian}
 PI_BIN=${REPO_TASKS_PI_BIN:-pi}
@@ -45,7 +44,7 @@ OUT=$RUNS/$arm/$task_id/$k
 TREE=$RUNS/trees/$arm-$task_id-$k
 [ -f "$OUT/run.json" ] || die "no run for $arm $task_id $k (run run.sh first)"
 [ -f "$OUT/change.diff" ] || die "no change.diff for $arm $task_id $k"
-[ -d "$TREE" ] || die "no worktree for $arm $task_id $k"
+[ -d "$TREE" ] || die "no run tree for $arm $task_id $k"
 
 python3 "$HERE/prompt.py" "$task" "$TREE" "$base" "$OUT/change.diff" \
   > "$OUT/review-prompt.md" || exit 2

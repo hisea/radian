@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report over the fixed repository task set's runs.
 
-    python3 benchmarks/repo-tasks/report.py [--runs DIR] [--baseline ARM] [--json]
+    python3 benchmarks/repo-tasks/report.py [--runs DIR] [--baseline ARM] [--source REPO] [--json]
     python3 benchmarks/repo-tasks/report.py --self-test
 
 Every metric comes from `benchmarks/journal_metrics.py`: one `build_report` call
@@ -9,6 +9,11 @@ over each run's session journal, then sums per arm and task. The columns and
 their definitions are the ones in that module's `COLUMNS` table; this report
 does not redefine them. A run that hit the wall-time cap is a `timeout` row,
 never a dropped run.
+
+Every run is scanned by `leak.py`. The `leak` column counts each arm's runs by
+leak level (`L0`..`L3`, `no journal`). A run with level 2 or 3 reached the
+task's later commits: it is left out of the totals, the spread and the ratios,
+and each table says `<arm>: excluded N (leak)` under it.
 
 The text output has:
 
@@ -24,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -35,8 +39,11 @@ sys.path.insert(0, str(BENCHMARKS))
 sys.path.insert(0, str(HERE))
 
 import journal_metrics  # noqa: E402
+import leak  # noqa: E402
+import lib  # noqa: E402
 
-DEFAULT_RUNS = HERE / "runs"
+# A run at this leak level or above is left out of every total and ratio.
+EXCLUDE_LEVEL = 2
 
 # The fixed numeric columns every table shows, by their `journal_metrics.COLUMNS`
 # names. The per-tool `calls.<tool>` and `bytes.<tool>` columns are added by
@@ -126,8 +133,15 @@ def _result(run: dict) -> str:
     return "no-check"
 
 
-def collect(runs_dir: Path) -> list[dict]:
+def excluded(run: dict) -> bool:
+    level = run.get("leak_level")
+    return level is not None and level >= EXCLUDE_LEVEL
+
+
+def collect(runs_dir: Path, source=None) -> list[dict]:
     """Every run under `<runs>/<arm>/<task>/<k>/run.json`."""
+    if source is None:
+        source = lib.source_repo()
     runs = []
     for path in sorted(runs_dir.glob("*/*/*/run.json")):
         data = _json(path)
@@ -139,6 +153,8 @@ def collect(runs_dir: Path) -> list[dict]:
         data["review"] = _json(out / "review.json")
         data["metrics"] = _journal_metrics(data)
         data["result"] = _result(data)
+        data["leak"] = leak.scan_run(out, source)
+        data["leak_level"] = data["leak"]["level"]
         runs.append(data)
     return runs
 
@@ -164,8 +180,21 @@ def _spread(runs: list[dict]) -> str:
     return f"{low:,}-{high:,}"
 
 
-def aggregate(runs: list[dict]) -> dict:
-    """One arm's totals over its runs of one task (or over every task)."""
+def _leak_cell(runs: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    for run in runs:
+        name = leak.describe(run.get("leak_level"))
+        counts[name] = counts.get(name, 0) + 1
+    return " ".join(f"{name}={count}" for name, count in sorted(counts.items())) or "-"
+
+
+def aggregate(all_runs: list[dict]) -> dict:
+    """One arm's totals over its runs of one task (or over every task).
+
+    `leak` and `excluded` count every run; every other value is over the runs
+    whose leak level is below `EXCLUDE_LEVEL`.
+    """
+    runs = [run for run in all_runs if not excluded(run)]
     rows = [run["metrics"] for run in runs if run["metrics"]]
     tool_names: set[str] = set()
     for row in rows:
@@ -173,6 +202,8 @@ def aggregate(runs: list[dict]) -> dict:
         tool_names.update(row.get("tool_bytes", {}))
     totals: dict = {
         "runs": len(runs),
+        "excluded": len(all_runs) - len(runs),
+        "leak": _leak_cell(all_runs),
         "result": _status_cell(runs),
         "spread": _spread(runs),
         "tool_calls": {},
@@ -269,8 +300,8 @@ def _arm_row(totals: dict, columns: list[str]) -> list[str]:
     return values
 
 
-def build(runs_dir: Path, baseline: str | None = None) -> dict:
-    runs = collect(runs_dir)
+def build(runs_dir: Path, baseline: str | None = None, source=None) -> dict:
+    runs = collect(runs_dir, source)
     if not runs:
         raise ReportError(f"no run under {runs_dir} (looked for <arm>/<task>/<k>/run.json)")
     arms = sorted({run["arm"] for run in runs})
@@ -329,7 +360,12 @@ def build(runs_dir: Path, baseline: str | None = None) -> dict:
                     "status", "timed_out", "exit_code", "result",
                 )
             }
-            | {"journal": run.get("journal"), "metrics": run.get("metrics")}
+            | {
+                "journal": run.get("journal"),
+                "metrics": run.get("metrics"),
+                "leak": run.get("leak_level"),
+                "excluded": excluded(run),
+            }
             for run in sorted(runs, key=lambda run: (run["task"], run["arm"], run.get("k", 0)))
         ],
         "tasks_totals": tables,
@@ -342,19 +378,25 @@ def build(runs_dir: Path, baseline: str | None = None) -> dict:
 def format_report(report: dict) -> str:
     tasks = report["tasks_totals"]
     columns = _columns(tasks)
-    headers = ["arm", "runs", "result", *columns, "in_spread"]
+    headers = ["arm", "runs", "result", "leak", *columns, "in_spread"]
     blocks = []
-    for task in report["tasks"]:
+
+    def block(title: str, cells: dict, arms) -> str:
         rows = []
-        for arm in sorted(tasks[task]):
-            totals = tasks[task][arm]
-            rows.append([arm, str(totals["runs"]), totals["result"], *_arm_row(totals, columns), totals["spread"]])
-        blocks.append(f"TASK {task}\n" + _table(headers, rows))
-    totals_rows = []
-    for arm in report["agents"]:
-        totals = report["totals"][arm]
-        totals_rows.append([arm, str(totals["runs"]), totals["result"], *_arm_row(totals, columns), totals["spread"]])
-    blocks.append("TOTALS\n" + _table(headers, totals_rows))
+        notes = []
+        for arm in arms:
+            totals = cells[arm]
+            rows.append([
+                arm, str(totals["runs"]), totals["result"] or "-", totals["leak"],
+                *_arm_row(totals, columns), totals["spread"],
+            ])
+            if totals["excluded"]:
+                notes.append(f"{arm}: excluded {totals['excluded']} (leak)")
+        return "\n".join([f"{title}\n" + _table(headers, rows), *notes])
+
+    for task in report["tasks"]:
+        blocks.append(block(f"TASK {task}", tasks[task], sorted(tasks[task])))
+    blocks.append(block("TOTALS", report["totals"], report["agents"]))
     if report["baseline"] is not None:
         ratio_headers = ["task", "arm", "input_total", "calls", "output", "fee_usd", "wall_seconds", "result_bytes"]
         rows = []
@@ -374,8 +416,10 @@ def format_report(report: dict) -> str:
 
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--runs", default=os.environ.get("REPO_TASKS_RUNS", DEFAULT_RUNS),
-                        help="the runs root")
+    parser.add_argument("--runs", default=lib.runs_root(), help="the runs root")
+    parser.add_argument("--source", default=None,
+                        help="the repository leak.py looks later shas up in "
+                        "(default: REPO_TASKS_SOURCE, else this repository)")
     parser.add_argument("--baseline", metavar="ARM",
                         help="the arm every ratio divides by")
     parser.add_argument("--json", action="store_true", help="print one JSON object")
@@ -385,7 +429,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return subprocess.call([sys.executable, str(HERE / "tests" / "test_repo_tasks.py")])
     try:
-        report = build(Path(args.runs), args.baseline)
+        report = build(Path(args.runs), args.baseline, args.source)
     except ReportError as error:
         print(f"report.py: {error}", file=sys.stderr)
         return 2

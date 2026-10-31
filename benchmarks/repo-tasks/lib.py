@@ -6,6 +6,10 @@
     python3 benchmarks/repo-tasks/lib.py arm full agent
     python3 benchmarks/repo-tasks/lib.py list-tasks
     python3 benchmarks/repo-tasks/lib.py list-arms
+    python3 benchmarks/repo-tasks/lib.py source
+    python3 benchmarks/repo-tasks/lib.py runs-root
+    python3 benchmarks/repo-tasks/lib.py check-runs-root <dir>
+    python3 benchmarks/repo-tasks/lib.py make-tree <source> <base> <tree>
 
 A task file is one Markdown file under ``tasks/``: a frontmatter block of
 ``key: value`` lines between two ``---`` lines, then ``## Brief`` and the worker
@@ -25,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,6 +43,30 @@ VERDICT_RS = REPO / "crates/radian-arc/src/gate/verdict.rs"
 
 TASK_KEYS = ("id", "slug", "base", "outcome", "crates")
 ARM_KEYS = ("agent", "provider", "model", "extra")
+
+
+# Variables that make git look at another repository than the `-C` one. A run
+# started from a git hook would carry them; every git call here drops them.
+_GIT_REPO_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+)
+
+# Lets `git fetch` ask a local repository for a bare sha that no ref points at.
+# It is passed on the fetch's command line, so the source's config never changes.
+UPLOAD_PACK = (
+    "git -c uploadpack.allowReachableSHA1InWant=true "
+    "-c uploadpack.allowAnySHA1InWant=true upload-pack"
+)
+
+
+class SetupError(Exception):
+    """A run root or a run tree cannot be used; the message is the one to print."""
 
 
 class LookupError(Exception):
@@ -325,6 +354,139 @@ def find_arm(name: str) -> dict[str, str]:
     return parse_arm(_find(name, ARMS_DIR, arm_names(), "arm"))
 
 
+def git_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for name in _GIT_REPO_ENV:
+        env.pop(name, None)
+    return env
+
+
+def git(directory, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(directory), *args],
+        capture_output=True,
+        text=True,
+        env=git_env(),
+        check=check,
+    )
+
+
+def source_repo() -> Path | None:
+    """The repository the run trees are fetched from.
+
+    `REPO_TASKS_SOURCE` when set, else the repository holding this file. A
+    relative path is taken from the current directory.
+    """
+    value = os.environ.get("REPO_TASKS_SOURCE")
+    if value:
+        return Path(value).absolute()
+    result = git(HERE, "rev-parse", "--show-toplevel", check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip())
+
+
+def runs_root() -> Path:
+    """`REPO_TASKS_RUNS`, else `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs`."""
+    value = os.environ.get("REPO_TASKS_RUNS")
+    if value:
+        return Path(value).absolute()
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(cache).absolute() / "radian-repo-tasks" / "runs"
+
+
+def checkout_holding(path) -> str | None:
+    """The git checkout (or git directory) that holds `path`, or None.
+
+    `path` need not exist yet: its nearest existing ancestor is asked.
+    """
+    directory = Path(path).absolute()
+    while not directory.exists():
+        if directory.parent == directory:
+            return None
+        directory = directory.parent
+    if not directory.is_dir():
+        directory = directory.parent
+    top = git(directory, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode == 0 and top.stdout.strip():
+        return top.stdout.strip()
+    # Inside a `.git` directory there is no work tree, but it is a repository.
+    git_dir = git(directory, "rev-parse", "--absolute-git-dir", check=False)
+    if git_dir.returncode == 0 and git_dir.stdout.strip():
+        return git_dir.stdout.strip()
+    return None
+
+
+def check_runs_root(path) -> None:
+    """Refuse a run root inside any git checkout.
+
+    A tree under a checkout lets an agent that leaves its tree reach that
+    checkout's history and branches (one run did: it ran `git checkout work/...`
+    in the harness worktree that held the default run root).
+    """
+    holder = checkout_holding(path)
+    if holder is not None:
+        raise SetupError(
+            f"the run root {path} is inside the git checkout {holder}; "
+            "set REPO_TASKS_RUNS to a directory outside every repository"
+        )
+
+
+def tree_commits(tree) -> int:
+    """How many commits the tree's HEAD reaches (`git rev-list --count HEAD`)."""
+    return int(git(tree, "rev-list", "--count", "HEAD").stdout.strip())
+
+
+def check_tree(tree) -> int:
+    """The tree's commit count; anything but 1 means it holds history past its base."""
+    count = tree_commits(tree)
+    if count != 1:
+        raise SetupError(
+            f"the run tree {tree} reaches {count} commits, not 1; "
+            "it must hold its base and nothing else"
+        )
+    return count
+
+
+def make_tree(source, base: str, tree) -> int:
+    """Make a run tree holding only `base`, fetched from `source`, and no ref.
+
+    `git init`, a depth-1 fetch of the one sha, a detached checkout. There is no
+    clone and no remote, so the tree has no `origin/*`, no branch and no later
+    commit to find. `FETCH_HEAD` names the source path, so it is removed. The
+    source is only read: the upload-pack options are on the command line.
+    Returns the tree's commit count, which is always 1 (else SetupError).
+    """
+    tree = Path(tree)
+    if tree.exists():
+        raise SetupError(f"the run tree exists: {tree} (remove it first)")
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    steps = (
+        ("init", tree.parent, ("-c", "init.defaultBranch=base", "init", "-q", str(tree))),
+        (
+            "fetch",
+            tree,
+            (
+                "fetch", "--quiet", "--depth", "1", "--no-tags",
+                "--upload-pack", UPLOAD_PACK, str(source), base,
+            ),
+        ),
+        ("checkout", tree, ("checkout", "--quiet", "--detach", "FETCH_HEAD")),
+    )
+    for name, directory, args in steps:
+        result = git(directory, *args, check=False)
+        if result.returncode != 0:
+            raise SetupError(
+                f"cannot make the run tree {tree} at {base} from {source}: "
+                f"git {name}: "
+                f"{result.stderr.strip()}"
+            )
+    fetch_head = tree / ".git" / "FETCH_HEAD"
+    if fetch_head.exists():
+        fetch_head.unlink()
+    return check_tree(tree)
+
+
 def _main(argv: list[str]) -> int:
     if not argv:
         print(__doc__.strip(), file=sys.stderr)
@@ -336,6 +498,22 @@ def _main(argv: list[str]) -> int:
             return 0
         if command == "list-arms":
             print("\n".join(arm_names()))
+            return 0
+        if command == "source" and len(argv) == 1:
+            source = source_repo()
+            if source is None:
+                print("no source repository; set REPO_TASKS_SOURCE", file=sys.stderr)
+                return 2
+            print(source)
+            return 0
+        if command == "runs-root" and len(argv) == 1:
+            print(runs_root())
+            return 0
+        if command == "check-runs-root" and len(argv) == 2:
+            check_runs_root(argv[1])
+            return 0
+        if command == "make-tree" and len(argv) == 4:
+            print(make_tree(argv[1], argv[2], argv[3]))
             return 0
         if command == "brief" and len(argv) == 2:
             sys.stdout.write(str(find_task(argv[1])["brief"]))
@@ -356,7 +534,7 @@ def _main(argv: list[str]) -> int:
                 return 2
             print(value)
             return 0
-    except (LookupError, ValueError) as error:
+    except (LookupError, ValueError, SetupError) as error:
         print(error, file=sys.stderr)
         return 2
     print(__doc__.strip(), file=sys.stderr)

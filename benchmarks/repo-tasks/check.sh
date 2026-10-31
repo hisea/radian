@@ -1,7 +1,7 @@
 #!/bin/bash
 # The task's crate-scoped checks for one finished run: check.sh <arm> <task> <k>
 #
-# Runs, in the run's own worktree and target directory:
+# Runs, in the run's own tree and target directory:
 #   cargo fmt --all -- --check
 #   cargo clippy -p <crate> --all-targets -- -D warnings   (once per listed crate)
 #   cargo nextest run -p <crate> --locked --no-fail-fast   (once per listed crate)
@@ -11,7 +11,7 @@
 # is `checks.json`; a failing step makes `checks_ok` false and the exit code 1.
 #
 # Environment:
-#   REPO_TASKS_RUNS      output root (default: benchmarks/repo-tasks/runs)
+#   REPO_TASKS_RUNS      output root (default: ${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs)
 #   REPO_TASKS_CARGO     cargo binary (default: cargo; tests use a stub)
 #   REPO_TASKS_MAX_JOBS  passed to cargo clippy and nextest as `--jobs` (optional;
 #                        never to `cargo fmt`, which would forward it to rustfmt)
@@ -26,8 +26,7 @@ arm=$1
 task=$2
 k=$3
 
-RUNS=${REPO_TASKS_RUNS:-$HERE/runs}
-case $RUNS in /*) ;; *) RUNS="$PWD/$RUNS" ;; esac
+RUNS=$(python3 "$LIB" runs-root) || exit 2
 CARGO=${REPO_TASKS_CARGO:-cargo}
 task_id=$(python3 "$LIB" task "$task" id) || exit 2
 crates=$(python3 "$LIB" task "$task" crates) || exit 2
@@ -35,7 +34,7 @@ crates=$(python3 "$LIB" task "$task" crates) || exit 2
 
 OUT=$RUNS/$arm/$task_id/$k
 TREE=$RUNS/trees/$arm-$task_id-$k
-[ -d "$TREE" ] || die "no worktree for $arm $task_id $k (run run.sh first)"
+[ -d "$TREE" ] || die "no run tree for $arm $task_id $k (run run.sh first)"
 mkdir -p "$OUT"
 cd "$TREE" || die "cannot enter $TREE"
 unset CARGO_TARGET_DIR

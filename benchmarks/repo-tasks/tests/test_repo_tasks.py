@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the fixed repository task set's runner, checks, review prompt and
-report. No test calls a model: the agents and cargo are stub scripts, and the
-worktrees come from a temporary repository.
+report and leak scan. No test calls a model: the agents and cargo are stub
+scripts, the run trees come from a temporary repository, and the leak tests read
+small fixture journals.
 
     python3 benchmarks/repo-tasks/tests/test_repo_tasks.py
     python3 benchmarks/repo-tasks/report.py --self-test     # the same tests
@@ -29,17 +30,20 @@ sys.path.insert(0, str(BENCHMARKS))
 sys.path.insert(0, str(ROOT))
 
 import journal_metrics  # noqa: E402
+import leak  # noqa: E402
 import lib  # noqa: E402
 import prompt  # noqa: E402
 import report  # noqa: E402
 
-SCRATCH = REPO / ".radian" / "repo-tasks-tests"
 TASK_FIELDS = ("id", "slug", "base", "outcome", "crates")
 
 
 def scratch() -> Path:
-    SCRATCH.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="t-", dir=SCRATCH))
+    """A temporary directory outside every git checkout (run.sh refuses one inside)."""
+    path = Path(tempfile.mkdtemp(prefix="repo-tasks-")).resolve()
+    if lib.checkout_holding(path) is not None:
+        raise unittest.SkipTest(f"the temporary directory {path} is inside a git checkout")
+    return path
 
 
 def journal(records) -> str:
@@ -128,6 +132,31 @@ def init_repo(repo: Path) -> Path:
 
 def make_repo(root: Path) -> Path:
     return init_repo(root / "repo")
+
+
+def commit(repo: Path, name: str, text: str, message: str) -> str:
+    write(repo / name, text)
+    git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def history_repo(root: Path) -> tuple[Path, str, dict]:
+    """A source with history before and after a mid-history base.
+
+    `first` -> `base` -> `later` on the default branch, `work/TK1-fix` with the
+    fix on top of `base`, and a tag on `later`. `base` is the tip of no branch.
+    """
+    repo = init_repo(root / "source")
+    shas = {"first": git(repo, "rev-parse", "HEAD")}
+    shas["base"] = commit(repo, "a.txt", "base\n", "base")
+    git(repo, "branch", "--no-track", "work/TK1-fix")
+    shas["later"] = commit(repo, "a.txt", "later\n", "later on main")
+    git(repo, "tag", "v1")
+    git(repo, "checkout", "-q", "work/TK1-fix")
+    shas["fix"] = commit(repo, "fix.txt", "the fix\n", "the reference fix")
+    git(repo, "checkout", "-q", "-")
+    return repo, shas["base"], shas
 
 
 def radian_stub(directory: Path, body: str) -> Path:
@@ -311,21 +340,20 @@ class TaskSetTest(ScratchCase):
 
 class RunScriptTest(ScratchCase):
     def prepare(self, stub=STUB_RADIAN):
-        repo = make_repo(self.root)
-        base = git(repo, "rev-parse", "HEAD")
+        repo, base, self.shas = history_repo(self.root)
         tasks = self.root / "tasks"
         arms = self.root / "arms"
         task_file(tasks, "T1-demo", base)
         arm_file(arms, "full")
         return repo, base, tasks, arms, radian_stub(self.root, stub)
 
-    def run_script(self, repo, tasks, arms, stub, *args, timeout="30", clone=None, path_prefix=None, cwd=None):
+    def run_script(self, repo, tasks, arms, stub, *args, timeout="30", runs=None,
+                   path_prefix=None, cwd=None):
         env = self.env(
             REPO_TASKS_TASKS_DIR=tasks,
             REPO_TASKS_ARMS_DIR=arms,
             REPO_TASKS_SOURCE=repo,
-            REPO_TASKS_RUNS=self.root / "runs",
-            REPO_TASKS_CLONE=clone or self.root / "clone",
+            REPO_TASKS_RUNS=runs or self.root / "runs",
             REPO_TASKS_RADIAN_BIN=stub,
             REPO_TASKS_TIMEOUT=timeout,
         )
@@ -339,25 +367,105 @@ class RunScriptTest(ScratchCase):
             env=env,
         )
 
-    def test_the_callers_repository_config_is_byte_identical(self):
+    def test_the_source_config_is_byte_identical(self):
         repo, _, tasks, arms, stub = self.prepare()
         before = (repo / ".git" / "config").read_bytes()
         before_worktrees = git(repo, "worktree", "list", "--porcelain")
+        before_refs = git(repo, "for-each-ref")
         result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((repo / ".git" / "config").read_bytes(), before)
         self.assertEqual(git(repo, "worktree", "list", "--porcelain"), before_worktrees)
-        # The worktree and the session are in the separate clone/run root.
+        self.assertEqual(git(repo, "for-each-ref"), before_refs)
         tree = self.root / "runs" / "trees" / "full-T1-1"
         self.assertTrue((tree / "README.md").is_file())
-        self.assertTrue((self.root / "clone" / ".git").is_dir())
-        self.assertTrue((self.root / "runs" / "full" / "T1" / "1" / "change.diff").is_file())
-        data = json.loads((self.root / "runs" / "full" / "T1" / "1" / "run.json").read_text())
+        self.assertFalse((self.root / "runs" / "clone").exists())
+        out = self.root / "runs" / "full" / "T1" / "1"
+        self.assertTrue((out / "change.diff").is_file())
+        data = json.loads((out / "run.json").read_text())
         self.assertFalse(data["timed_out"])
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["journal"])
+        self.assertEqual(data["tree_commits"], 1)
+        self.assertEqual(Path(data["tree"]).resolve(), tree.resolve())
+        self.assertEqual(json.loads((out / "leak.json").read_text())["level"], 0)
 
-    def test_radian_gets_the_worktree_as_its_workspace(self):
+    def test_a_tree_holds_its_base_and_nothing_later(self):
+        repo, base, tasks, arms, stub = self.prepare()
+        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tree = self.root / "runs" / "trees" / "full-T1-1"
+        self.assertEqual(git(tree, "log", "--all", "--format=%H"), base)
+        # A detached HEAD is the only line `git branch -a` can print.
+        self.assertEqual(git(tree, "branch", "-a"), f"* (HEAD detached at {base[:7]})")
+        self.assertEqual(git(tree, "for-each-ref"), "")
+        self.assertEqual(git(tree, "tag"), "")
+        self.assertEqual(git(tree, "remote"), "")
+        for name in ("later", "fix", "first"):
+            missing = subprocess.run(
+                ["git", "-C", str(tree), "cat-file", "-e", self.shas[name]],
+                capture_output=True,
+            )
+            self.assertNotEqual(missing.returncode, 0, name)
+        # Nothing in the tree's git directory names the source path.
+        for path in (tree / ".git").rglob("*"):
+            if path.is_file() and "objects" not in path.parts:
+                self.assertNotIn(str(repo), path.read_text(errors="replace"), path)
+
+    def test_a_mid_history_base_is_fetched(self):
+        repo, base, _, _, _ = self.prepare()
+        tips = git(repo, "for-each-ref", "--format=%(objectname)").split()
+        self.assertNotIn(base, tips)
+        tree = self.root / "tree"
+        self.assertEqual(lib.make_tree(repo, base, tree), 1)
+        self.assertEqual(git(tree, "rev-parse", "HEAD"), base)
+
+    def test_a_tree_with_more_than_its_base_is_refused(self):
+        repo, _, _, _, _ = self.prepare()
+        with self.assertRaises(lib.SetupError) as error:
+            lib.check_tree(repo)
+        self.assertIn("not 1", str(error.exception))
+
+    def test_the_agents_commits_are_listed_from_base_to_head(self):
+        # The tree is shallow at base; `git log base..HEAD` (commits.txt and the
+        # review prompt) must still list the agent's commits.
+        repo, base, tasks, arms, _ = self.prepare()
+        stub = radian_stub(
+            self.root,
+            STUB_RADIAN
+            + "import subprocess\n"
+            "pathlib.Path('agent.txt').write_text('x\\n')\n"
+            "subprocess.run(['git', 'add', 'agent.txt'], check=True)\n"
+            "subprocess.run(['git', '-c', 'user.email=a@b', '-c', 'user.name=a',"
+            " 'commit', '-q', '-m', 'agent change'], check=True)\n",
+        )
+        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = self.root / "runs" / "full" / "T1" / "1"
+        tree = self.root / "runs" / "trees" / "full-T1-1"
+        self.assertIn("agent change", (out / "commits.txt").read_text())
+        self.assertIn("+x", (out / "change.diff").read_text())
+        arm_file(arms, "reviewer")
+        reviewer = reviewer_stub(
+            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n"
+        )
+        reviewed = subprocess.run(
+            ["bash", str(ROOT / "review.sh"), "full", "T1", "1"],
+            capture_output=True,
+            text=True,
+            env=self.env(
+                REPO_TASKS_TASKS_DIR=tasks,
+                REPO_TASKS_ARMS_DIR=arms,
+                REPO_TASKS_RUNS=self.root / "runs",
+                REPO_TASKS_RADIAN_BIN=reviewer,
+            ),
+        )
+        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+        prompt_text = (out / "review-prompt.md").read_text()
+        self.assertIn("agent change", prompt_text)
+        self.assertIn(f"{base}..{git(tree, 'rev-parse', 'HEAD')}", prompt_text)
+
+    def test_radian_gets_the_tree_as_its_workspace(self):
         # Without `--workspace` radian exec has no file or shell tools, so a run
         # ends at once with an empty diff.
         repo, _, tasks, arms, _ = self.prepare()
@@ -372,38 +480,56 @@ class RunScriptTest(ScratchCase):
         self.assertIn("--workspace", args)
         self.assertEqual(Path(args[args.index("--workspace") + 1]).resolve(), tree.resolve())
 
-    def test_a_clone_pointing_at_the_callers_repository_is_refused(self):
-        repo, _, tasks, arms, stub = self.prepare()
-        before = (repo / ".git" / "config").read_bytes()
-        before_worktrees = git(repo, "worktree", "list", "--porcelain")
-        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1", clone=repo)
+    def assert_refused(self, result, checkout: Path, repo: Path, before: bytes):
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("separate clone", result.stderr)
+        self.assertIn("inside the git checkout", result.stderr)
+        self.assertIn(str(checkout.resolve()), result.stderr)
         self.assertEqual((repo / ".git" / "config").read_bytes(), before)
-        self.assertEqual(git(repo, "worktree", "list", "--porcelain"), before_worktrees)
-        self.assertFalse((self.root / "runs" / "full" / "T1" / "1" / "run.json").exists())
+        self.assertFalse(list(self.root.rglob("run.json")))
 
-    def test_a_clone_that_is_the_source_is_refused_even_from_elsewhere(self):
+    def test_a_run_root_inside_the_source_is_refused(self):
         repo, _, tasks, arms, stub = self.prepare()
         before = (repo / ".git" / "config").read_bytes()
         result = self.run_script(
-            repo, tasks, arms, stub, "full", "T1", "1", clone=repo, cwd=self.root
+            repo, tasks, arms, stub, "full", "T1", "1", runs=repo / "runs", cwd=self.root
         )
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("separate clone", result.stderr)
-        self.assertEqual((repo / ".git" / "config").read_bytes(), before)
+        self.assert_refused(result, repo, repo, before)
+        self.assertFalse((repo / "runs").exists())
 
-    def test_a_plain_directory_inside_the_caller_is_allowed_as_the_clone(self):
+    def test_a_run_root_inside_the_callers_checkout_is_refused(self):
         repo, _, tasks, arms, stub = self.prepare()
-        plain = repo / "runs" / "clone"
-        plain.mkdir(parents=True)
-        before = git(repo, "worktree", "list", "--porcelain")
-        result = self.run_script(repo, tasks, arms, stub, "full", "T1", "1", clone=plain)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # Cloning there creates its own `.git`; the caller gains no worktree.
-        self.assertTrue((plain / ".git").is_dir())
-        self.assertTrue((self.root / "runs" / "trees" / "full-T1-1" / "README.md").is_file())
-        self.assertEqual(git(repo, "worktree", "list", "--porcelain"), before)
+        caller = init_repo(self.root / "caller")
+        before = (repo / ".git" / "config").read_bytes()
+        result = self.run_script(
+            repo, tasks, arms, stub, "full", "T1", "1", runs="runs", cwd=caller
+        )
+        self.assert_refused(result, caller, repo, before)
+
+    def test_a_run_root_inside_an_unrelated_checkout_is_refused(self):
+        repo, _, tasks, arms, stub = self.prepare()
+        other = init_repo(self.root / "other")
+        before = (repo / ".git" / "config").read_bytes()
+        result = self.run_script(
+            repo, tasks, arms, stub, "full", "T1", "1",
+            runs=other / "deep" / "not-yet" / "runs", cwd=self.root,
+        )
+        self.assert_refused(result, other, repo, before)
+
+    def test_the_default_run_root_is_under_the_cache_directory(self):
+        env = self.env(XDG_CACHE_HOME=self.root / "cache")
+        env.pop("REPO_TASKS_RUNS", None)
+        printed = subprocess.run(
+            [sys.executable, str(ROOT / "lib.py"), "runs-root"],
+            capture_output=True, text=True, env=env, check=True,
+        ).stdout.strip()
+        self.assertEqual(printed, str(self.root / "cache" / "radian-repo-tasks" / "runs"))
+        env.pop("XDG_CACHE_HOME")
+        env["HOME"] = str(self.root / "home")
+        printed = subprocess.run(
+            [sys.executable, str(ROOT / "lib.py"), "runs-root"],
+            capture_output=True, text=True, env=env, check=True,
+        ).stdout.strip()
+        self.assertEqual(printed, str(self.root / "home" / ".cache" / "radian-repo-tasks" / "runs"))
 
     def test_a_task_with_two_crates_runs_both_checks(self):
         repo, _, tasks, arms, stub = self.prepare()
@@ -530,11 +656,16 @@ class CheckScriptTest(ScratchCase):
 
 
 class ReportTest(ScratchCase):
-    def make_run(self, arm, task, k, input_tokens=100, timed_out=False, extra_journal=""):
+    def make_run(self, arm, task, k, input_tokens=100, timed_out=False, extra_journal="",
+                 no_journal=False):
         out = self.root / "runs" / arm / task / str(k)
-        journal_path = write(
-            out / "session" / "s.jsonl", session_journal(input_tokens) + extra_journal
-        )
+        journal_path = None
+        if no_journal:
+            (out / "session").mkdir(parents=True)
+        else:
+            journal_path = write(
+                out / "session" / "s.jsonl", session_journal(input_tokens) + extra_journal
+            )
         write(
             out / "run.json",
             json.dumps(
@@ -550,7 +681,7 @@ class ReportTest(ScratchCase):
                     "timed_out": timed_out,
                     "exit_code": 124 if timed_out else 0,
                     "wall_seconds": 2.0,
-                    "journal": str(journal_path),
+                    "journal": str(journal_path) if journal_path else None,
                     "session_dir": str(out / "session"),
                 }
             ),
@@ -623,6 +754,187 @@ class ReportTest(ScratchCase):
         )
         self.assertIn("calls.read", header)
         self.assertIn("bytes.read", header)
+
+
+    def test_a_level_two_run_is_left_out_of_the_totals(self):
+        self.make_run("full", "T1", 1, input_tokens=100)
+        self.make_run(
+            "full", "T1", 2, input_tokens=900,
+            extra_journal=radian_call("git show origin/work/TK1-fix --stat"),
+        )
+        self.make_run("pi-like", "T1", 1, input_tokens=50)
+        built = report.build(self.root / "runs", "full", source=self.root)
+        self.assertEqual(built["totals"]["full"]["input_total"], 100)
+        self.assertEqual(built["totals"]["full"]["runs"], 1)
+        self.assertEqual(built["totals"]["full"]["excluded"], 1)
+        self.assertEqual(built["tasks_totals"]["T1"]["full"]["excluded"], 1)
+        self.assertEqual(built["ratios"]["T1"]["pi-like"]["input_total"], "0.500")
+        self.assertEqual(built["ratios"]["TOTAL"]["pi-like"]["input_total"], "0.500")
+        levels = {(run["arm"], run["k"]): run["leak"] for run in built["runs"]}
+        self.assertEqual(levels[("full", 2)], 2)
+        text = report.format_report(built)
+        self.assertIn("full: excluded 1 (leak)", text)
+        header = next(line for line in text.splitlines() if line.startswith("arm "))
+        self.assertIn("leak", header.split())
+        self.assertIn("L0=1 L2=1", text)
+        self.assertNotIn("pi-like: excluded", text)
+
+    def test_a_run_with_no_journal_says_no_journal(self):
+        out = self.make_run("full", "T1", 1, no_journal=True)
+        built = report.build(self.root / "runs", source=self.root)
+        self.assertIsNone(built["runs"][0]["leak"])
+        self.assertFalse(built["runs"][0]["excluded"])
+        self.assertIn("no journal=1", report.format_report(built))
+        self.assertIsNone(leak.scan_run(out, self.root)["level"])
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "leak.py"), str(out), "--source", str(self.root)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("no journal"))
+        self.assertIsNone(json.loads((out / "leak.json").read_text())["level"])
+
+
+def radian_call(command: str, call_id: str = "c9") -> str:
+    """A radian journal line: a shell call with JSON-string arguments."""
+    return journal([
+        {
+            "event": "ToolExecutionStarted",
+            "data": {
+                "call_id": call_id,
+                "name": "shell",
+                "arguments": json.dumps({"command": command}),
+            },
+        }
+    ])
+
+
+def radian_journal(tree: str, *commands: str) -> str:
+    created = journal([{"event": "SessionCreated", "data": {"workspace": tree}}])
+    return created + "".join(
+        radian_call(command, f"c{index}") for index, command in enumerate(commands)
+    )
+
+
+def pi_journal(tree: str, *commands: str) -> str:
+    records = [{"type": "session", "version": 3, "id": "s", "cwd": tree}]
+    for index, command in enumerate(commands):
+        records.append({
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": f"t{index}",
+                    "name": "bash",
+                    "arguments": {"command": command},
+                }],
+            },
+        })
+    return journal(records)
+
+
+class LeakTest(ScratchCase):
+    def setUp(self):
+        super().setUp()
+        self.source, self.base, self.shas = history_repo(self.root)
+        self.tree = str(self.root / "runs" / "trees" / "full-T1-1")
+        self.home = str(self.root)
+
+    def level(self, text: str, own=(), name="s.jsonl") -> dict:
+        path = write(self.root / "journals" / name, text)
+        return leak.scan([path], self.source, self.base, own, None, self.home)
+
+    def both(self, *commands: str) -> tuple[dict, dict]:
+        radian = self.level(radian_journal(self.tree, *commands), name="r.jsonl")
+        pi = self.level(pi_journal(self.tree, *commands), name="p.jsonl")
+        return radian, pi
+
+    def test_a_later_ref_cherry_pick_is_level_three_in_both_formats(self):
+        for result in self.both("git cherry-pick HEAD..origin/work/X 2>&1"):
+            self.assertEqual(result["level"], 3)
+            self.assertIn("cherry-pick HEAD..origin/work/X", result["evidence"][0]["text"])
+
+    def test_branch_all_alone_is_level_one_in_both_formats(self):
+        for result in self.both("git branch -a"):
+            self.assertEqual(result["level"], 1)
+
+    def test_a_plain_status_is_level_zero_in_both_formats(self):
+        for result in self.both("git status && git diff", "cargo test"):
+            self.assertEqual(result["level"], 0)
+            self.assertEqual(result["evidence"], [])
+
+    def test_a_later_sha_is_resolved_in_the_source(self):
+        later = self.shas["fix"][:9]
+        self.assertEqual(self.level(radian_journal(self.tree, f"git show {later}"))["level"], 2)
+        self.assertEqual(
+            self.level(radian_journal(self.tree, f"git show {later}:fix.txt > fix.txt"))["level"], 3
+        )
+        # An ancestor of base is ordinary history.
+        first = self.shas["first"][:9]
+        self.assertEqual(self.level(radian_journal(self.tree, f"git show {first}"))["level"], 0)
+
+    def test_the_runs_own_commit_is_not_later(self):
+        # The run's own commit, restored by `git show`, is listed in commits.txt.
+        own = self.shas["fix"][:9]
+        result = self.level(
+            radian_journal(self.tree, f"git show {own}:fix.txt > fix.txt"), own={own}
+        )
+        self.assertEqual(result["level"], 0)
+
+    def test_a_second_history_is_level_three_and_names_its_location(self):
+        cases = {
+            "git remote add up /Users/someone/Code/radian": "/Users/someone/Code/radian",
+            "git remote add -f up https://github.com/o/r.git": "https://github.com/o/r.git",
+            "git fetch /Users/someone/Code/radian 2>/dev/null": "/Users/someone/Code/radian",
+            "git fetch --depth 1 ../other main": "../other",
+            "git pull git@github.com:o/r.git main": "git@github.com:o/r.git",
+            "cd /tmp && git clone /Users/hai/Code/radian x": "/Users/hai/Code/radian",
+            "git clone --depth 1 file:///srv/r.git": "file:///srv/r.git",
+        }
+        for command, location in cases.items():
+            with self.subTest(command=command):
+                for result in self.both(command):
+                    self.assertEqual(result["level"], 3)
+                    self.assertIn(location, result["evidence"][0]["text"])
+
+    def test_a_fetch_of_a_remote_name_is_not_a_second_history(self):
+        for command in ("git fetch", "git fetch origin", "git remote -v", "git pull --ff-only"):
+            with self.subTest(command=command):
+                self.assertEqual(self.level(radian_journal(self.tree, command))["level"], 0)
+
+    def test_paths_outside_the_tree_are_listed_and_toolchain_paths_are_not(self):
+        commands = (
+            f"cat {self.tree}/README.md",
+            f"cd {self.home}/Code/radian && ls",
+            f"ls {self.home}/.cargo/bin {self.home}/.rustup/toolchains",
+            "cat ~/notes.txt",
+        )
+        result = self.level(radian_journal(self.tree, *commands))
+        self.assertEqual(result["level"], 0)
+        self.assertEqual(
+            result["outside"], [f"{self.home}/Code/radian", f"{self.home}/notes.txt"]
+        )
+
+    def test_a_call_carried_twice_counts_once(self):
+        line = radian_call("git branch -a")
+        result = self.level(radian_journal(self.tree) + line + line)
+        self.assertEqual(result["calls"], 1)
+
+    def test_leak_py_writes_leak_json_for_a_run(self):
+        out = self.root / "runs" / "full" / "T1" / "1"
+        write(out / "session" / "s.jsonl", radian_journal(self.tree, "git log --all --oneline"))
+        write(out / "run.json", json.dumps({"base": self.base, "tree": self.tree}))
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "leak.py"), str(out), "--source", str(self.source)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("L1"))
+        data = json.loads((out / "leak.json").read_text())
+        self.assertEqual(data["level"], 1)
+        self.assertEqual(data["calls"], 1)
+        self.assertEqual(data["source"], str(self.source))
 
 
 class PromptTest(ScratchCase):

@@ -156,7 +156,7 @@ def _git(tree: Path, *args: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("task", help="task id or task file stem")
-    parser.add_argument("tree", help="the run's worktree")
+    parser.add_argument("tree", help="the run tree")
     parser.add_argument("base", help="the task's base sha")
     parser.add_argument("diff_file", help="the run's change.diff")
     parser.add_argument(
