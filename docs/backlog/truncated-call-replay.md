@@ -30,3 +30,7 @@ B. 只知道 C 时的 `max_tokens`：
 - `max_tokens`：`--context-window 32768` 且 catalog 无 O 时，请求体里 `max_tokens = 8192`；C 和 O 都有时不变；都没有时仍不发。手册 `providers.md` 那段同步。
 - 复现：Hai-PC 线路上同一个 brief，turn 不再因 500 失败。
 - 变异：去掉 `{}` 替换、去掉 C-only 的 `max_tokens`，各有测试失败。
+
+## 顺带：journal 不记停止原因
+
+统计上面两种情况时发现 `ModelUsageRecorded` 没有模型的停止原因（`stop` / `length` / `tool_calls`）。核心在 turn 里知道它（ADR 0017 按 `MaxTokens` 决定截断调用怎么处理），journal 没持久化，`journal_metrics.py` 只能用"有 `truncated` 的工具结果或 usage 总量 ≥ C − 16"反推。建议 `ModelUsageRecorded` 加一个 `stop_reason` 字段（闭集，schema fixture 同步），eval 指标直接读。涉及 ADR 0006/0007。
