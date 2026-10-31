@@ -65,7 +65,7 @@ This flag is refused for `openai-compatible` requests.
 
 An OpenAI-compatible chat request sets its own output cap `max_tokens`, where `C` is the context window (from the models catalog, `--context-window` or `model.context_window`) and `O` is the models catalog's output limit:
 `min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))` when both are known, `min(16384, ⌊C/4⌋)` when only `C` is known, and no `max_tokens` when `C` is unknown.
-An explicit `max_tokens` in an extra request body wins, and the output reservation counts it; on an OpenAI-compatible chat route `max_completion_tokens` counts the same way, and an integral float such as `32000.0` counts as its integer. A `null` output key is not sent, so the reservation counts the computed cap when there is one. A per-request setting also wins for that request.
+An explicit `max_tokens` in an extra request body wins, and the output reservation counts it; on an OpenAI-compatible chat route `max_completion_tokens` counts the same way, and an integral float such as `32000.0` counts as its integer. A value above 4294967295 cannot be reserved for, so it stops startup; see `environment`. A `null` output key is not sent, so the reservation counts the computed cap when there is one. A per-request setting also wins for that request.
 Set `RADIAN_EXTRA_BODY` to merge top-level fields into every request body; see `environment` for the per-route reserved keys, the startup line, and the refused `/model` switch.
 A route to `api.openai.com` sends none, because its newer chat models reject `max_tokens`.
 The context budget reserves the larger of `min(16384, ⌊C/4⌋)` and the `max_tokens` the request sends, and subtracts that from `C`.

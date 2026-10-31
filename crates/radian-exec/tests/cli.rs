@@ -10515,11 +10515,17 @@ async fn the_extra_body_env_reaches_the_request_and_the_startup_line_names_the_k
     );
 }
 
-/// A reserved key and a non-object are startup refusals naming the variable (and the key),
-/// before any session file exists. Exit code 2 is the code every startup refusal uses.
+/// A reserved key, a non-object and an output cap the reservation cannot hold are startup
+/// refusals naming the variable (and the key), before any session file exists. Exit code 2 is
+/// the code every startup refusal uses.
 #[tokio::test]
 async fn a_bad_extra_body_stops_startup_with_the_named_error() {
-    for (value, needle) in [("{\"messages\":[]}", "messages"), ("[1]", "object")] {
+    for (value, needle) in [
+        ("{\"messages\":[]}", "messages"),
+        ("[1]", "object"),
+        // ADR 0018 §2: the request would send this output while `R` could only hold `u32::MAX`.
+        ("{\"max_completion_tokens\":5000000000}", "4294967295"),
+    ] {
         let (code, _, stderr) = feed_and_wait(
             spawn_radian(
                 &[

@@ -735,3 +735,14 @@ a backup under `.radian/`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0257-M4 | the startup `request_output` drops `.with_explicit(...)` (the pre-fix separation between the window and the body merge) | ✅ 1 failed (rc=100) | `an_explicit_max_tokens_raises_the_reservation_it_counts` (`R 19200, B 108800` while the body sends 32000) |
+
+## TK0286: rework 2, an oversized output cap stops startup (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups` (rework 2). The mutation was applied
+in place and the named test run with `cargo nextest run -p radian-exec --test cli --locked
+--profile sandbox --no-fail-fast -E 'test(a_bad_extra_body_stops_startup_with_the_named_error)'`;
+the source was restored from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M9 | `parse_extra_body` drops the oversized-output-cap refusal | ✅ 1 failed (rc=100) | `cli::a_bad_extra_body_stops_startup_with_the_named_error` (`5000000000` started instead of exit 2) |
