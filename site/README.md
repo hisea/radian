@@ -56,7 +56,7 @@ then configures and uploads the Pages artifact.
 
 Every page (the four hand-written pages, `404.html` and every docs page) loads one external script, `/analytics.js`, with `defer`; no page holds inline analytics code, and the docs tests check that each page loads it exactly once. The file sends one anonymous PostHog `$pageview` per page load and nothing else: autocapture, dead-click capture and session recording are off, `person_profiles` is `identified_only` and nobody is identified. It runs only when `location.hostname` is `getrad.dev` or `www.getrad.dev`, so a local preview, a fork's Pages site and the README renderer send nothing.
 
-`POSTHOG_KEY` at the top of the file is the project API key (`phc_…`, public by design: it can only write events). It is empty in the repository, and an empty key turns analytics off; paste the key to turn it on. `api_host` and `ui_host` name the project's cloud region (EU as written); change both together if the project is on US Cloud. This is the website only: the binary sends no telemetry (ADR 0013).
+`POSTHOG_KEY` at the top of the file is the project API key (`phc_…`, public by design: it can only write events). An empty key turns analytics off. The project is shared with anylut.com (the free plan allows one project); in PostHog, filter on the event property `$host` (`getrad.dev`) to see this site alone. `api_host` and `ui_host` name the project's cloud region (EU as written); change both together if the project is on US Cloud. This is the website only: the binary sends no telemetry (ADR 0013).
 
 ## Preview the docs
 

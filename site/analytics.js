@@ -6,8 +6,9 @@
 //
 // The PostHog project API key is public by design (it can only write events). An empty
 // key, or any value that is not a `phc_` key, turns analytics off and the page is
-// unchanged.
-var POSTHOG_KEY = '';
+// unchanged. The project is shared with anylut.com (one project per free plan); tell the
+// two sites apart by the `$host` property of each event.
+var POSTHOG_KEY = 'phc_ytxuan84PDF95SHcyCaMjW8m9dQW2DoudkUSRQG2aAey';
 
 var analyticsEnabled =
   POSTHOG_KEY.indexOf('phc_') === 0 &&
