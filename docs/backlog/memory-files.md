@@ -1,6 +1,6 @@
 # memory：模型可写的 Markdown 文件存储，索引注入
 
-- 状态：idea（设计已写全，但它推翻 ADR 0021 D5 第 1 条「模型没有写路径」；owner 决定反转后改 decided）
+- 状态：decided（2026-10-31：反转 ADR 0021 D5 第 1 条「模型没有写路径」，模型写）
 - 涉及 ADR：0021（D3 存储、D4 数据模型、D5 写入来源、D6 注入、D7 工具与命令、不变量 5）、0020（`~/.radian/` 目录表与沙箱禁读清单）、0036（角色规则：何时写、何时查）、0035（TUI 卡片）、0043（subagent 不继承会话记忆）、0012（memory 目录的写允许规则）
 - 来源：`research/2026-10-31-competitor-memory.md`（§1 radian 现状、§2 对手逐个、§3 对比）
 
@@ -17,11 +17,9 @@
 - 信任放在提示词和输入防护里：Codex「记忆不是当前行为的证明，要查源头」「用过 MCP 或网页内容的会话标 polluted、不提炼」；Claude Code 加载索引时清理伪标记；Copilot 要求先核引用。没有人做存储字段级的 verification。
 - 没有人做事件溯源的 JSONL 存储、revision 比较、purge 语义。
 
-## 待决问题
+## 决定（已定）
 
-- 唯一的待决：是否反转 ADR 0021 D5 第 1 条，让模型写。下面的设计以反转为前提。
-
-## 设计（反转后即 decided）
+ADR 0021 D5 第 1 条反转：模型有写路径，用宿主的 `write` 与 `patch` 直接写记忆目录。其余如下。
 
 1. **存储是文件。** `~/.radian/memory/global/<name>.md` 与 `~/.radian/memory/projects/<ProjectId>/<name>.md`，一事一个文件；项目身份沿用 D2。frontmatter 字段：`name`（与文件名相同）、`description`（一句话，索引用）、`type`（闭集 `user`、`feedback`、`project`、`reference`）、`source`（闭集 `model`、`user`、`import`，由宿主写，模型给的值被覆盖）、`created`、`modified`、`last_used`（见 `memory-aging.md`）、`provenance`（`session_id`、`turn_id`，可缺）。正文自由 Markdown，`feedback` 与 `project` 类带 `**Why:**` 与 `**How to apply:**` 两行。每个 scope 一个 `MEMORY.md` 索引，一条一行 `- [标题](文件名) — 一句话`，由写入方维护。D3 的 JSONL 事件日志、D4 的 `key`/`revision`/`verification`、`KeyConflict`、archive/forget/purge 语义全部取消：文件就是记录，删文件就是忘记。
 2. **模型用宿主工具写。** `write` 与 `patch` 对这两个目录的写在 `full` 与 `workspace` 两档都是 `allow`（ADR 0012 加一条内置规则）；`shell` 对 memory 目录仍不可读不可写，不变量 5 不变（沙箱禁读清单不改）。何时写由角色规则（ADR 0036）给出：被用户纠正时、交接时、发现一件跨会话才有用的事实时；不存仓库已经记录的东西（代码结构、git 历史、AGENTS.md）；同一主题更新已有文件而不是新建；发现错的删掉。D5 第 2 条不变：项目事实与项目流程仍进 AGENTS.md，跨项目流程仍进用户 skill；记忆存的是这两处放不下的：用户的偏好与纠正、进行中的工作状态、外部资源指针。

@@ -1,6 +1,6 @@
 # memory：记忆老化，先记 last_used，再定自动归档
 
-- 状态：idea（前提：`memory-files.md` 落地；自动归档的天数等有 `last_used` 数据再定）
+- 状态：decided（第 1、2 条，随 `memory-files.md` 一起做；第 3 条自动归档的天数等有 `last_used` 数据再定）
 - 涉及 ADR：0021（文件存储落地后的 D3）
 - 来源：`research/2026-10-31-competitor-memory.md` §2.3（Codex）、§2.5（Copilot）
 
