@@ -65,4 +65,4 @@
 
 ## 已落地
 
-第 6、7 条（没修的问题变成 `todo.proposed` 的收尾 task；task 级 propose / confirm）已实现；第 8 条（review 与 commands 并行）已实现。第一轮专用的 `first.exec_args` / `first.timeout_secs` 暂时落在 `[gate.review.first]` 上，键名与 reviewer profile 相同；reviewer profile 落地时移入 `[gate.reviewers.<name>]`。
+第 6、7 条（没修的问题变成 `todo.proposed` 的收尾 task；task 级 propose / confirm）已实现；第 8 条（review 与 commands 并行）已实现。第 1 条的配置已实现：`[gate.reviewers.<name>]` 的 `exec_args`、`prompt_file`、`timeout_secs`、`fix_level` 和 `first.exec_args` / `first.timeout_secs`，以及 `gate.profiles.<name>.reviewer`；`[gate.review.first]` 只作为 `default` reviewer 的旧拼法继续读。`fix_level` 目前只记入 verdict 的 `review_settings`，不参与判定。
