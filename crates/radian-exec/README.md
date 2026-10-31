@@ -167,8 +167,9 @@ provider's prefix cache stays valid. A record the agent saves mid-session reache
 **one System-source message** right after the next user message — ids and origin in its
 metadata, the content in the transcript — and never by rewriting the system prompt; a turn whose
 text hits nothing appends nothing, and `[memory.injection] additions = false` turns the
-appending off. The injected ids/revisions/scopes are recorded as a `MemoryInjected` runtime
-event when the set changes. A memory read failure is a `[memory]` warning, never a failed turn.
+appending off. This build does not write the injected records set: the `MemoryInjected` audit
+record names the injected index files only (ADR 0021 D6), and the file-store injection writes
+it. A memory read failure is a `[memory]` warning, never a failed turn.
 Startup prints `[memory]` with the project state and the budget.
 
 ## Input

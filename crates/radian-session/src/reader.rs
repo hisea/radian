@@ -19,8 +19,8 @@ use serde_json::Value;
 use crate::error::ReadError;
 use crate::fee::UsageFee;
 use crate::runtime::{
-    ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,
-    TurnOutcome, TurnReason,
+    ApprovalPolicyValue, InboxLane, MemoryInjectedIndex, MemoryInjectedRecord, PermissionApprover,
+    PermissionDecision, TurnOutcome, TurnReason, validate_memory_injected_index,
 };
 use crate::writer::SCHEMA_VERSION;
 
@@ -213,10 +213,13 @@ pub enum EventData {
     ApprovalPolicyChanged {
         policy: ApprovalPolicyValue,
     },
-    /// The memory set injected before a model request (ADR 0021 D6). Typed for an exact round
-    /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
+    /// The memory injected before a model request (ADR 0021 D6). Typed for an exact round
+    /// trip; audit only, never a transcript record. A record carries exactly one shape:
+    /// `records` (the old JSONL store's ids/revisions/scopes) or `indexes` (the file store's
+    /// index paths and hashes). The reader accepts both; the other vector is empty.
     MemoryInjected {
         records: Vec<MemoryInjectedRecord>,
+        indexes: Vec<MemoryInjectedIndex>,
     },
     /// A subtree context file was appended to the transcript (ADR 0036). Typed for an exact
     /// round trip; audit only, never a transcript record. A resume reads the paths so no file
@@ -774,7 +777,8 @@ impl LineScanner {
             }
             "MemoryInjected" => {
                 let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
-                EventData::MemoryInjected { records: d.records }
+                let (records, indexes) = memory_injected_shape(d, self.lineno, path)?;
+                EventData::MemoryInjected { records, indexes }
             }
             "ContextFileAppended" => {
                 let d: ContextFileAppendedData = data_of(raw, self.lineno, path)?;
@@ -1418,7 +1422,50 @@ struct ApprovalPolicyChangedData {
 
 #[derive(Deserialize)]
 struct MemoryInjectedData {
-    records: Vec<MemoryInjectedRecord>,
+    // Exactly one of the two shapes is present (ADR 0021 D6). `Option` distinguishes an absent
+    // field from an empty array; the empty array is still a present field.
+    #[serde(default)]
+    records: Option<Vec<MemoryInjectedRecord>>,
+    #[serde(default)]
+    indexes: Option<Vec<MemoryInjectedIndex>>,
+}
+
+/// Accepts one `MemoryInjected` shape and refuses a record with both or neither, naming the
+/// line (ADR 0021 D6). An `indexes` entry is validated against the same contract the writer uses.
+fn memory_injected_shape(
+    data: MemoryInjectedData,
+    lineno: u64,
+    path: &Path,
+) -> Result<(Vec<MemoryInjectedRecord>, Vec<MemoryInjectedIndex>), ReadError> {
+    let corrupt = |message: String| ReadError::Corrupt {
+        path: path.to_path_buf(),
+        line: lineno,
+        column: 0,
+        message,
+    };
+    match (data.records, data.indexes) {
+        (Some(_), Some(_)) => Err(corrupt(
+            "MemoryInjected carries both `records` and `indexes`; a record carries exactly one"
+                .to_string(),
+        )),
+        (None, None) => Err(corrupt(
+            "MemoryInjected carries neither `records` nor `indexes`; a record carries exactly one"
+                .to_string(),
+        )),
+        (Some(records), None) => Ok((records, Vec::new())),
+        (None, Some(indexes)) => {
+            if indexes.is_empty() {
+                return Err(corrupt(
+                    "MemoryInjected.indexes must not be empty; a record carries exactly one shape"
+                        .to_string(),
+                ));
+            }
+            for index in &indexes {
+                validate_memory_injected_index(index).map_err(corrupt)?;
+            }
+            Ok((Vec::new(), indexes))
+        }
+    }
 }
 
 #[derive(Deserialize)]

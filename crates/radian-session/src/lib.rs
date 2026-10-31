@@ -61,8 +61,9 @@ pub use index::{
 pub use radian_core::ReplacementEnd;
 pub use reader::{EventData, Session, SessionEvent, UncommittedReplacement};
 pub use runtime::{
-    ApprovalPolicyValue, InboxLane, MemoryInjectedRecord, PermissionApprover, PermissionDecision,
-    RuntimeEvent, TurnOutcome, TurnReason,
+    ApprovalPolicyValue, InboxLane, MEMORY_INJECTED_INDEX_SCOPES, MemoryInjectedIndex,
+    MemoryInjectedRecord, PermissionApprover, PermissionDecision, RuntimeEvent, TurnOutcome,
+    TurnReason,
 };
 pub use tail::{JournalTail, TailUpdate};
 /// ADR 0043 decision 7: whether a live session process holds the file's writer lock (the reader-side

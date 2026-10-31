@@ -117,7 +117,6 @@ fn production_chain(
     let role = Arc::new(radian_host::RoleHooks::new("", "", None));
     let memory = Arc::new(radian_host::memory::MemoryHooks::new(
         None,
-        Arc::clone(&journal),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));

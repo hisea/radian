@@ -102,8 +102,10 @@ pub enum ApprovalPolicyValue {
     Unknown,
 }
 
-/// One record that was injected before a model request (ADR 0021 D6). It carries **only** the
-/// id, revision and scope — never the content (D6: the event cannot rebuild an old request).
+/// One record that was injected before a model request, in the **old** JSONL store's shape
+/// (ADR 0021 D6 before the file store): only the id, revision and scope — never the content.
+/// This build writes only [`MemoryInjectedIndex`]; the type stays so an old journal still reads
+/// and so a transcript addition can carry its `(id, revision, scope)` origin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryInjectedRecord {
     pub id: String,
@@ -112,6 +114,48 @@ pub struct MemoryInjectedRecord {
     /// `radian-session` does not depend on the memory crate, so it stays a [`Value`] here;
     /// a future scope shape round-trips without a new event version.
     pub scope: Value,
+}
+
+/// The two scopes a `MemoryInjected` index entry can name (ADR 0021 D6). One closed set,
+/// read by the reader, the writer and the docs drift test.
+pub const MEMORY_INJECTED_INDEX_SCOPES: &[&str] = &["project", "global"];
+
+/// One memory **index file** injected before a model request (ADR 0021 D6). It names the file
+/// and hashes its text, so an audit and a resume can tell what the prompt held. It never copies
+/// the index text itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryInjectedIndex {
+    /// One of [`MEMORY_INJECTED_INDEX_SCOPES`].
+    pub scope: String,
+    /// The `MEMORY.md` path of that scope.
+    pub path: String,
+    /// The SHA-256 of the index text, as 64 hex characters.
+    pub sha256: String,
+    /// The index's line count.
+    pub lines: u32,
+    /// The index's byte count.
+    pub bytes: u64,
+}
+
+/// Checks one [`MemoryInjectedIndex`] against the record contract (ADR 0021 D6). The reader and
+/// the writer share it so a malformed record cannot be written or read.
+pub(crate) fn validate_memory_injected_index(index: &MemoryInjectedIndex) -> Result<(), String> {
+    if !MEMORY_INJECTED_INDEX_SCOPES.contains(&index.scope.as_str()) {
+        return Err(format!(
+            "MemoryInjected index scope {:?} is not one of {:?}",
+            index.scope, MEMORY_INJECTED_INDEX_SCOPES
+        ));
+    }
+    if index.path.is_empty() {
+        return Err("MemoryInjected index path must not be empty".to_string());
+    }
+    if index.sha256.len() != 64 || !index.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "MemoryInjected index sha256 {:?} must be 64 hex characters",
+            index.sha256
+        ));
+    }
+    Ok(())
 }
 
 /// One durable fact the runtime owns. `#[non_exhaustive]`; the variants below are the
@@ -205,11 +249,6 @@ pub enum RuntimeEvent {
     /// record the host writes alongside (`{"approval": …}`); this event is the permission
     /// audit of the switch itself.
     ApprovalPolicyChanged { policy: ApprovalPolicyValue },
-    /// The memory set injected before a model request (ADR 0021 D6). Audit only:
-    /// `critical = false`. The records are an ordered list of `{ id, revision, scope }` and
-    /// carry no content; a reader uses them to see *which* records were injected, not to
-    /// rebuild the request.
-    MemoryInjected { records: Vec<MemoryInjectedRecord> },
     /// A subtree context file was appended to the transcript (ADR 0036). Audit only:
     /// `critical = false`. `path` is relative to the workspace; `bytes` is the loaded size
     /// (after imports and truncation); `truncated` says the file hit the per-file cap. A
@@ -317,7 +356,6 @@ impl RuntimeEvent {
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
             RuntimeEvent::ApprovalPolicyChanged { .. } => "ApprovalPolicyChanged",
-            RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
             RuntimeEvent::ContextFileAppended { .. } => "ContextFileAppended",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
@@ -338,7 +376,7 @@ impl RuntimeEvent {
 
     /// The `critical` flag (ADR 0006 §4). State/rebuild events are `true`; audit events are
     /// `false` (`TurnFailed`, `ContextBudgetReached`, `PermissionResolved`,
-    /// `ApprovalPolicyChanged`, `MemoryInjected`, `SessionForked`, `ProjectTrustChanged`,
+    /// `ApprovalPolicyChanged`, `SessionForked`, `ProjectTrustChanged`,
     /// `UserBash`, `BackgroundJobStarted`, `BackgroundJobSettled`, and every `Goal*`
     /// event). A reader may skip a `false` event without breaking reconstruction.
     pub fn critical(&self) -> bool {
@@ -353,7 +391,6 @@ impl RuntimeEvent {
             | RuntimeEvent::ContextBudgetReached { .. }
             | RuntimeEvent::PermissionResolved { .. }
             | RuntimeEvent::ApprovalPolicyChanged { .. }
-            | RuntimeEvent::MemoryInjected { .. }
             | RuntimeEvent::ContextFileAppended { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
@@ -498,8 +535,8 @@ pub(crate) struct SessionForkedData<'a> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct MemoryInjectedData<'a> {
-    pub records: &'a [MemoryInjectedRecord],
+pub(crate) struct MemoryIndexesData<'a> {
+    pub indexes: &'a [MemoryInjectedIndex],
 }
 
 #[derive(Serialize)]
@@ -595,7 +632,6 @@ pub(crate) enum RuntimeData<'a> {
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
     ApprovalPolicyChanged(ApprovalPolicyChangedData),
-    MemoryInjected(MemoryInjectedData<'a>),
     ContextFileAppended(ContextFileAppendedData<'a>),
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
@@ -626,7 +662,6 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
             RuntimeData::ApprovalPolicyChanged(d) => d.serialize(serializer),
-            RuntimeData::MemoryInjected(d) => d.serialize(serializer),
             RuntimeData::ContextFileAppended(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
@@ -738,9 +773,6 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         }),
         RuntimeEvent::ApprovalPolicyChanged { policy } => {
             RuntimeData::ApprovalPolicyChanged(ApprovalPolicyChangedData { policy: *policy })
-        }
-        RuntimeEvent::MemoryInjected { records } => {
-            RuntimeData::MemoryInjected(MemoryInjectedData { records })
         }
         RuntimeEvent::ContextFileAppended {
             path,

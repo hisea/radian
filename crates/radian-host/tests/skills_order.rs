@@ -65,7 +65,6 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     let journal = journal(&dir);
     let memory = Arc::new(MemoryHooks::new(
         Some(service),
-        Arc::clone(&journal),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));

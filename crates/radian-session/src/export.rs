@@ -206,13 +206,22 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 out.push('\n');
             }
             // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
-            // shows only its size; the ids/revisions/scopes are in the JSON export.
-            EventData::MemoryInjected { records } => {
-                out.push_str(&format!(
-                    "- memory injected: {} record(s) (seq {})\n",
-                    records.len(),
-                    event.seq
-                ));
+            // shows only its size; the index paths/hashes (or the old ids/revisions/scopes)
+            // are in the JSON export.
+            EventData::MemoryInjected { records, indexes } => {
+                if indexes.is_empty() {
+                    out.push_str(&format!(
+                        "- memory injected: {} record(s) (seq {})\n",
+                        records.len(),
+                        event.seq
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "- memory injected: {} index file(s) (seq {})\n",
+                        indexes.len(),
+                        event.seq
+                    ));
+                }
             }
             EventData::ContextFileAppended {
                 path,
@@ -457,7 +466,14 @@ fn event_data_value(
             "reason": reason,
             "policy": policy,
         }),
-        EventData::MemoryInjected { records } => json!({"records": records}),
+        // ADR 0021 D6: one shape is present; the reader leaves the other vector empty.
+        EventData::MemoryInjected { records, indexes } => {
+            if indexes.is_empty() {
+                json!({"records": records})
+            } else {
+                json!({"indexes": indexes})
+            }
+        }
         EventData::ContextFileAppended {
             path,
             bytes,
