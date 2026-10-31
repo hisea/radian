@@ -85,6 +85,7 @@ See `mcp` and `configuration` for those rules.
 |---|---|
 | `~/.radian/config/config.toml` (or `$RADIAN_HOME`, `--config`, `RADIAN_CONFIG`) | Every configuration key. See `configuration`. A missing file is an empty configuration. |
 | `~/.radian/credentials/auth.json` | Every stored key, including every `keys[]` item. A missing entry refuses the run and points at `radian login`. The file is `0600`; wide permissions warn. |
+| `~/.radian/hub/repos.toml` | The hub's repository registry, read and written by `radian hub add`, `remove` and `list`. A missing file is an empty registry. See `arc/hub`. |
 | `~/.radian/trust/trust.json` | Your remembered per-project trust choices. Confirming the trust prompt writes it. |
 | `~/.radian/sessions/` (or `--session-dir`, `RADIAN_SESSION_DIR`) | The session files `--resume`, `--list`, `--search`, `--export`, `--fork`, and `attach` read. |
 | `<workspace>/.radian/config.toml` | May only narrow the tier (`[permissions] profile = "workspace"`). Wider values, `[sandbox]` keys, and other keys are refused or skipped by name. |

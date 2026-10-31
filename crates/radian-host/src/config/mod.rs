@@ -189,6 +189,41 @@ impl Default for ControlConfig {
     }
 }
 
+/// The `[hub]` default port (ADR 0048): the HTTP API listens only on loopback.
+pub const DEFAULT_HUB_PORT: u16 = 7341;
+/// The `[hub]` default concurrency: tasks in `doing` across every registered repository.
+pub const DEFAULT_HUB_CONCURRENCY: u32 = 4;
+/// The `[hub]` default wait between scheduling passes, the same default `radian arc serve`
+/// used.
+pub const DEFAULT_HUB_INTERVAL_SECS: u64 = 30;
+/// The low end of the closed `[hub] port` range.
+pub const MIN_HUB_PORT: u16 = 1;
+/// The high end of the closed `[hub] port` range.
+pub const MAX_HUB_PORT: u16 = 65535;
+/// The low end of the closed `[hub] interval_secs` range.
+pub const MIN_HUB_INTERVAL_SECS: u64 = 5;
+/// The high end of the closed `[hub] interval_secs` range.
+pub const MAX_HUB_INTERVAL_SECS: u64 = 3600;
+
+/// `[hub]` (ADR 0048): the hub process. A value outside a range is refused; an unknown key is
+/// skipped and named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubConfig {
+    pub port: u16,
+    pub concurrency: u32,
+    pub interval_secs: u64,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_HUB_PORT,
+            concurrency: DEFAULT_HUB_CONCURRENCY,
+            interval_secs: DEFAULT_HUB_INTERVAL_SECS,
+        }
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -205,6 +240,8 @@ pub struct Config {
     pub integrations: IntegrationsConfig,
     /// `[control]` (ADR 0043): the process control port, on by default.
     pub control: ControlConfig,
+    /// `[hub]` (ADR 0048): the port, concurrency and interval of the hub.
+    pub hub: HubConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
@@ -358,6 +395,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "sandbox" => sandbox::parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
             "control" => parse_control(value, path, &mut config)?,
+            "hub" => parse_hub(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "hooks" => hooks::parse_hooks(value, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
@@ -480,6 +518,62 @@ fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), 
                 return Err(wrong_type(path, "control.enabled", "a boolean"));
             }
             (other, _) => config.skipped.push(format!("control.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[hub]` (ADR 0048). Each key has a closed range: a value outside it is a
+/// configuration error naming the key and the range, never a guess. An unknown key is skipped
+/// and named on the startup line.
+fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "hub", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("port", Value::Integer(port))
+                if (i64::from(MIN_HUB_PORT)..=i64::from(MAX_HUB_PORT)).contains(port) =>
+            {
+                config.hub.port = *port as u16;
+            }
+            ("port", Value::Integer(_)) => {
+                return Err(ConfigError::ValueOutOfRange {
+                    path: path.to_path_buf(),
+                    key: "hub.port".into(),
+                    range: "1 to 65535",
+                });
+            }
+            ("port", _) => return Err(wrong_type(path, "hub.port", "an integer")),
+            ("concurrency", Value::Integer(count))
+                if *count >= 1 && *count <= i64::from(u32::MAX) =>
+            {
+                config.hub.concurrency = *count as u32;
+            }
+            ("concurrency", Value::Integer(_)) => {
+                return Err(ConfigError::ValueOutOfRange {
+                    path: path.to_path_buf(),
+                    key: "hub.concurrency".into(),
+                    range: "1 or more",
+                });
+            }
+            ("concurrency", _) => return Err(wrong_type(path, "hub.concurrency", "an integer")),
+            ("interval_secs", Value::Integer(secs))
+                if (MIN_HUB_INTERVAL_SECS as i64..=MAX_HUB_INTERVAL_SECS as i64).contains(secs) =>
+            {
+                config.hub.interval_secs = *secs as u64;
+            }
+            ("interval_secs", Value::Integer(_)) => {
+                return Err(ConfigError::ValueOutOfRange {
+                    path: path.to_path_buf(),
+                    key: "hub.interval_secs".into(),
+                    range: "5 to 3600",
+                });
+            }
+            ("interval_secs", _) => {
+                return Err(wrong_type(path, "hub.interval_secs", "an integer"));
+            }
+            (other, _) => config.skipped.push(format!("hub.{other}")),
         }
     }
     Ok(())
@@ -1927,6 +2021,9 @@ future_option = "alpha"
             "sandbox.allow_env",
             "integrations.herdr",
             "control.enabled",
+            "hub.port",
+            "hub.concurrency",
+            "hub.interval_secs",
             "compaction.auto",
             "compaction.thinking",
             "hooks.PreToolUse",
@@ -2068,6 +2165,10 @@ future_option = "alpha"
                 "herdr = false\n",
                 "[control]\n",
                 "enabled = false\n",
+                "[hub]\n",
+                "port = 7341\n",
+                "concurrency = 4\n",
+                "interval_secs = 30\n",
                 "[compaction]\n",
                 "auto = false\n",
                 "thinking = \"low\"\n",
@@ -2240,6 +2341,7 @@ future_option = "alpha"
         "## `[skills]`",
         "## `[memory.injection]`",
         "## `[control]`",
+        "## `[hub]`",
         "## `[integrations]`",
         "## `[compaction]`",
         "## `[tui]`",
@@ -2438,6 +2540,15 @@ future_option = "alpha"
             (
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
+            ),
+            ("hub.port", HubConfig::default().port.to_string()),
+            (
+                "hub.concurrency",
+                HubConfig::default().concurrency.to_string(),
+            ),
+            (
+                "hub.interval_secs",
+                HubConfig::default().interval_secs.to_string(),
             ),
             (
                 "control.enabled",

@@ -58,6 +58,11 @@ pub fn memory_dir_for(root: &Path) -> PathBuf {
 pub fn credentials_dir_for(root: &Path) -> PathBuf {
     root.join("credentials")
 }
+/// The hub directory (ADR 0048): the repository registry, the bearer token and the lock a
+/// running hub holds. **Sandbox-denied** (ADR 0020), like `credentials/`.
+pub fn hub_dir_for(root: &Path) -> PathBuf {
+    root.join("hub")
+}
 pub fn themes_dir_for(root: &Path) -> PathBuf {
     root.join("themes")
 }
@@ -124,6 +129,12 @@ pub fn credentials_dir() -> Option<PathBuf> {
     Some(private(credentials_dir_for(&radian_home()?)))
 }
 
+/// The hub directory for this process, created 0700. **Sandbox-denied** (ADR 0020): it holds
+/// the repository registry, the bearer token and the lock (ADR 0048).
+pub fn hub_dir() -> Option<PathBuf> {
+    Some(private(hub_dir_for(&radian_home()?)))
+}
+
 /// The themes directory for this process, created 0700. Sandbox-readable (ADR 0020): theme
 /// files are user UI data, like the config (ADR 0029:
 /// `~/.radian/themes/<name>.toml`).
@@ -162,10 +173,11 @@ pub fn catalog_cache() -> Option<PathBuf> {
 }
 
 /// The list the sandbox policy and the file tools' `full`-tier deny set share (ADR 0039
-/// decision 4): the actual sessions directory plus `memory/`, `credentials/`, `trust/` and
-/// `access/` under `$RADIAN_HOME` (ADR 0020's unreadable directories, ADR 0026 D4, ADR 0031
-/// T2, ADR 0038 decision 3). A host builds its sandbox deny-read list from this and passes
-/// the same list to the coding tools as their file-tool deny set. One function, so the two can never differ.
+/// decision 4): the actual sessions directory plus `memory/`, `credentials/`, `trust/`,
+/// `access/` and `hub/` under `$RADIAN_HOME` (ADR 0020's unreadable directories, ADR 0026 D4,
+/// ADR 0031 T2, ADR 0038 decision 3, ADR 0048). A host builds its sandbox deny-read list from
+/// this and passes the same list to the coding tools as their file-tool deny set. One
+/// function, so the two can never differ.
 /// Each entry is created owner-only first (0700), so Linux's bwrap can mask it.
 pub fn file_tool_deny_read(session_dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![session_dir.to_path_buf()];
@@ -174,6 +186,9 @@ pub fn file_tool_deny_read(session_dir: &Path) -> Vec<PathBuf> {
     }
     if let Some(credentials) = credentials_dir() {
         out.push(credentials);
+    }
+    if let Some(hub) = hub_dir() {
+        out.push(hub);
     }
     if let Some(trust) = trust_dir() {
         out.push(trust);

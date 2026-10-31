@@ -1884,3 +1884,19 @@ and the file was restored from a copy under `.radian/`, which `cmp` found identi
 |---|---|---|---|
 | TK0249-M1 | `auto_reverify_tasks` prints the literal `main` in the automatic reverify line instead of the configured target branch | `run::an_automatic_reverify_names_the_target_branch` (the line read `main moved (f8dbd9c)` for a `release` that moved) | ✅ 1 failed |
 | TK0249-M2 | `finish_integration` says `main moved after integration` instead of naming `context.target_branch` | `review::an_integration_that_keeps_moving_names_the_target_branch` (the reason read `main moved after integration`) | ✅ 1 failed |
+
+## TK0281: the hub registry, its CLI and the sandbox deny (2026-10-31, branch `work/TK0281-hub-registry-and-cli`)
+
+The registry reads and writes `$RADIAN_HOME/hub/repos.toml` through a temporary file and an
+atomic rename, and the hub directory joins the sandbox deny list. Each mutation was applied by
+hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox` (M3 ran the escape matrix with
+`cargo nextest run -p radian-sandbox --test escape_macos`, which needs `sandbox-exec` and so
+must run outside the workspace sandbox), and the file was restored from a copy under
+`.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0281-M1 | `add` compares the raw path against the stored entries instead of the canonical one | `hub_registry::add_refuses_the_same_path_reached_through_a_symlink` (`expect_err` got `RepoEntry { name: "alias", … }`: the symlink was registered) | ✅ 1 failed |
+| TK0281-M2 | drop the arc-repository check from `add` | `hub_registry::add_refuses_a_directory_without_an_arc_store_and_leaves_the_file_alone` (the plain directory was registered) | ✅ 1 failed |
+| TK0281-M3 | drop `hub/` from the harness's deny list | `escape_macos::macos_escape_matrix` (`radian_home/hub_unreadable`: sandbox `ok`, verdict `FAIL`) | ✅ 1 failed |
