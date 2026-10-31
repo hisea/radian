@@ -652,6 +652,26 @@ class CheckScriptTest(ScratchCase):
         self.assertIn("build -p agent-extensions --bin mcp-fixture --locked", steps[0])
         self.assertTrue(json.loads((run / "checks.json").read_text())["fixture_ok"])
 
+    def test_the_radian_binary_is_built_before_the_fixture_when_the_tree_has_both(self):
+        tasks, run, tree = self.make_run_tree()
+        stub = '#!/bin/sh\necho "$@"\nif [ "$3" = "radian-tui" ]; then exit 1; fi\nexit 0\n'
+        cargo = write(self.root / "cargo-stub.sh", stub)
+        cargo.chmod(0o755)
+        write(tree / "crates" / "radian-tui" / "Cargo.toml", '[[bin]]\nname = "radian"\n')
+        write(tree / "crates" / "agent-extensions" / "Cargo.toml",
+              '[[bin]]\nname = "mcp-fixture"\n')
+        result = self.check(tasks, cargo)
+        # A failed build is setup, not a check.
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = [line for line in (run / "checks.log").read_text().splitlines()
+                 if line.startswith("=== ") and "rc=" not in line]
+        self.assertIn("build -p radian-tui --bin radian --locked", steps[0])
+        self.assertIn("build -p agent-extensions --bin mcp-fixture --locked", steps[1])
+        data = json.loads((run / "checks.json").read_text())
+        self.assertFalse(data["binary_ok"])
+        self.assertTrue(data["fixture_ok"])
+        self.assertTrue(data["checks_ok"])
+
     def test_a_failed_fixture_build_does_not_fail_the_checks(self):
         tasks, run, tree = self.make_run_tree()
         stub = '#!/bin/sh\necho "$@"\nif [ "$1" = "build" ]; then exit 1; fi\nexit 0\n'
@@ -670,8 +690,12 @@ class CheckScriptTest(ScratchCase):
         cargo = write(self.root / "cargo-stub.sh", "#!/bin/sh\necho \"$@\"\nexit 0\n")
         cargo.chmod(0o755)
         self.assertEqual(self.check(tasks, cargo).returncode, 0)
-        self.assertNotIn("mcp-fixture", (run / "checks.log").read_text())
-        self.assertIsNone(json.loads((run / "checks.json").read_text())["fixture_ok"])
+        log = (run / "checks.log").read_text()
+        self.assertNotIn("mcp-fixture", log)
+        self.assertNotIn("--bin radian", log)
+        data = json.loads((run / "checks.json").read_text())
+        self.assertIsNone(data["fixture_ok"])
+        self.assertIsNone(data["binary_ok"])
 
     def test_max_jobs_reaches_cargo_and_not_rustfmt(self):
         tasks, run, _ = self.make_run_tree()

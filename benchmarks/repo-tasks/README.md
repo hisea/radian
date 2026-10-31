@@ -138,6 +138,7 @@ Environment inputs:
 target directory:
 
 ```sh
+cargo build -p radian-tui --bin radian --locked               # when the tree has it
 cargo build -p agent-extensions --bin mcp-fixture --locked   # when the tree has it
 cargo fmt --all -- --check
 cargo clippy -p <crate> --all-targets -- -D warnings
@@ -146,10 +147,11 @@ cargo nextest run -p <crate> --locked --no-fail-fast
 
 Every listed crate is checked even after one fails: a two-crate task runs both,
 and either failure makes `checks.json`'s `checks_ok` false and the exit code 1.
-The fixture build is setup: tests that start the MCP fixture find it beside the
-test binaries and fail without it, whatever the agent changed. Its result is
-`fixture_ok` (null when the tree has no fixture), and it does not enter
-`checks_ok`.
+The two builds are setup, as in `scripts/verify.sh`: radian-exec's tests run the
+`radian` binary and refuse one older than its sources, and tests that start the
+MCP fixture find it beside the test binaries; without the builds they fail
+whatever the agent changed. Their results are `binary_ok` and `fixture_ok`
+(null when the tree has no such binary), and they do not enter `checks_ok`.
 `REPO_TASKS_MAX_JOBS` is passed as `--jobs` to clippy and nextest; `cargo fmt`
 takes no job option, and passing one after `--` would reach rustfmt.
 

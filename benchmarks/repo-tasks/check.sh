@@ -2,6 +2,7 @@
 # The task's crate-scoped checks for one finished run: check.sh <arm> <task> <k>
 #
 # Runs, in the run's own tree and target directory:
+#   cargo build -p radian-tui --bin radian --locked               (when the tree has it)
 #   cargo build -p agent-extensions --bin mcp-fixture --locked   (when the tree has it)
 #   cargo fmt --all -- --check
 #   cargo clippy -p <crate> --all-targets -- -D warnings   (once per listed crate)
@@ -11,10 +12,12 @@
 # an earlier one failed, so one failing crate cannot hide the other. The result
 # is `checks.json`; a failing step makes `checks_ok` false and the exit code 1.
 #
-# The fixture build is setup, not a check: tests that start the MCP fixture
-# (radian-host `mcp_cwd`, for one) find it beside the test binaries, and without
-# the build they fail whatever the agent changed. Its result is `fixture_ok`
-# (null when the tree has no fixture) and does not enter `checks_ok`.
+# The two builds are setup, not checks, as in scripts/verify.sh: radian-exec's
+# tests run the `radian` binary and refuse one older than its sources, and tests
+# that start the MCP fixture (radian-host `mcp_cwd`, for one) find it beside the
+# test binaries; without the builds they fail whatever the agent changed. Their
+# results are `binary_ok` and `fixture_ok` (null when the tree has no such
+# binary) and do not enter `checks_ok`.
 #
 # Environment:
 #   REPO_TASKS_RUNS      output root (default: ${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs)
@@ -62,6 +65,11 @@ step() {
   return $rc
 }
 
+binary_rc=""
+if grep -qs '^name = "radian"' crates/radian-tui/Cargo.toml; then
+  step "$CARGO" build $JOBS -p radian-tui --bin radian --locked
+  binary_rc=$?
+fi
 fixture_rc=""
 if grep -qs '^name = "mcp-fixture"' crates/agent-extensions/Cargo.toml; then
   step "$CARGO" build $JOBS -p agent-extensions --bin mcp-fixture --locked
@@ -80,14 +88,15 @@ for crate in ${crates//,/ }; do
 done
 
 python3 - "$OUT/checks.json" "$arm" "$task_id" "$k" "$crates" "$fmt_rc" \
-  "${clippy_rc[*]:-}" "${tests_rc[*]:-}" "$fixture_rc" <<'EOF'
+  "${clippy_rc[*]:-}" "${tests_rc[*]:-}" "$fixture_rc" "$binary_rc" <<'EOF'
 import json, sys
-path, arm, task, k, crates, fmt_rc, clippy, tests, fixture_rc = sys.argv[1:]
+path, arm, task, k, crates, fmt_rc, clippy, tests, fixture_rc, binary_rc = sys.argv[1:]
 names = [name for name in crates.replace(",", " ").split() if name]
 clippy_rc = [int(value) for value in clippy.split()] if clippy.strip() else [1] * len(names)
 tests_rc = [int(value) for value in tests.split()] if tests.strip() else [1] * len(names)
 result = {
     "arm": arm, "task": task, "k": int(k), "crates": names,
+    "binary_ok": None if binary_rc == "" else int(binary_rc) == 0,
     "fixture_ok": None if fixture_rc == "" else int(fixture_rc) == 0,
     "fmt_ok": int(fmt_rc) == 0,
     "clippy_ok": {name: rc == 0 for name, rc in zip(names, clippy_rc)},
