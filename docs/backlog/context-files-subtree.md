@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0036（基础提示与上下文文件）、0025（skill 按描述触发）、0031（项目信任）
-- 来源：对手调查 2026-10-31（Amp、Gemini CLI、Cursor、Windsurf、Copilot）
+- 来源：`research/2026-10-31-competitor-memory.md` §2.2、§2.10（Amp）、§4
 
 ## 背景
 

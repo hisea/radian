@@ -2,7 +2,7 @@
 
 - 状态：idea（前提：`memory-files.md` 落地；自动归档的天数等有 `last_used` 数据再定）
 - 涉及 ADR：0021（文件存储落地后的 D3）
-- 来源：对手调查 2026-10-31
+- 来源：`research/2026-10-31-competitor-memory.md` §2.3（Codex）、§2.5（Copilot）
 
 ## 背景
 

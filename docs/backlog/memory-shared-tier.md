@@ -2,7 +2,7 @@
 
 - 状态：idea
 - 涉及 ADR：0021（D1 scope、D2 项目身份）、0020（`~/.radian/` 目录表）、0031（项目信任：仓库内文件何时被装载）、0036（上下文文件）
-- 来源：对手调查 2026-10-31（Gemini CLI、Copilot、Amp、Devin）
+- 来源：`research/2026-10-31-competitor-memory.md` §2.2（Gemini CLI）、§2.5（Copilot）、§2.9（Devin）、§4
 
 ## 背景
 

@@ -2,7 +2,7 @@
 
 - 状态：idea（设计已写全，但它推翻 ADR 0021 D5 第 1 条「模型没有写路径」；owner 决定反转后改 decided）
 - 涉及 ADR：0021（D3 存储、D4 数据模型、D5 写入来源、D6 注入、D7 工具与命令、不变量 5）、0020（`~/.radian/` 目录表与沙箱禁读清单）、0036（角色规则：何时写、何时查）、0035（TUI 卡片）、0043（subagent 不继承会话记忆）、0012（memory 目录的写允许规则）
-- 来源：对手调查 2026-10-31（Claude Code、Gemini CLI、Codex、oh-my-pi、Copilot、Augment、Windsurf、Cursor、Devin、pi、opencode、Amp）与本机使用数据
+- 来源：`research/2026-10-31-competitor-memory.md`（§1 radian 现状、§2 对手逐个、§3 对比）
 
 ## 背景
 
