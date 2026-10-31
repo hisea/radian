@@ -3,12 +3,13 @@
 
 use radian_core::{
     ContentPart, InputSource, Message, MessageMeta, PlanError, SUMMARY_FACTS_DELETE_OLDEST,
-    SUMMARY_FACTS_ORDER_RULE, SUMMARY_NEWER_MESSAGES_WIN, SUMMARY_ONE_CONSOLIDATED,
-    SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, TOOL_RESULT_LIMIT_CHARS, ToolCall, ToolResult,
-    check_summary, compacted_history, deterministic_summary, deterministic_summary_line,
-    keep_target, message_tokens, plan, shorten_request, shorten_target, summary_max_tokens,
-    summary_request, summary_system_prompt, truncate_kept_tool_results, truncate_to_tokens,
-    truncate_tool_result_text, units, verified_facts_max_tokens,
+    SUMMARY_FACTS_ORDER_RULE, SUMMARY_MIN_TOKENS, SUMMARY_NEWER_MESSAGES_WIN,
+    SUMMARY_ONE_CONSOLIDATED, SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, TOOL_RESULT_LIMIT_CHARS,
+    ToolCall, ToolResult, check_summary, compacted_history, deterministic_summary,
+    deterministic_summary_line, keep_target, message_tokens, plan, shorten_request, shorten_target,
+    summary_max_tokens, summary_min_tokens, summary_request, summary_system_prompt,
+    truncate_kept_tool_results, truncate_to_tokens, truncate_tool_result_text, units,
+    verified_facts_max_tokens,
 };
 use serde_json::{Value, json};
 
@@ -464,13 +465,112 @@ fn a_summary_request_without_previous_or_instructions_is_just_the_conversation()
 
 #[test]
 fn check_summary_rejects_empty_and_overlong() {
-    assert_eq!(check_summary("  \n\t ", 100), Err(SummaryError::Empty));
-    let long = "x".repeat(100_000);
+    assert_eq!(check_summary("  \n\t ", 100, 0), Err(SummaryError::Empty));
+    let long = "## Goal\n".to_owned() + &"x".repeat(100_000);
     assert!(matches!(
-        check_summary(&long, 100),
+        check_summary(&long, 100, 0),
         Err(SummaryError::TooLong { tokens, max }) if tokens > 100 && max == 100
     ));
-    assert_eq!(check_summary("  hello  ", 100).unwrap(), "hello");
+    assert_eq!(
+        check_summary("  ## Goal\n  hello  ", 100, 0).unwrap(),
+        "## Goal\n  hello"
+    );
+}
+
+/// A text whose `message_tokens` is exactly `tokens`.
+fn text_with_tokens(tokens: u64, prefix: &str) -> String {
+    let mut text = prefix.to_owned();
+    while message_tokens(&Message::user(&text)) < tokens {
+        text.push('x');
+    }
+    assert_eq!(
+        message_tokens(&Message::user(&text)),
+        tokens,
+        "the padding must land exactly on the target"
+    );
+    text
+}
+
+/// The local model's prose answer is not a summary: it is under the floor and has no heading.
+/// Storing it would replace the history with one sentence.
+#[test]
+fn a_prose_answer_is_too_short() {
+    let prose = "Let me continue reading the key parts of the turn.rs file.";
+    let tokens = message_tokens(&Message::user(prose));
+    assert!(
+        tokens < 100,
+        "the prose answer is under the floor: {tokens}"
+    );
+    assert_eq!(
+        check_summary(prose, 8_192, SUMMARY_MIN_TOKENS),
+        Err(SummaryError::TooShort {
+            tokens,
+            min: SUMMARY_MIN_TOKENS
+        })
+    );
+}
+
+/// 300 tokens of bold labels is long enough but has no `## ` heading line: it is still not a
+/// structured summary.
+#[test]
+fn a_long_answer_without_a_heading_has_no_heading() {
+    let text = text_with_tokens(300, "**Goal**\n**Progress**\n");
+    assert!(!text.contains("## "));
+    assert_eq!(
+        check_summary(&text, 8_192, SUMMARY_MIN_TOKENS),
+        Err(SummaryError::NoHeading)
+    );
+}
+
+/// Exactly at the floor with one heading line is accepted, and the result is trimmed.
+#[test]
+fn a_summary_exactly_at_the_floor_is_accepted_and_trimmed() {
+    let body = text_with_tokens(100, "## Goal\n");
+    let padded = format!("  \n{body}\n\t ");
+    assert_eq!(
+        check_summary(&padded, 8_192, SUMMARY_MIN_TOKENS).unwrap(),
+        body
+    );
+}
+
+/// Whitespace only is still `Empty`; the floor never sees it.
+#[test]
+fn whitespace_only_is_still_empty() {
+    assert_eq!(
+        check_summary(" \n\t ", 8_192, SUMMARY_MIN_TOKENS),
+        Err(SummaryError::Empty)
+    );
+}
+
+/// The cap is checked before the floor and the heading, so an over-long answer with no heading
+/// still takes the shortening retry.
+#[test]
+fn an_overlong_answer_without_a_heading_is_too_long() {
+    let text = "x".repeat(100_000);
+    assert!(matches!(
+        check_summary(&text, 8_192, SUMMARY_MIN_TOKENS),
+        Err(SummaryError::TooLong { tokens, max }) if tokens > 8_192 && max == 8_192
+    ));
+}
+
+/// The heading may sit anywhere: prose before `## Goal` still passes.
+#[test]
+fn a_heading_after_prose_is_accepted() {
+    let text = text_with_tokens(300, "Here is the summary.\n\n## Goal\nFinish the parser.\n");
+    assert_eq!(
+        check_summary(&text, 8_192, SUMMARY_MIN_TOKENS).unwrap(),
+        text
+    );
+}
+
+/// A short history may have an honest short summary; only a history of at least 10 × the floor
+/// demands it. The threshold is inclusive.
+#[test]
+fn the_floor_applies_only_at_ten_times_the_minimum() {
+    assert_eq!(summary_min_tokens(0), 0);
+    assert_eq!(summary_min_tokens(999), 0);
+    assert_eq!(summary_min_tokens(1_000), 100);
+    assert_eq!(summary_min_tokens(20_000), 100);
 }
 
 // ---------- compacted_history ----------
@@ -604,14 +704,14 @@ fn the_scaled_ceiling_reaches_the_prompt_and_the_check() {
 
     // ~10000 tokens by the default 4-bytes-per-token ruler: over the old default, under the
     // scaled one.
-    let text = "a".repeat(40_000);
+    let text = "## Goal\n".to_owned() + &"a".repeat(40_000);
     let tokens = message_tokens(&Message::user(&text));
     assert!(tokens > 8_192 && tokens <= max, "{tokens}");
     assert!(
-        check_summary(&text, 8_192).is_err(),
+        check_summary(&text, 8_192, 0).is_err(),
         "the old fixed ceiling would reject it"
     );
-    assert_eq!(check_summary(&text, max).unwrap().len(), text.len());
+    assert_eq!(check_summary(&text, max, 0).unwrap().len(), text.len());
 }
 
 // ---------- ADR 0018: the user's words, kept verbatim ----------
