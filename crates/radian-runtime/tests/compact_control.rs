@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Recorder, ScriptedModel, TempDir, created};
+use common::{Recorder, ScriptedModel, TempDir, created, valid_summary};
 use radian_core::{
     Agent, AgentConfig, CompactionOutcome, ContentPart, ContextBudget, InputSource, JournalRecord,
     Message, ModelResponse, NoTools, StopReason, TranscriptJournal, TurnOptions,
@@ -83,7 +83,7 @@ async fn open_driver(
 #[tokio::test]
 async fn compact_between_turns_commits_and_enqueues_nothing() {
     let (_dir, journal, path) = big_session().await;
-    let model = ScriptedModel::new([summary_response("a short summary")]);
+    let model = ScriptedModel::new([summary_response(&valid_summary("a short summary"))]);
     let agent = compaction_agent(Arc::clone(&model));
     let inbox = Inbox::durable(16, Arc::clone(&journal));
     let mut driver = open_driver(&agent, Arc::clone(&journal), Arc::clone(&inbox)).await;
@@ -143,7 +143,10 @@ async fn compact_waits_for_a_running_turn() {
     let (_dir, journal, path) = big_session().await;
     // The turn's reply is slow, so the control request is queued mid-turn; the second call
     // is the summary.
-    let model = ScriptedModel::new([text_response("done"), summary_response("a short summary")]);
+    let model = ScriptedModel::new([
+        text_response("done"),
+        summary_response(&valid_summary("a short summary")),
+    ]);
     model.slow_at(0, 500);
     let agent = compaction_agent(Arc::clone(&model));
     let inbox = Inbox::durable(16, Arc::clone(&journal));

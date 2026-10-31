@@ -1900,3 +1900,18 @@ must run outside the workspace sandbox), and the file was restored from a copy u
 | TK0281-M1 | `add` compares the raw path against the stored entries instead of the canonical one | `hub_registry::add_refuses_the_same_path_reached_through_a_symlink` (`expect_err` got `RepoEntry { name: "alias", … }`: the symlink was registered) | ✅ 1 failed |
 | TK0281-M2 | drop the arc-repository check from `add` | `hub_registry::add_refuses_a_directory_without_an_arc_store_and_leaves_the_file_alone` (the plain directory was registered) | ✅ 1 failed |
 | TK0281-M3 | drop `hub/` from the harness's deny list | `escape_macos::macos_escape_matrix` (`radian_home/hub_unreadable`: sandbox `ok`, verdict `FAIL`) | ✅ 1 failed |
+## TK0264: reviewer profiles (2026-10-31, branch `work/TK0264-reviewer-profiles-config`)
+
+A gate profile's `reviewer` selects a `[gate.reviewers.<name>]` section, and a file without a
+`[gate.reviewers.default]` section reads `[gate.review]`'s session keys as that reviewer's
+values. Each mutation was applied by hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test config` or `--test
+gate_profile`, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0264-M1 | `config::parse` no longer builds the `default` reviewer from the legacy `[gate.review]` keys | `config::the_legacy_review_table_is_the_default_reviewers_values` (the parse failed: no `[gate.reviewers.default]` section) | ✅ 1 failed |
+| TK0264-M2 | the review stage looks up the reviewer name `default` instead of `plan.profile.reviewer` | `gate_profile::each_profiles_review_uses_the_reviewer_it_names` (`settings.reviewer` read `default`, not `one`) | ✅ 1 failed |
+| TK0264-M3 | `config::parse` no longer checks that each profile's `reviewer` names a section | `config::a_profile_names_a_missing_reviewer_is_refused` (the file parsed with reviewer `cheap` absent) | ✅ 1 failed |
+
+3/3 caught.
