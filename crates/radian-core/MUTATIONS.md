@@ -103,3 +103,13 @@ Each mutation was applied by hand to `crates/radian-core/src/turn.rs`, backed up
 |---|---|---|---|
 | TK0258-M1 | the turn loop appends `JournalRecord::ModelUsage` with `stop_reason: None` (the field is omitted) | ✅ 2 failed (rc=100) | `tests/usage.rs::a_truncated_response_with_tool_calls_records_max_tokens_then_end_turn` and `tests/usage.rs::an_other_stop_reason_records_other_and_the_provider_text` |
 | TK0258-M2 | the turn loop writes `ModelStopReason::EndTurn` for every response | ✅ 2 failed (rc=100) | the same two tests (`max_tokens` read as `end_turn`; `other` lost its raw text) |
+## One consolidated summary instead of a rolling append (TK0259, 2026-10-31)
+
+Branch `work/TK0259-summary-consolidate`. Each mutation was applied in place, only the two
+compaction test binaries were run, and the source was restored from `.radian/compaction.rs.clean`
+(`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0259-M1 | the update paragraph restored to the old "Update the previous summary above with them, preserving what is still relevant" | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
+| TK0259-M2 | the "newer messages win" sentence removed from the update paragraph | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
