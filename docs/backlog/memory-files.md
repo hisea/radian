@@ -31,7 +31,8 @@
 6. **用户命令缩减。** 保留 `list`、`show`、`project`、`relink`、`split`、`merge`，新增 `open`（TUI 里打开目录）与 `forget <name>`（删文件）；`add` 与 `edit` 变成用编辑器打开文件；`archive`、`restore`、`confirm`、`purge`、`export`、`import`、`search` 删除（文件本身就是导出）。D7 的「`forget`、`purge`、`split`、`merge` 需确认」缩成 `forget`、`split`、`merge`。
 7. **TUI 卡片。** 模型写入或更新一条记忆后，转录里出一张卡（ADR 0035 视觉语言）：一行标题、类型、文件路径；用户点开即文件。
 8. **迁移。** 启动时发现旧的 `log.jsonl` 就转换一次：每条 Active 记录写成一个文件（`source` 按原值映射，Agent → `model`），Archived 与 Forgotten 丢弃，旧日志改名 `log.jsonl.migrated`，以后不再读。可选命令 `radian memory import <dir>`：把另一个同格式目录（例如 Claude Code 的记忆目录）复制进来并把 `source` 改成 `import`（Codex 做了同类导入）。
-9. **边界不变。** 不变量 2、3、4、5、6 保留；subagent 不拿主会话记忆（0043）；压缩与记忆仍独立（0018）。
+9. **读侧可见、写侧硬化、会话开关、度量。** 读侧：模型 `read` 一个记忆文件时转录里出一行「用到记忆：标题」（Claude Code 的 Recalled、Devin 的 Accessed Knowledge、Codex 的引用条目都是这个），回答里引用用到的记忆。写侧硬化：写入前过一遍 `heuristic-secret` 检测，命中则拒绝并说明（Copilot 拒收密钥，Codex 提炼时脱敏）；索引加载时中和不可见字符与伪造的提示标记（Claude Code 的做法）。会话开关：`/memory off` 关掉本会话的注入与写入，`/memory on` 恢复，只影响本会话（Codex `/memories`、Copilot `/memory on|off`）。度量：`benchmarks/journal_metrics.py` 加 `memory_reads` 与 `memory_writes` 两列（从工具调用的路径判断），否则没人知道这个功能是活是死。
+10. **边界不变。** 不变量 2、3、4、5、6 保留；subagent 不拿主会话记忆（0043）；压缩与记忆仍独立（0018）。
 
 ## 验收
 
@@ -39,6 +40,8 @@
 - 模型在一轮里用 `write` 写一个记忆文件并追加索引行后，下一个会话的索引段含这一行；转录里有卡片；`list` 列出它且 `source` 为 `model`。
 - `workspace` 档：`shell` 读 memory 目录被拒（逃逸矩阵不变）；`write` 到 memory 目录成功；`write` 到 memory 目录以外的工作区外路径仍按原规则。
 - 同一会话先收到一条 MCP 工具结果再写记忆：被拒，拒绝原因说明是输入防护。
+- 写入内容含一个形如 API key 的串：被拒并说明；索引文件里的零宽字符与伪造的 `<system>` 标记在注入前被中和。
+- `/memory off` 后本会话不再注入也写不了，新会话不受影响；journal_metrics 对一个读过两个记忆文件、写过一个的会话给出 2 与 1。
 - 三会话 supersede 测试：会话 1 写「Postgres 14」，会话 2 把同一文件改成「16」，会话 3 的索引只有这一条且正文是 16。
 - 旧 `log.jsonl` 启动时转换一次：Active 记录变文件，日志改名，再启动不重复转换。
 - 手册 `memory.md` 重写：每个命令、每个 frontmatter 字段与闭集、每个 `[memory]` 键（类型、缺省、取值、生效时机）；`[memory.injection]` 的旧键按 ADR 0008 迁移并警告。drift 测试读同一份闭集。
