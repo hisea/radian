@@ -104,6 +104,10 @@ pub enum EventData {
         stop_reason: Option<ModelStopReason>,
         /// The provider's raw stop reason text, present only with `other`.
         stop_reason_raw: Option<String>,
+        /// The exact `stop_reason` text as it appeared in the file, kept so an export writes
+        /// a future value back unchanged instead of its normalized `unknown` spelling
+        /// (ADR 0006 §6(d)). `None` when the record has no field.
+        stop_reason_wire: Option<String>,
         /// The fee the call was billed at (ADR 0027). `None` on a record written
         /// before the field existed (ADR 0007): a resume then re-prices it with the
         /// current catalog and marks the total an estimate.
@@ -666,10 +670,23 @@ impl LineScanner {
             }
             "ModelUsageRecorded" => {
                 let d: UsageData = data_of(raw, self.lineno, path)?;
-                // ADR 0006 §5.7: the provider's raw text is the sibling of `other` only. A
-                // line that pairs it with anything else is refused at that line, the same
-                // way the reference checker refuses the fixture.
-                if d.stop_reason_raw.is_some() && d.stop_reason != Some(ModelStopReason::Other) {
+                // ADR 0006 §5.7: `stop_reason` and `stop_reason_raw` are optional non-empty
+                // strings, and the raw text is the sibling of `other` only. The reference
+                // checker (`docs/schema/check-fixtures.sh`) refuses the same shapes; the
+                // reader and the checker must agree on the field.
+                let data = data_value(raw, self.lineno, path)?;
+                let object = data.as_object().ok_or_else(|| {
+                    E::from(ReadError::InvalidField {
+                        path: path.to_path_buf(),
+                        line: self.lineno,
+                        message: "ModelUsageRecorded data must be an object".into(),
+                    })
+                })?;
+                let stop_reason_wire =
+                    optional_non_empty_string(object, "stop_reason", path, self.lineno)?;
+                let stop_reason_raw =
+                    optional_non_empty_string(object, "stop_reason_raw", path, self.lineno)?;
+                if stop_reason_raw.is_some() && stop_reason_wire.as_deref() != Some("other") {
                     return Err(E::from(ReadError::InvalidField {
                         path: path.to_path_buf(),
                         line: self.lineno,
@@ -678,20 +695,22 @@ impl LineScanner {
                             .into(),
                     }));
                 }
+                let stop_reason = stop_reason_wire.as_deref().map(ModelStopReason::from_wire);
                 fold_push(
                     &mut self.fold,
                     JournalRecord::ModelUsage {
                         usage: d.usage.clone(),
-                        stop_reason: d.stop_reason,
-                        stop_reason_raw: d.stop_reason_raw.clone(),
+                        stop_reason,
+                        stop_reason_raw: stop_reason_raw.clone(),
                     },
                     path,
                     self.lineno,
                 )?;
                 EventData::ModelUsageRecorded {
                     usage: d.usage,
-                    stop_reason: d.stop_reason,
-                    stop_reason_raw: d.stop_reason_raw,
+                    stop_reason,
+                    stop_reason_raw,
+                    stop_reason_wire,
                     fee: d.fee,
                 }
             }
@@ -1271,15 +1290,30 @@ struct SettledData {
 #[derive(Deserialize)]
 struct UsageData {
     usage: ModelUsage,
-    /// The response's stop reason (ADR 0006 §5.7); absent on an older record.
-    #[serde(default)]
-    stop_reason: Option<ModelStopReason>,
-    /// The provider's raw text, present only with `other`.
-    #[serde(default)]
-    stop_reason_raw: Option<String>,
     /// The fee the call was billed at; absent on an older record (ADR 0007).
     #[serde(default)]
     fee: Option<UsageFee>,
+}
+
+/// The optional non-empty string `key` in a `ModelUsageRecorded` object. An absent key is
+/// `None`; a present `null`, non-string or empty string is refused at its line (ADR 0006
+/// §5.7), matching the reference checker. The exact text is returned so a future value can
+/// be written back unchanged (ADR 0006 §6(d)).
+fn optional_non_empty_string<E: From<ReadError>>(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    path: &Path,
+    line: u64,
+) -> Result<Option<String>, E> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text.clone())),
+        Some(_) => Err(E::from(ReadError::InvalidField {
+            path: path.to_path_buf(),
+            line,
+            message: format!("{key} must be a non-empty string (ADR 0006 §5.7)"),
+        })),
+    }
 }
 
 #[derive(Deserialize)]

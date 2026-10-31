@@ -296,14 +296,27 @@ fn event_data_value(
             usage,
             stop_reason,
             stop_reason_raw,
+            stop_reason_wire,
             fee,
         } => {
             let mut data = serde_json::Map::new();
             data.insert("usage".into(), serde_json::to_value(usage)?);
             // Optional, additive fields: absent on an older record, and `stop_reason_raw`
-            // only accompanies `other` (ADR 0006 §5.7).
+            // only accompanies `other` (ADR 0006 §5.7). The wire text is written back as it
+            // appeared, so an unknown future value never becomes the normalized `unknown`
+            // spelling (ADR 0006 §6(d)); without it, an in-memory `Unknown` is omitted.
             if let Some(stop_reason) = stop_reason {
-                data.insert("stop_reason".into(), serde_json::to_value(stop_reason)?);
+                let wire = stop_reason_wire
+                    .as_ref()
+                    .map(|text| Value::String(text.clone()));
+                let value = match wire {
+                    Some(text) => Some(text),
+                    None if *stop_reason == radian_core::ModelStopReason::Unknown => None,
+                    None => Some(serde_json::to_value(stop_reason)?),
+                };
+                if let Some(value) = value {
+                    data.insert("stop_reason".into(), value);
+                }
             }
             if let Some(stop_reason_raw) = stop_reason_raw {
                 data.insert("stop_reason_raw".into(), json!(stop_reason_raw));
