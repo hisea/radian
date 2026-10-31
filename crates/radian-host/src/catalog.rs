@@ -307,7 +307,8 @@ pub enum RouteOutput {
     /// The request carries no output field (the Responses adapter, and `api.openai.com`'s chat
     /// route, whose newer models reject `max_tokens`).
     None,
-    /// The request sends this exact value (Anthropic's `max_tokens`).
+    /// The request sends this exact value (Anthropic's `max_tokens`, or an explicit
+    /// `max_tokens` from the extra body that wins over the route's own output).
     Fixed(u32),
     /// An OpenAI-compatible chat request sends `min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`
     /// when the route knows both numbers, `min(16384, ⌊C/4⌋)` when it knows only `C`, and
@@ -705,8 +706,9 @@ pub struct Window {
     /// `R`: the output reservation used to compute `B`.
     pub reservation: u64,
     /// The output the request actually sends (ADR 0018 §2): Anthropic's `max_tokens`, the
-    /// catalog-derived chat cap, or `None` when the request carries no output field. The host
-    /// builds the model's `max_tokens` from this, so the sent value and `R` cannot drift.
+    /// catalog-derived chat cap, an explicit `max_tokens` from the extra body, or `None` when
+    /// the request carries no output field. The host builds the model's `max_tokens` from
+    /// this, so the sent value and `R` cannot drift.
     pub request_output: Option<u32>,
     pub source: WindowSource,
     pub limit: Option<ModelLimit>,

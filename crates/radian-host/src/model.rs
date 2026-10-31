@@ -875,9 +875,10 @@ impl RouteContext {
     }
 
     /// The output a switched route's request sends (ADR 0018 §2), for the driver's budget
-    /// resolver: Anthropic's `max_tokens`, the catalog-derived chat cap, or none. The budget
-    /// query uses the route's own protocol and endpoint, so a cross-provider switch does not
-    /// inherit the startup route's reservation.
+    /// resolver: Anthropic's `max_tokens`, the catalog-derived chat cap, the extra body's
+    /// explicit `max_tokens` when one wins, or none. The budget query uses the route's own
+    /// protocol and endpoint, so a cross-provider switch does not inherit the startup route's
+    /// reservation.
     pub fn output_for(&self, provider_name: &str, model: &str) -> crate::RouteOutput {
         let Ok(route) = resolve_route_name(
             provider_name,
