@@ -10,8 +10,8 @@
 //! Later turns' new hits are appended as **one System message** through the inbox's `inject`
 //! lane instead (decision 3): [`addition_for_turn`] ranks the Active records this turn's text
 //! hits that neither the fixed block nor an earlier addition in the transcript already carries.
-//! It records the injected `(id, revision, scope)` set — the fixed block plus the transcript's
-//! additions — as a non-critical `MemoryInjected` runtime event when the set changes.
+//! The journal is not written here: this build's `MemoryInjected` record names the injected
+//! index files (ADR 0021 D6), and the host's index write arrives with the file-store injection.
 //!
 //! Three rules matter more than the rest:
 //!
@@ -31,7 +31,7 @@ use radian_core::{
     OpaqueJson, RequestSize,
 };
 use radian_memory::{MemoryRecord, Scope, SearchQuery, Source};
-use radian_session::{MemoryInjectedRecord, RuntimeEvent, SessionJournal};
+use radian_session::MemoryInjectedRecord;
 
 use super::service::{MemoryService, MemoryServiceError, ScopeSelection};
 
@@ -80,9 +80,8 @@ impl Default for InjectionConfig {
     }
 }
 
-/// What one injection produced. `records` is the selected order (the same order recorded in
-/// `MemoryInjected`); `text` is what is appended to the system prompt (empty when nothing was
-/// selected).
+/// What one injection produced. `records` is the selected order; `text` is what is appended to
+/// the system prompt (empty when nothing was selected).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Injection {
     pub records: Vec<MemoryRecord>,
@@ -303,7 +302,7 @@ pub fn first_user_text(messages: &[Message]) -> Option<String> {
     })
 }
 
-/// The `(id, revision, scope)` set of one injection, the shape `MemoryInjected` carries.
+/// The `(id, revision, scope)` set of one injection, the shape a memory-addition origin carries.
 fn injected_records(records: &[MemoryRecord]) -> Vec<MemoryInjectedRecord> {
     records
         .iter()
@@ -365,8 +364,6 @@ fn excluded_ids(records: &[MemoryInjectedRecord]) -> HashSet<String> {
 struct State {
     /// The fixed block, computed by the first caller and reused byte-for-byte afterwards.
     fixed: Option<Injection>,
-    /// The last set written to the journal, so an unchanged set is not written again.
-    last: Vec<MemoryInjectedRecord>,
 }
 
 /// The memory injection the system-prompt hook and the per-turn addition seam share.
@@ -378,7 +375,6 @@ pub struct MemoryInjection {
     /// then a no-op, which is how "closing memory changes nothing" (invariant 1) is expressed
     /// without changing the agent's hook type.
     service: Option<MemoryService>,
-    journal: Arc<SessionJournal>,
     config: InjectionConfig,
     warn: Arc<dyn Fn(&str) + Send + Sync>,
     state: Mutex<State>,
@@ -387,13 +383,11 @@ pub struct MemoryInjection {
 impl MemoryInjection {
     pub fn new(
         service: Option<MemoryService>,
-        journal: Arc<SessionJournal>,
         config: InjectionConfig,
         warn: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self {
             service,
-            journal,
             config,
             warn,
             state: Mutex::new(State::default()),
@@ -483,28 +477,6 @@ impl MemoryInjection {
             },
         })
     }
-
-    /// Writes `MemoryInjected` when the set changed. Audit only (`critical: false`): a failed
-    /// append is a warning, never a turn failure, exactly like the permission audit sink.
-    async fn record(&self, records: Vec<MemoryInjectedRecord>) {
-        let changed = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.last != records
-        };
-        if !changed {
-            return;
-        }
-        if let Err(error) = self
-            .journal
-            .append_runtime_event(RuntimeEvent::MemoryInjected {
-                records: records.clone(),
-            })
-            .await
-        {
-            (self.warn)(&format!("could not record MemoryInjected: {error}"));
-        }
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).last = records;
-    }
 }
 
 /// The body of one addition message: the same rendered block the system prompt carries
@@ -524,11 +496,10 @@ pub struct MemoryHooks {
 impl MemoryHooks {
     pub fn new(
         service: Option<MemoryService>,
-        journal: Arc<SessionJournal>,
         config: InjectionConfig,
         warn: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Self {
-        Self::from_shared(MemoryInjection::new(service, journal, config, warn))
+        Self::from_shared(MemoryInjection::new(service, config, warn))
     }
 
     /// The hook over an injection another part of the host also uses (the per-turn addition
@@ -567,11 +538,6 @@ impl Hooks for MemoryHooks {
                 None => request.system_prompt = Some(fixed.text.clone()),
             }
         }
-        // The set is the fixed block plus what the transcript's additions already carry
-        // (ADR 0021).
-        let mut records = injected_records(&fixed.records);
-        records.extend(addition_ledger(&request.messages));
-        self.injection.record(records).await;
         Ok(())
     }
 }

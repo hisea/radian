@@ -202,8 +202,8 @@ takes it from a `build_report` row like every other number: `journal`,
 file), `p50ms.<bucket>`, `p90ms.<bucket>`, `deterministic_compactions`,
 `rereads_after_compaction`, `rereads_after_compaction_max`, `retained_reads`,
 `compaction_seconds`, `compaction_wall_share` and `outcomes` (the tables' own
-`result` counts a run's outcome from `run.json`, not a journal's turn
-outcomes). Their definitions are in `journal_metrics.py` and in
+`result` counts a run's outcome from `run.json`, `checks.json` and `review.json`, not a
+journal's turn outcomes). Their definitions are in `journal_metrics.py` and in
 [the Terminal-Bench page](../terminal-bench/README.md#journal-metrics-extractor).
 
 The `leak` column counts the arm's runs by leak level: `L0` to `L3`, and `no

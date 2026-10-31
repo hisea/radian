@@ -109,6 +109,13 @@ pub(crate) async fn open_host_session(
         sandbox.as_ref(),
     )?
     .with_approval(setup.approval.policy);
+    // ADR 0012 / ADR 0021 invariant 5: with memory on, `write` and `patch` reach the two
+    // memory scope directories without a prompt in every tier. `memory_root` is `None` only
+    // when neither `RADIAN_HOME` nor `HOME` is set, and then memory is off.
+    let permission_profile = match &memory_root {
+        Some(root) => permission_profile.with_memory_root(root),
+        None => permission_profile,
+    };
 
     // The audit sink is a channel whose drain task is spawned once the session (and its
     // journal) exists.

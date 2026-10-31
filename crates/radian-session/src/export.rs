@@ -206,13 +206,22 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 out.push('\n');
             }
             // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
-            // shows only its size; the ids/revisions/scopes are in the JSON export.
-            EventData::MemoryInjected { records } => {
-                out.push_str(&format!(
-                    "- memory injected: {} record(s) (seq {})\n",
-                    records.len(),
-                    event.seq
-                ));
+            // shows only its size; the index paths/hashes (or the old ids/revisions/scopes)
+            // are in the JSON export.
+            EventData::MemoryInjected { records, indexes } => {
+                if indexes.is_empty() {
+                    out.push_str(&format!(
+                        "- memory injected: {} record(s) (seq {})\n",
+                        records.len(),
+                        event.seq
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "- memory injected: {} index file(s) (seq {})\n",
+                        indexes.len(),
+                        event.seq
+                    ));
+                }
             }
             EventData::ContextFileAppended {
                 path,
@@ -307,14 +316,27 @@ fn event_data_value(
             usage,
             stop_reason,
             stop_reason_raw,
+            stop_reason_wire,
             fee,
         } => {
             let mut data = serde_json::Map::new();
             data.insert("usage".into(), serde_json::to_value(usage)?);
             // Optional, additive fields: absent on an older record, and `stop_reason_raw`
-            // only accompanies `other` (ADR 0006 §5.7).
+            // only accompanies `other` (ADR 0006 §5.7). The wire text is written back as it
+            // appeared, so an unknown future value never becomes the normalized `unknown`
+            // spelling (ADR 0006 §6(d)); without it, an in-memory `Unknown` is omitted.
             if let Some(stop_reason) = stop_reason {
-                data.insert("stop_reason".into(), serde_json::to_value(stop_reason)?);
+                let wire = stop_reason_wire
+                    .as_ref()
+                    .map(|text| Value::String(text.clone()));
+                let value = match wire {
+                    Some(text) => Some(text),
+                    None if *stop_reason == radian_core::ModelStopReason::Unknown => None,
+                    None => Some(serde_json::to_value(stop_reason)?),
+                };
+                if let Some(value) = value {
+                    data.insert("stop_reason".into(), value);
+                }
             }
             if let Some(stop_reason_raw) = stop_reason_raw {
                 data.insert("stop_reason_raw".into(), json!(stop_reason_raw));
@@ -457,7 +479,14 @@ fn event_data_value(
             "reason": reason,
             "policy": policy,
         }),
-        EventData::MemoryInjected { records } => json!({"records": records}),
+        // ADR 0021 D6: one shape is present; the reader leaves the other vector empty.
+        EventData::MemoryInjected { records, indexes } => {
+            if indexes.is_empty() {
+                json!({"records": records})
+            } else {
+                json!({"indexes": indexes})
+            }
+        }
         EventData::ContextFileAppended {
             path,
             bytes,

@@ -36,10 +36,13 @@ same lock, `seq` counter and sync-point decision (ADR 0040); `next_seq()`, `sess
 
 `RuntimeEvent` is the typed runtime write path: `InboxEnqueued`, `InputClaimed`,
 `InputAdmitted`, `TurnStarted`, `TurnFinished`, `ConfigChanged`, `ContextBudgetReached`,
-`PermissionResolved`, `MemoryInjected`, plus `RuntimeEvent::name()`, `critical()` and
-`permission_resolved()`. `PermissionResolved` and `MemoryInjected` are `critical: false`
-(audit); `MemoryInjected` carries only `{ id, revision, scope }` per record, never content
-(ADR 0021 D6).
+`PermissionResolved`, plus `RuntimeEvent::name()`, `critical()` and `permission_resolved()`.
+`PermissionResolved` is `critical: false` (audit). The old `MemoryInjected` records shape has
+no runtime variant: this build writes a `MemoryInjected` line only through
+`SessionJournal::append_memory_injected_indexes`, as the file store's
+`{ scope, path, sha256, lines, bytes }` indexes — never the index text (ADR 0021 D6). The
+reader accepts either shape, the old `{ id, revision, scope }` records or the new indexes, and
+refuses a record with both or neither.
 Transcript events are deliberately **absent** from it: they must go through
 `TranscriptJournal::append` so `MessageAppended.index` stays contiguous with what `replay`
 expects.
@@ -125,8 +128,7 @@ set on purpose would be a surprise; telling them is not.
 | Concurrent runtime and core appends keep `seq` in file order | `concurrent_runtime_and_core_appends_keep_seq_in_file_order` | `tests/runtime_events.rs` |
 | The runtime-event write path respects the single-writer lock and truncates a torn tail like every other line | `the_new_method_respects_the_single_writer_lock`, `the_new_method_truncates_a_torn_tail_like_every_other_line` | `tests/runtime_events.rs` |
 | `PermissionResolved` round-trips and is not replayed | `permission_resolved_round_trips_and_is_not_replayed` | `tests/permission_event.rs` |
-| `MemoryInjected` round-trips without content, is `critical: false`, is never a transcript record, and the exports show it | `memory_injected_round_trips_without_content_and_is_not_critical` | `tests/runtime_events.rs` |
-| `MemoryInjected` round-trips without content, is `critical: false`, is never a transcript record, and the exports show it | `memory_injected_round_trips_without_content_and_is_not_critical` | `tests/runtime_events.rs` |
+| `MemoryInjected` round-trips without content, is `critical: false`, is never a transcript record, and the exports show it; the writer emits only `indexes`, the reader accepts both exclusive shapes, and the scopes are the documented closed set | `memory_injected_round_trips_without_content_and_is_not_critical`, `an_old_records_only_line_reads_as_before`, `an_indexes_only_line_reads_and_a_short_sha256_is_refused_with_its_line`, `a_line_with_both_records_and_indexes_is_refused_naming_its_line`, `a_line_with_neither_shape_is_refused_naming_its_line`, `an_unknown_scope_is_refused_with_the_allowed_values`, `a_new_shape_record_exports_byte_for_byte`, `the_index_writer_refuses_an_unknown_scope_or_short_hash`, `the_documented_index_scopes_are_the_constant`, `the_fixture_passes_the_checker_and_an_unknown_scope_copy_fails_it` | `tests/runtime_events.rs`, `tests/memory_injected.rs` |
 | A normal append after a complete replacement is not counted as part of it; replacements and the appends between them fold to the last revision | `a_normal_append_after_a_complete_replacement_is_not_counted_as_part_of_it`, `replacements_and_the_appends_between_them_fold_to_the_last_revision` | `tests/replace.rs` |
 | Resume continues after a short replacement, and after that replacement is replaced again | `resume_continues_after_a_short_replacement`, `resume_continues_after_a_short_replacement_is_replaced_again` | `tests/replace.rs` |
 | A crash mid-replacement is recovered as the written prefix; a short replacement before a new marker reads back; an interior empty line refuses resume; an orphan tool marker is refused | `a_crash_mid_replacement_is_recovered_as_the_written_prefix`, `a_short_replacement_followed_by_another_replacement_reads_back`, `resume_refuses_an_interior_empty_line`, `a_marker_whose_call_id_never_appeared_is_refused` | `tests/findings.rs` |

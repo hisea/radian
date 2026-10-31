@@ -322,3 +322,27 @@ ran with `cargo nextest run -p radian-session --locked --profile sandbox --test 
 | TK0258-M2 | the writer writes `end_turn` for every response | ✅ 1 failed (rc=100) | `tests/write.rs::a_usage_record_carries_the_response_stop_reason` (`max_tokens` read back as `end_turn`) |
 | TK0258-M3 | the reader turns a missing `stop_reason` into `end_turn` (`d.stop_reason.or(Some(EndTurn))`) | ✅ 2 failed (rc=100) | `tests/read_fixtures.rs::an_old_usage_record_without_a_stop_reason_reads_as_not_recorded_and_resumes` and `tests/read_fixtures.rs::the_model_stop_reason_fixture_reads_every_value` |
 | TK0258-M4 | the reader accepts `stop_reason_raw` beside any `stop_reason` (the §5.7 pair check in the `ModelUsageRecorded` arm removed) | ✅ 1 failed (rc=100) | `tests/read_fixtures.rs::a_stop_reason_raw_beside_any_value_but_other_refuses_the_file` |
+
+## TK0269: the `MemoryInjected` index record (2026-10-31, branch `work/TK0269-memory-journal-record`)
+
+Each mutation was applied to the working tree by hand, backed up under `.radian/backup/` and
+restored from that copy (`diff -q` identical). The reader mutations ran
+`cargo nextest run -p radian-session --locked --profile sandbox --test memory_injected
+-E 'test(...)'`; the fixture mutation ran `bash docs/schema/check-fixtures.sh`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0269-M1 | reader: the both-shapes check removed — `(Some(_), Some(_))` now reads as a record | ✅ 1 failed (rc=100) | `tests/memory_injected.rs::a_line_with_both_records_and_indexes_is_refused_naming_its_line` (`unwrap_err` on `Ok`) |
+| TK0269-M2 | reader/writer: the `MEMORY_INJECTED_INDEX_SCOPES` check removed from `validate_memory_injected_index` | ✅ 1 failed (rc=100) | `tests/memory_injected.rs::an_unknown_scope_is_refused_with_the_allowed_values` (`scope: "session"` read as `Ok`; `the_index_writer_refuses_an_unknown_scope_or_short_hash` covers the writer half) |
+| TK0269-M3 | fixture: the new line's `"scope":"project"` changed to `"scope":"x"` | ✅ checker failed (exit 1) | `bash docs/schema/check-fixtures.sh`: `FAIL memory-injected.jsonl: line 4: MemoryInjected 索引 scope 'x' 不在 ['project', 'global']`; `tests/memory_injected.rs::the_fixture_passes_the_checker_and_an_unknown_scope_copy_fails_it` pins the same rule |
+## TK0286: follow-ups for the stop reason (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. Each mutation was applied to the
+named source file, backed up under `.radian/mut/`, the named test run with `cargo nextest run -p
+radian-session --locked --profile sandbox --test <binary> --no-fail-fast -E 'test(<name>)'`, and
+the source restored from the backup.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M1 | `optional_non_empty_string` accepts an empty string and a present `null` again (the pre-fix `Option<String>` shape) | ✅ 1 failed (rc=100) | `tests/read_fixtures.rs::an_empty_or_null_stop_reason_refuses_the_file` (`unwrap_err` on an `Ok` session carrying `stop_reason: ""`) |
+| TK0286-M2 | the JSON export serializes the enum instead of the stored wire text (`serde_json::to_value(stop_reason)`) | ✅ 1 failed (rc=100) | `tests/export.rs::an_unknown_stop_reason_exports_its_original_text` (`"unknown"` instead of `"some_future_reason"`) |

@@ -1,6 +1,6 @@
-//! `MemoryHooks` end to end: the injected block reaches the system prompt, `MemoryInjected` is
-//! written only when the set changes, and a broken memory log never fails the turn (ADR 0021
-//! D6 / invariant 2).
+//! `MemoryHooks` end to end: the injected block reaches the system prompt, no legacy
+//! `MemoryInjected` record is written (this build records only index files, ADR 0021 D6), and a
+//! broken memory log never fails the turn (ADR 0021 D6 / invariant 2).
 
 mod common;
 
@@ -64,29 +64,18 @@ fn context() -> HookContext {
     }
 }
 
-/// The `(revision, id)` pairs of every `MemoryInjected` record, in file order.
-fn injected(session: &Session) -> Vec<(u64, String)> {
-    injected_sets(session).into_iter().flatten().collect()
-}
-
-/// The `(revision, id)` pairs of each `MemoryInjected` event, one entry per event.
-fn injected_sets(session: &Session) -> Vec<Vec<(u64, String)>> {
-    let mut out = Vec::new();
-    for event in session.events() {
-        if let EventData::MemoryInjected { records } = &event.data {
-            out.push(
-                records
-                    .iter()
-                    .map(|record| (record.revision, record.id.clone()))
-                    .collect(),
-            );
-        }
-    }
-    out
+/// How many `MemoryInjected` events a session carries. The in-process hook writes none: this
+/// build's writer records injected index files only (ADR 0021 D6).
+fn injected_events(session: &Session) -> usize {
+    session
+        .events()
+        .iter()
+        .filter(|event| matches!(event.data, EventData::MemoryInjected { .. }))
+        .count()
 }
 
 #[tokio::test]
-async fn the_block_reaches_the_system_prompt_and_the_event_is_written_once() {
+async fn the_block_reaches_the_system_prompt_and_writes_no_legacy_record() {
     let dir = scratch("prompt");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -102,14 +91,9 @@ async fn the_block_reaches_the_system_prompt_and_the_event_is_written_once() {
         )
         .unwrap();
 
-    let journal = journal(&dir);
+    let _journal = journal(&dir);
     let (warn, warnings) = warn_sink();
-    let hooks = MemoryHooks::new(
-        Some(service.clone()),
-        Arc::clone(&journal),
-        InjectionConfig::default(),
-        warn,
-    );
+    let hooks = MemoryHooks::new(Some(service.clone()), InjectionConfig::default(), warn);
 
     // The first request's block, kept: revision 2 decision 2 makes it the process's block for
     // good, so every later request must append the very same bytes.
@@ -122,22 +106,25 @@ async fn the_block_reaches_the_system_prompt_and_the_event_is_written_once() {
         system
     };
 
-    // The second request is unchanged and adds no event.
+    // The second request is unchanged.
     let mut req = request("what style?");
     hooks.before_model_call(&context(), &mut req).await.unwrap();
     assert_eq!(req.system_prompt.as_deref(), Some(first_system.as_str()));
     let session = Session::open(dir.join("s.jsonl")).unwrap();
-    let events = injected(&session);
-    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        injected_events(&session),
+        0,
+        "this build writes only indexes (ADR 0021 D6)"
+    );
 
-    // The content must not be in the session file: the event carries id/revision/scope only.
+    // The content must not be in the session file either.
     let raw = std::fs::read_to_string(dir.join("s.jsonl")).unwrap();
     assert!(!raw.contains("tabs over spaces"), "content leaked: {raw}");
+    assert!(!raw.contains("MemoryInjected"), "no legacy record: {raw}");
     assert!(warnings.lock().unwrap().is_empty(), "{warnings:?}");
 
     // ADR 0021: a revision of the memory **does not** rewrite the block
-    // in this process. The set is the same, so no second event is written either; the new
-    // revision reaches the model at the next session or resume.
+    // in this process. The new revision reaches the model at the next session or resume.
     let records = service.list(ScopeSelection::ProjectOnly, false).unwrap();
     let id = records[0].id.clone();
     service
@@ -156,8 +143,11 @@ async fn the_block_reaches_the_system_prompt_and_the_event_is_written_once() {
         "the block is computed once per process"
     );
     let session = Session::open(dir.join("s.jsonl")).unwrap();
-    let events = injected(&session);
-    assert_eq!(events.len(), 1, "the set did not change: {events:?}");
+    assert_eq!(
+        injected_events(&session),
+        0,
+        "no legacy record: {session:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -182,14 +172,8 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
         )
         .unwrap();
 
-    let journal = journal(&dir);
     let (warn, warnings) = warn_sink();
-    let injection = MemoryInjection::new(
-        Some(service.clone()),
-        Arc::clone(&journal),
-        InjectionConfig::default(),
-        warn,
-    );
+    let injection = MemoryInjection::new(Some(service.clone()), InjectionConfig::default(), warn);
     let hooks = MemoryHooks::from_shared(Arc::clone(&injection));
 
     // The first turn fixes the block; the transcript is empty, so the ledger is too.
@@ -197,8 +181,6 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
     hooks.before_model_call(&context(), &mut req).await.unwrap();
     let fixed_system = req.system_prompt.clone().unwrap();
     assert!(fixed_system.contains("the style is tabs"), "{fixed_system}");
-    let session = Session::open(dir.join("s.jsonl")).unwrap();
-    assert_eq!(injected(&session).len(), 1, "the fixed block was written");
 
     // A record saved between the turns: it is not in the fixed block (that one is fixed), and
     // the second turn's text is what hits it.
@@ -264,27 +246,13 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
         .expect("the id left the ledger with the compacted message");
     assert!(again.text().contains("src/parse.rs"), "{}", again.text());
 
-    // The hook's set is the fixed block plus the transcript's additions, so the addition joins
-    // it and the fixed block's bytes do not move.
+    // The fixed block's bytes do not move when an addition joins the transcript.
     let mut req = request("parser");
     req.messages = with_addition.clone();
     hooks.before_model_call(&context(), &mut req).await.unwrap();
     assert_eq!(req.system_prompt.as_deref(), Some(fixed_system.as_str()));
-    let session = Session::open(dir.join("s.jsonl")).unwrap();
-    let sets = injected_sets(&session);
-    assert_eq!(sets.len(), 2, "the addition joined the set: {sets:?}");
-    assert_eq!(sets[0].len(), 1, "the first set is the fixed block alone");
-    assert_eq!(
-        sets[1].len(),
-        2,
-        "the second set adds the addition: {sets:?}"
-    );
-    assert!(
-        sets[1].iter().any(|(_, id)| id == later.id.0.as_str()),
-        "the addition is recorded with its own id: {sets:?}"
-    );
 
-    // A turn whose text hits nothing new appends nothing, and the set is unchanged.
+    // A turn whose text hits nothing new appends nothing.
     assert!(
         injection
             .addition_for_turn("nothing to see here", &[])
@@ -295,10 +263,6 @@ async fn a_later_turn_appends_its_new_hits_as_one_system_message() {
     assert!(
         injection.addition_for_turn("style", &transcript).is_none(),
         "a record in the fixed block is not appended again"
-    );
-    assert_eq!(
-        injected_sets(&Session::open(dir.join("s.jsonl")).unwrap()).len(),
-        2
     );
     assert!(warnings.lock().unwrap().is_empty(), "{warnings:?}");
 
@@ -317,18 +281,12 @@ async fn an_addition_budget_drops_whole_records_and_additions_can_be_off() {
     service
         .add(WriteScope::Project, Kind::Fact, None, "style".into())
         .unwrap();
-    let journal = journal(&dir);
     let (warn, _) = warn_sink();
     let config = InjectionConfig {
         addition_budget: 120,
         ..InjectionConfig::default()
     };
-    let injection = MemoryInjection::new(
-        Some(service.clone()),
-        Arc::clone(&journal),
-        config,
-        Arc::clone(&warn),
-    );
+    let injection = MemoryInjection::new(Some(service.clone()), config, Arc::clone(&warn));
     let hooks = MemoryHooks::from_shared(Arc::clone(&injection));
     let mut req = request("style");
     hooks.before_model_call(&context(), &mut req).await.unwrap();
@@ -369,7 +327,7 @@ async fn an_addition_budget_drops_whole_records_and_additions_can_be_off() {
         additions: false,
         ..InjectionConfig::default()
     };
-    let injection = MemoryInjection::new(Some(service), Arc::clone(&journal), off, warn);
+    let injection = MemoryInjection::new(Some(service), off, warn);
     assert!(
         injection.addition_for_turn("parser", &transcript).is_none(),
         "additions = false sends nothing"
@@ -391,12 +349,7 @@ async fn the_hook_orders_the_block_by_the_first_user_message() {
             .unwrap();
     }
     let (warn, _) = warn_sink();
-    let hooks = MemoryHooks::new(
-        Some(service),
-        journal(&dir),
-        InjectionConfig::default(),
-        warn,
-    );
+    let hooks = MemoryHooks::new(Some(service), InjectionConfig::default(), warn);
 
     // The request is a later turn of a session: the first user message is the session's first,
     // and the last is this turn's. Only the first may decide the order (decision 1). In a
@@ -431,11 +384,9 @@ async fn a_new_hook_instance_resumes_with_the_current_memory() {
     let record = service
         .add(WriteScope::Project, Kind::Fact, None, "first".into())
         .unwrap();
-    let journal = journal(&dir);
     let (warn, _) = warn_sink();
     let first = MemoryHooks::new(
         Some(service.clone()),
-        Arc::clone(&journal),
         InjectionConfig::default(),
         Arc::clone(&warn),
     );
@@ -452,25 +403,13 @@ async fn a_new_hook_instance_resumes_with_the_current_memory() {
             "second".into(),
         )
         .unwrap();
-    let resumed = MemoryHooks::new(
-        Some(service.clone()),
-        Arc::clone(&journal),
-        InjectionConfig::default(),
-        warn,
-    );
+    let resumed = MemoryHooks::new(Some(service.clone()), InjectionConfig::default(), warn);
     let mut req = request("hello");
     resumed
         .before_model_call(&context(), &mut req)
         .await
         .unwrap();
     assert!(req.system_prompt.unwrap().contains("second"));
-
-    let session = Session::open(dir.join("s.jsonl")).unwrap();
-    let events = injected(&session);
-    assert_eq!(
-        events,
-        vec![(1, record.id.to_string()), (2, record.id.to_string())]
-    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -485,9 +424,9 @@ async fn a_broken_memory_log_warns_but_does_not_fail_the_turn() {
     // A malformed committed line: the reader refuses the whole scope.
     std::fs::write(root.join("global/log.jsonl"), "not json\n").unwrap();
     let service = MemoryService::open(&ws, &root);
-    let journal = journal(&dir);
+    let _journal = journal(&dir);
     let (warn, warnings) = warn_sink();
-    let hooks = MemoryHooks::new(Some(service), journal, InjectionConfig::default(), warn);
+    let hooks = MemoryHooks::new(Some(service), InjectionConfig::default(), warn);
 
     let mut req = request("hello");
     hooks
@@ -500,14 +439,8 @@ async fn a_broken_memory_log_warns_but_does_not_fail_the_turn() {
     assert!(warnings[0].contains("memory read failed"), "{warnings:?}");
     drop(warnings);
 
-    // No event was written either (the set did not change from its empty initial value).
+    // No record is written either.
     let session = Session::open(dir.join("s.jsonl")).unwrap();
-    assert!(
-        !session
-            .events()
-            .iter()
-            .any(|e| matches!(e.data, EventData::MemoryInjected { .. })),
-        "no event on a failed read"
-    );
+    assert_eq!(injected_events(&session), 0, "no event on a failed read");
     let _ = std::fs::remove_dir_all(&dir);
 }

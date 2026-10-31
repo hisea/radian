@@ -422,13 +422,21 @@ pub(super) fn resolve_window_and_route(
     app.session.model_name = resolved.model_name.clone();
     // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body — on the startup route
     // and on every later `/model` route. It is read once here, before the window, because an
-    // explicit `max_tokens` in it is what the request sends and `R` must count it. The
-    // per-route reserved-key check needs the resolved route and stays below.
+    // explicit `max_tokens` in it is what the request sends and `R` must count it.
     let extra_body = radian_host::read_extra_body()?;
     let extra_fields = extra_body
         .clone()
         .map(radian_host::ExtraBody::into_fields)
         .unwrap_or_default();
+    // Refuse a reserved key before the window is built: the same key (for example `max_tokens`
+    // on an Anthropic route) also raises `R`, so `startup_check` would otherwise refuse a small
+    // `--context-window` with a `C <= R` message that hides the real cause. The resolved
+    // route's own adapter is checked again below, where a catalog-overruled protocol is final.
+    if let Some(extra) = &extra_body
+        && let Some(refusal) = extra.refusal_for(resolved.provider)
+    {
+        return Err(RunError::from(refusal));
+    }
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
     let catalog_base_url =
         resolved
@@ -452,7 +460,10 @@ pub(super) fn resolve_window_and_route(
         &output_base_url,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     )
-    .with_explicit(radian_host::explicit_max_tokens(&extra_fields));
+    .with_explicit(radian_host::explicit_max_tokens(
+        &extra_fields,
+        resolved.provider,
+    ));
     // The catalog groups by provider id; the generic descriptor is not one, so its provider
     // is derived from the base URL hostname. A named provider is its own group only when its
     // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
@@ -563,7 +574,7 @@ pub(super) fn resolve_window_and_route(
         startup_log.line(format!("radian: [compaction] {notice}"));
     }
     // ADR 0026 D13: reserved keys are checked per route, so only the startup route's adapter
-    // is consulted here.
+    // is consulted here (the earlier check covers the window's refusal order).
     if let Some(extra) = &extra_body
         && let Some(refusal) = extra.refusal_for(route.adapter())
     {

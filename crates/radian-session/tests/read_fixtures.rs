@@ -529,6 +529,47 @@ fn a_stop_reason_raw_beside_any_value_but_other_refuses_the_file() {
     assert!(text.contains("other"), "{text}");
 }
 
+/// ADR 0006 §5.7: `stop_reason` and `stop_reason_raw` are non-empty strings when present.
+/// The reference checker refuses an empty one, and the reader must refuse the same shape at
+/// the same line; a present `null` is not a string either.
+#[test]
+fn an_empty_or_null_stop_reason_refuses_the_file() {
+    let sid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    for (data, field) in [
+        (
+            r#"{"usage":{"input":1,"output":1},"stop_reason":""}"#,
+            "stop_reason",
+        ),
+        (
+            r#"{"usage":{"input":1,"output":1},"stop_reason":"other","stop_reason_raw":""}"#,
+            "stop_reason_raw",
+        ),
+        (
+            r#"{"usage":{"input":1,"output":1},"stop_reason":null}"#,
+            "stop_reason",
+        ),
+    ] {
+        let dir = TempDir::new("empty-stop-reason");
+        let path = dir.file("s.jsonl");
+        let lines = [
+            format!(
+                r#"{{"schema_version":1,"session_id":"{sid}","seq":0,"ts":"2026-10-31T00:00:00.000000Z","event":"SessionCreated","critical":true,"data":{{"workspace":"/work/example","config_snapshot":{{}}}}}}"#
+            ),
+            format!(
+                r#"{{"schema_version":1,"session_id":"{sid}","seq":1,"ts":"2026-10-31T00:00:01.000000Z","event":"ModelUsageRecorded","critical":false,"data":{data}}}"#
+            ),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let err = Session::open(&path).unwrap_err();
+        let ReadError::InvalidField { line, message, .. } = &err else {
+            panic!("{data}: expected InvalidField, got {err:?}");
+        };
+        assert_eq!(*line, 2, "{data}: the 1-based line must be reported");
+        assert!(message.contains(field), "{data}: {message}");
+    }
+}
+
 /// ADR 0006 §5.7: a journal line written before the field existed reads as "not recorded",
 /// and the session still resumes (the missing field is not corruption).
 #[test]

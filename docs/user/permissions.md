@@ -40,6 +40,19 @@ A refused read says the path is in the sandbox's deny set.
 Under `full` the shell is not limited by the deny set; use `workspace` to keep it from the shell too.
 Writes stay in the workspace in every tier, except a memory file written under a memory scope directory.
 
+`write` and `patch` do not ask for a path under the two memory scope directories in either
+tier: `<memory root>/global/` and `<memory root>/projects/<project id>/` are allowed.
+`<memory root>` is `~/.radian/memory` (or `$RADIAN_HOME/memory`). The rule matches the
+resolved path, so a path that leaves those directories through `..` or a symbolic link is
+not covered. The registry file `<memory root>/projects.jsonl`, a file directly in
+`<memory root>/projects/`, and any other directory under `<memory root>` are not covered.
+When there is no memory directory, the rule is absent. Under the `workspace` tier the sandbox
+keeps the `shell` tool out of the memory directories: a read is refused, macOS refuses a
+write, and Linux sends a write into a throw-away temporary directory instead of the real
+one. Under `full` no sandbox runs, so the shell can read and write them as you can.
+This rule only decides whether the call asks; the file tools' own root still decides
+whether it reaches the file.
+
 Trust controls project resources.
 A new repository starts untrusted.
 Untrusted projects do not load project skills.

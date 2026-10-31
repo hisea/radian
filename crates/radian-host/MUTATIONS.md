@@ -1870,6 +1870,40 @@ was restored from a backup under `.radian/`.
 |---|---|---|---|
 | TK0257-M3 | `RouteOutput::with_explicit` ignores its argument and returns `self` | ✅ 1 failed (rc=100) | `catalog::tests::an_explicit_max_tokens_override_decides_the_reservation` (the request would send 19200 while the body's 32000 wins on the wire) |
 
+## TK0269: the legacy `MemoryInjected` write path is gone (2026-10-31)
+
+Branch `work/TK0269-memory-journal-record` (rework 1). The mutation restored the old
+implementation of `crates/radian-session/src/runtime.rs`, `crates/radian-host/src/memory/injection.rs`,
+`crates/radian-host/src/control.rs` and `crates/radian-host/src/session/open.rs` from the branch,
+plus a temporary test with the old four-argument `MemoryHooks::new`; it ran with
+`cargo nextest run -p radian-host --test mut_legacy --locked --profile sandbox --no-fail-fast`.
+Each source was restored from a backup under `.radian/mut-backup/` (`git status` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0269-M4 | restore the legacy `RuntimeEvent::MemoryInjected { records }` writer and the hook's `record()` call (the old four-argument `MemoryHooks::new`) | ✅ 1 failed (rc=100) | the mutation-time twin of `tests/memory_injection.rs::the_block_reaches_the_system_prompt_and_writes_no_legacy_record` (temporary `mut_legacy.rs`, same assertions: 1 `MemoryInjected` event where 0 is expected) |
+## TK0286: follow-ups for the explicit output cap (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. Each mutation was applied to the
+named source file, backed up under `.radian/mut/`, the named test run with `cargo nextest run -p
+radian-host --locked --profile sandbox --lib --test route_context_output --no-fail-fast -E
+'test(<name>)'`, and the source restored from the backup.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M3 | `explicit_max_tokens` reads only `max_tokens` with `as_u64()` again (no `max_completion_tokens`, no integral float) | ✅ 1 failed (rc=100) | `extra_body::tests::the_explicit_max_tokens_is_read_as_the_output_it_sends` (`None` instead of `Some(32000)` for `32000.0`) |
+| TK0286-M4 | the `RouteContext::args_for` and `output_for` call sites drop `.with_explicit(...)` | ✅ 1 failed (rc=100) | `tests/route_context_output.rs::a_switched_route_counts_an_explicit_output_cap` (`Some(19200)` instead of `Some(32000)`) |
+
+## TK0286: rework 2, an output cap the reservation cannot hold (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups` (rework 2). The mutation was applied
+in place and the named test run with `cargo nextest run -p radian-host --lib --locked --profile
+sandbox --no-fail-fast -E 'test(an_output_cap_the_reservation_cannot_hold_is_refused_at_startup)'`;
+the source was restored from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M9 | `parse_extra_body` drops the oversized-output-cap refusal, so the body parses again | ✅ 1 failed (rc=100) | `extra_body::tests::an_output_cap_the_reservation_cannot_hold_is_refused_at_startup` (`expect_err`: `{"max_tokens":4294967296}` parsed) |
 ## TK0277: subtree context files (2026-10-31)
 
 Branch `work/TK0277-subtree-context-files`. Each mutation was applied in place, the

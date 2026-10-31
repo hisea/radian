@@ -34,6 +34,9 @@ STOP_REASONS = (
     "content_filtered", "pause_turn", "other",
 )
 META_FIELDS = {"id", "source", "origin"}
+# ADR 0021 D6: the closed `scope` set of a MemoryInjected index entry. One list, read here.
+MEMORY_INDEX_SCOPES = ("project", "global")
+SHA256_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
 RFC3339_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$"
 )
@@ -99,9 +102,26 @@ EXPECT = {
     ),
     "memory-injected.jsonl": dict(
         outcome="accept",
-        events=6,
+        events=7,
         skips=[],
+        # One old-shape line and one new-shape line beside it (ADR 0021 D6).
         memory_injected=[(3, "mem-1", "global"), (1, "mem-2", "prj-1")],
+        memory_indexes=[
+            (
+                "project",
+                "/home/example/.radian/memory/projects/prj-1/MEMORY.md",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                2,
+                120,
+            ),
+            (
+                "global",
+                "/home/example/.radian/memory/global/MEMORY.md",
+                "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                1,
+                40,
+            ),
+        ],
         repair={},
     ),
     "approval-policy-changed.jsonl": dict(
@@ -412,11 +432,15 @@ def fold_push(st, ev, lineno, name):
 
 def check_stop_reason(name, lineno, data):
     """ADR 0006 §5.7：stop_reason 是可选字符串；stop_reason_raw 只能与 other 同时出现。"""
+    # Presence is tested on the key, not `get()`: an explicitly present `null` is not the
+    # absent optional field (it is not a string at all), and it must not bypass the raw rule.
+    reason_present = "stop_reason" in data
+    raw_present = "stop_reason_raw" in data
     reason = data.get("stop_reason")
     raw = data.get("stop_reason_raw")
-    if reason is not None and (not isinstance(reason, str) or not reason):
+    if reason_present and (not isinstance(reason, str) or not reason):
         raise Corruption(f"{name}: line {lineno}: stop_reason 必须是非空字符串")
-    if raw is not None:
+    if raw_present:
         if reason != "other":
             raise Corruption(
                 f"{name}: line {lineno}: stop_reason_raw 只能与 "
@@ -564,25 +588,68 @@ def check_fixture(name, exp):
             if not isinstance(rev, int) or isinstance(rev, bool):
                 raise Corruption(f"{name}: line {i}: TranscriptReplacementAborted.revision 不是整数")
         if ev["event"] == "MemoryInjected":
-            # ADR 0021 D6：只带 id/revision/scope，不带内容；critical 必须为 false。
+            # ADR 0021 D6: one shape per record — old `{records: [{id, revision, scope}]}` or
+            # new `{indexes: [{scope, path, sha256, lines, bytes}]}`. Both or neither is
+            # corruption; `critical` must be false. The text of an index is never carried.
             if ev["critical"]:
                 raise Corruption(f"{name}: line {i}: MemoryInjected 必须是 critical:false")
-            records = ev["data"].get("records")
-            if not isinstance(records, list) or not records:
-                raise Corruption(f"{name}: line {i}: MemoryInjected.records 必须是非空数组")
-            for rec in records:
-                if set(rec) != {"id", "revision", "scope"}:
-                    raise Corruption(
-                        f"{name}: line {i}: MemoryInjected 记录字段必须是 id/revision/scope"
-                    )
-                if not isinstance(rec["id"], str) or not isinstance(rec["revision"], int):
-                    raise Corruption(f"{name}: line {i}: MemoryInjected 记录类型错误")
-                scope = rec["scope"]
-                if not (
-                    scope == "global"
-                    or (isinstance(scope, dict) and isinstance(scope.get("project"), str))
-                ):
-                    raise Corruption(f"{name}: line {i}: MemoryInjected.scope 形状错误")
+            data = ev["data"]
+            has_records = "records" in data
+            has_indexes = "indexes" in data
+            if has_records == has_indexes:
+                raise Corruption(
+                    f"{name}: line {i}: MemoryInjected 必须且只能带 records 或 indexes 之一"
+                )
+            if has_records:
+                records = data["records"]
+                if not isinstance(records, list) or not records:
+                    raise Corruption(f"{name}: line {i}: MemoryInjected.records 必须是非空数组")
+                for rec in records:
+                    if set(rec) != {"id", "revision", "scope"}:
+                        raise Corruption(
+                            f"{name}: line {i}: MemoryInjected 记录字段必须是 id/revision/scope"
+                        )
+                    if not isinstance(rec["id"], str) or not isinstance(rec["revision"], int):
+                        raise Corruption(f"{name}: line {i}: MemoryInjected 记录类型错误")
+                    scope = rec["scope"]
+                    if not (
+                        scope == "global"
+                        or (isinstance(scope, dict) and isinstance(scope.get("project"), str))
+                    ):
+                        raise Corruption(f"{name}: line {i}: MemoryInjected.scope 形状错误")
+            else:
+                indexes = data["indexes"]
+                if not isinstance(indexes, list) or not indexes:
+                    raise Corruption(f"{name}: line {i}: MemoryInjected.indexes 必须是非空数组")
+                for entry in indexes:
+                    if set(entry) != {"scope", "path", "sha256", "lines", "bytes"}:
+                        raise Corruption(
+                            f"{name}: line {i}: MemoryInjected 索引字段必须是 "
+                            "scope/path/sha256/lines/bytes"
+                        )
+                    if entry["scope"] not in MEMORY_INDEX_SCOPES:
+                        raise Corruption(
+                            f"{name}: line {i}: MemoryInjected 索引 scope "
+                            f"{entry['scope']!r} 不在 {list(MEMORY_INDEX_SCOPES)}"
+                        )
+                    if not isinstance(entry["path"], str) or not entry["path"]:
+                        raise Corruption(f"{name}: line {i}: MemoryInjected 索引 path 必须是非空字符串")
+                    if not isinstance(entry["sha256"], str) or not SHA256_HEX.match(entry["sha256"]):
+                        raise Corruption(
+                            f"{name}: line {i}: MemoryInjected 索引 sha256 必须是 64 位十六进制"
+                        )
+                    if (
+                        not isinstance(entry["lines"], int)
+                        or isinstance(entry["lines"], bool)
+                        or not 0 <= entry["lines"] <= 0xFFFFFFFF
+                    ):
+                        raise Corruption(f"{name}: line {i}: MemoryInjected 索引 lines 不是 u32")
+                    if (
+                        not isinstance(entry["bytes"], int)
+                        or isinstance(entry["bytes"], bool)
+                        or not 0 <= entry["bytes"] <= 0xFFFFFFFFFFFFFFFF
+                    ):
+                        raise Corruption(f"{name}: line {i}: MemoryInjected 索引 bytes 不是 u64")
         if ev["event"] == "ModelUsageRecorded":
             try:
                 check_stop_reason(name, i, ev["data"])
@@ -816,7 +883,7 @@ def check_fixture(name, exp):
         for e in events:
             if e["event"] != "MemoryInjected":
                 continue
-            for rec in e["data"]["records"]:
+            for rec in e["data"].get("records", []):
                 scope = rec["scope"]
                 if isinstance(scope, dict):
                     scope = scope["project"]
@@ -825,6 +892,27 @@ def check_fixture(name, exp):
             raise Corruption(
                 f"{name}: memory_injected {got} != 期望 {exp['memory_injected']}"
             )
+        if not any("records" in e["data"] for e in events if e["event"] == "MemoryInjected"):
+            raise Corruption(f"{name}: 期望至少一条旧形状的 MemoryInjected")
+    if "memory_indexes" in exp:
+        got = []
+        for e in events:
+            if e["event"] != "MemoryInjected" or "indexes" not in e["data"]:
+                continue
+            for entry in e["data"]["indexes"]:
+                got.append(
+                    (
+                        entry["scope"],
+                        entry["path"],
+                        entry["sha256"],
+                        entry["lines"],
+                        entry["bytes"],
+                    )
+                )
+        if got != [tuple(x) for x in exp["memory_indexes"]]:
+            raise Corruption(f"{name}: memory_indexes {got} != 期望 {exp['memory_indexes']}")
+        if not any("indexes" in e["data"] for e in events if e["event"] == "MemoryInjected"):
+            raise Corruption(f"{name}: 期望至少一条新形状的 MemoryInjected")
     if "inbox_wake" in exp:
         # ADR 0011 / ADR 0006 §5.5：`wake` 是 InboxEnqueued 的**可选**字段，缺省即
         # 旧记录。这里逐条钉住带字段与缺字段两种形状，并检查类型。

@@ -7839,9 +7839,13 @@ async fn memory_injection_reaches_the_system_prompt() {
         system.contains("not instructions"),
         "the low-trust note is present: {system}"
     );
-    // The injected set is recorded (id/revision/scope), but its content is not in the file.
+    // This build records only the injected index files (ADR 0021 D6); the in-process records
+    // set is not written, and the content is not in the file either.
     let raw = std::fs::read_to_string(env.sessions.join("injected.jsonl")).unwrap();
-    assert!(raw.contains("MemoryInjected"), "{raw}");
+    assert!(
+        !raw.contains("MemoryInjected"),
+        "no legacy record is written: {raw}"
+    );
     assert!(
         !raw.contains("tabs over spaces"),
         "injected content leaked into the session: {raw}"
@@ -7855,7 +7859,8 @@ async fn memory_injection_reaches_the_system_prompt() {
 /// when the write makes the tree dirty. The fixed block holds the two filler records the
 /// first turn's text hits; the third record does not fit the budget, so the second turn's
 /// text appends it as one System-source message right after the second user message. The
-/// tool definitions never move, and `MemoryInjected` gains the new id.
+/// tool definitions never move. No legacy `MemoryInjected` record is written: this build's
+/// writer records injected index files only (ADR 0021 D6).
 #[tokio::test]
 async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once() {
     if !git_available() {
@@ -7973,7 +7978,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     assert!(text.starts_with("<memory>"), "{text}");
 
     // The session file: a System-source message with the memory_addition origin, at the
-    // transcript index right after the user message; and the injected set recorded twice.
+    // transcript index right after the user message.
     let session = radian_session::Session::open(env.sessions.join("fixed.jsonl")).unwrap();
     let history = session.history().unwrap();
     let addition_at = history
@@ -7994,41 +7999,16 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
     );
     assert!(history[addition_at].text().contains("src/parse.rs"));
 
-    let sets: Vec<Vec<String>> = session
-        .events()
-        .iter()
-        .filter_map(|event| match &event.data {
-            radian_session::EventData::MemoryInjected { records } => Some(
-                records
-                    .iter()
-                    .map(|record| record.id.clone())
-                    .collect::<Vec<String>>(),
-            ),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(sets.len(), 2, "only the set changes are written: {sets:?}");
-    // The record beside the budget is in the second set only.
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json");
-    let target = value
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|record| record["key"] == json!("target"))
-        .expect("the target record")
-        .clone();
-    let target_id = target["id"].as_str().unwrap().to_owned();
-    assert!(!sets[0].contains(&target_id), "{sets:?}");
-    assert!(sets[1].contains(&target_id), "{sets:?}");
-
-    // The addition's content is in the session file (decision 3's accepted cost); the
-    // `MemoryInjected` records still carry ids only.
+    // The addition's content is in the session file (decision 3's accepted cost); no legacy
+    // `MemoryInjected` record was written.
     let raw = std::fs::read_to_string(env.sessions.join("fixed.jsonl")).unwrap();
     assert!(
         raw.contains("src/parse.rs"),
         "the addition is in the transcript"
+    );
+    assert!(
+        !raw.contains("MemoryInjected"),
+        "no legacy record is written: {raw}"
     );
 }
 
@@ -10614,11 +10594,17 @@ async fn the_extra_body_env_reaches_the_request_and_the_startup_line_names_the_k
     );
 }
 
-/// A reserved key and a non-object are startup refusals naming the variable (and the key),
-/// before any session file exists. Exit code 2 is the code every startup refusal uses.
+/// A reserved key, a non-object and an output cap the reservation cannot hold are startup
+/// refusals naming the variable (and the key), before any session file exists. Exit code 2 is
+/// the code every startup refusal uses.
 #[tokio::test]
 async fn a_bad_extra_body_stops_startup_with_the_named_error() {
-    for (value, needle) in [("{\"messages\":[]}", "messages"), ("[1]", "object")] {
+    for (value, needle) in [
+        ("{\"messages\":[]}", "messages"),
+        ("[1]", "object"),
+        // ADR 0018 §2: the request would send this output while `R` could only hold `u32::MAX`.
+        ("{\"max_completion_tokens\":5000000000}", "4294967295"),
+    ] {
         let (code, _, stderr) = feed_and_wait(
             spawn_radian(
                 &[
