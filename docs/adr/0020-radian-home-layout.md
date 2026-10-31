@@ -19,7 +19,7 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
     catalog/models.json    models.dev catalog cache (ADR 0018)       sandbox-readable
     diagnostics/           panic logs and similar (ADR 0013)         sandbox-readable
   sessions/                session JSONL and index.db (ADR 0006)     sandbox-unreadable
-  memory/                  memory record files and per-scope MEMORY.md indexes (ADR 0021)  sandbox-unreadable
+  memory/                  memory record files and per-scope MEMORY.md indexes (ADR 0021); the file tools reach the two scope directories only (ADR 0039 decision 4)  sandbox-unreadable
   credentials/auth.json    credentials (ADR 0026)                    sandbox-unreadable
   trust/trust.json         project trust records (ADR 0031)          sandbox-unreadable
   themes/<name>.toml       theme files (ADR 0029)                    sandbox-readable
