@@ -48,3 +48,33 @@ empty at the end.
 a thread-local open hook, between `open()` and the lock); M9 uses the move hook to check the
 target log is locked at the check-to-write point. M7 from round 1 (the directory fsync) stays
 as the documented equivalent mutation.
+
+## TK0268: the file store and the log migration
+
+Base: this branch's code commit · each mutation run with
+`cargo nextest run -p radian-memory --locked --profile sandbox --test <binary> -E 'test(<name>)'`,
+then restored from `.radian/files.rs.bak`; `git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0268-M1 | `touch_last_used` rewrites `modified` too | `files::touch_last_used_changes_only_the_last_used_line` | ✅ failed |
+| TK0268-M2 | the migration keeps Archived records | `migrate::two_active_one_archived_and_one_forgotten_become_two_files_and_an_index` | ✅ failed |
+| TK0268-M3 | the `type` closed-set check is removed from the reader | `files::a_type_outside_the_closed_set_is_unreadable_and_reports_its_line` | ✅ failed |
+
+3/3 caught.
+
+## Re-review: quoted YAML, a fixed source, the directory race, the docs drift test, description bytes
+
+Base: this branch's rework · each mutation run with
+`cargo nextest run -p radian-memory --locked --profile sandbox --test <binary> -E 'test(<name>)'`,
+then restored from `.radian/files.rs.bak` and `.radian/fs.rs.bak`; `git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0268-M4 | `write` takes `source` from the new record on replacement | `files::a_write_keeps_the_source_of_an_existing_record` | ✅ failed |
+| TK0268-M5 | `parse_scalar` treats a quoted scalar verbatim | `files::a_quoted_yaml_scalar_reads_as_its_value` | ✅ failed |
+| TK0268-M6 | the migration trims the first content line | `migrate::a_description_is_the_first_content_line_cut_at_120_characters` | ✅ failed |
+| TK0268-M7 | `create_or_accept` returns the race's `AlreadyExists` error | `fs::tests::a_directory_a_racing_caller_created_is_not_an_error` | ✅ failed |
+| TK0268-M8 | `RECORD_TYPES` gains a value the docs do not list | `files::the_documented_closed_sets_are_the_constants` | ✅ failed |
+
+5/5 caught.
