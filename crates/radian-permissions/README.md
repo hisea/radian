@@ -30,9 +30,14 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 **Priority: `deny` > `ask` > `allow`; no rule matching means `ask`.** So an `ask` rule beats
 an `allow` rule when both match, and the default is conservative.
 
-The memory tool (ADR 0021 D5) follows this rule: `memory_search` is `allow` in both tiers.
-There is deliberately no agent tool for archive/forget/purge/confirm/save/revise (D5: the
-model has no write path).
+`write` and `patch` are `allow` in **both** tiers when their `path` resolves under the two
+memory scope directories, `<memory root>/global/` and `<memory root>/projects/` (ADR 0021
+invariant 5 and D7): the model writes memory records as files. Only those two directories are
+covered — the registry `<memory root>/projects.jsonl` and a sibling directory still ask. The
+prefix is resolved like a call's path, so `..` or a symlink that leaves the store does not
+match. A profile built without a memory root (memory off) adds no memory rule. The `shell`
+tool never reaches the store; the sandbox deny set is unchanged (ADR 0020). See
+`with_memory_root` and the edge-case tests in `src/profile.rs`.
 
 Removed tool names are refused as unknown tools: there is no alias mapping, so a rule
 written against `git_diff`, `list` or another removed name matches only that literal name
@@ -279,6 +284,7 @@ transcript record, so it never appears in `journal_records`/`replay`.
 | 27 | a prefix grant never crosses the sandbox boundary | `tests/session_prefix.rs` |
 | 28 | `job` is fixed `allow` in every tier (sandboxed `workspace` too), `ask`/`deny` user rules still win, and `approval = never` keeps it (ADR 0037 decision 8) | `tests/job.rs`, `src/profile.rs` |
 | 29 | a `PermissionRequest` hook answers before the approver (and on non-human turns), its deny/error never prompts, rules/grants/auto never fire it, its `session_grant` covers later calls (a `shell` prefix too) on any turn source and dies with the session, and cancellation interrupts it | `tests/hooks.rs` |
+| 30 | `write`/`patch` are allowed in the memory scope directories in every tier; `..`, a symlink out, the registry and a sibling directory are not; no memory root adds no rule; `memory_search` is no longer an allow rule | `src/profile.rs` |
 
 ## Not verified / limits
 

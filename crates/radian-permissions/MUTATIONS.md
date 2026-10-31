@@ -154,3 +154,19 @@ empty).
 | TK0236-M6 | a `PermissionRequest` `allow` also fires `permission_prompt` | ✅ 1 failed (rc=100) | `command_hooks::a_permission_prompt_fires_once_and_never_delays_the_prompt` (the answered ask wrote a notification) |
 
 3/3 caught, no equivalent mutation.
+
+## TK0270: the memory scope directories are writable (2026-10-31, branch `work/TK0270-memory-write-permission`)
+
+ADR 0012 / ADR 0021 invariant 5 and D7: `write` and `patch` under `<memory root>/global/`
+and `<memory root>/projects/` are `allow` in every tier. Each mutation was applied in place,
+the named test ran with `cargo nextest run -p radian-permissions --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and the source was restored from `.radian/mut/` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0270-M1 | the memory rule matches any path under `<root>` (`PathUnder(root)` instead of `PathUnder(root/global)` and `PathUnder(root/projects)`) | ✅ 1 failed (rc=100) | `profile::tests::a_memory_write_outside_the_scope_directories_is_not_matched` |
+| TK0270-M2 | `rule::resolve_path` skips `canonicalize_existing_prefix` and only normalises lexically | ✅ 1 failed (rc=100) | `profile::tests::a_symlink_out_of_the_memory_store_is_not_matched` |
+| TK0270-M3 | the rule is added to the `full` tier only (`if preset != FullAccess { return self }`) | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::write_to_a_global_memory_file_is_allowed_in_every_tier` |
+
+3/3 caught, no equivalent mutation.

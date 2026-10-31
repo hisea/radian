@@ -119,13 +119,20 @@ pub fn build_access(
     deny_read: &[std::path::PathBuf],
     allow_unix_sockets: &[std::path::PathBuf],
     allow_env: &[String],
+    memory_root: Option<&Path>,
 ) -> Result<radian_host::AccessParts, String> {
     // Slice 1 of `sandbox-auto-allow-shell`: the sandbox is built first and the
     // profile after it, so the `workspace` rule is static for the session. A failed
     // probe is the `Err` that refuses the switch (and the startup), never a fallback.
     let tier = tier_of(preset);
     let sandbox = build_sandbox(tier, workspace, deny_read, allow_unix_sockets, allow_env)?;
-    let profile = build_profile(tier, workspace, allow_shell_commands, sandbox.as_ref())?;
+    let profile = build_profile(
+        tier,
+        workspace,
+        allow_shell_commands,
+        sandbox.as_ref(),
+        memory_root,
+    )?;
     Ok(radian_host::AccessParts { profile, sandbox })
 }
 
@@ -145,6 +152,7 @@ pub fn build_profile(
     workspace: &Path,
     allow_shell_commands: &[String],
     sandbox: Option<&Sandbox>,
+    memory_root: Option<&Path>,
 ) -> Result<Profile, String> {
     let preset = tier.preset();
     let base = match (preset, sandbox) {
@@ -155,6 +163,13 @@ pub fn build_profile(
         (Preset::FullAccess, _) => Profile::full_access(workspace),
     }
     .map_err(|e| format!("--workspace {}: {e}", workspace.display()))?;
+    // ADR 0012 / ADR 0021 invariant 5: with memory on, `write` and `patch` reach the two
+    // memory scope directories without a prompt in every tier. A `None` root means memory
+    // is off and no memory rule is added.
+    let base = match memory_root {
+        Some(root) => base.with_memory_root(root),
+        None => base,
+    };
     if allow_shell_commands.is_empty() {
         return Ok(base);
     }

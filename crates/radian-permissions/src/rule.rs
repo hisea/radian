@@ -198,8 +198,17 @@ pub(crate) fn resolve(workspace: &Path, raw: &str) -> PathBuf {
     } else {
         workspace.join(path)
     };
-    let resolved = canonicalize_existing_prefix(&joined).unwrap_or(joined);
-    lexical_normalize(&resolved)
+    resolve_path(&joined)
+}
+
+/// Resolves an **already joined** path the way [`resolve`] does: symlinks in the existing
+/// part are resolved and `.`/`..` are removed lexically. A rule prefix is resolved with this
+/// too, so a prefix such as a memory root matches the same spelling a call's path takes.
+pub(crate) fn resolve_path(path: &Path) -> PathBuf {
+    match canonicalize_existing_prefix(path) {
+        Some(resolved) => lexical_normalize(&resolved),
+        None => lexical_normalize(path),
+    }
 }
 
 fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {

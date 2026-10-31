@@ -899,6 +899,36 @@ impl Rig {
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
         );
+        // ADR 0021 invariant 5: `shell` cannot write the memory store either. The denylist is
+        // unchanged; only the model's own file tools reach it, through the permission profile.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "memory_unwritable",
+            Expect::MustFail,
+            &format!("printf x > {}", q(&radian.join("memory/shell-write.txt"))),
+        );
+        // The model's `write`/`patch` calls are **not** a sandbox matter: the file tools run
+        // in the host process, outside any sandbox. The permission profile allows the two
+        // memory scope directories in both tiers (ADR 0012) and `radian-coding`'s file roots
+        // decide whether a call reaches the file (ADR 0039 §4); the sandbox denylist is
+        // unchanged. Recorded as SKIP so the matrix documents the boundary it does not test.
+        self.record(
+            g,
+            "memory_write_tool_is_not_a_sandbox_matter",
+            Expect::MustSucceed,
+            Outcome {
+                succeeded: true,
+                detail: String::new(),
+            },
+            Outcome {
+                succeeded: true,
+                detail: String::new(),
+            },
+            "the `write`/`patch` tools run in the host process; the permission profile and the coding tools' file roots decide them, not the sandbox",
+        )
+        .skip = Some("the file tools never enter the sandbox".into());
         // ADR 0026 D4: `credentials/auth.json` is denied; the control (FullAccess) reads it,
         // so the denial is the sandbox, not a missing file.
         self.sh_case(

@@ -1375,7 +1375,9 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `radian-exec` 
 - A `[memory]` startup notice names the project state (the linked project id, or "no project
   linked" with the `radian memory project new`/`relink` hint) and the injection budget
   (ADR 0021 D2/D6). The current memory is injected into the system prompt each turn;
-  `memory_search` (allowed) mounts only past the injection budget (ADR 0021 D7), and a
+  `memory_search` mounts only past the injection budget (ADR 0021 D7); the permission
+  profile carries no memory-tool allow rule (write and patch to the memory scope
+  directories are allowed, ADR 0012), and a
   default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
   ) is shown as a `Notice` transcript entry — one line naming the new project and
   its identity key — because stderr would be drawn over by the fullscreen UI. Tested by

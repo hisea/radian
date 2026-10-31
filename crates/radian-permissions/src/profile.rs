@@ -128,7 +128,6 @@ impl Profile {
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
-            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend(git_exec_denies(ws));
@@ -159,7 +158,6 @@ impl Profile {
         }
         let mut profile = Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
-            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
@@ -183,7 +181,6 @@ impl Profile {
     pub fn full_access(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::FullAccess, workspace, |ws| {
             let mut rules = read_only();
-            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
@@ -268,6 +265,28 @@ impl Profile {
         self
     }
 
+    /// Adds the memory write rule (ADR 0012; ADR 0021 invariant 5 and D7): `write` and
+    /// `patch` are `allow` under `<memory root>/global/` and `<memory root>/projects/`, in
+    /// every tier. A profile built without a memory root (memory off) has no memory rule.
+    ///
+    /// The prefixes are resolved like a call's path (symlinks and `..` removed), so a path
+    /// that escapes the memory directory through `..` or a symlink does not match. The
+    /// registry (`<memory root>/projects.jsonl`) and any other directory under the root are
+    /// not covered: only the two scope directories are.
+    pub fn with_memory_root(mut self, memory_root: impl AsRef<Path>) -> Self {
+        let root = crate::rule::resolve_path(memory_root.as_ref());
+        for scope in ["global", "projects"] {
+            for tool in ["write", "patch"] {
+                self.rules.push(Rule::new(
+                    ToolMatcher::Name(tool.into()),
+                    ResourceMatcher::PathUnder(root.join(scope)),
+                    Action::Allow,
+                ));
+            }
+        }
+        self
+    }
+
     /// Replaces the approval policy (used by `custom` callers and tests).
     pub fn with_approval(mut self, approval: ApprovalPolicy) -> Self {
         self.approval = approval;
@@ -322,18 +341,6 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProfileError> {
         return Err(ProfileError::NotADirectory(canonical));
     }
     Ok(canonical)
-}
-
-/// The memory tool (ADR 0021 D5/D7). Reading is allowed in every tier. There is
-/// deliberately **no** archive/forget/purge/confirm/save/revise agent tool (D5: the model has
-/// no write path).
-fn memory_rules() -> Vec<Rule> {
-    [("memory_search", Action::Allow)]
-        .into_iter()
-        .map(|(name, action)| {
-            Rule::new(ToolMatcher::Name(name.into()), ResourceMatcher::Any, action)
-        })
-        .collect()
 }
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
@@ -434,6 +441,30 @@ mod tests {
         crate::rule::evaluate(profile.rules(), &profile.workspace, &call(name)).action
     }
 
+    /// The tier's answer for a call carrying `path` (the shape `write`/`patch` use).
+    fn action_at(profile: &Profile, name: &str, path: &Path) -> Action {
+        let mut tool_call = call(name);
+        tool_call.arguments = json!({ "path": path.to_string_lossy() });
+        crate::rule::evaluate(profile.rules(), &profile.workspace, &tool_call).action
+    }
+
+    /// The three profiles that carry a memory root: `workspace`, the sandboxed `workspace`
+    /// and `full`. `Sandbox::inherited` is enforced without probing, so this is deterministic.
+    fn memory_profiles(ws: &TestDir, root: &TestDir) -> Vec<(&'static str, Profile)> {
+        let sandbox = radian_sandbox::Sandbox::inherited(ws);
+        [
+            ("workspace", Profile::workspace_write(ws).unwrap()),
+            (
+                "sandboxed workspace",
+                Profile::workspace_write_sandboxed(ws, &sandbox).unwrap(),
+            ),
+            ("full", Profile::full_access(ws).unwrap()),
+        ]
+        .into_iter()
+        .map(|(tier, profile)| (tier, profile.with_memory_root(root)))
+        .collect()
+    }
+
     /// A fresh empty directory, removed on drop. `workspace_write` discovers git metadata
     /// under the workspace, so these tests use an isolated dir rather than the shared temp
     /// dir itself (which can hold near a million entries on a lived-in machine and make
@@ -465,29 +496,127 @@ mod tests {
         }
     }
 
-    /// ADR 0021 D5/D7: `memory_search` is allowed in both tiers; no memory tool asks.
+    /// Edge case 1 (ADR 0012; ADR 0021 invariant 5/D7): a record file under `global/` is
+    /// writable in `workspace`, the sandboxed `workspace` and `full`. The mutation that adds
+    /// the rule to `full` only makes the two `workspace` halves fail.
     #[test]
-    fn memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks() {
-        let ws = TestDir::new("memory");
+    fn write_to_a_global_memory_file_is_allowed_in_every_tier() {
+        let ws = TestDir::new("memory-global-ws");
+        let root = TestDir::new("memory-global-root");
+        std::fs::create_dir_all(root.0.join("global")).unwrap();
+        let path = root.0.join("global/x.md");
+        for (tier, profile) in memory_profiles(&ws, &root) {
+            assert_eq!(action_at(&profile, "write", &path), Action::Allow, "{tier}");
+        }
+    }
+
+    /// Edge case 2: a project record (`patch`, and `write` for symmetry) under
+    /// `projects/<ProjectId>/` is allowed in every tier.
+    #[test]
+    fn write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier() {
+        let ws = TestDir::new("memory-project-ws");
+        let root = TestDir::new("memory-project-root");
+        std::fs::create_dir_all(root.0.join("projects/P")).unwrap();
+        let path = root.0.join("projects/P/x.md");
+        for tool in ["write", "patch"] {
+            for (tier, profile) in memory_profiles(&ws, &root) {
+                assert_eq!(
+                    action_at(&profile, tool, &path),
+                    Action::Allow,
+                    "{tier}: {tool}"
+                );
+            }
+        }
+    }
+
+    /// Edge case 3: only the two scope directories are covered. The registry
+    /// (`projects.jsonl`) and a sibling directory under the root fall to the tier's default.
+    /// The mutation that matches any path under `<root>` makes this fail.
+    #[test]
+    fn a_memory_write_outside_the_scope_directories_is_not_matched() {
+        let ws = TestDir::new("memory-registry-ws");
+        let root = TestDir::new("memory-registry-root");
+        std::fs::create_dir_all(root.0.join("other")).unwrap();
+        for path in [root.0.join("projects.jsonl"), root.0.join("other/x.md")] {
+            for (tier, profile) in memory_profiles(&ws, &root) {
+                assert_eq!(
+                    action_at(&profile, "write", &path),
+                    Action::Ask,
+                    "{tier}: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// Edge case 4: `..` cannot move a call into the memory scope. Matching the raw path
+    /// would see `<root>/global/..` and allow it; the resolved path does not.
+    #[test]
+    fn a_memory_write_that_escapes_with_dotdot_is_not_matched() {
+        let ws = TestDir::new("memory-dotdot-ws");
+        let root = TestDir::new("memory-dotdot-root");
+        std::fs::create_dir_all(root.0.join("global")).unwrap();
+        let path = root.0.join("global/../../etc/x");
+        for (tier, profile) in memory_profiles(&ws, &root) {
+            assert_eq!(action_at(&profile, "write", &path), Action::Ask, "{tier}");
+        }
+    }
+
+    /// Edge case 5: a symlink inside `global/` that points outside the memory store does not
+    /// match (the rule matches the canonical path). Removing the canonicalisation from
+    /// `rule::resolve` makes this fail.
+    #[test]
+    fn a_symlink_out_of_the_memory_store_is_not_matched() {
+        let ws = TestDir::new("memory-symlink-ws");
+        let root = TestDir::new("memory-symlink-root");
+        let outside = TestDir::new("memory-symlink-outside");
+        std::fs::create_dir_all(root.0.join("global")).unwrap();
+        let target = outside.0.join("x.md");
+        std::fs::write(&target, "outside\n").unwrap();
+        std::os::unix::fs::symlink(&target, root.0.join("global/link.md")).unwrap();
+        let link = root.0.join("global/link.md");
+        for (tier, profile) in memory_profiles(&ws, &root) {
+            assert_eq!(action_at(&profile, "write", &link), Action::Ask, "{tier}");
+        }
+    }
+
+    /// Edge case 7: `memory_search` is no longer a built-in `allow` rule. An unknown tool name
+    /// falls to the tier's default, which is `ask` in every profile.
+    #[test]
+    fn memory_search_is_no_longer_a_known_allow_rule() {
+        let ws = TestDir::new("memory-search-ws");
+        let root = TestDir::new("memory-search-root");
+        for (tier, profile) in memory_profiles(&ws, &root) {
+            assert_eq!(action(&profile, "memory_search"), Action::Ask, "{tier}");
+        }
+    }
+
+    /// Edge case 8: a profile built without a memory root (memory off) adds no memory rule;
+    /// every other rule is unchanged, so a write under the root asks and the old rules still
+    /// answer.
+    #[test]
+    fn a_profile_without_a_memory_root_has_no_memory_rule() {
+        let ws = TestDir::new("memory-off-ws");
+        let root = TestDir::new("memory-off-root");
+        std::fs::create_dir_all(root.0.join("global")).unwrap();
+        let memory_path = root.0.join("global/x.md");
+        let workspace_path = ws.0.join("x.md");
         for profile in [
             Profile::workspace_write(&ws).unwrap(),
             Profile::full_access(&ws).unwrap(),
         ] {
             let tier = profile.preset.as_str();
-            assert_eq!(action(&profile, "memory_search"), Action::Allow, "{tier}");
-            // No rule matches a write or destructive name, so the default `ask` stands —
-            // but there is no tool to ask about either.
-            for name in [
-                "memory_save",
-                "memory_revise",
-                "memory_get",
-                "memory_archive",
-                "memory_forget",
-                "memory_purge",
-                "memory_confirm",
-            ] {
-                assert_eq!(action(&profile, name), Action::Ask, "{tier}: {name}");
-            }
+            assert_eq!(
+                action_at(&profile, "write", &memory_path),
+                Action::Ask,
+                "{tier}: a memory path is not special without a memory root"
+            );
+            assert_eq!(
+                action_at(&profile, "write", &workspace_path),
+                Action::Allow,
+                "{tier}: the workspace rule is unchanged"
+            );
+            assert_eq!(action(&profile, "ask_user"), Action::Allow, "{tier}");
         }
     }
 
