@@ -29,3 +29,13 @@ file from a backup under `.radian/`.
 | TK0261-M3 | every `ContextCompacted` candidate counts, committed or not (no `TranscriptReplacementCommitted` match) | `CompactionMetricsTest.test_an_uncommitted_compaction_candidate_is_not_a_compaction` (2 re-reads instead of 0, 1 retained path instead of 0) | ✅ failed |
 | TK0261-M4 | `compaction_seconds` starts at the first `CompactionUsageRecorded`'s own `ts` instead of the record before it | `CompactionMetricsTest.test_compaction_seconds_run_from_the_record_before_the_first_usage` (20 s instead of 30 s; also `test_the_totals_sum_and_recompute_the_compaction_columns`) | ✅ failed |
 
+## TK0262: a second history counts only once the fetch succeeded
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0262-M1 | `leak.py` `Scanner._pointed`: `remote add` returns level 3 again (`return 1, f"remote {name} -> {location}"` → `return 3, ...`) | `LeakTest.test_a_remote_add_then_a_failed_fetch_is_level_one_with_two_rows` (also `test_a_remote_add_alone_is_level_one`) | ✅ failed |
+| TK0262-M2 | `leak.py` `Scanner._second`: the `fatal:` check is removed (`if result and FATAL in result:` and its return deleted) | `LeakTest.test_a_remote_add_then_a_failed_fetch_is_level_one_with_two_rows` (also `test_a_fetch_of_a_url_is_level_three_only_when_it_succeeds`, `test_a_clone_that_failed_is_level_one`) | ✅ failed |
+| TK0262-M3 | `leak.py` `scan`: the remembered remote names are cleared between journals (`remotes.clear()` at the top of the loop over journals) | `LeakTest.test_remembered_remotes_span_the_runs_journals` | ✅ failed |
+| TK0262-M4 | `leak.py` `Scanner._pointed`: `remote add` option values are not skipped (`_words(rest, REMOTE_OPTION_ARGS)` → `_words(rest)`) | `LeakTest.test_a_remote_add_with_option_arguments_names_the_remote` (4 subtests: `-t main`, `--track main`, `-m main`, `--master main`) | ✅ failed |
+| TK0262-M5 | `leak.py` `scan`: calls are de-duplicated by `(name, arguments)` again instead of call id | `LeakTest.test_two_fetches_of_one_remote_keep_the_second_result` | ✅ failed |
+| TK0262-M6 | `leak.py` `second_history`: `fetch`/`pull`/`clone` option values are not skipped (`_words(rest, SECOND_HISTORY_OPTION_ARGS.get(sub, frozenset()))` → `_words(rest)`) | `LeakTest.test_fetch_options_that_take_a_value_do_not_shadow_the_remote` (4 subtests) and `test_a_clone_with_options_names_the_repository` (`--depth 1 --reference /srv/ref`) | ✅ failed |
