@@ -49,8 +49,9 @@ pub struct OpenAiCompatibleConfig {
     /// `None` = the default policy (on for `api.openai.com`, off everywhere else),
     /// `Some(b)` = explicit override.
     pub include_usage: Option<bool>,
-    /// The output cap the request sends as `max_tokens` (ADR 0018): `min(limit.output,
-    /// ⌊C/4⌋)` when the route's catalog entry knows both. `None` sends no field. An explicit
+    /// The output cap the request sends as `max_tokens` (ADR 0018), from
+    /// [`catalog_max_tokens`]: `min(limit.output, ⌊C/4⌋)` when the route knows both,
+    /// `min(16384, ⌊C/4⌋)` when it knows only the window. `None` sends no field. An explicit
     /// `max_tokens` in `extra_body` or in the request settings wins and is never overwritten.
     pub max_tokens: Option<u32>,
     /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
@@ -141,13 +142,21 @@ pub(crate) fn openai_host_is_default(host: &str) -> bool {
         .eq_ignore_ascii_case("api.openai.com")
 }
 
-/// The `max_tokens` an OpenAI-compatible chat request sends when the route's catalog entry
-/// knows both the context window `C` and the output ceiling `O` (ADR 0018): `min(O, ⌊C/4⌋)`.
-/// A zero or missing number is unknown, and the request sends no field. Never returns zero.
+/// The cap a chat request's `max_tokens` takes when the route knows its window `C` but not the
+/// model's output ceiling (ADR 0018). It is the host's output reservation cap too, so the
+/// value sent is exactly the `R` the host already reserves and `B` does not change.
+pub const WINDOW_ONLY_OUTPUT_CAP: u64 = 16_384;
+
+/// The `max_tokens` an OpenAI-compatible chat request sends (ADR 0018): `min(O, ⌊C/4⌋)` when
+/// the route knows both the context window `C` and the output ceiling `O`,
+/// `min(WINDOW_ONLY_OUTPUT_CAP, ⌊C/4⌋)` when it knows only `C`, and no field when `C` is
+/// unknown. A zero or missing number is unknown. Never returns zero.
 pub fn catalog_max_tokens(context: Option<u64>, output: Option<u64>) -> Option<u32> {
     let context = context.filter(|value| *value > 0)?;
-    let output = output.filter(|value| *value > 0)?;
-    let cap = output.min(context / 4);
+    let ceiling = output
+        .filter(|value| *value > 0)
+        .unwrap_or(WINDOW_ONLY_OUTPUT_CAP);
+    let cap = ceiling.min(context / 4);
     (cap > 0).then(|| cap.min(u64::from(u32::MAX)) as u32)
 }
 

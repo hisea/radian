@@ -280,8 +280,9 @@ fn parse_interleaved(value: &Value) -> Option<String> {
 
 /// The **cap** on the output reservation `R` (ADR 0018): the reservation is a
 /// quarter of the window, never more than this. A fixed 16384 made any window at or below 16K
-/// have no budget at all.
-pub const OUTPUT_RESERVATION_CAP: u64 = 16_384;
+/// have no budget at all. It is the chat route's window-only `max_tokens` cap as well, so a
+/// request that knows only `C` sends exactly the `R` reserved for it.
+pub const OUTPUT_RESERVATION_CAP: u64 = agent_provider_openai_compatible::WINDOW_ONLY_OUTPUT_CAP;
 
 /// `R = max(min(16384, ⌊C/4⌋), request_max_output)` (ADR 0018).
 ///
@@ -308,8 +309,9 @@ pub enum RouteOutput {
     None,
     /// The request sends this exact value (Anthropic's `max_tokens`).
     Fixed(u32),
-    /// An OpenAI-compatible chat request sends `min(limit.output, ⌊C/4⌋)` when the catalog
-    /// knows both numbers for the route's model (ADR 0018); nothing otherwise.
+    /// An OpenAI-compatible chat request sends `min(limit.output, ⌊C/4⌋)` when the route knows
+    /// both numbers, `min(16384, ⌊C/4⌋)` when it knows only `C`, and nothing when `C` is
+    /// unknown (ADR 0018).
     CatalogChat,
 }
 
@@ -1316,11 +1318,23 @@ mod tests {
             RouteOutput::CatalogChat.resolve(Some(128_000), Some(16_384)),
             Some(16_384)
         );
-        // Either number unknown: the request sends nothing, so R stays the safety quarter.
+        // Only C known: the request sends min(16384, ⌊C/4⌋), which is the R already
+        // reserved, so B does not change.
+        let output = RouteOutput::CatalogChat.resolve(Some(1_000_000), None);
+        assert_eq!(output, Some(16_384));
+        assert_eq!(output_reservation(Some(1_000_000), output), 16_384);
         assert_eq!(
-            RouteOutput::CatalogChat.resolve(Some(1_000_000), None),
-            None
+            input_budget(Some(1_000_000), None, output),
+            input_budget(Some(1_000_000), None, None)
         );
+        assert_eq!(
+            input_budget(Some(1_000_000), None, output),
+            Ok(Some(983_616))
+        );
+        let output = RouteOutput::CatalogChat.resolve(Some(32_768), None);
+        assert_eq!(output, Some(8_192));
+        assert_eq!(input_budget(Some(32_768), None, output), Ok(Some(24_576)));
+        // C unknown: the request sends nothing.
         assert_eq!(RouteOutput::CatalogChat.resolve(None, Some(384_000)), None);
         // The other routes keep their old values.
         assert_eq!(

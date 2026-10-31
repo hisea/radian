@@ -1,5 +1,7 @@
 //! `ModelRequest` -> Chat Completions request body. Pure, so it is tested without a server.
 
+use std::collections::HashSet;
+
 use radian_core::{ContentPart, Message, ModelError, ModelRequest, ToolCall, ToolResult};
 use serde_json::{Map, Value, json};
 
@@ -62,7 +64,13 @@ pub(crate) fn build_body(
         messages.push(json!({"role": "system", "content": system}));
     }
     let replay = config.reasoning_replay.as_deref();
-    messages.extend(request.messages.iter().map(|item| message(item, replay)));
+    let truncated = truncated_calls(&request.messages);
+    messages.extend(
+        request
+            .messages
+            .iter()
+            .map(|item| message(item, replay, &truncated)),
+    );
     body.insert("messages".into(), Value::Array(messages));
 
     if !request.tools.is_empty() {
@@ -95,7 +103,21 @@ fn settings_object(settings: &Value) -> Result<Map<String, Value>, ModelError> {
     }
 }
 
-fn message(message: &Message, replay: Option<&str>) -> Value {
+/// The ids of the calls whose result says the response was cut off before the call ran
+/// (ADR 0017: `error_code` `truncated`).
+fn truncated_calls(messages: &[Message]) -> HashSet<&str> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Tool { result, .. } if result.error_code.as_deref() == Some("truncated") => {
+                Some(result.call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn message(message: &Message, replay: Option<&str>, truncated: &HashSet<&str>) -> Value {
     match message {
         Message::User { content, .. } => user(content),
         Message::Assistant {
@@ -103,7 +125,7 @@ fn message(message: &Message, replay: Option<&str>) -> Value {
             reasoning,
             tool_calls,
             ..
-        } => assistant(content, reasoning, tool_calls, replay),
+        } => assistant(content, reasoning, tool_calls, replay, truncated),
         Message::Tool { result, .. } => tool_result(result),
     }
 }
@@ -141,6 +163,7 @@ fn assistant(
     reasoning: &[ContentPart],
     tool_calls: &[ToolCall],
     replay: Option<&str>,
+    truncated: &HashSet<&str>,
 ) -> Value {
     let text = plain_text(content);
     let mut message = Map::new();
@@ -166,7 +189,7 @@ fn assistant(
                 json!({
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": arguments_string(call)},
+                    "function": {"name": call.name, "arguments": arguments_string(call, truncated)},
                 })
             })
             .collect();
@@ -176,9 +199,12 @@ fn assistant(
 }
 
 /// The API carries arguments as a JSON string. A string value is what `response` stores for
-/// arguments the model sent that were not valid JSON, so it goes back exactly as received.
-fn arguments_string(call: &ToolCall) -> String {
+/// arguments the model sent that were not valid JSON, so it goes back exactly as received,
+/// except for a call that was cut off at the token limit (ADR 0017): its partial arguments go
+/// back as `{}`, because a strict server refuses the whole request over them.
+fn arguments_string(call: &ToolCall, truncated: &HashSet<&str>) -> String {
     match &call.arguments {
+        Value::String(_) if truncated.contains(call.id.as_str()) => "{}".into(),
         Value::String(raw) => raw.clone(),
         other => other.to_string(),
     }
@@ -495,27 +521,68 @@ mod tests {
         ));
     }
 
+    fn assistant_calling(arguments: Value) -> Message {
+        Message::Assistant {
+            reasoning: Vec::new(),
+            content: vec![ContentPart::text("calling")],
+            tool_calls: vec![call("c1", "t", arguments)],
+            provider_payload: None,
+            interrupted: false,
+            meta: MessageMeta::default(),
+        }
+    }
+
+    fn result_of_c1(error_code: Option<&str>) -> Message {
+        Message::Tool {
+            result: ToolResult {
+                call_id: "c1".into(),
+                content: vec![ContentPart::text("not run")],
+                structured: None,
+                is_error: error_code.is_some(),
+                error_code: error_code.map(str::to_owned),
+            },
+            meta: MessageMeta::default(),
+        }
+    }
+
+    fn replayed_arguments(messages: Vec<Message>) -> Value {
+        let body = build_body(&request(messages), &config(), false).unwrap();
+        assert_eq!(body["messages"][0]["content"], "calling");
+        body["messages"][0]["tool_calls"][0]["function"]["arguments"].clone()
+    }
+
     #[test]
-    fn arguments_that_were_not_json_go_back_as_received() {
-        let body = build_body(
-            &request(vec![Message::Assistant {
-                reasoning: Vec::new(),
-                content: vec![ContentPart::text("calling")],
-                tool_calls: vec![call("c1", "t", Value::String("{\"a\": ".into()))],
-                provider_payload: None,
-                interrupted: false,
-                meta: MessageMeta::default(),
-            }]),
-            &config(),
-            false,
-        )
-        .unwrap();
-        let message = &body["messages"][0];
-        assert_eq!(message["content"], "calling");
+    fn arguments_that_were_not_json_go_back_as_received_when_the_call_was_not_truncated() {
+        let raw = || Value::String("{\"a\": ".into());
         assert_eq!(
-            message["tool_calls"][0]["function"]["arguments"],
+            replayed_arguments(vec![assistant_calling(raw())]),
             "{\"a\": "
         );
+        assert_eq!(
+            replayed_arguments(vec![
+                assistant_calling(raw()),
+                result_of_c1(Some("unknown_tool"))
+            ]),
+            "{\"a\": "
+        );
+    }
+
+    #[test]
+    fn a_truncated_call_whose_arguments_are_not_json_goes_back_with_empty_arguments() {
+        let arguments = replayed_arguments(vec![
+            assistant_calling(Value::String("{\"path\":\"<parameter=edits>".into())),
+            result_of_c1(Some("truncated")),
+        ]);
+        assert_eq!(arguments, "{}");
+    }
+
+    #[test]
+    fn a_truncated_call_whose_arguments_are_json_goes_back_as_received() {
+        let arguments = replayed_arguments(vec![
+            assistant_calling(json!({"path": "a.rs"})),
+            result_of_c1(Some("truncated")),
+        ]);
+        assert_eq!(arguments, "{\"path\":\"a.rs\"}");
     }
 
     #[test]
@@ -642,11 +709,13 @@ mod tests {
             catalog_max_tokens(Some(128_000), Some(16_384)),
             Some(16_384)
         );
-        // Either number unknown (missing or 0) means the request sends no field.
+        // The window unknown (missing or 0) means the request sends no field.
         assert_eq!(catalog_max_tokens(None, Some(384_000)), None);
-        assert_eq!(catalog_max_tokens(Some(1_000_000), None), None);
+        // Only the window known: a quarter of it, never more than 16384.
+        assert_eq!(catalog_max_tokens(Some(1_000_000), None), Some(16_384));
+        assert_eq!(catalog_max_tokens(Some(32_768), None), Some(8_192));
         assert_eq!(catalog_max_tokens(Some(0), Some(384_000)), None);
-        assert_eq!(catalog_max_tokens(Some(1_000_000), Some(0)), None);
+        assert_eq!(catalog_max_tokens(Some(1_000_000), Some(0)), Some(16_384));
         // A window too small to give a token of output sends nothing either.
         assert_eq!(catalog_max_tokens(Some(3), Some(1_000)), None);
     }
@@ -663,8 +732,13 @@ mod tests {
         let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
         assert_eq!(body["max_tokens"], json!(16_384));
 
-        // O unknown: nothing is sent.
-        cfg.max_tokens = catalog_max_tokens(Some(1_000_000), None);
+        // O unknown: a quarter of the window, never more than 16384.
+        cfg.max_tokens = catalog_max_tokens(Some(32_768), None);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(8_192));
+
+        // C unknown: nothing is sent.
+        cfg.max_tokens = catalog_max_tokens(None, Some(384_000));
         let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
         assert!(body.get("max_tokens").is_none(), "{body}");
 
