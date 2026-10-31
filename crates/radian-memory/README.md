@@ -43,16 +43,21 @@ Directories are `0700` and files `0600`. Every write goes through a temporary fi
 directory, an atomic rename over the path, and then a directory fsync.
 
 A record is YAML frontmatter between two `---` lines, then the body. The body keeps its bytes
-exactly: a trailing newline and a line that spells `---` included. The fields are `name` (the
+exactly: a trailing newline and a line that spells `---` included. Every frontmatter scalar is
+one line: plain, single-quoted or double-quoted. The writer leaves a value plain when that is
+unambiguous and double-quotes anything else (a value with `: `, a leading or trailing space, a
+quote at its start, or a control character), so a hand-written quoted value and a written
+record read back the same. The fields are `name` (the
 file stem; `[a-z0-9-]`, 1 to 64 characters), `description` (one line), `type` (the closed set
 `RECORD_TYPES`: `user`, `feedback`, `project`, `reference`), `source` (the closed set
 `RECORD_SOURCES`: `model`, `user`, `import`; the host sets it), `created` and `modified` (RFC
 3339 UTC; `created` is kept across a write and `modified` is set on every write), `last_used`
 (RFC 3339 UTC or absent, which means never read), and an optional `provenance` map with
-`session_id` and `turn_id`. `write` refuses a name outside the rule before it touches a file.
-`touch_last_used` rewrites only the `last_used` line, or inserts one after `modified`; every
-other byte stays. The two closed sets are the slices the parser, the writer and the docs drift
-test read.
+`session_id` and `turn_id`. `write` refuses a name outside the rule before it touches a file,
+and a record's `source` is fixed at its first write: replacing a file keeps its existing
+`source` and ignores the caller's new value. `touch_last_used` rewrites only the `last_used`
+line, or inserts one after `modified`; every other byte stays. The two closed sets are the
+slices the parser, the writer and the docs drift test read.
 
 The index is plain text the store does not interpret. `index_lines` parses the
 `- [title](file) — description` form and reports every line that is not in it with its 1-based

@@ -305,7 +305,163 @@ fn index_lines_parses_the_form_and_reports_a_line_that_is_not() {
 }
 
 #[test]
-fn the_closed_sets_are_the_documented_values() {
-    assert_eq!(RECORD_TYPES, ["user", "feedback", "project", "reference"]);
-    assert_eq!(RECORD_SOURCES, ["model", "user", "import"]);
+fn a_quoted_yaml_scalar_reads_as_its_value() {
+    let dir = TempDir::new("files-yaml-scalars");
+    let store = FileStore::open(dir.path());
+    std::fs::create_dir_all(store.scope_dir(&global())).unwrap();
+    let timestamp = "2026-10-31T12:00:00.000000Z";
+    std::fs::write(
+        store.record_path(&global(), "hand"),
+        format!(
+            "---\nname: \"hand\"\ndescription: 'a quoted: value'\ntype: \"user\"\nsource: 'model'\ncreated: \"{timestamp}\"\nmodified: '{timestamp}'\nprovenance:\n  session_id: \"session-1\"\n  turn_id: 'turn-2'\n---\nbody\n"
+        ),
+    )
+    .unwrap();
+
+    let record = store.read(&global(), "hand").unwrap();
+    assert_eq!(record.frontmatter.name, "hand");
+    assert_eq!(record.frontmatter.description, "a quoted: value");
+    assert_eq!(record.frontmatter.record_type, "user");
+    assert_eq!(record.frontmatter.source, "model");
+    assert_eq!(record.frontmatter.created, timestamp);
+    assert_eq!(record.frontmatter.modified, timestamp);
+    assert_eq!(
+        record.frontmatter.provenance,
+        Some(FileProvenance {
+            session_id: Some("session-1".to_owned()),
+            turn_id: Some("turn-2".to_owned()),
+        })
+    );
+    assert_eq!(record.body, "body\n");
+
+    let entries = store.list(&global()).unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| matches!(entry, ListEntry::Record(_))),
+        "a quoted closed-set value is readable: {entries:?}"
+    );
+}
+
+#[test]
+fn a_write_keeps_the_source_of_an_existing_record() {
+    let dir = TempDir::new("files-source-fixed");
+    let store = FileStore::open(dir.path());
+    let mut first = new_record("style");
+    first.source = "user".to_owned();
+    store.write(&global(), first).unwrap();
+
+    let mut second = new_record("style");
+    second.source = "model".to_owned();
+    second.body = "new body\n".to_owned();
+    let written = store.write(&global(), second).unwrap();
+    assert_eq!(
+        written.frontmatter.source, "user",
+        "the returned record keeps the source fixed at the first write"
+    );
+
+    let read = store.read(&global(), "style").unwrap();
+    assert_eq!(read.frontmatter.source, "user");
+    assert_eq!(read.body, "new body\n");
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn backticked(text: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        values.push(after[..close].to_owned());
+        rest = &after[close + 1..];
+    }
+    values
+}
+
+/// The comma-separated backticked values that directly follow `marker`.
+fn documented_values_after(text: &str, marker: &str) -> Vec<String> {
+    let start = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("the docs do not mention {marker}"));
+    let mut rest = &text[start + marker.len()..];
+    let mut values = Vec::new();
+    while let Some(open) = rest.find('`') {
+        if !rest[..open]
+            .chars()
+            .all(|ch| ch.is_whitespace() || ch == ':' || ch == ',')
+        {
+            break;
+        }
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        values.push(after[..close].to_owned());
+        rest = &after[close + 1..];
+        let trimmed = rest.trim_start();
+        let Some(after_comma) = trimmed.strip_prefix(',') else {
+            break;
+        };
+        rest = after_comma;
+    }
+    assert!(!values.is_empty(), "no values follow {marker}");
+    values
+}
+
+/// A D4 table row's closed-set cell: `| \`type\` | closed set | \`a\`, \`b\`. |`.
+fn adr_closed_set(adr: &str, field: &str) -> Vec<String> {
+    let prefix = format!("| `{field}` | closed set |");
+    let row = adr
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("ADR 0021 D4 has no closed-set row for {field}"));
+    let cell = row.split('|').nth(3).unwrap_or("");
+    backticked(cell)
+}
+
+#[test]
+fn the_documented_closed_sets_are_the_constants() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("crates/radian-memory/README.md")).unwrap();
+    let adr = std::fs::read_to_string(root.join("docs/adr/0021-memory.md")).unwrap();
+
+    let documented_types = documented_values_after(&readme, "`RECORD_TYPES`:");
+    assert_eq!(
+        documented_types
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        RECORD_TYPES,
+        "the README lists a different `type` set than RECORD_TYPES"
+    );
+    let documented_sources = documented_values_after(&readme, "`RECORD_SOURCES`:");
+    assert_eq!(
+        documented_sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        RECORD_SOURCES,
+        "the README lists a different `source` set than RECORD_SOURCES"
+    );
+    assert_eq!(
+        adr_closed_set(&adr, "type")
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        RECORD_TYPES,
+        "ADR 0021 D4 lists a different `type` set than RECORD_TYPES"
+    );
+    assert_eq!(
+        adr_closed_set(&adr, "source")
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        RECORD_SOURCES,
+        "ADR 0021 D4 lists a different `source` set than RECORD_SOURCES"
+    );
 }

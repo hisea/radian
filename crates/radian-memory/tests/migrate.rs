@@ -167,6 +167,39 @@ fn an_interrupted_migration_writes_the_same_files_on_the_next_call() {
 }
 
 #[test]
+fn a_description_is_the_first_content_line_cut_at_120_characters() {
+    let dir = TempDir::new("migrate-description");
+    let old = MemoryStore::open(dir.path());
+    create(&old, None, "  padded line  \nsecond line");
+    let long = format!("{}z\nsecond line", "x".repeat(130));
+    create(&old, None, &long);
+
+    migrate_log(dir.path().join("global")).unwrap();
+
+    let store = FileStore::open(dir.path());
+    let descriptions: Vec<String> = store
+        .list(&global())
+        .unwrap()
+        .into_iter()
+        .map(|entry| match entry {
+            ListEntry::Record(frontmatter) => frontmatter.description,
+            ListEntry::Unreadable { path, reason } => {
+                panic!("unreadable record {}: {reason}", path.display())
+            }
+        })
+        .collect();
+    assert!(
+        descriptions.iter().any(|line| line == "  padded line  "),
+        "the first line keeps its leading and trailing spaces: {descriptions:?}"
+    );
+    let truncated: String = long.chars().take(120).collect();
+    assert!(
+        descriptions.contains(&truncated),
+        "the first line is cut at 120 characters: {descriptions:?}"
+    );
+}
+
+#[test]
 fn an_old_agent_source_becomes_model() {
     let dir = TempDir::new("migrate-source");
     let old = MemoryStore::open(dir.path());

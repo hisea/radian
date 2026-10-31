@@ -2,9 +2,9 @@
 //! scope, beside the old JSONL logs.
 //!
 //! A record file is YAML frontmatter between two `---` lines and then the body. The frontmatter
-//! is flat except for the optional `provenance` map. The parser is deliberately small and has no
-//! YAML dependency: a known field with a known shape is accepted, anything else is refused with
-//! its 1-based line.
+//! is flat except for the optional `provenance` map, and every scalar is on one line: plain, or
+//! single- or double-quoted. The parser is deliberately small and has no YAML dependency: a known
+//! field with a known shape is accepted, anything else is refused with its 1-based line.
 //!
 //! The name is the file stem and is restricted to `[a-z0-9-]`, 1 to 64 characters. Two records
 //! never share a name. A write goes through a temporary file in the scope directory and an
@@ -75,7 +75,7 @@ pub struct Record {
 }
 
 /// What a host supplies to [`FileStore::write`]. `modified` is set by the store; `created` and
-/// `last_used` are kept from an existing file.
+/// `last_used` are kept from an existing file, and so is `source` after the first write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRecord {
     pub name: String,
@@ -157,8 +157,8 @@ impl FileStore {
         read_named(&self.scope_dir(scope), name)
     }
 
-    /// Creates or replaces `<name>.md`. `modified` is set now; `created` and `last_used` are
-    /// kept from an existing file. The name is validated before any file is touched.
+    /// Creates or replaces `<name>.md`. `modified` is set now; `created`, `last_used` and
+    /// `source` are kept from an existing file. The name is validated before any file is touched.
     pub fn write(&self, scope: &Scope, record: NewRecord) -> Result<Record, MemoryError> {
         write_new(&self.scope_dir(scope), record)
     }
@@ -300,6 +300,136 @@ impl ParseError {
     }
 }
 
+/// Parses a YAML scalar as this store accepts it: a plain scalar, or a single- or double-quoted
+/// one on a single line. A plain scalar ends at a ` #` comment and loses trailing whitespace.
+fn parse_scalar(value: &str, line: usize) -> Result<String, ParseError> {
+    let value = value.trim_start();
+    if let Some(rest) = value.strip_prefix('"') {
+        parse_double_quoted(rest, line)
+    } else if let Some(rest) = value.strip_prefix('\'') {
+        parse_single_quoted(rest, line)
+    } else {
+        Ok(plain_scalar(value))
+    }
+}
+
+fn plain_scalar(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut end = bytes.len();
+    for index in 1..bytes.len() {
+        if bytes[index] == b'#' && matches!(bytes[index - 1], b' ' | b'\t') {
+            end = index;
+            break;
+        }
+    }
+    value[..end].trim_end().to_owned()
+}
+
+fn parse_double_quoted(rest: &str, line: usize) -> Result<String, ParseError> {
+    let mut chars = rest.chars();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                if !scalar_tail_ok(chars.as_str()) {
+                    return Err(ParseError::new(
+                        line,
+                        "unexpected text after a quoted scalar",
+                    ));
+                }
+                return Ok(out);
+            }
+            '\\' => {
+                let Some(escaped) = chars.next() else {
+                    return Err(ParseError::new(line, "a quoted scalar ends in a backslash"));
+                };
+                match escaped {
+                    '0' => out.push('\0'),
+                    'a' => out.push('\u{7}'),
+                    'b' => out.push('\u{8}'),
+                    't' | '\t' => out.push('\t'),
+                    'n' => out.push('\n'),
+                    'v' => out.push('\u{b}'),
+                    'f' => out.push('\u{c}'),
+                    'r' => out.push('\r'),
+                    'e' => out.push('\u{1b}'),
+                    ' ' => out.push(' '),
+                    '"' => out.push('"'),
+                    '/' => out.push('/'),
+                    '\\' => out.push('\\'),
+                    'N' => out.push('\u{85}'),
+                    '_' => out.push('\u{a0}'),
+                    'L' => out.push('\u{2028}'),
+                    'P' => out.push('\u{2029}'),
+                    'x' => out.push(parse_hex_escape(&mut chars, 2, line)?),
+                    'u' => out.push(parse_hex_escape(&mut chars, 4, line)?),
+                    'U' => out.push(parse_hex_escape(&mut chars, 8, line)?),
+                    other => {
+                        return Err(ParseError::new(
+                            line,
+                            format!("unknown escape `\\{other}` in a quoted scalar"),
+                        ));
+                    }
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    Err(ParseError::new(line, "a quoted scalar is not closed"))
+}
+
+fn parse_hex_escape(
+    chars: &mut std::str::Chars<'_>,
+    digits: usize,
+    line: usize,
+) -> Result<char, ParseError> {
+    let mut value = 0u32;
+    for _ in 0..digits {
+        let Some(ch) = chars.next() else {
+            return Err(ParseError::new(line, "a quoted scalar ends mid-escape"));
+        };
+        let Some(digit) = ch.to_digit(16) else {
+            return Err(ParseError::new(
+                line,
+                format!("`{ch}` is not a hex digit in a quoted scalar"),
+            ));
+        };
+        value = value * 16 + digit;
+    }
+    char::from_u32(value)
+        .ok_or_else(|| ParseError::new(line, "a quoted scalar has an invalid escape code point"))
+}
+
+fn parse_single_quoted(rest: &str, line: usize) -> Result<String, ParseError> {
+    let mut chars = rest.chars();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.as_str().starts_with('\'') {
+                chars.next();
+                out.push('\'');
+            } else {
+                if !scalar_tail_ok(chars.as_str()) {
+                    return Err(ParseError::new(
+                        line,
+                        "unexpected text after a quoted scalar",
+                    ));
+                }
+                return Ok(out);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Err(ParseError::new(line, "a quoted scalar is not closed"))
+}
+
+/// A quoted scalar may be followed only by whitespace and a `#` comment on its line.
+fn scalar_tail_ok(tail: &str) -> bool {
+    let tail = tail.trim_start();
+    tail.is_empty() || tail.starts_with('#')
+}
+
 #[derive(Default)]
 struct Builder {
     name: Option<String>,
@@ -368,7 +498,7 @@ fn parse_record(text: &str, expected_name: Option<&str>) -> Result<Record, Parse
             let Some((key, value)) = line.text.trim().split_once(':') else {
                 return Err(ParseError::new(line_number, "expected `key: value`"));
             };
-            let value = value.trim().to_owned();
+            let value = parse_scalar(value, line_number)?;
             let provenance = builder.provenance.get_or_insert_with(Default::default);
             match key.trim() {
                 "session_id" => provenance.session_id = Some(value),
@@ -384,10 +514,10 @@ fn parse_record(text: &str, expected_name: Option<&str>) -> Result<Record, Parse
             return Err(ParseError::new(line_number, "expected `key: value`"));
         };
         let key = key.trim();
-        let value = value.trim();
         match key {
             "name" => {
-                if !name_fits(value) {
+                let value = parse_scalar(value, line_number)?;
+                if !name_fits(&value) {
                     return Err(ParseError::new(
                         line_number,
                         format!(
@@ -395,43 +525,61 @@ fn parse_record(text: &str, expected_name: Option<&str>) -> Result<Record, Parse
                         ),
                     ));
                 }
-                builder.name = Some(value.to_owned());
+                builder.name = Some(value);
             }
-            "description" => builder.description = Some(value.to_owned()),
+            "description" => {
+                let value = parse_scalar(value, line_number)?;
+                if value.contains(['\n', '\r']) {
+                    return Err(ParseError::new(
+                        line_number,
+                        "the description must be one line",
+                    ));
+                }
+                builder.description = Some(value);
+            }
             "type" => {
-                if !RECORD_TYPES.contains(&value) {
+                let value = parse_scalar(value, line_number)?;
+                if !RECORD_TYPES.contains(&value.as_str()) {
                     return Err(ParseError::new(
                         line_number,
                         format!("type {value:?} is not one of {RECORD_TYPES:?}"),
                     ));
                 }
-                builder.record_type = Some(value.to_owned());
+                builder.record_type = Some(value);
             }
             "source" => {
-                if !RECORD_SOURCES.contains(&value) {
+                let value = parse_scalar(value, line_number)?;
+                if !RECORD_SOURCES.contains(&value.as_str()) {
                     return Err(ParseError::new(
                         line_number,
                         format!("source {value:?} is not one of {RECORD_SOURCES:?}"),
                     ));
                 }
-                builder.source = Some(value.to_owned());
+                builder.source = Some(value);
             }
             "created" => {
-                validate_timestamp("created", value)
+                let value = parse_scalar(value, line_number)?;
+                validate_timestamp("created", &value)
                     .map_err(|message| ParseError::new(line_number, message))?;
-                builder.created = Some(value.to_owned());
+                builder.created = Some(value);
             }
             "modified" => {
-                validate_timestamp("modified", value)
+                let value = parse_scalar(value, line_number)?;
+                validate_timestamp("modified", &value)
                     .map_err(|message| ParseError::new(line_number, message))?;
-                builder.modified = Some(value.to_owned());
+                builder.modified = Some(value);
             }
             "last_used" => {
-                validate_timestamp("last_used", value)
-                    .map_err(|message| ParseError::new(line_number, message))?;
-                builder.last_used = Some(value.to_owned());
+                let value = parse_scalar(value, line_number)?;
+                if value.is_empty() || value == "null" || value == "~" {
+                    builder.last_used = None;
+                } else {
+                    validate_timestamp("last_used", &value)
+                        .map_err(|message| ParseError::new(line_number, message))?;
+                    builder.last_used = Some(value);
+                }
             }
-            "provenance" => match value {
+            "provenance" => match value.trim() {
                 "" => {
                     builder.provenance = Some(FileProvenance::default());
                     in_provenance = true;
@@ -556,17 +704,23 @@ fn write_new(dir: &Path, new: NewRecord) -> Result<Record, MemoryError> {
         )));
     }
     let path = record_path_in(dir, &new.name);
-    let (created, last_used) = if path.exists() {
+    // `created` and `last_used` are kept across a replacement, and so is `source`: a record's
+    // source is fixed at its first write (ADR 0021 D4).
+    let (created, last_used, source) = if path.exists() {
         let existing = read_named(dir, &new.name)?;
-        (existing.frontmatter.created, existing.frontmatter.last_used)
+        (
+            existing.frontmatter.created,
+            existing.frontmatter.last_used,
+            existing.frontmatter.source,
+        )
     } else {
-        (now_utc(), None)
+        (now_utc(), None, new.source)
     };
     let frontmatter = Frontmatter {
         name: new.name.clone(),
         description: new.description,
         record_type: new.record_type,
-        source: new.source,
+        source,
         created,
         modified: now_utc(),
         last_used,
@@ -590,28 +744,84 @@ fn write_record(dir: &Path, frontmatter: &Frontmatter, body: &str) -> Result<(),
 fn render(frontmatter: &Frontmatter, body: &str) -> String {
     let mut out = String::new();
     out.push_str("---\n");
-    out.push_str(&format!("name: {}\n", frontmatter.name));
-    out.push_str(&format!("description: {}\n", frontmatter.description));
-    out.push_str(&format!("type: {}\n", frontmatter.record_type));
-    out.push_str(&format!("source: {}\n", frontmatter.source));
-    out.push_str(&format!("created: {}\n", frontmatter.created));
-    out.push_str(&format!("modified: {}\n", frontmatter.modified));
+    out.push_str(&format!("name: {}\n", render_scalar(&frontmatter.name)));
+    out.push_str(&format!(
+        "description: {}\n",
+        render_scalar(&frontmatter.description)
+    ));
+    out.push_str(&format!(
+        "type: {}\n",
+        render_scalar(&frontmatter.record_type)
+    ));
+    out.push_str(&format!("source: {}\n", render_scalar(&frontmatter.source)));
+    out.push_str(&format!(
+        "created: {}\n",
+        render_scalar(&frontmatter.created)
+    ));
+    out.push_str(&format!(
+        "modified: {}\n",
+        render_scalar(&frontmatter.modified)
+    ));
     if let Some(last_used) = &frontmatter.last_used {
-        out.push_str(&format!("last_used: {last_used}\n"));
+        out.push_str(&format!("last_used: {}\n", render_scalar(last_used)));
     }
     if let Some(provenance) = &frontmatter.provenance
         && (provenance.session_id.is_some() || provenance.turn_id.is_some())
     {
         out.push_str("provenance:\n");
         if let Some(session_id) = &provenance.session_id {
-            out.push_str(&format!("  session_id: {session_id}\n"));
+            out.push_str(&format!("  session_id: {}\n", render_scalar(session_id)));
         }
         if let Some(turn_id) = &provenance.turn_id {
-            out.push_str(&format!("  turn_id: {turn_id}\n"));
+            out.push_str(&format!("  turn_id: {}\n", render_scalar(turn_id)));
         }
     }
     out.push_str("---\n");
     out.push_str(body);
+    out
+}
+
+fn render_scalar(value: &str) -> String {
+    if plain_scalar_safe(value) {
+        value.to_owned()
+    } else {
+        quote_scalar(value)
+    }
+}
+
+/// A value the writer can emit without quotes and read back unchanged.
+fn plain_scalar_safe(value: &str) -> bool {
+    if value.is_empty() || value != value.trim() || value.chars().any(char::is_control) {
+        return false;
+    }
+    let first = value.chars().next().unwrap();
+    if "-?:,[]{}#&*!|>'\"%@`".contains(first) {
+        return false;
+    }
+    if value.contains(": ") || value.ends_with(':') || value.contains(" #") {
+        return false;
+    }
+    !matches!(
+        value,
+        "null" | "Null" | "NULL" | "~" | "true" | "True" | "TRUE" | "false" | "False" | "FALSE"
+    )
+}
+
+fn quote_scalar(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -678,7 +888,7 @@ fn replace_last_used(text: &str, at: &str) -> Result<String, ParseError> {
     match existing {
         Some((start, content_end, next)) => {
             let ending = &text[content_end..next];
-            let mut replacement = format!("last_used: {at}");
+            let mut replacement = format!("last_used: {}", render_scalar(at));
             replacement.push_str(ending);
             Ok(format!(
                 "{}{}{}",
@@ -692,8 +902,9 @@ fn replace_last_used(text: &str, at: &str) -> Result<String, ParseError> {
                 ParseError::new(line_number, "the frontmatter is not closed with `---`")
             })?;
             Ok(format!(
-                "{}last_used: {at}\n{}",
+                "{}last_used: {}\n{}",
                 &text[..insert_at],
+                render_scalar(at),
                 &text[insert_at..]
             ))
         }
@@ -866,10 +1077,9 @@ fn base_name(record: &MemoryRecord) -> String {
 
 fn description_of(content: &str) -> String {
     content
-        .lines()
+        .split(['\n', '\r'])
         .next()
         .unwrap_or("")
-        .trim()
         .chars()
         .take(DESCRIPTION_MAX)
         .collect()
