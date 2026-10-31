@@ -31,43 +31,34 @@ Status: accepted
 
 ### D3 Persistence
 
-- Each scope keeps one append-written JSONL log as the only fact source: `~/.radian/memory/global/log.jsonl`, `~/.radian/memory/projects/<ProjectId>/log.jsonl`.
-- Reuses JSONL write and read paths, single-writer lock, torn-tail truncation, unknown-event critical handling, and 0600/0700 modes. Memory has **its own event schema and its own replay**, uncoupled from session state machines.
-- Events: `MemoryCreated`, `MemoryRevised`, `MemoryArchived`, `MemoryRestored`, `MemoryConfirmed`, `MemoryForgotten`, `StorePurged`. Current state equals replay result.
-
-| Operation | Effect | Data still present |
-|---|---|---|
-| **Archive** | Skipped from default retrieval and injection; `restore` possible | Records and full history stay |
-| **Forget** (`delete`) | Logical delete: vanishes from every view, search, injection, and export; no rebuild ever revives it | History content stays in the log |
-| **Purge** | User-triggered physical cleanup: rewrites the log, drops all content of Forgotten records | Gone from copies this service manages; no guarantee over user-made backups or content already written into session files |
-
-Purge: exclusive lock, then write temp file per current state, then fsync, then atomic rename over the old log, then fsync the directory. The new log ends with one `StorePurged { removed, at }`. On mid-way crash, old or new log stays intact. No partly valid file ever remains. Only the user triggers Purge. Archive and Forget must never claim physical deletion.
-
-- Markdown is a view: `export` produces editable Markdown (YAML front matter with `id` and `revision`). `import` creates `MemoryRevised` per `id` plus `revision` (revision mismatch means conflict, never overwrite; malformed format means reject with position). Direct Markdown edits take no effect.
+- Each scope is a directory of Markdown files: `~/.radian/memory/global/<name>.md` and `~/.radian/memory/projects/<ProjectId>/<name>.md`. One record is one file: its frontmatter is the record's metadata (D4) and its body is the content. Directories are `0700` and files `0600`. A write goes through a temporary file in the same directory, `fsync`, an atomic rename over the path, then a directory `fsync`; a crash leaves either the old file or the new one, never a partial file.
+- Each scope has one index, `~/.radian/memory/global/MEMORY.md` or `~/.radian/memory/projects/<ProjectId>/MEMORY.md`. Its form is `- [title](file) — description`, one line per record. The store treats the index as plain text and only parses that form for the host's cap and the tests.
+- A body keeps its bytes exactly: trailing newlines, blank lines and a line that spells `---` all survive a write and a read. The closing `---` of the frontmatter is the first such line after the opening one.
+- `name` is the file stem and obeys `[a-z0-9-]`, 1 to 64 characters. A write refuses any other name before it touches a file. Two records never share a name; the caller chooses another name.
+- A file whose frontmatter does not parse, or whose `type` or `source` is outside its closed set, is reported by `list` as one unreadable entry naming its path and line and never hides the other records. Reading it is an error naming the path and the line.
+- Deleting a file is forgetting. There is no archive, no purge, no revision and no event log: the file is the record.
+- Migration: when `<scope>/log.jsonl` exists and `<scope>/log.jsonl.migrated` does not, replay the log once with its reader. Every Active record becomes one file: the name comes from the record's key when it obeys the name rule, else from a slug of the first words of its content and made unique with `-2`, `-3`; the description is the first line of the content cut at 120 characters; `type` maps `preference` to `user`, `decision` and `fact` to `project`, and `lesson` to `feedback`; `source` maps `User` to `user`, `Agent` to `model`, and `Import` to `import`; `created` and `modified` come from the record; `provenance` keeps `session_id` and `turn_id`. Archived and Forgotten records are dropped. The index is written with one line per file, then the log is renamed to `log.jsonl.migrated`. A second call finds the marker and does nothing. A crash before the rename leaves the log in place, and the next call writes the same files again: the writes are idempotent.
 - No cross-scope atomicity promised.
 
 ### D4 Data model
 
-```text
-MemoryRecord {
-    id: MemoryId,                 // stable across revisions, exports, imports, and Purge
-    scope: Global | Project(ProjectId),
-    kind: Preference | Decision | Fact | Lesson,
-    key: Option<String>,
-    content: String,
-    source: User | Agent | Import,
-    provenance: { session_id?, turn_id?, file?, commit? },
-    verification: Unverified | Confirmed { by: User, at },
-    status: Active | Archived,
-    created_at, updated_at,
-    revision: u64,
-}
-```
+Each record is one Markdown file. Its frontmatter has these fields:
 
-- **Active and Verified are two independent dimensions**: a record can be `Active` and `Unverified`. A user `confirm` never rewrites `source` to `User`: `source` keeps its value, a separate `MemoryConfirmed` is written, and `verification` becomes `Confirmed`. A user-written record is natively `Confirmed`.
-- `source: Agent` appears only on old-log records: no write path produces it anymore (D5). Reads, injection, and `confirm` of these records behave as usual.
-- Deterministic conflicts on same-scope same-key (no last-write-wins): one scope holds at most one Active record per non-empty key. A `create` against an existing Active key fails with `KeyConflict`, returning the existing record id and revision. Content changes use `revise` only, with `expected_revision`. `revise`, `archive`, `restore`, and `confirm` all carry `expected_revision`. A mismatch returns `RevisionConflict`. Multiple writers serialize on the single-writer lock, then revision rules judge.
-- No TTL, `review_at`, `NeedsReview`, conflict candidates, or `Superseded`. Adding them adds only fields and events. The base storage format stays.
+| Field | Type | Rule |
+|---|---|---|
+| `name` | string | The file stem; `[a-z0-9-]`, 1 to 64 characters. |
+| `description` | string | One line, used by the index. |
+| `type` | closed set | `user`, `feedback`, `project`, `reference`. |
+| `source` | closed set | `model`, `user`, `import`. The host sets it at write time and never trusts a model-claimed value. |
+| `created` | RFC 3339 UTC | Set once and kept across writes. |
+| `modified` | RFC 3339 UTC | Set on every write. |
+| `last_used` | RFC 3339 UTC | Optional; absent means never read. A model read updates it by rewriting only that line. |
+| `provenance` | optional map | `session_id` and `turn_id`, each optional. |
+
+- The body is free Markdown. `feedback` and `project` records carry `**Why:**` and `**How to apply:**` lines.
+- The two closed sets are `RECORD_TYPES` and `RECORD_SOURCES` in `radian-memory`: the parser, the writer and the docs drift test read the same slices.
+- `source` is fixed when the file is written and never changes afterwards. The host judges it; the model never supplies it.
+- There is no `id`, `key`, `revision`, `verification`, or lifecycle dimension. A record's identity is its scope and its name. A change rewrites the file; deleting it is forgetting (D3).
 
 ### D5 Write sources and priority
 

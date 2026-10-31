@@ -80,6 +80,16 @@ pub enum MemoryError {
         column: usize,
         message: String,
     },
+    #[error("invalid memory record name {name:?}: {reason}")]
+    InvalidName { name: String, reason: String },
+    #[error("invalid memory record: {message}")]
+    InvalidRecord { message: String },
+    #[error("{path}: line {line}: {message}")]
+    Frontmatter {
+        path: PathBuf,
+        line: usize,
+        message: String,
+    },
 }
 
 impl MemoryError {

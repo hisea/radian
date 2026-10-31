@@ -16,7 +16,7 @@ use crate::model::{
     Confirmer, Kind, MemoryId, MemoryRecord, ProjectId, Provenance, Scope, Source, now_utc,
 };
 
-/// Where a split/merge calls its test seam.
+/// Where a split/merge or a migration calls its test seam.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovePhase {
@@ -26,6 +26,9 @@ pub enum MovePhase {
     /// After the target `Created` and before the source `Forgotten`: a crash here leaves the
     /// half-finished on-disk state.
     AfterTargetAppend,
+    /// After a log migration wrote every record file and the index, and before it renames the
+    /// log to `log.jsonl.migrated`.
+    MigrationBeforeLogRename,
 }
 
 // Test seam: a callback run at a [`MovePhase`]; returning `true` aborts with
@@ -45,7 +48,7 @@ pub fn set_move_hook(hook: Box<dyn FnMut(MovePhase) -> bool>) {
     MOVE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
 }
 
-fn run_move_hook(phase: MovePhase) -> bool {
+pub(crate) fn run_move_hook(phase: MovePhase) -> bool {
     MOVE_HOOK.with(|slot| slot.borrow_mut().as_mut().is_some_and(|hook| hook(phase)))
 }
 
