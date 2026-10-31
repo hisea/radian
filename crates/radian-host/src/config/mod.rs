@@ -192,7 +192,7 @@ impl Default for ControlConfig {
 /// The `[hub]` default port (ADR 0048): the HTTP API listens only on loopback.
 pub const DEFAULT_HUB_PORT: u16 = 7341;
 /// The `[hub]` default concurrency: tasks in `doing` across every registered repository.
-pub const DEFAULT_HUB_CONCURRENCY: u32 = 4;
+pub const DEFAULT_HUB_CONCURRENCY: u64 = 4;
 /// The `[hub]` default wait between scheduling passes, the same default `radian arc serve`
 /// used.
 pub const DEFAULT_HUB_INTERVAL_SECS: u64 = 30;
@@ -210,7 +210,7 @@ pub const MAX_HUB_INTERVAL_SECS: u64 = 3600;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubConfig {
     pub port: u16,
-    pub concurrency: u32,
+    pub concurrency: u64,
     pub interval_secs: u64,
 }
 
@@ -545,10 +545,8 @@ fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 });
             }
             ("port", _) => return Err(wrong_type(path, "hub.port", "an integer")),
-            ("concurrency", Value::Integer(count))
-                if *count >= 1 && *count <= i64::from(u32::MAX) =>
-            {
-                config.hub.concurrency = *count as u32;
+            ("concurrency", Value::Integer(count)) if *count >= 1 => {
+                config.hub.concurrency = *count as u64;
             }
             ("concurrency", Value::Integer(_)) => {
                 return Err(ConfigError::ValueOutOfRange {
