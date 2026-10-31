@@ -76,3 +76,16 @@ identical).
 |---|---|---|---|
 | TK0226-M1 | TK0208's continuation is reverted: no streak is kept and a `MaxTokens` response with no tool calls ends the turn at once | ✅ 2 failed (rc=100) | `tests/turn.rs::two_truncated_responses_without_calls_then_a_normal_one_complete` (the first truncation ended `Incomplete(MaxTokens)` instead of `Completed`) and `tests/turn.rs::truncated_tool_call_responses_share_the_streak` (2 model calls instead of 4: the second truncation ended the turn) |
 | TK0226-M2 | a truncated response with tool calls does not count toward the streak (`&& tool_calls.is_empty()` in the streak update) | ✅ 2 failed (rc=100) | `tests/turn.rs::truncated_tool_call_responses_share_the_streak` and `tests/turn.rs::a_truncated_tool_call_response_counts_toward_the_streak` (both ended `Completed` instead of `Incomplete(MaxTokens)`) |
+
+## A small window: the kept part over `K` and the one extra compaction (fix/compaction-small-window, 2026-10-31)
+
+Branch `fix/compaction-small-window`. Each mutation was applied in place, only
+`tests/compaction_flow.rs` was run, and the source was restored from a copy taken before the
+mutation (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| compaction-small-window-M1 | the kept-part cut never runs (`if false && deterministic_allowed && plan.kept_tokens > keep`) | ✅ 1 failed | `tests/compaction_flow.rs::a_kept_tail_over_the_keep_target_has_its_tool_results_cut` (the compaction came out below target) |
+| compaction-small-window-M2 | no extra compaction: a turn with a below-target compaction fails on the next over-budget request (`if true \|\| self.run.extra_compaction_used`) | ✅ 2 failed | `tests/compaction_flow.rs::a_second_compaction_after_a_below_target_one_lets_the_turn_finish` (failed `BelowTarget` instead of `Completed`) and `tests/compaction_flow.rs::a_below_target_extra_compaction_stops_auto_compaction_for_the_turn` (1 compaction instead of 2) |
+| compaction-small-window-M3 | the tool-result cut keeps 0 characters (`let limit = 0usize.saturating_sub(reserve)` in `truncate_tool_result_text`) | ✅ 2 failed | `tests/compaction_flow.rs::a_kept_tail_over_the_keep_target_has_its_tool_results_cut` (the head of the result did not survive) and `tests/compaction_flow.rs::the_deterministic_fallback_truncates_tools_and_drops_the_oldest_first` |
+| compaction-small-window-M4 | an extra compaction that reached the goal does not clear the below-target state | ✅ 1 failed | `tests/compaction_flow.rs::a_second_compaction_after_a_below_target_one_lets_the_turn_finish` (the third over-budget request failed `BelowTarget` instead of compacting) |

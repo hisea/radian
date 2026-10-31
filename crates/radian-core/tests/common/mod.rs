@@ -225,6 +225,8 @@ pub enum Behavior {
     Stubborn,
     /// On cancellation, spends this many milliseconds cleaning up, then records it.
     CleansUp(u64),
+    /// Returns this many copies of the character: a large result from small arguments.
+    Large(char, usize),
 }
 
 #[derive(Default)]
@@ -347,6 +349,7 @@ impl ToolSession for MemSession {
                 Err(ToolFailure::new("cancelled", "cancelled"))
             }
             Behavior::Stubborn => std::future::pending().await,
+            Behavior::Large(c, n) => Ok(ToolOutput::text(c.to_string().repeat(n))),
             Behavior::CleansUp(ms) => {
                 cx.cancellation.cancelled().await;
                 tokio::time::sleep(Duration::from_millis(ms)).await;

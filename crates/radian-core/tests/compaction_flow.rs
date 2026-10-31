@@ -960,27 +960,35 @@ fn a_candidate_without_a_commit_recovers_the_old_history() {
     );
 }
 
-// ---------- 6b (cont.): below-target stops auto-compaction for the turn ----------
+// ---------- 6b (cont.): below-target and the one extra compaction ----------
 
-/// After a below-target compaction, the next over-budget request in the same turn fails
-/// instead of compacting again (ADR 0018).
+/// A history whose bulk is an assistant message, so the verbatim user list stays tiny and a
+/// summary's own length decides where `T_after` lands (`compaction_agent`, `B = 8000`).
+fn assistant_heavy_history() -> Vec<Message> {
+    vec![
+        Message::user("task"),
+        Message::assistant("x".repeat(12_000)),
+        Message::user("last"),
+    ]
+}
+
+/// After a below-target compaction, the next over-budget request gets one more compaction
+/// (ADR 0018). When that one is below target too, the next over-budget request in the same
+/// turn fails instead of compacting a third time.
 #[tokio::test]
-async fn a_below_target_compaction_stops_auto_compaction_for_the_turn() {
+async fn a_below_target_extra_compaction_stops_auto_compaction_for_the_turn() {
     use common::stop;
 
     let model = ScriptedModel::new([
-        summary_reply(&"s".repeat(2_600), 10),
+        summary_reply(&"s".repeat(6_500), 10),
         stop(StopReason::PauseTurn, &"a".repeat(2_000)),
+        summary_reply(&"t".repeat(4_500), 10),
+        stop(StopReason::PauseTurn, &"b".repeat(2_000)),
     ]);
     let journal = Arc::new(RecordingJournal::new());
     let agent = compaction_agent(model.clone(), 8_000, true);
-    let history = vec![
-        Message::user("x".repeat(4_000)),
-        Message::user("y".repeat(12_000)),
-        Message::user("last"),
-    ];
     let mut session = agent
-        .open_session_with_journal(history, journal.clone())
+        .open_session_with_journal(assistant_heavy_history(), journal.clone())
         .await
         .unwrap();
     let recorder = Recorder::default();
@@ -995,6 +1003,16 @@ async fn a_below_target_compaction_stops_auto_compaction_for_the_turn() {
             radian_core::RunError::Compaction(radian_core::CompactionError::BelowTarget)
         ),
         "{error:?}"
+    );
+    let targets = compaction_targets(&journal);
+    assert_eq!(
+        targets.len(),
+        2,
+        "exactly one extra compaction: {targets:?}"
+    );
+    assert!(
+        targets.iter().all(|t| t.0),
+        "both below target: {targets:?}"
     );
 }
 
@@ -1640,4 +1658,165 @@ async fn the_deterministic_fallback_counts_the_whole_removed_head() {
         )),
         "the event names the same count"
     );
+}
+
+// ---------- small windows: the kept tail and the extra compaction ----------
+
+/// An agent with one `big` tool that returns `chars` copies of `z` from empty arguments, and a
+/// budget at the default ruler (4 bytes per token), so `B`, `K` and the plan measure alike.
+fn small_window_agent(
+    model: Arc<ScriptedModel>,
+    budget: u64,
+    chars: usize,
+) -> Arc<Agent<Arc<ScriptedModel>, common::MemTools, ()>> {
+    let tools = common::MemTools::new(vec![(
+        common::spec("big"),
+        common::Behavior::Large('z', chars),
+    )]);
+    Arc::new(Agent::new(model, tools).with_config(AgentConfig {
+        context_budget: Some(ContextBudget::new(budget)),
+        auto_compact: true,
+        retries: 0,
+        ..Default::default()
+    }))
+}
+
+/// The `(below_target, tokens_after)` of every `ContextCompacted` candidate in the journal.
+fn compaction_targets(journal: &RecordingJournal) -> Vec<(bool, u64)> {
+    journal
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::ContextCompacted {
+                below_target,
+                tokens_after,
+                ..
+            } => Some((*below_target, *tokens_after)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of the kept `big` tool result in a transcript.
+fn big_result(history: &[Message]) -> String {
+    history
+        .iter()
+        .find_map(|m| match m {
+            Message::Tool { result, .. } if result.call_id == "b1" => Some(result.text()),
+            _ => None,
+        })
+        .expect("the newest tool result is kept")
+}
+
+/// ADR 0018: a 32k window (`B = 24576`, `K = 6144`) whose newest atomic unit is one
+/// ~19k-token tool result. Kept whole, summary plus tail lands over 75% of `B` and the
+/// compaction is below target. The kept part alone is over `K`, so its over-long tool result is
+/// cut to the fallback's 2000 characters before the measure, and the compaction reaches the
+/// goal.
+#[tokio::test]
+async fn a_kept_tail_over_the_keep_target_has_its_tool_results_cut() {
+    use radian_core::TOOL_RESULT_LIMIT_CHARS;
+
+    let model = ScriptedModel::new([
+        common::calls(vec![common::call("b1", "big", serde_json::json!({}))]),
+        summary_reply("summary of the task", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = small_window_agent(model.clone(), 24_576, 76_000);
+    let history = vec![Message::user("x".repeat(24_000)), Message::assistant("ok")];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let targets = compaction_targets(&journal);
+    assert_eq!(targets.len(), 1, "{targets:?}");
+    assert!(!targets[0].0, "the cut tail reaches the goal: {targets:?}");
+    assert!(targets[0].1 * 4 <= 24_576 * 3, "{targets:?}");
+    assert_eq!(
+        compacted_records(&journal),
+        vec![(false, 3)],
+        "a model summary"
+    );
+
+    let kept = big_result(session.transcript());
+    assert!(kept.contains("[truncated"), "{}", &kept[kept.len() - 60..]);
+    assert!(kept.chars().count() <= TOOL_RESULT_LIMIT_CHARS);
+    // The cut keeps the head of the result, not just the marker.
+    assert!(
+        kept.starts_with(&"z".repeat(1_000)),
+        "the head of the result survives"
+    );
+}
+
+/// ADR 0018: a kept part within `K` is not touched, so a large window (where a tool result is
+/// never near `K`) compacts exactly as before.
+#[tokio::test]
+async fn a_kept_tail_within_the_keep_target_stays_whole() {
+    let model = ScriptedModel::new([
+        common::calls(vec![common::call("b1", "big", serde_json::json!({}))]),
+        summary_reply("summary of the task", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    // `K = 6144`; the result is 6000 characters, about 1500 tokens.
+    let agent = small_window_agent(model.clone(), 24_576, 6_000);
+    // Request 1 (23,500 tokens) fits; the result pushes request 2 over `B`.
+    let history = vec![Message::user("x".repeat(94_000)), Message::assistant("ok")];
+    let mut session = agent
+        .open_session_with_journal(history, journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(compaction_targets(&journal).len(), 1);
+    assert_eq!(big_result(session.transcript()), "z".repeat(6_000));
+}
+
+/// ADR 0018: after a below-target compaction, the next over-budget request in the same turn
+/// gets one more compaction. When that one reaches the goal, the turn goes on under the
+/// ordinary rule, so a later over-budget request compacts again.
+#[tokio::test]
+async fn a_second_compaction_after_a_below_target_one_lets_the_turn_finish() {
+    use common::stop;
+
+    let model = ScriptedModel::new([
+        summary_reply(&"s".repeat(6_500), 10),
+        stop(StopReason::PauseTurn, &"a".repeat(2_000)),
+        summary_reply("short", 10),
+        // Over `B` again: the extra compaction reached the goal, so the ordinary rule is back
+        // and this one compacts as well.
+        stop(StopReason::PauseTurn, &"b".repeat(7_000)),
+        summary_reply("shorter", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(assistant_heavy_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let targets = compaction_targets(&journal);
+    assert_eq!(targets.len(), 3, "{targets:?}");
+    assert!(targets[0].0, "the first is below target: {targets:?}");
+    assert!(!targets[1].0, "the extra one reaches the goal: {targets:?}");
 }

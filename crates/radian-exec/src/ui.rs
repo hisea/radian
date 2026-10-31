@@ -212,11 +212,7 @@ impl EventSink for Ui {
                 if deterministic {
                     eprintln!("[compaction] compacted without a summary ({dropped} dropped)");
                 } else {
-                    let note = if below_target {
-                        " (below target; no further compaction this turn)"
-                    } else {
-                        ""
-                    };
+                    let note = if below_target { " (below target)" } else { "" };
                     eprintln!("[compaction] {tokens_before} tokens → {tokens_after} tokens{note}");
                 }
             }
