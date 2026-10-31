@@ -165,8 +165,9 @@ empty).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| TK0270-M1 | the memory rule matches any path under `<root>` (`PathUnder(root)` instead of `PathUnder(root/global)` and `PathUnder(root/projects)`) | ✅ 1 failed (rc=100) | `profile::tests::a_memory_write_outside_the_scope_directories_is_not_matched` |
+| TK0270-M1 | the memory rule matches any path under `<root>` (`PathUnder(root)` instead of `PathUnder(root/global)` and `PathUnderNested(root/projects)`) | ✅ 1 failed (rc=100) | `profile::tests::a_memory_write_outside_the_scope_directories_is_not_matched` |
 | TK0270-M2 | `rule::resolve_path` skips `canonicalize_existing_prefix` and only normalises lexically | ✅ 1 failed (rc=100) | `profile::tests::a_symlink_out_of_the_memory_store_is_not_matched` |
 | TK0270-M3 | the rule is added to the `full` tier only (`if preset != FullAccess { return self }`) | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::write_to_a_global_memory_file_is_allowed_in_every_tier` |
+| TK0270-M4 | the project scope matches with plain `PathUnder(<root>/projects)`, so a file directly in `projects/` counts | ✅ 1 failed (rc=100) | `profile::tests::a_memory_write_directly_in_the_projects_directory_is_not_matched` |
 
-3/3 caught, no equivalent mutation.
+4/4 caught, no equivalent mutation.

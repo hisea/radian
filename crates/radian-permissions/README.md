@@ -21,9 +21,10 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 - Tool matcher: `Any`, `Name("read")`, `Prefix("server__")`, or `Mcp` (matches the
   `server__tool` alias form; an approximation — a name containing `__` for another reason
   also matches).
-- Resource matcher: `Any`; `PathUnder(prefix)` for a file path; `CommandPrefix(["git",
-  "status"])` for a shell command; `Name("server__tool")` for an MCP alias / any
-  parameterless tool.
+- Resource matcher: `Any`; `PathUnder(prefix)` for a file path; `PathUnderNested(prefix)`
+  for a path at least two components below the prefix (a directory and an entry inside it);
+  `CommandPrefix(["git", "status"])` for a shell command; `Name("server__tool")` for an MCP
+  alias / any parameterless tool.
 - The resource is taken from the call: `command` argument if present, else `path`, else the
   tool name.
 
@@ -31,12 +32,13 @@ A rule is `(tool matcher, resource matcher) -> allow | ask | deny`.
 an `allow` rule when both match, and the default is conservative.
 
 `write` and `patch` are `allow` in **both** tiers when their `path` resolves under the two
-memory scope directories, `<memory root>/global/` and `<memory root>/projects/` (ADR 0021
-invariant 5 and D7): the model writes memory records as files. Only those two directories are
-covered — the registry `<memory root>/projects.jsonl` and a sibling directory still ask. The
-prefix is resolved like a call's path, so `..` or a symlink that leaves the store does not
-match. A profile built without a memory root (memory off) adds no memory rule. The `shell`
-tool never reaches the store; the sandbox deny set is unchanged (ADR 0020). See
+memory scope directories, `<memory root>/global/` and `<memory root>/projects/<ProjectId>/`
+(ADR 0021 invariant 5 and D7): the model writes memory records as files. The project scope
+needs a project-id directory, so a file directly in `<memory root>/projects/` is not covered;
+neither are the registry `<memory root>/projects.jsonl` and any sibling directory — they still
+ask. The prefix is resolved like a call's path, so `..` or a symlink that leaves the store
+does not match. A profile built without a memory root (memory off) adds no memory rule. The
+`shell` tool never reaches the store; the sandbox deny set is unchanged (ADR 0020). See
 `with_memory_root` and the edge-case tests in `src/profile.rs`.
 
 Removed tool names are refused as unknown tools: there is no alias mapping, so a rule

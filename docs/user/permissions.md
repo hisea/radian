@@ -40,8 +40,9 @@ Writes stay in the workspace in every tier, except the two memory scope director
 tier: `<memory root>/global/` and `<memory root>/projects/<project id>/` are allowed.
 `<memory root>` is `~/.radian/memory` (or `$RADIAN_HOME/memory`). The rule matches the
 resolved path, so a path that leaves those directories through `..` or a symbolic link is
-not covered. The registry file `<memory root>/projects.jsonl` and any other directory under
-`<memory root>` are not covered. When there is no memory directory, the rule is absent. The
+not covered. The registry file `<memory root>/projects.jsonl`, a file directly in
+`<memory root>/projects/`, and any other directory under `<memory root>` are not covered.
+When there is no memory directory, the rule is absent. The
 `shell` tool never reads or writes the memory directories, and the sandbox deny set still
 hides them.
 This rule only decides whether the call asks; the file tools' own root still decides

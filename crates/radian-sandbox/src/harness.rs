@@ -899,15 +899,38 @@ impl Rig {
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
         );
-        // ADR 0021 invariant 5: `shell` cannot write the memory store either. The denylist is
-        // unchanged; only the model's own file tools reach it, through the permission profile.
-        self.sh_case(
-            sandbox,
-            control,
+        // ADR 0021 invariant 5: a sandboxed `shell` cannot change the memory store. The
+        // denylist is unchanged; only the model's own file tools reach it, through the
+        // permission profile. The case measures the **real** store seen from this process,
+        // not the command's exit status: on Linux a write into a `deny_read` directory
+        // succeeds inside the sandbox and lands in the masking tmpfs (LIMITS.md), while
+        // macOS refuses it outright. The control (no sandbox) proves the command itself can
+        // create the file; its file is removed before the sandboxed run.
+        let store_write = radian.join("memory/shell-write.txt");
+        let script = format!("printf x > {}", q(&store_write));
+        let _ = std::fs::remove_file(&store_write);
+        let control_run = run_shell(control, &script);
+        let control_succeeded = store_write.is_file();
+        let _ = std::fs::remove_file(&store_write);
+        let sandbox_run = run_shell(sandbox, &script);
+        let reached_store = store_write.is_file();
+        let _ = std::fs::remove_file(&store_write);
+        self.record(
             g,
-            "memory_unwritable",
+            "memory_write_does_not_reach_store",
             Expect::MustFail,
-            &format!("printf x > {}", q(&radian.join("memory/shell-write.txt"))),
+            Outcome {
+                succeeded: reached_store,
+                detail: format!(
+                    "real store changed: {reached_store}; sandbox command succeeded: {}; {}",
+                    sandbox_run.succeeded, sandbox_run.detail
+                ),
+            },
+            Outcome {
+                succeeded: control_succeeded,
+                detail: control_run.detail,
+            },
+            "",
         );
         // The model's `write`/`patch` calls are **not** a sandbox matter: the file tools run
         // in the host process, outside any sandbox. The permission profile allows the two

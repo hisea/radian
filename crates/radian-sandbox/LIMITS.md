@@ -146,7 +146,9 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
   `WritableExceptExec` 先 `--bind` 每个发现到的 git 目录（工作区、per-worktree gitdir、
   共享 common dir），再把可执行入口 `--ro-bind-try` 回去（见下节）；敏感目录 `--tmpfs`
   （目录）或 `/dev/null`（文件）；`--clearenv` + 白名单；`HOME`/`TMPDIR` 在工作区内
-  `.radian-sandbox/{home,tmp}`。
+  `.radian-sandbox/{home,tmp}`。**写入 `deny_read` 目录在 Linux 沙箱内会成功**：写进遮蔽用的
+  临时 tmpfs，永远不进入真实目录；macOS 的 seatbelt 则直接拒绝该写入。两边真正的性质相同——
+  沙箱内的 shell 改不了真实目录。
 
 ## Linux seccomp 过滤器（片 0，2026-10-20）
 

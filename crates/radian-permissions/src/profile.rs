@@ -266,23 +266,29 @@ impl Profile {
     }
 
     /// Adds the memory write rule (ADR 0012; ADR 0021 invariant 5 and D7): `write` and
-    /// `patch` are `allow` under `<memory root>/global/` and `<memory root>/projects/`, in
-    /// every tier. A profile built without a memory root (memory off) has no memory rule.
+    /// `patch` are `allow` under `<memory root>/global/` and
+    /// `<memory root>/projects/<ProjectId>/`, in every tier. A profile built without a
+    /// memory root (memory off) has no memory rule.
     ///
     /// The prefixes are resolved like a call's path (symlinks and `..` removed), so a path
     /// that escapes the memory directory through `..` or a symlink does not match. The
-    /// registry (`<memory root>/projects.jsonl`) and any other directory under the root are
-    /// not covered: only the two scope directories are.
+    /// project scope needs a project-id directory between `projects/` and the record: a
+    /// file directly in `<memory root>/projects/` does not match. The registry
+    /// (`<memory root>/projects.jsonl`) and any other directory under the root are not
+    /// covered either: only the two scope directories are.
     pub fn with_memory_root(mut self, memory_root: impl AsRef<Path>) -> Self {
         let root = crate::rule::resolve_path(memory_root.as_ref());
-        for scope in ["global", "projects"] {
-            for tool in ["write", "patch"] {
-                self.rules.push(Rule::new(
-                    ToolMatcher::Name(tool.into()),
-                    ResourceMatcher::PathUnder(root.join(scope)),
-                    Action::Allow,
-                ));
-            }
+        for tool in ["write", "patch"] {
+            self.rules.push(Rule::new(
+                ToolMatcher::Name(tool.into()),
+                ResourceMatcher::PathUnder(root.join("global")),
+                Action::Allow,
+            ));
+            self.rules.push(Rule::new(
+                ToolMatcher::Name(tool.into()),
+                ResourceMatcher::PathUnderNested(root.join("projects")),
+                Action::Allow,
+            ));
         }
         self
     }
@@ -577,6 +583,20 @@ mod tests {
         let link = root.0.join("global/link.md");
         for (tier, profile) in memory_profiles(&ws, &root) {
             assert_eq!(action_at(&profile, "write", &link), Action::Ask, "{tier}");
+        }
+    }
+
+    /// Edge case 9: the project scope needs a project-id directory. A file written directly
+    /// in `<root>/projects/` is not a record, so the tier's default stands. The mutation that
+    /// matches the project scope with the plain `PathUnder` matcher makes this fail.
+    #[test]
+    fn a_memory_write_directly_in_the_projects_directory_is_not_matched() {
+        let ws = TestDir::new("memory-projects-file-ws");
+        let root = TestDir::new("memory-projects-file-root");
+        std::fs::create_dir_all(root.0.join("projects")).unwrap();
+        let path = root.0.join("projects/x.md");
+        for (tier, profile) in memory_profiles(&ws, &root) {
+            assert_eq!(action_at(&profile, "write", &path), Action::Ask, "{tier}");
         }
     }
 
