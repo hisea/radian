@@ -82,27 +82,25 @@ impl Fixture {
 
     /// The `workspace` tier: no tier source, so outside paths outside the roots refuse.
     fn workspace_tools(&self) -> CodingTools {
-        CodingTools::with_roots_and_deny(
-            &self.workspace,
-            ReadRoots::none(),
-            MemoryRoots::from_dirs(&self.scopes()),
-            self.deny(&self.scopes()),
-        )
-        .unwrap()
+        let roots = MemoryRoots::from_dirs(&self.scopes());
+        let deny = self.deny(&roots);
+        CodingTools::with_roots_and_deny(&self.workspace, ReadRoots::none(), roots, deny).unwrap()
     }
 
-    /// The `full` tier: a `FullAccess` slot and the host's deny set, with the two scopes as
-    /// its documented exception.
+    /// The `full` tier: a `FullAccess` slot and the host's deny set, with the scopes the tools
+    /// actually opened as its documented exception.
     fn full_tools(&self) -> CodingTools {
         let slot = SandboxSlot::with(
             Sandbox::new(SandboxMode::FullAccess, &self.workspace).expect("full access"),
         );
+        let roots = MemoryRoots::from_dirs(&self.scopes());
+        let deny = self.deny(&roots);
         CodingTools::with_sandbox_slot_and_roots(
             &self.workspace,
             slot,
             ReadRoots::none(),
-            MemoryRoots::from_dirs(&self.scopes()),
-            self.deny(&self.scopes()),
+            roots,
+            deny,
         )
         .unwrap()
     }
@@ -112,18 +110,20 @@ impl Fixture {
         let slot = SandboxSlot::with(
             Sandbox::new(SandboxMode::FullAccess, &self.workspace).expect("full access"),
         );
+        let roots = MemoryRoots::from_dirs(std::slice::from_ref(&self.global));
+        let deny = self.deny(&roots);
         CodingTools::with_sandbox_slot_and_roots(
             &self.workspace,
             slot,
             ReadRoots::none(),
-            MemoryRoots::from_dirs(std::slice::from_ref(&self.global)),
-            self.deny(std::slice::from_ref(&self.global)),
+            roots,
+            deny,
         )
         .unwrap()
     }
 
-    fn deny(&self, scopes: &[PathBuf]) -> DenySet {
-        DenySet::from_home_and_extra(None, std::slice::from_ref(&self.memory)).allowing(scopes)
+    fn deny(&self, roots: &MemoryRoots) -> DenySet {
+        DenySet::from_home_and_extra(None, std::slice::from_ref(&self.memory)).allowing(roots)
     }
 }
 
@@ -378,4 +378,32 @@ async fn grep_and_glob_results_under_a_memory_scope_carry_the_root_prefix() {
             .any(|line| line == abs(&fx.project.join("needle.md"))),
         "the glob result carries the root prefix: {body}"
     );
+}
+
+// ---------- 12: an unavailable scope is not a root and not an exception ----------
+
+#[tokio::test]
+async fn an_unavailable_scope_is_not_a_root_and_does_not_except_the_memory_directory() {
+    let fx = Fixture::new("memory-roots-unavailable");
+    // The scope directory was not there when the tool set was built (its creation failed), so
+    // it is not a root. The memory tooling creates it later; the deny set must not have
+    // excepted it in the meantime.
+    std::fs::remove_dir_all(&fx.global).unwrap();
+    let tools = fx.full_tools();
+    std::fs::create_dir_all(&fx.global).unwrap();
+    std::fs::write(fx.global.join("late.md"), "LATE\n").unwrap();
+
+    let late = fx.global.join("late.md");
+    let failure = call(&tools, "read", json!({"path": abs(&late)}))
+        .await
+        .expect_err("an unopened scope is not a root and not an exception");
+    assert_outside(&failure, &abs(&late));
+    assert!(failure.message.contains("deny set"), "{failure:?}");
+
+    let registry = fx.memory.join("projects.jsonl");
+    let failure = call(&tools, "read", json!({"path": abs(&registry)}))
+        .await
+        .expect_err("the registry stays denied");
+    assert_outside(&failure, &abs(&registry));
+    assert!(failure.message.contains("deny set"), "{failure:?}");
 }

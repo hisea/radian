@@ -1004,7 +1004,7 @@ fn docs_write_failure(user: &str) -> ToolFailure {
         format!(
             "`{user}` is in the bundled manual (`radian://docs/`), which is read-only; \
              `write` and `patch` only write workspace paths (relative or absolute inside the \
-             workspace)"
+             workspace) and memory-scope paths (an absolute or `~` path under one)"
         ),
     )
 }

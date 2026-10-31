@@ -11,11 +11,15 @@
 //! The deny check runs on the `realpath`ed path, so a symlink into a denied directory
 //! refuses; the file itself opens with `O_NOFOLLOW` on its last component.
 //!
-//! One exception (ADR 0039 decision 4): the two memory scope directories the file tools were
-//! given as writable roots. Everything else under `memory/` keeps the deny text, in the file
-//! tools; the sandbox policy (the shell) has no exception and denies the whole directory.
+//! One exception (ADR 0039 decision 4): the memory scope directories the file tools opened as
+//! writable roots. The exception is derived from those roots' canonical paths, so a scope that
+//! was never created, or one replaced after the roots were opened, cannot widen it to the
+//! memory directory. Everything else under `memory/` keeps the deny text, in the file tools;
+//! the sandbox policy (the shell) has no exception and denies the whole directory.
 
 use std::path::{Path, PathBuf};
+
+use crate::memory_roots::MemoryRoots;
 
 /// The denied paths, canonicalized the way the sandbox policy canonicalizes them, plus the
 /// one documented exception: the writable memory scopes (ADR 0039 decision 4).
@@ -39,15 +43,15 @@ impl DenySet {
     }
 
     /// Adds the memory scope directories the file tools were given as roots (ADR 0039
-    /// decision 4): the deny set keeps `memory/` for the shell, but the two scope directories
-    /// are reachable through their own roots and so are the exception here. Each directory is
-    /// resolved like a denied entry, so a not-yet-created scope still binds once it exists.
-    pub fn allowing(mut self, scopes: &[PathBuf]) -> Self {
-        for path in scopes {
-            if let Some(resolved) = radian_sandbox::canonicalize_existing_prefix(path)
-                && !self.except.contains(&resolved)
-            {
-                self.except.push(resolved);
+    /// decision 4): the deny set keeps `memory/` for the shell, but the scope directories the
+    /// tools actually opened are reachable through their own roots and so are the exception
+    /// here. The exception is the roots' canonical paths, never a path resolved again: a scope
+    /// that was never created (or whose creation failed), or one replaced by a link after the
+    /// roots were opened, is not an exception and cannot widen it to the memory directory.
+    pub fn allowing(mut self, memory_roots: &MemoryRoots) -> Self {
+        for path in memory_roots.canonical_dirs() {
+            if !self.except.contains(&path) {
+                self.except.push(path);
             }
         }
         self.except.sort();
@@ -127,6 +131,64 @@ mod tests {
     }
 
     #[test]
+    fn an_unavailable_scope_is_not_an_exception() {
+        let dir = std::env::temp_dir().join(format!("radian-deny-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let memory = dir.join("memory");
+        std::fs::create_dir_all(&memory).unwrap();
+        std::fs::write(memory.join("projects.jsonl"), "{\"key\":\"x\"}\n").unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let memory = dir.join("memory");
+        // `global/` was never created (or its creation failed), so the tool set has no root
+        // for it. It must not except the memory directory in its place: the registry and
+        // credentials stay denied.
+        let roots = crate::MemoryRoots::from_dirs(&[memory.join("global")]);
+        let set =
+            DenySet::from_home_and_extra(None, std::slice::from_ref(&memory)).allowing(&roots);
+        assert_eq!(
+            set.denies(&memory.join("projects.jsonl")),
+            Some(memory.as_path())
+        );
+        assert_eq!(
+            set.denies(&memory.join("credentials/x")),
+            Some(memory.as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_scope_replaced_after_setup_does_not_except_the_memory_directory() {
+        let dir = std::env::temp_dir().join(format!("radian-deny-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let memory = dir.join("memory");
+        let global = memory.join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(memory.join("projects.jsonl"), "{\"key\":\"x\"}\n").unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let memory = dir.join("memory");
+        let global = memory.join("global");
+        // The root is opened first; then the scope directory is replaced by a link to the
+        // memory directory before the deny set is built. Going through the opened root is
+        // harmless (its fd is the old directory), but resolving the path again would except
+        // the whole memory directory.
+        let roots = crate::MemoryRoots::from_dirs(std::slice::from_ref(&global));
+        std::fs::remove_dir(&global).unwrap();
+        std::os::unix::fs::symlink(&memory, &global).unwrap();
+        let set =
+            DenySet::from_home_and_extra(None, std::slice::from_ref(&memory)).allowing(&roots);
+        assert_eq!(
+            set.denies(&memory.join("projects.jsonl")),
+            Some(memory.as_path())
+        );
+        assert_eq!(
+            set.denies(&memory.join("credentials/x")),
+            Some(memory.as_path())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_memory_scope_is_the_exception_but_its_parent_and_siblings_are_denied() {
         let dir = std::env::temp_dir().join(format!("radian-deny-except-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -137,8 +199,9 @@ mod tests {
         let memory = dir.join("memory");
         let global = memory.join("global");
         let project = memory.join("projects/P");
-        let set = DenySet::from_home_and_extra(None, std::slice::from_ref(&memory))
-            .allowing(&[global.clone(), project.clone()]);
+        let roots = crate::MemoryRoots::from_dirs(&[global.clone(), project.clone()]);
+        let set =
+            DenySet::from_home_and_extra(None, std::slice::from_ref(&memory)).allowing(&roots);
         assert!(set.denies(&global.join("x.md")).is_none());
         assert!(set.denies(&project.join("MEMORY.md")).is_none());
         // Everything else under `memory/` is still the sandbox's deny set.

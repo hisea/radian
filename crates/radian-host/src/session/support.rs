@@ -139,7 +139,7 @@ pub(super) fn build_coding_tools(
             let read_roots = ReadRoots::from_env_and_skills(skill_dirs);
             let memory_roots = MemoryRoots::from_dirs(memory_scope_dirs);
             let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read)
-                .allowing(memory_scope_dirs);
+                .allowing(&memory_roots);
             // The slot decides whether `shell` exists: an empty slot means no shell
             // advertised, a non-empty one is a sandbox the shell can run under. The
             // tool set is fixed here at `open_session`; a later switch to a *narrower* tier

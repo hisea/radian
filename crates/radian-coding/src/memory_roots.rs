@@ -75,6 +75,17 @@ impl MemoryRoots {
         &self.roots
     }
 
+    /// The canonical paths of the roots that opened, for the `full`-tier deny set's one
+    /// exception (ADR 0039 decision 4). A directory [`MemoryRoots::from_dirs`] skipped
+    /// contributes nothing, so a scope that was never created, or whose creation failed,
+    /// cannot widen the exception to the memory directory.
+    pub(crate) fn canonical_dirs(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .map(|root| root.canonical.clone())
+            .collect()
+    }
+
     /// The root `path` (already absolute and lexically normalised) falls under, the longest
     /// matching prefix winning. `None` means it is under no memory scope.
     pub(crate) fn lookup(&self, path: &Path) -> Option<FoundMemoryPath> {
