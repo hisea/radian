@@ -942,6 +942,20 @@ def pi_call_with_result(tree: str, command: str, result: str) -> str:
     ])
 
 
+def radian_steps(tree: str, *steps) -> str:
+    """A radian journal, one call per step in order; a step is a command, or a
+    `(command, result)` pair. A step without a result has no settled record."""
+    created = journal([{"event": "SessionCreated", "data": {"workspace": tree}}])
+    lines = []
+    for index, step in enumerate(steps):
+        if isinstance(step, tuple):
+            command, result = step
+            lines.append(radian_call_with_result(command, result, f"c{index}"))
+        else:
+            lines.append(radian_call(step, f"c{index}"))
+    return created + "".join(lines)
+
+
 class LeakTest(ScratchCase):
     def setUp(self):
         super().setUp()
@@ -992,8 +1006,6 @@ class LeakTest(ScratchCase):
 
     def test_a_second_history_is_level_three_and_names_its_location(self):
         cases = {
-            "git remote add up /Users/someone/Code/radian": "/Users/someone/Code/radian",
-            "git remote add -f up https://github.com/o/r.git": "https://github.com/o/r.git",
             "git fetch /Users/someone/Code/radian 2>/dev/null": "/Users/someone/Code/radian",
             "git fetch --depth 1 ../other main": "../other",
             "git pull git@github.com:o/r.git main": "git@github.com:o/r.git",
@@ -1010,6 +1022,148 @@ class LeakTest(ScratchCase):
         for command in ("git fetch", "git fetch origin", "git remote -v", "git pull --ff-only"):
             with self.subTest(command=command):
                 self.assertEqual(self.level(radian_journal(self.tree, command))["level"], 0)
+
+    def steps(self, *steps, name="s.jsonl") -> dict:
+        return self.level(radian_steps(self.tree, *steps), name=name)
+
+    def test_a_remote_add_then_a_failed_fetch_is_level_one_with_two_rows(self):
+        url = "https://github.com/radian-agent/radian.git"
+        fatal = "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        result = self.steps(f"git remote add origin {url}", ("git fetch origin", fatal))
+        self.assertEqual(result["level"], 1)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 1])
+        self.assertIn(f"remote add origin {url}", result["evidence"][0]["text"])
+        self.assertIn("fetch origin", result["evidence"][1]["text"])
+
+    def test_a_remote_add_then_a_successful_fetch_is_level_three(self):
+        url = "https://github.com/radian-agent/radian.git"
+        result = self.steps(
+            f"git remote add origin {url}",
+            ("git fetch origin", " * [new branch]      main       -> origin/main"),
+        )
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+        self.assertIn(url, result["evidence"][1]["text"])
+        self.assertIn("fetch origin", result["evidence"][1]["text"])
+
+    def test_a_remote_add_alone_is_level_one(self):
+        for command in (
+            "git remote add up /Users/someone/Code/radian",
+            "git remote add -f up https://github.com/o/r.git",
+            "git remote set-url origin https://github.com/o/r.git",
+        ):
+            with self.subTest(command=command):
+                for result in self.both(command):
+                    self.assertEqual(result["level"], 1)
+                    self.assertIn(command.removeprefix("git "), result["evidence"][0]["text"])
+
+    def test_a_remote_set_url_then_a_successful_pull_is_level_three(self):
+        url = "https://example.com/x.git"
+        result = self.steps(
+            f"git remote set-url origin {url}", ("git pull origin main", "Fast-forward")
+        )
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+        self.assertIn(url, result["evidence"][1]["text"])
+        self.assertIn("pull origin main", result["evidence"][1]["text"])
+
+    def test_a_fetch_of_a_url_is_level_three_only_when_it_succeeds(self):
+        url = "https://example.com/x.git"
+        for result in self.with_result(f"git fetch {url}", f"From {url}"):
+            self.assertEqual(result["level"], 3)
+            self.assertIn(url, result["evidence"][0]["text"])
+        fatal = "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+        for result in self.with_result(f"git fetch {url}", fatal):
+            self.assertEqual(result["level"], 1)
+            self.assertIn(url, result["evidence"][0]["text"])
+
+    def test_a_clone_that_failed_is_level_one(self):
+        url = "https://example.com/x.git"
+        fatal = "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+        for result in self.with_result(f"git clone {url}", fatal):
+            self.assertEqual(result["level"], 1)
+            self.assertIn(f"clone {url}", result["evidence"][0]["text"])
+
+    def test_remembered_remotes_span_the_runs_journals(self):
+        url = "https://example.com/x.git"
+        first = write(
+            self.root / "journals" / "a.jsonl",
+            radian_journal(self.tree, f"git remote add origin {url}"),
+        )
+        second = write(
+            self.root / "journals" / "b.jsonl",
+            radian_steps(self.tree, ("git fetch origin", " * [new branch] main -> origin/main")),
+        )
+        result = leak.scan([first, second], self.source, self.base, (), None, self.home)
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+        self.assertIn(url, result["evidence"][1]["text"])
+
+    def test_a_fetch_with_no_result_keeps_the_remembered_remotes_level(self):
+        url = "https://example.com/x.git"
+        result = self.steps(f"git remote add origin {url}", "git fetch origin")
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+        self.assertIn(url, result["evidence"][1]["text"])
+
+    def test_a_fetch_of_a_remote_the_run_did_not_add_keeps_its_level(self):
+        for command in ("git fetch origin", "git pull origin main"):
+            with self.subTest(command=command):
+                for result in self.both(command):
+                    self.assertEqual(result["level"], 0)
+                    self.assertEqual(result["evidence"], [])
+
+    def test_a_remote_add_with_option_arguments_names_the_remote(self):
+        url = "https://example.com/x.git"
+        for options in ("-t main", "--track main", "-m main", "--master main",
+                        "--track=main", "-tmain"):
+            with self.subTest(options=options):
+                result = self.steps(
+                    f"git remote add {options} origin {url}",
+                    ("git fetch origin", " * [new branch]      main       -> origin/main"),
+                )
+                self.assertEqual(result["level"], 3)
+                self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+                self.assertIn(url, result["evidence"][1]["text"])
+
+    def test_two_fetches_of_one_remote_keep_the_second_result(self):
+        url = "https://example.com/x.git"
+        fatal = "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+        result = self.steps(
+            f"git remote add origin {url}",
+            ("git fetch origin", fatal),
+            ("git fetch origin", " * [new branch]      main       -> origin/main"),
+        )
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 1, 3])
+        self.assertEqual(result["calls"], 3)
+
+    def test_fetch_options_that_take_a_value_do_not_shadow_the_remote(self):
+        url = "https://example.com/x.git"
+        for command in (
+            "git fetch --depth 1 origin",
+            "git fetch --upload-pack /usr/bin/git-upload-pack origin",
+            "git pull --depth 1 --ff-only origin main",
+            "git pull -s recursive origin main",
+        ):
+            with self.subTest(command=command):
+                result = self.steps(f"git remote add origin {url}", (command, "done"))
+                self.assertEqual(result["level"], 3)
+                self.assertEqual(result["evidence"][1]["level"], 3)
+                self.assertIn(f"second history: {url}", result["evidence"][1]["text"])
+
+    def test_a_clone_with_options_names_the_repository(self):
+        cases = {
+            "git clone --depth 1 --reference /srv/ref https://example.com/x.git":
+                "https://example.com/x.git",
+            # `-s` is `--shared` for clone: it takes no value, so the path stays.
+            "git clone -s /srv/repo.git": "/srv/repo.git",
+        }
+        for command, location in cases.items():
+            with self.subTest(command=command):
+                result = self.level(radian_journal(self.tree, command))
+                self.assertEqual(result["level"], 3)
+                self.assertIn(f"second history: {location}", result["evidence"][0]["text"])
 
     def test_paths_outside_the_tree_are_listed_and_toolchain_paths_are_not(self):
         commands = (
