@@ -65,14 +65,19 @@ profile = "default"
 command_timeout_secs = 3600
 
 [gate.review]
+concurrency = 2
+propose_followups = true
+
+[gate.reviewers.default]
 exec_args = ["--model", "m"]  # unset: `[worker] exec_args`
 prompt_file = "review.md"      # unset: the built-in prompt only
 timeout_secs = 900
+fix_level = "major"            # recorded in the verdict; no stage reads it yet
 
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
 commands = []        # shell command lines, run in order by the `commands` stage
-key_commands = []    # shell command lines, run on the merge candidate by `integration`
+reviewer = "default" # the `[gate.reviewers.<name>]` section its reviews use
 ```
 
 - `Stage` is the closed set `commands`, `mutation`, `review`, `ci`, `human` plus
@@ -546,11 +551,12 @@ instead of resolving the flow again.
 as `commands` and before `human`; a profile that lists both must list `commands` first. Up to
 `[gate.review] concurrency` sessions run at once (default 2), each in its slot checkout
 `gates/review-<n>/`. It runs one `radian exec` per run with `--tools read,grep,glob`, no
-`--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from
-`[gate.review] exec_args` (default `[worker] exec_args`) and `[gate.review] timeout_secs`; a
-task's first review reads `[gate.review.first] exec_args` and `timeout_secs` first, and a
-later review never does (`ReviewConfig::choice`). The prompt is built from the brief, the
-commit list and the diff `base_sha..verified_sha`, plus `[gate.review] prompt_file`. The last
+`--mcp-config` and `--no-config-mcp`. Its model route and wall-time limit come from the
+reviewer the gate profile names: the profile's `reviewer` selects a `[gate.reviewers.<name>]`
+section, whose `exec_args` (default `[worker] exec_args`) and `timeout_secs` the session uses. A
+task's first review reads that reviewer's `first.exec_args` and `first.timeout_secs` first, and
+a later review never does (`Reviewer::choice`). The prompt is built from the brief, the commit
+list and the diff `base_sha..verified_sha`, plus the reviewer's `prompt_file`. The last
 fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
 fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
 string is an item with only its text, so an old verdict reads and re-serializes unchanged (the
@@ -558,13 +564,13 @@ digest is computed from the re-serialized verdict). Unusable output (no block, a
 field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session once more;
 two unusable runs fail with `review_output`, or `review_timeout` when the last run timed out.
 The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
-(`round`, the `exec_args` source key, `timeout_secs` and its source key) and, in a rework
-round, `review_pre_existing`.
+(`round`, `reviewer`, `fix_level`, the `exec_args` source key, `timeout_secs` and its source
+key) and, in a rework round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
-gets the first review's prompt, though it reads `[gate.review]` rather than
-`[gate.review.first]`. A rework round's prompt holds the previous blocking items, the commits
+gets the first review's prompt, though it reads the reviewer's own settings rather than its
+`first` table. A rework round's prompt holds the previous blocking items, the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
 `suggestions` with `pre_existing` unless its `file:line` is within 3 lines of a line the task's

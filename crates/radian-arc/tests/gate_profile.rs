@@ -905,3 +905,112 @@ fn a_rework_runs_only_its_flows_before_attempt_steps() {
         "the merging flow did not fetch the remote main"
     );
 }
+
+/// The value after `flag` in a recorded argv.
+fn arg_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let index = argv.iter().position(|arg| arg == flag)?;
+    argv.get(index + 1).map(String::as_str)
+}
+
+/// Two profiles name two reviewers with different `exec_args` and `timeout_secs`: each task's
+/// review runs with its own profile's reviewer, and each verdict's `review_settings.reviewer`
+/// names it.
+#[test]
+fn each_profiles_review_uses_the_reviewer_it_names() {
+    let (repo, store) = setup("gate-profile-reviewers");
+    append_config(
+        &store,
+        "[gate.reviewers.one]\n\
+         exec_args = [\"--model\", \"one\", \"--base-url\", \"http://127.0.0.1:9\"]\n\
+         timeout_secs = 120\n\
+         \n\
+         [gate.reviewers.two]\n\
+         exec_args = [\"--model\", \"two\", \"--base-url\", \"http://127.0.0.1:9\"]\n\
+         timeout_secs = 240\n\
+         \n\
+         [gate.profiles.one]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         before_attempt = []\n\
+         reviewer = \"one\"\n\
+         \n\
+         [gate.profiles.two]\n\
+         stages = [{ stage = \"review\", required = true }, \
+         { stage = \"human\", required = true }]\n\
+         before_attempt = []\n\
+         reviewer = \"two\"\n\
+         \n\
+         [flows.one]\n\
+         gate_profile = \"one\"\n\
+         \n\
+         [flows.two]\n\
+         gate_profile = \"two\"\n",
+    );
+    let plan = store
+        .add_plan("p", "A plan", "the request\n")
+        .expect("add a plan");
+    let first = store
+        .add_task_with_flow(
+            &plan,
+            "one",
+            "One",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("one"),
+        )
+        .expect("add the first task");
+    let second = store
+        .add_task_with_flow(
+            &plan,
+            "two",
+            "Two",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "brief\n",
+            Some("two"),
+        )
+        .expect("add the second task");
+    plan_ops::confirm(&store, &plan).expect("confirm");
+    let base = repo.rev("main");
+    let first_head = publish(&repo, &first, &base, "one.txt", "one\n");
+    let second_head = publish(&repo, &second, &base, "two.txt", "two\n");
+    set_verifying(&store, &first, &first_head, &base);
+    set_verifying(&store, &second, &second_head, &base);
+    let fake = FakeReview::new(
+        "gate-profile-reviewers",
+        &[
+            review_message("one is fine", &[], &[]),
+            review_message("two is fine", &[], &[]),
+        ],
+        0,
+    );
+
+    review::verify_with(&store, &first, Some(fake.program())).expect("the first gate runs");
+    review::verify_with(&store, &second, Some(fake.program())).expect("the second gate runs");
+
+    for (task, reviewer, model, timeout) in
+        [(&first, "one", "one", 120u64), (&second, "two", "two", 240)]
+    {
+        let verdict = Verdict::read(
+            &verdict_path(store.repo(), task, &format!("{task}-1"), Stage::Review)
+                .expect("the review verdict path"),
+        )
+        .expect("the review verdict reads");
+        let settings = verdict.review_settings.clone().expect("the settings");
+        assert_eq!(settings.reviewer, reviewer, "{task}");
+        assert_eq!(settings.timeout_secs, timeout, "{task}");
+        assert_eq!(
+            settings.exec_args,
+            format!("gate.reviewers.{reviewer}.exec_args")
+        );
+        assert_eq!(
+            settings.timeout,
+            format!("gate.reviewers.{reviewer}.timeout_secs")
+        );
+        let run = if task == &first { 1 } else { 2 };
+        assert_eq!(arg_value(&fake.argv(run), "--model"), Some(model), "{task}");
+    }
+}

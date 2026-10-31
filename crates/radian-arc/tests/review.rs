@@ -108,6 +108,23 @@ impl Fixture {
         tune_config(&self.store, from, to);
     }
 
+    /// Appends a table to `config.toml`, after the `init` text.
+    fn append_config(&self, text: &str) {
+        let path = self.store.root().join("config.toml");
+        let mut config = fs::read_to_string(&path).expect("config.toml");
+        config.push('\n');
+        config.push_str(text);
+        fs::write(&path, config).expect("write config.toml");
+    }
+
+    /// Makes the `default` profile use `name`'s `[gate.reviewers.<name>]` section.
+    fn profile_reviewer(&self, name: &str) {
+        self.tune(
+            "before_attempt = [\"merge-main\"]",
+            &format!("before_attempt = [\"merge-main\"]\nreviewer = \"{name}\""),
+        );
+    }
+
     fn commands(&self, lines: &[&str]) {
         let list = lines
             .iter()
@@ -220,7 +237,7 @@ impl Fixture {
         add_review_stage_to(&self.store);
     }
 
-    /// Sets `gate.review.exec_args`.
+    /// Sets `[gate.reviewers.default] exec_args`.
     fn review_exec_args(&self, args: &[&str]) {
         let list = args
             .iter()
@@ -228,12 +245,12 @@ impl Fixture {
             .collect::<Vec<_>>()
             .join(", ");
         self.tune(
-            "# exec_args = [\"--model\", \"m\"]",
+            "# exec_args = [\"--model\", \"m\"]  # not set: the same as [worker] exec_args",
             &format!("exec_args = [{list}]"),
         );
     }
 
-    /// Sets `gate.review.timeout_secs`.
+    /// Sets `[gate.reviewers.default] timeout_secs`.
     fn review_timeout(&self, seconds: u64) {
         self.tune(
             "timeout_secs = 900              # wall-time",
@@ -246,31 +263,48 @@ impl Fixture {
         self.tune("concurrency = 2", &format!("concurrency = {value}"));
     }
 
-    /// Sets `gate.review.first.exec_args`.
+    /// Sets `[gate.reviewers.default.first] exec_args`.
     fn review_first_exec_args(&self, args: &[&str]) {
+        self.uncomment_first_block();
         let list = args
             .iter()
             .map(|arg| format!("\"{arg}\""))
             .collect::<Vec<_>>()
             .join(", ");
         self.tune(
-            "# exec_args = [\"--model\", \"m\"]   # not set: the same as [gate.review] exec_args",
+            "# exec_args = [\"--model\", \"m\"]  # not set: the same as [gate.reviewers.default] exec_args",
             &format!("exec_args = [{list}]"),
         );
     }
 
-    /// Sets `gate.review.first.timeout_secs`.
+    /// Sets `[gate.reviewers.default.first] timeout_secs`.
     fn review_first_timeout(&self, seconds: u64) {
+        self.uncomment_first_block();
         self.tune(
-            "# timeout_secs = 1800            # not set: the same as [gate.review] timeout_secs",
+            "# timeout_secs = 1800           # not set: the same as [gate.reviewers.default] timeout_secs",
             &format!(
-                "timeout_secs = {seconds}             # not set: the same as [gate.review] \
-                 timeout_secs"
+                "timeout_secs = {seconds}           # not set: the same as \
+                 [gate.reviewers.default] timeout_secs"
             ),
         );
     }
 
-    /// Sets `gate.review.prompt_file`.
+    /// `init` writes the first-review table commented out; a test that sets one of its keys
+    /// uncomments its header first.
+    fn uncomment_first_block(&self) {
+        let path = self.store.root().join("config.toml");
+        let text = fs::read_to_string(&path).expect("config.toml");
+        let header = "# [gate.reviewers.default.first]";
+        if text.contains(header) {
+            fs::write(
+                &path,
+                text.replacen(header, "[gate.reviewers.default.first]", 1),
+            )
+            .expect("write config.toml");
+        }
+    }
+
+    /// Sets `[gate.reviewers.default] prompt_file`.
     fn review_prompt_file(&self, file: &str) {
         self.tune(
             "# prompt_file = \"review.md\"",
@@ -2985,7 +3019,7 @@ fn an_exec_arg_the_review_stage_owns_is_refused() {
         .expect_err("the stage owns --tools");
     assert_eq!(error.exit(), Exit::State);
     assert!(
-        error.message().contains("gate.review.exec_args"),
+        error.message().contains("gate.reviewers.default.exec_args"),
         "{error:?}"
     );
     assert!(error.message().contains("--tools"), "{error:?}");
@@ -3053,9 +3087,14 @@ fn a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones() {
     );
     let settings = verdict.review_settings.clone().expect("the settings");
     assert_eq!(settings.round, "first");
-    assert_eq!(settings.exec_args, "gate.review.first.exec_args");
+    assert_eq!(settings.exec_args, "gate.reviewers.default.first.exec_args");
     assert_eq!(settings.timeout_secs, 1);
-    assert_eq!(settings.timeout, "gate.review.first.timeout_secs");
+    assert_eq!(
+        settings.timeout,
+        "gate.reviewers.default.first.timeout_secs"
+    );
+    assert_eq!(settings.reviewer, "default");
+    assert_eq!(settings.fix_level, "major");
     let argv = fake.argv(1);
     assert_eq!(arg_value(&argv, "--model"), Some("first-model"));
     assert_eq!(
@@ -3063,7 +3102,8 @@ fn a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones() {
         Some(format!("{}-review-1", fixture.attempt_label()).as_str())
     );
 
-    // The rework round reads `[gate.review]`: its 900 s limit lets the 3 s session pass.
+    // The rework round reads the reviewer's own keys: its 900 s limit lets the 3 s session
+    // pass.
     let second_head = fixture.rework(&head, "two.txt", "two\n");
     assert_ne!(second_head, head);
     let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
@@ -3074,9 +3114,9 @@ fn a_first_review_uses_the_first_settings_and_a_rework_uses_the_normal_ones() {
     assert!(verdict.is_pass(), "{:?}", verdict.reason);
     let settings = verdict.review_settings.clone().expect("the settings");
     assert_eq!(settings.round, "rework");
-    assert_eq!(settings.exec_args, "gate.review.exec_args");
+    assert_eq!(settings.exec_args, "gate.reviewers.default.exec_args");
     assert_eq!(settings.timeout_secs, 900);
-    assert_eq!(settings.timeout, "gate.review.timeout_secs");
+    assert_eq!(settings.timeout, "gate.reviewers.default.timeout_secs");
     let argv = fake.argv(3);
     assert_eq!(arg_value(&argv, "--model"), Some("review-model"));
 }
@@ -3107,14 +3147,14 @@ fn an_unset_first_review_key_falls_back_to_the_review_table() {
     let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
     let settings = verdict.review_settings.clone().expect("the settings");
     assert_eq!(settings.round, "first");
-    assert_eq!(settings.exec_args, "gate.review.first.exec_args");
+    assert_eq!(settings.exec_args, "gate.reviewers.default.first.exec_args");
     assert_eq!(settings.timeout_secs, 900);
-    assert_eq!(settings.timeout, "gate.review.timeout_secs");
+    assert_eq!(settings.timeout, "gate.reviewers.default.timeout_secs");
     assert_eq!(arg_value(&fake.argv(1), "--model"), Some("first-model"));
 }
 
-/// A `[gate.review.first] exec_args` entry that repeats an argument the stage owns is
-/// refused by that key's name, and the session does not run.
+/// A `[gate.reviewers.default.first] exec_args` entry that repeats an argument the stage owns
+/// is refused by that key's name, and the session does not run.
 #[test]
 fn a_first_exec_arg_the_review_stage_owns_is_refused() {
     let fixture = Fixture::new("review-first-owned-args");
@@ -3132,7 +3172,9 @@ fn a_first_exec_arg_the_review_stage_owns_is_refused() {
         .expect_err("the stage owns --tools");
     assert_eq!(error.exit(), Exit::State);
     assert!(
-        error.message().contains("gate.review.first.exec_args"),
+        error
+            .message()
+            .contains("gate.reviewers.default.first.exec_args"),
         "{error:?}"
     );
     assert!(error.message().contains("--tools"), "{error:?}");
@@ -7629,4 +7671,108 @@ fn a_key_commands_change_between_the_gate_and_the_merge_is_used() {
         1,
         "the merge ran the current [integration] key_commands"
     );
+}
+
+/// A reviewer's `first.exec_args` apply to the first review only: the rework review of the same
+/// task runs with the reviewer's own `exec_args`.
+#[test]
+fn a_reviewers_first_exec_args_apply_to_the_first_review_only() {
+    let fixture = Fixture::new("reviewer-first-args");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.append_config(
+        "[gate.reviewers.strict]\n\
+         exec_args = [\"--model\", \"rework-model\", \"--base-url\", \"http://127.0.0.1:9\"]\n\
+         \n\
+         [gate.reviewers.strict.first]\n\
+         exec_args = [\"--model\", \"first-model\", \"--base-url\", \"http://127.0.0.1:9\"]\n",
+    );
+    fixture.profile_reviewer("strict");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "reviewer-first-args-fake",
+        &[
+            review_message("the change is fine", &[], &[]),
+            review_message("the rework is fine", &[], &[]),
+        ],
+        0,
+    );
+
+    fixture.verifying_with_review(&head, fake.program());
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.round, "first");
+    assert_eq!(settings.reviewer, "strict");
+    assert_eq!(settings.exec_args, "gate.reviewers.strict.first.exec_args");
+    assert_eq!(arg_value(&fake.argv(1), "--model"), Some("first-model"));
+
+    fixture.rework(&head, "two.txt", "two\n");
+    review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework verification runs");
+    let label = format!("{}-2", fixture.task);
+    let verdict = fixture.verdict(&label, Stage::Review);
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.round, "rework");
+    assert_eq!(settings.reviewer, "strict");
+    assert_eq!(settings.exec_args, "gate.reviewers.strict.exec_args");
+    assert_eq!(arg_value(&fake.argv(2), "--model"), Some("rework-model"));
+}
+
+/// A reviewer with no `exec_args` runs with `[worker] exec_args`, and the recorded source key
+/// says so.
+#[test]
+fn a_reviewer_without_exec_args_runs_with_the_workers() {
+    let fixture = Fixture::new("reviewer-worker-args");
+    fixture.add_review_stage();
+    fixture.commands(&["true"]);
+    fixture.tune(
+        "exec_args = []                 # extra `radian acp` arguments for the worker",
+        "exec_args = [\"--model\", \"worker-model\"]                 # extra `radian acp` \
+         arguments for the worker",
+    );
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "reviewer-worker-args-fake",
+        &[review_message("the change is fine", &[], &[])],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    let settings = verdict.review_settings.clone().expect("the settings");
+    assert_eq!(settings.reviewer, "default");
+    assert_eq!(settings.exec_args, "worker.exec_args");
+    assert_eq!(arg_value(&fake.argv(1), "--model"), Some("worker-model"));
+}
+
+/// A reviewer's `exec_args` that repeats an argument the stage owns is refused by the
+/// reviewer's key name, and the session does not run.
+#[test]
+fn a_reviewers_exec_args_that_repeat_an_owned_argument_are_refused() {
+    let fixture = Fixture::new("reviewer-owned-args");
+    fixture.add_review_stage();
+    fixture.append_config(
+        "[gate.reviewers.strict]\n\
+         exec_args = [\"--tools\", \"shell\"]\n",
+    );
+    fixture.profile_reviewer("strict");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "reviewer-owned-args-fake",
+        &[review_message("must not run", &[], &[])],
+        0,
+    );
+    fixture.set_verifying(&head);
+
+    let error = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect_err("the stage owns --tools");
+    assert_eq!(error.exit(), Exit::State);
+    assert!(
+        error.message().contains("gate.reviewers.strict.exec_args"),
+        "{error:?}"
+    );
+    assert!(error.message().contains("--tools"), "{error:?}");
+    assert_eq!(fake.count(), 0, "the session ran");
+    assert_state(&fixture, ("review", "verifying"));
 }

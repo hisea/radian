@@ -823,13 +823,22 @@ fn run_stage(
         .map_err(gate_error),
         Stage::Review => {
             let review = &plan.config.gate.review;
+            // The profile names the reviewer every review run of its tasks uses (ADR 0048
+            // decision 15).
+            let Some((reviewer_name, reviewer)) = plan.config.gate.reviewer(&plan.profile) else {
+                return Err(Error::Refused(format!(
+                    "gate profile `{}` uses reviewer `{}`, but no [gate.reviewers.{}] section \
+                     exists",
+                    plan.profile_name, plan.profile.reviewer, plan.profile.reviewer
+                )));
+            };
             // A review that follows an earlier one of this task is a rework round: the stage
             // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
             let earlier = previous_review(store, &task.id, &plan.label);
             // A first review is a review stage run when no earlier attempt of the task has a
-            // review verdict; only it reads `[gate.review.first]` (ADR 0048 decision 10).
+            // review verdict; only it reads the reviewer's `first` keys (ADR 0048 decision 10).
             let first = earlier.is_none();
-            let choice = review.choice(first, &plan.config.worker.exec_args);
+            let choice = reviewer.choice(reviewer_name, first, &plan.config.worker.exec_args);
             // The stage owns the read-only mount and the session flags: an argument that
             // repeated one would overrule them (ADR 0048 decision 10).
             if let Some(owned) = choice
@@ -845,11 +854,13 @@ fn run_stage(
             }
             let settings = ReviewSettings {
                 round: if first { "first" } else { "rework" }.to_owned(),
-                exec_args: choice.exec_args_key.to_owned(),
+                reviewer: reviewer_name.to_owned(),
+                fix_level: reviewer.fix_level.clone(),
+                exec_args: choice.exec_args_key.clone(),
                 timeout_secs: choice.timeout_secs,
-                timeout: choice.timeout_key.to_owned(),
+                timeout: choice.timeout_key.clone(),
             };
-            let prompt_file = review
+            let prompt_file = reviewer
                 .prompt_file
                 .as_ref()
                 .map(|file| store.repo().join(file));

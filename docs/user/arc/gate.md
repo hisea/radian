@@ -41,6 +41,7 @@ A gate writes its verdict files and one record, `runs/<task>/gate.json`; it neve
   A signalled or killed gate releases the lock; the next pass starts it again, and the verdicts already written are reused.
   Stages of different tasks still queue on their own locks: one `commands` stage at a time, one checkout per stage, and the review stage has its own.
   Up to [`gate.review.concurrency`](config.md#configtoml) review sessions run at once (default `2`, `1` or more); each takes one of the locks `gates/review-0.lock` … `gates/review-<n-1>.lock` and the checkout of that slot, so no two sessions share a checkout. With `1`, a second review waits for the first.
+  Each session's model route, prompt file and time limit come from the reviewer its gate profile names, a [`[gate.reviewers.<name>]`](config.md#configtoml) section (see [the review stage](gate-review.md#the-review-stage)).
   The `review` stage is a read-only session, so it does not wait for another task's `commands`.
 - The gate's own output is `runs/<task>/gate.log`.
 - `runs/<task>/gate.json` holds one record, with the attempt it ran for.

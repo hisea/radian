@@ -134,6 +134,7 @@ fn a_profile_cannot_list_integration_and_stage_names_are_a_closed_set() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     let stages = effective_stages(
         &profile,
@@ -373,4 +374,217 @@ fn the_review_table_defaults_are_the_adr_values() {
         std::time::Duration::ZERO,
         "0 waits forever"
     );
+}
+
+/// The config.toml the `init` of the previous build wrote, kept as a fixture: its review keys
+/// are all in `[gate.review]`, and it must still load with the same effective settings.
+const LEGACY_INIT: &str = r#"schema_version = 1
+
+[repository]
+remote = "origin"
+main_branch = "main"          # what init found
+
+[limits]
+concurrency = 1
+max_attempts = 3
+stall_timeout_secs = 900
+max_wall_time_secs = 7200
+git_remote_timeout_secs = 300   # limit of one git call to a remote; local git is unbounded
+# max_cost_usd = 5.0          # not set = no limit
+cancel_grace_secs = 10
+max_auto_rework = 2
+max_conflict_rework = 3       # consecutive conflicts before the task waits for you
+max_auto_reverify = 2         # 0 turns the automatic reverify off
+max_gate_deaths = 2           # 0 stops at the first gate death
+
+[worker]
+exec_args = []                 # extra `radian acp` arguments for the worker
+rework_session = "fresh"       # `fresh`: a session per attempt; `resume`: the task's one session
+# command = ["codex", "exec"]  # not set: the worker is `radian acp`; do not combine it with exec_args
+
+[ids]
+plan_prefix = "PL"             # 1 to 4 uppercase letters; the first letters of a new plan id
+task_prefix = "TK"             # 1 to 4 uppercase letters; the first letters of a new task id
+
+[integration]
+key_commands = []             # what the integration stage runs on the merge candidate
+# target_branch = "main"      # not set: the value of [repository] main_branch
+# method = "push"             # `push`, `command` with a `command` line, or the `pr` gh preset
+# command = "./merge.sh"     # the line `method = "command"` runs; refused with `push` and `pr`
+# style = "merge"             # `merge`, `squash` or `rebase`: how the candidate is built
+
+[hooks]
+after_merge = [                # shell command lines run after a task reaches done.merged
+  "git push origin --delete work/$ARC_TASK",
+  "git worktree remove --force $ARC_WORKTREE",
+  "git branch -D work/$ARC_TASK",
+]
+
+[gate]
+profile = "default"
+command_timeout_secs = 3600
+
+[gate.review]
+# exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
+timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
+concurrency = 2                 # how many review sessions run at once in this repository; 1 or more
+propose_followups = true        # add the plan's review follow-up once it has no open task
+# prompt_file = "review.md"      # not set: the built-in prompt only
+
+[gate.review.first]
+# exec_args = ["--model", "m"]   # not set: the same as [gate.review] exec_args
+# timeout_secs = 1800            # not set: the same as [gate.review] timeout_secs
+
+[gate.profiles.default]
+stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
+before_attempt = ["merge-main"]   # steps the wrapper runs in the worktree before the worker; [] runs none
+commands = []                 # shell command lines, run in order on the gate checkout
+"#;
+
+/// A file with only the legacy `[gate.review]` spellings gives the `default` reviewer their
+/// values: `exec_args` from `[gate.review]`, `first.timeout_secs` from `[gate.review.first]`,
+/// and the source keys still name the legacy table.
+#[test]
+fn the_legacy_review_table_is_the_default_reviewers_values() {
+    let worker = vec!["--model".to_owned(), "worker".to_owned()];
+    let text = format!(
+        "{BASE}[gate.review]\nexec_args = [\"--model\", \"legacy\"]\n\
+         [gate.review.first]\ntimeout_secs = 12\n"
+    );
+    let config = radian_arc::store::config::parse(&text).expect("the legacy file parses");
+    assert!(!config.gate.reviewers.is_empty());
+    let reviewer = &config.gate.reviewers["default"];
+    assert!(
+        reviewer.legacy,
+        "the default reviewer came from [gate.review]"
+    );
+    assert_eq!(
+        reviewer.exec_args.as_deref(),
+        Some(["--model".to_owned(), "legacy".to_owned()].as_slice())
+    );
+    assert_eq!(reviewer.first.timeout_secs, Some(12));
+    assert_eq!(reviewer.fix_level, "major");
+
+    let choice = reviewer.choice("default", true, &worker);
+    assert_eq!(choice.exec_args_key, "gate.review.exec_args");
+    assert_eq!(choice.timeout_secs, 12);
+    assert_eq!(choice.timeout_key, "gate.review.first.timeout_secs");
+    let choice = reviewer.choice("default", false, &worker);
+    assert_eq!(choice.exec_args_key, "gate.review.exec_args");
+    assert_eq!(choice.timeout_key, "gate.review.timeout_secs");
+    assert_eq!(choice.timeout_secs, 900);
+}
+
+/// `init` writes `[gate.reviewers.default]`, and a file the previous `init` wrote still loads
+/// with the same effective review settings.
+#[test]
+fn init_writes_the_default_reviewer_and_yesterdays_file_still_loads() {
+    let text = radian_arc::store::config::default_text("main");
+    assert!(
+        text.contains("[gate.reviewers.default]"),
+        "init names the reviewer table:\n{text}"
+    );
+    assert!(
+        text.contains("# [gate.reviewers.default.first]"),
+        "init writes the first-review block commented out:\n{text}"
+    );
+    assert!(
+        !text.contains("\n[gate.review.first]"),
+        "the legacy first-review table is gone from init:\n{text}"
+    );
+    assert!(
+        !text.contains("[gate.review]\nexec_args"),
+        "the legacy review keys are gone from init:\n{text}"
+    );
+    let fresh = radian_arc::store::config::parse(&text).expect("the init text parses");
+    let legacy = radian_arc::store::config::parse(LEGACY_INIT).expect("yesterday's text parses");
+    let worker = vec!["--model".to_owned(), "worker".to_owned()];
+    for config in [&fresh, &legacy] {
+        let reviewer = config
+            .gate
+            .reviewers
+            .get("default")
+            .expect("the default reviewer exists");
+        assert_eq!(reviewer.exec_args, None);
+        assert_eq!(reviewer.timeout_secs, 900);
+        assert_eq!(reviewer.prompt_file, None);
+        assert_eq!(reviewer.fix_level, "major");
+        let choice = reviewer.choice("default", true, &worker);
+        assert_eq!(choice.exec_args, worker.as_slice());
+        assert_eq!(choice.timeout_secs, 900);
+    }
+    // The two files resolve the same values; only the source keys differ, because one names
+    // the reviewer table and the other the legacy spelling it came from.
+    let fresh_choice = fresh.gate.reviewers["default"].choice("default", false, &worker);
+    let legacy_choice = legacy.gate.reviewers["default"].choice("default", false, &worker);
+    assert_eq!(fresh_choice.timeout_secs, legacy_choice.timeout_secs);
+    assert_eq!(
+        fresh_choice.timeout_key,
+        "gate.reviewers.default.timeout_secs"
+    );
+    assert_eq!(legacy_choice.timeout_key, "gate.review.timeout_secs");
+}
+
+/// A `[gate.reviewers.default]` section and a legacy `[gate.review]` session key are one
+/// setting in two places: the file is refused and names both keys.
+#[test]
+fn a_legacy_review_key_beside_the_default_reviewer_is_refused_by_both_names() {
+    for (addition, keys) in [
+        (
+            "[gate.review]\ntimeout_secs = 10\n[gate.reviewers.default]\ntimeout_secs = 20\n",
+            vec![
+                "gate.review.timeout_secs",
+                "gate.reviewers.default.timeout_secs",
+            ],
+        ),
+        (
+            "[gate.review]\nexec_args = []\n[gate.reviewers.default]\n",
+            vec!["gate.review.exec_args", "gate.reviewers.default.exec_args"],
+        ),
+        (
+            "[gate.review.first]\nexec_args = []\n[gate.reviewers.default]\n",
+            vec![
+                "gate.review.first.exec_args",
+                "gate.reviewers.default.first.exec_args",
+            ],
+        ),
+    ] {
+        let error = radian_arc::store::config::parse(&format!("{BASE}{addition}"))
+            .expect_err("the two spellings conflict");
+        for key in keys {
+            assert!(error.contains(key), "the error names `{key}`: {error}");
+        }
+    }
+}
+
+/// A profile's `reviewer` must name a `[gate.reviewers.<name>]` section: a missing one is
+/// refused by the profile key and the reviewer name.
+#[test]
+fn a_profile_names_a_missing_reviewer_is_refused() {
+    let text = format!("{BASE}[gate.profiles.art]\nreviewer = \"cheap\"\n");
+    let error = radian_arc::store::config::parse(&text).expect_err("no cheap reviewer");
+    assert!(error.contains("gate.profiles.art.reviewer"), "{error}");
+    assert!(error.contains("cheap"), "{error}");
+
+    let text = format!(
+        "{BASE}[gate.reviewers.cheap]\ntimeout_secs = 60\n\
+         [gate.profiles.art]\nreviewer = \"cheap\"\n"
+    );
+    radian_arc::store::config::parse(&text).expect("a named reviewer resolves");
+}
+
+/// `fix_level` is one of `REVIEW_LEVELS`: a value outside it is refused with all three.
+#[test]
+fn a_fix_level_outside_the_review_levels_is_refused_with_all_of_them() {
+    let text = format!("{BASE}[gate.reviewers.strict]\nfix_level = \"blocker\"\n");
+    let error = radian_arc::store::config::parse(&text).expect_err("blocker is not a level");
+    assert!(error.contains("gate.reviewers.strict.fix_level"), "{error}");
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            error.contains(&format!("`{level}`")),
+            "the error lists `{level}`: {error}"
+        );
+    }
+    let text = format!("{BASE}[gate.reviewers.strict]\nfix_level = \"minor\"\n");
+    radian_arc::store::config::parse(&text).expect("a listed level parses");
 }

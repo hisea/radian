@@ -11,14 +11,14 @@ The gate's `review` stage.
 - `review` is a read-only radian session, not the worker session.
   It runs at the same time as `commands` when the profile lists both and before `human`; a profile that lists both must list `commands` first.
   For each run it starts one `radian exec` in its own slot checkout, `.radian/arc/gates/review-<n>/`, on the candidate, with the candidate as the workspace and only the `read`, `grep` and `glob` tools mounted: no shell tool, no write tool, and no MCP server.
-  Its model route is `[gate.review] exec_args`, and `[gate.review] timeout_secs` limits one session.
+  Its model route and time limit come from the reviewer its gate profile names: the profile's [`reviewer`](config.md#configtoml) picks a `[gate.reviewers.<name>]` section, whose `exec_args` and `timeout_secs` the session uses.
   A task's **first review** is a review stage run when no earlier attempt of the task has a `review` verdict.
-  It reads `[gate.review.first] exec_args` and `[gate.review.first] timeout_secs` when they are set; an unset key falls back to the same `[gate.review]` key and, for `exec_args`, then to `worker.exec_args`.
-  A rework review never reads `[gate.review.first]`.
+  It reads the reviewer's `first.exec_args` and `first.timeout_secs` when they are set; an unset key falls back to the reviewer's own key and, for `exec_args`, then to `worker.exec_args`.
+  A rework review never reads the reviewer's `first` table.
   Both keys are read when the stage starts, so a change takes effect at the next review.
   The prompt is built in: the task's brief, the commit list and the diff from the merge base of the remote target branch and `verified_sha` to `verified_sha` (the task's own change, not the target branch's), and the instruction to check the change against the brief and the repository's rules (`AGENTS.md` and the design records the brief names).
   A rework round's prompt holds the increment instead of the full diff (see [A rework round](#a-rework-round)).
-  `[gate.review] prompt_file` is appended to it.
+  The reviewer's `prompt_file` is appended to it.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
   ```json
@@ -31,8 +31,8 @@ The gate's `review` stage.
   No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   A session whose `Result` carries a `model_error` with `kind` `unavailable` or `usage_limit` is **model unavailable**: the stage does not run it a second time, fails at once with reason `review_unavailable`, and its verdict records the session id, its summed cost and that `model_error` object as `review_model_error` (see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
   A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_model_error` (only on a `review_unavailable` failure), `review_settings` (`round`, `first` or `rework`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha`, `candidate_sha` and `profile`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
-- `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), `review_timeout` (the last run hit `[gate.review] timeout_secs`), and `review_unavailable` (the session's model was unavailable; see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
+  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_model_error` (only on a `review_unavailable` failure), `review_settings` (`round`, `first` or `rework`; `reviewer`, the section's name; `fix_level`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha`, `candidate_sha` and `profile`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
+- `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), `review_timeout` (the last run hit the reviewer's `timeout_secs`), and `review_unavailable` (the session's model was unavailable; see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
 - When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
   A `commands` failure decides it with the commands reason, even when the review passed or failed too: the review verdict is still written, its cost counts, `show` lists its items, and arc writes no automatic review rework for that round.
   When `commands` passes and `review` fails, the review path runs (see [A failed review](#a-failed-review)).
@@ -44,8 +44,8 @@ The gate's `review` stage.
 
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
 A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
-It reads the `[gate.review]` settings, not `[gate.review.first]`, because an earlier review verdict exists, so it is not a first review.
-A genuine first review, one with no earlier verdict at all, keeps the full-diff prompt and the `[gate.review.first]` settings.
+It reads the reviewer's own settings, not its `first` table, because an earlier review verdict exists, so it is not a first review.
+A genuine first review, one with no earlier verdict at all, keeps the full-diff prompt and the reviewer's `first` settings.
 
 A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
 It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
