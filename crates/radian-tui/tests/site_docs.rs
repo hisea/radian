@@ -1,6 +1,6 @@
 //! The web manual (`site-docs` example) renders every `DOCS` page, resolves every
 //! inter-page link and fragment, lists exactly the manual pages in its sidebar, emits no
-//! JavaScript (only a `TechArticle` JSON-LD record), names its canonical URL on every page,
+//! inline JavaScript (a `TechArticle` JSON-LD record and the external analytics file), names its canonical URL on every page,
 //! and lists every page once in `llms.txt`, `sitemap.xml` and in full in `llms-full.txt`.
 
 use radian_tui::site_docs::{
@@ -148,17 +148,24 @@ fn the_sidebar_lists_exactly_the_docs_pages() {
     }
 }
 
-/// No docs page emits JavaScript: the only `<script>` element is the JSON-LD record.
+/// No docs page holds inline JavaScript: its two `<script>` elements are the JSON-LD
+/// record and the external analytics file, loaded once from the site root.
 #[test]
 fn the_docs_pages_hold_no_script() {
     let site = site();
     for (index, page) in site.pages.iter().enumerate() {
         let html = radian_tui::site_docs::page_html(&site, index);
         let scripts = html.to_lowercase().matches("<script").count();
-        assert_eq!(scripts, 1, "{} has one script element", page.name);
+        assert_eq!(scripts, 2, "{} has two script elements", page.name);
         assert!(
             html.contains(JSON_LD_OPEN),
-            "{} has only the JSON-LD element",
+            "{} has the JSON-LD element",
+            page.name
+        );
+        assert_eq!(
+            html.matches(ANALYTICS_SCRIPT).count(),
+            1,
+            "{} loads the analytics file once, with an empty body",
             page.name
         );
         assert!(
@@ -169,8 +176,11 @@ fn the_docs_pages_hold_no_script() {
     }
 }
 
-/// The opening tag of the one `<script>` element a docs page holds.
+/// The opening tag of the JSON-LD `<script>` element a page holds.
 const JSON_LD_OPEN: &str = "<script type=\"application/ld+json\">";
+
+/// The one external script element every page holds.
+const ANALYTICS_SCRIPT: &str = radian_tui::site_docs::ANALYTICS_SCRIPT;
 
 /// The JSON-LD element's content.
 fn json_ld(html: &str) -> serde_json::Value {
@@ -235,7 +245,11 @@ fn a_description_cannot_close_the_json_ld_element() {
     let site = render_site(pages).expect("renders");
     let index = site.pages.iter().position(|p| p.stem == "evil").unwrap();
     let html = radian_tui::site_docs::page_html(&site, index);
-    assert_eq!(html.matches("</script>").count(), 1, "one closing tag");
+    assert_eq!(
+        html.matches("</script>").count(),
+        2,
+        "one closing tag each for the JSON-LD and the analytics element"
+    );
     assert_eq!(json_ld(&html)["description"], "A </script><b> description.");
 }
 
@@ -653,6 +667,11 @@ fn each_split_page_holds_one_language() {
         };
         assert!(html.contains(has), "{who} holds `{has}`");
         assert!(!html.contains(lacks), "{who} holds `{lacks}`");
+        assert_eq!(
+            html.matches(ANALYTICS_SCRIPT).count(),
+            1,
+            "{who} loads the analytics file once"
+        );
         if page.file == "index.html" {
             assert!(
                 html.contains(".install-row button"),
