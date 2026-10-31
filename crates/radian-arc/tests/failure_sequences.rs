@@ -41,8 +41,7 @@ use std::fs;
 use common::*;
 use radian_arc::gate::background;
 use radian_arc::gate::{
-    ReviewItem, ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, now_utc,
-    verdict_path,
+    ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, now_utc, verdict_path,
 };
 use radian_arc::review::{self, AutoReverify};
 use radian_arc::store::attempt_ops::{self, Class, Finish};
@@ -298,19 +297,20 @@ fn write_verdict(
         approver: None,
         review: (stage == Stage::Review).then(|| ReviewReport {
             summary: "the model test's review".to_owned(),
-            blocking: detail
+            findings: detail
                 .blocking
                 .iter()
-                .map(|text| ReviewItem {
-                    level: Some("major".to_owned()),
+                .map(|text| radian_arc::gate::Finding {
+                    severity: "major".to_owned(),
                     file: Some("file.txt".to_owned()),
                     line: Some(1),
-                    text: (*text).to_owned(),
+                    summary: (*text).to_owned(),
+                    trigger: String::new(),
                     pre_existing: false,
                 })
                 .collect(),
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         }),
         review_session_ids: Vec::new(),
         review_cost_micros: None,
