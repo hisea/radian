@@ -331,7 +331,7 @@ pub struct SubtreeFile {
 /// The in-memory "already loaded" set for subtree context files (ADR 0036). The startup chain
 /// is seeded loaded, and a resume adds every path the journal's `ContextFileAppended` events
 /// name. A file appended once never appends again in this process, even after a compaction
-/// removed its message.
+/// removed its message; a file whose read failed is not retried either, so it warns once.
 pub struct SubtreeContext {
     workspace: PathBuf,
     boundary: Option<PathBuf>,
@@ -366,8 +366,8 @@ impl SubtreeContext {
     /// Discovers the files to append for these trigger paths (tool arguments and listed result
     /// files). For each path under the workspace, walks from its directory up to the workspace
     /// and takes the first existing context file of each directory not yet loaded (ADR 0036),
-    /// inner directory first. The set is updated here, so a parallel call cannot append the
-    /// same file twice.
+    /// inner directory first. The set is updated here before the read, so a parallel call
+    /// cannot append the same file twice, and a file that cannot be read is not retried.
     pub fn discover(&self, triggers: &[PathBuf]) -> (Vec<SubtreeFile>, Vec<String>) {
         let mut files = Vec::new();
         let mut warnings = Vec::new();
@@ -392,8 +392,10 @@ impl SubtreeContext {
                     let key =
                         std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
                     // A symlink that resolves outside the workspace is skipped (ADR 0036).
+                    // Record the candidate before the read, so a file that cannot be read
+                    // warns once per session instead of on every trigger.
                     if key.starts_with(&self.workspace)
-                        && !loaded.contains(&key)
+                        && loaded.insert(key.clone())
                         && let Some((file, content)) = read_context_file(
                             &candidate,
                             &self.workspace,
@@ -401,7 +403,6 @@ impl SubtreeContext {
                             &mut warnings,
                         )
                     {
-                        loaded.insert(key.clone());
                         let relative = key
                             .strip_prefix(&self.workspace)
                             .unwrap_or(&key)
@@ -1657,6 +1658,32 @@ mod tests {
         let (files, warnings) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
         assert!(files.is_empty(), "{files:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// An unreadable subtree file warns once and is skipped, not retried on every trigger
+    /// (ADR 0036). Recording only a successful read warns again on each later read.
+    #[test]
+    fn an_unreadable_subtree_file_warns_once() {
+        let dir = TempDir::new("subtree-unreadable");
+        dir.write("ws/crates/x/real.md", "SECRET-CONTENT");
+        dir.write("ws/crates/x/src/a.rs", "a");
+        dir.write("ws/crates/x/src/b.rs", "b");
+        // A symlink inside the workspace: `read_nofollow` refuses the leaf (ADR 0039), and
+        // the file is still the first existing candidate in its directory.
+        std::os::unix::fs::symlink("real.md", dir.path().join("ws/crates/x/AGENTS.md")).unwrap();
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+
+        let (files, warnings) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
+        assert!(files.is_empty(), "{files:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("cannot read"), "{warnings:?}");
+
+        let (again, warnings) = state.discover(&[PathBuf::from("crates/x/src/b.rs")]);
+        assert!(again.is_empty(), "{again:?}");
+        assert!(
+            warnings.is_empty(),
+            "an unreadable file warns once: {warnings:?}"
+        );
     }
 
     /// A `grep` call with `path: crates/x` triggers that directory (ADR 0036).
