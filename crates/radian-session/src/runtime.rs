@@ -210,6 +210,16 @@ pub enum RuntimeEvent {
     /// carry no content; a reader uses them to see *which* records were injected, not to
     /// rebuild the request.
     MemoryInjected { records: Vec<MemoryInjectedRecord> },
+    /// A subtree context file was appended to the transcript (ADR 0036). Audit only:
+    /// `critical = false`. `path` is relative to the workspace; `bytes` is the loaded size
+    /// (after imports and truncation); `truncated` says the file hit the per-file cap. A
+    /// resume reads these paths so the same file is not appended again; the content itself
+    /// is the `Message` record.
+    ContextFileAppended {
+        path: String,
+        bytes: usize,
+        truncated: bool,
+    },
     /// A child session was forked from this one (ADR 0022 §3). Audit only: `critical = false`.
     /// The child's own `SessionCreated.parent` is the authority on the lineage; this record is
     /// the parent's index of it. `parent_seq` names the fork point and matches the child's
@@ -308,6 +318,7 @@ impl RuntimeEvent {
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
             RuntimeEvent::ApprovalPolicyChanged { .. } => "ApprovalPolicyChanged",
             RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
+            RuntimeEvent::ContextFileAppended { .. } => "ContextFileAppended",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
@@ -343,6 +354,7 @@ impl RuntimeEvent {
             | RuntimeEvent::PermissionResolved { .. }
             | RuntimeEvent::ApprovalPolicyChanged { .. }
             | RuntimeEvent::MemoryInjected { .. }
+            | RuntimeEvent::ContextFileAppended { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
@@ -491,6 +503,13 @@ pub(crate) struct MemoryInjectedData<'a> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ContextFileAppendedData<'a> {
+    pub path: &'a str,
+    pub bytes: usize,
+    pub truncated: bool,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ProjectTrustChangedData {
     pub path: String,
     pub decision: bool,
@@ -577,6 +596,7 @@ pub(crate) enum RuntimeData<'a> {
     PermissionResolved(PermissionResolvedData<'a>),
     ApprovalPolicyChanged(ApprovalPolicyChangedData),
     MemoryInjected(MemoryInjectedData<'a>),
+    ContextFileAppended(ContextFileAppendedData<'a>),
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
@@ -607,6 +627,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
             RuntimeData::ApprovalPolicyChanged(d) => d.serialize(serializer),
             RuntimeData::MemoryInjected(d) => d.serialize(serializer),
+            RuntimeData::ContextFileAppended(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
@@ -721,6 +742,15 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         RuntimeEvent::MemoryInjected { records } => {
             RuntimeData::MemoryInjected(MemoryInjectedData { records })
         }
+        RuntimeEvent::ContextFileAppended {
+            path,
+            bytes,
+            truncated,
+        } => RuntimeData::ContextFileAppended(ContextFileAppendedData {
+            path,
+            bytes: *bytes,
+            truncated: *truncated,
+        }),
         RuntimeEvent::SessionForked {
             child_session_id,
             parent_seq,

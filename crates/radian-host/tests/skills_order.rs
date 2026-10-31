@@ -62,9 +62,10 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
             "tabs over spaces".into(),
         )
         .unwrap();
+    let journal = journal(&dir);
     let memory = Arc::new(MemoryHooks::new(
         Some(service),
-        journal(&dir),
+        Arc::clone(&journal),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));
@@ -124,6 +125,15 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Arc::new(|_message: &str| {}),
         Arc::new(|_message: &str| {}),
     ));
+    // ADR 0036: the subtree context hook. This test has no tool call, so an empty state is
+    // enough; the hook is in the chain to pin its place.
+    let context_hooks = Arc::new(radian_host::ContextHooks::new(
+        Arc::new(radian_host::SubtreeContext::new(&ws, [])),
+        radian_runtime::Inbox::new(64),
+        journal,
+        Arc::new(|_message: &str| {}),
+        true,
+    ));
     let hooks = session_hooks(
         role,
         permissions,
@@ -132,6 +142,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         skills_hooks,
         goal,
         facts,
+        context_hooks,
     );
     let mut request = ModelRequest {
         system_prompt: None,

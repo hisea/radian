@@ -704,6 +704,9 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertEqual(row["read_unranged_calls"], 1)
         self.assertEqual(row["read_unranged_bytes"], 3)
         self.assertEqual(row["read_large_calls"], 0)
+        # This fixture touches no memory file: both memory columns are 0, not empty.
+        self.assertEqual(row["memory_reads"], 0)
+        self.assertEqual(row["memory_writes"], 0)
         self.assertEqual(row["compactions"], 1)
         self.assertEqual(row["deterministic_compactions"], 0)
         # The fixture's `ContextCompacted` has no commit, so no compaction counts
@@ -1467,6 +1470,227 @@ class CommandLineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(metrics.main([tmp]), 1)
+
+
+def tool_started(call_id, name, ts=None, **arguments):
+    """One radian `ToolExecutionStarted` carrying these tool arguments."""
+    return journal_event(
+        "ToolExecutionStarted",
+        ts,
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+    )
+
+
+def tool_settled(call_id, text="ok", is_error=False, ts=None):
+    """One radian `ToolExecutionSettled`; `is_error` is a call's success test."""
+    return journal_event(
+        "ToolExecutionSettled",
+        ts,
+        call_id=call_id,
+        result={
+            "call_id": call_id,
+            "content": [{"text": {"text": text}}],
+            "is_error": is_error,
+        },
+    )
+
+
+class MemoryMetricsTest(unittest.TestCase):
+    """`memory_reads` and `memory_writes` count a tool call's path, not its result text."""
+
+    def row(self, records, name="j.jsonl"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        write_journal(path, records)
+        return journal_metrics.build_report([path])["journals"][0]
+
+    def test_a_read_under_either_memory_scope_counts(self):
+        for path in (
+            "/Users/x/.radian/memory/projects/P/foo.md",
+            "/Users/x/.radian/memory/global/MEMORY.md",
+        ):
+            with self.subTest(path=path):
+                row = self.row(
+                    [
+                        tool_started("c1", "read", path=path),
+                        tool_settled("c1", "body"),
+                    ]
+                )
+                self.assertEqual(row["memory_reads"], 1)
+                self.assertEqual(row["memory_writes"], 0)
+
+    def test_a_workspace_path_that_merely_contains_memory_is_not_a_memory_read(self):
+        row = self.row(
+            [
+                tool_started("c1", "read", path="/Users/x/code/memory/notes.md"),
+                tool_settled("c1", "notes"),
+            ]
+        )
+        self.assertEqual(row["memory_reads"], 0)
+
+    def test_a_denied_write_to_a_memory_path_is_not_a_memory_write(self):
+        row = self.row(
+            [
+                tool_started(
+                    "c1",
+                    "write",
+                    path="/Users/x/.radian/memory/projects/P/foo.md",
+                    content="body",
+                ),
+                tool_settled(
+                    "c1",
+                    "denied: writing a memory file is not allowed in this session",
+                    is_error=True,
+                ),
+            ]
+        )
+        self.assertEqual(row["memory_writes"], 0)
+
+    def test_a_patch_that_succeeded_is_a_memory_write(self):
+        row = self.row(
+            [
+                tool_started(
+                    "c1",
+                    "patch",
+                    path="/Users/x/.radian/memory/global/MEMORY.md",
+                    old="a",
+                    new="b",
+                ),
+                tool_settled("c1", "patched"),
+            ]
+        )
+        self.assertEqual(row["memory_writes"], 1)
+
+    def test_a_grep_path_under_the_memory_directory_is_a_read(self):
+        row = self.row(
+            [
+                tool_started(
+                    "c1",
+                    "grep",
+                    path="/Users/x/.radian/memory/projects/P",
+                    pattern="deploy",
+                ),
+                tool_settled("c1", "foo.md:1: deploy"),
+                # No `path`: grep searched the workspace, not memory.
+                tool_started("c2", "grep", pattern="deploy"),
+                tool_settled("c2", "src/main.rs:1: deploy"),
+            ]
+        )
+        self.assertEqual(row["memory_reads"], 1)
+
+    def test_a_glob_path_under_the_memory_directory_is_a_read(self):
+        row = self.row(
+            [
+                tool_started(
+                    "c1", "glob", path="/Users/x/.radian/memory/global", pattern="*.md"
+                ),
+                tool_settled("c1", "MEMORY.md"),
+            ]
+        )
+        self.assertEqual(row["memory_reads"], 1)
+
+    def test_a_pi_journal_leaves_both_columns_empty(self):
+        row = self.row(
+            [
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "toolCall",
+                                "id": "c1",
+                                "name": "read",
+                                "arguments": {
+                                    "path": "/Users/x/.radian/memory/global/MEMORY.md"
+                                },
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "c1",
+                        "toolName": "read",
+                        "content": [{"type": "text", "text": "body"}],
+                        "isError": False,
+                    },
+                },
+            ]
+        )
+        self.assertIsNone(row["memory_reads"])
+        self.assertIsNone(row["memory_writes"])
+
+    def test_a_journal_with_no_tool_calls_reports_zero(self):
+        row = self.row(
+            [
+                journal_event(
+                    "SessionCreated",
+                    journal_time(0),
+                    workspace="/w",
+                    config_snapshot={},
+                )
+            ]
+        )
+        self.assertEqual(row["memory_reads"], 0)
+        self.assertEqual(row["memory_writes"], 0)
+
+    def test_the_totals_row_sums_both_columns(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        write_journal(
+            root / "a.jsonl",
+            [
+                tool_started(
+                    "c1", "read", path="/Users/x/.radian/memory/global/MEMORY.md"
+                ),
+                tool_settled("c1", "index"),
+                tool_started(
+                    "c2",
+                    "write",
+                    path="/Users/x/.radian/memory/projects/P/a.md",
+                    content="a",
+                ),
+                tool_settled("c2", "wrote"),
+            ],
+        )
+        write_journal(
+            root / "b.jsonl",
+            [
+                tool_started(
+                    "c1", "read", path="/Users/x/.radian/memory/projects/P/a.md"
+                ),
+                tool_settled("c1", "a"),
+            ],
+        )
+        totals = journal_metrics.build_report([root])["totals"]
+        self.assertEqual(totals["memory_reads"], 2)
+        self.assertEqual(totals["memory_writes"], 1)
+
+    def test_a_recorded_radian_home_names_the_memory_root(self):
+        # A host that records the override names the root the session wrote under.
+        row = self.row(
+            [
+                journal_event(
+                    "SessionCreated",
+                    journal_time(0),
+                    workspace="/w",
+                    config_snapshot={},
+                    radian_home="/opt/rh",
+                ),
+                tool_started(
+                    "c1", "read", path="/opt/rh/memory/projects/P/foo.md"
+                ),
+                tool_settled("c1", "body"),
+            ]
+        )
+        self.assertEqual(row["memory_reads"], 1)
 
 
 if __name__ == "__main__":

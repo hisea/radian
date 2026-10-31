@@ -39,3 +39,16 @@ file from a backup under `.radian/`.
 | TK0262-M4 | `leak.py` `Scanner._pointed`: `remote add` option values are not skipped (`_words(rest, REMOTE_OPTION_ARGS)` → `_words(rest)`) | `LeakTest.test_a_remote_add_with_option_arguments_names_the_remote` (4 subtests: `-t main`, `--track main`, `-m main`, `--master main`) | ✅ failed |
 | TK0262-M5 | `leak.py` `scan`: calls are de-duplicated by `(name, arguments)` again instead of call id | `LeakTest.test_two_fetches_of_one_remote_keep_the_second_result` | ✅ failed |
 | TK0262-M6 | `leak.py` `second_history`: `fetch`/`pull`/`clone` option values are not skipped (`_words(rest, SECOND_HISTORY_OPTION_ARGS.get(sub, frozenset()))` → `_words(rest)`) | `LeakTest.test_fetch_options_that_take_a_value_do_not_shadow_the_remote` (4 subtests) and `test_a_clone_with_options_names_the_repository` (`--depth 1 --reference /srv/ref`) | ✅ failed |
+
+## TK0273: journal metrics memory columns
+
+Base: `work/TK0273-memory-metrics` · method: apply the mutation to
+`benchmarks/journal_metrics.py`, run the named test with
+`cd benchmarks/terminal-bench/tests && python3 -m unittest
+test_metrics.MemoryMetricsTest.<test>`, expect a non-zero exit, restore the
+file from a backup under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0273-M1 | `_is_memory_path`: the component test is loosened to any path containing `memory` (`if "memory" in path: return True` before the component walk) | `MemoryMetricsTest.test_a_workspace_path_that_merely_contains_memory_is_not_a_memory_read` (`memory_reads` 1 instead of 0) | ✅ failed |
+| TK0273-M2 | `_add_memory`: the success test is removed from `memory_writes` (`if not is_error and _is_memory_path(...)` → `if _is_memory_path(...)`) | `MemoryMetricsTest.test_a_denied_write_to_a_memory_path_is_not_a_memory_write` (`memory_writes` 1 instead of 0) | ✅ failed |
