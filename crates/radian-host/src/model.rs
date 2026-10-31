@@ -844,7 +844,7 @@ impl RouteContext {
         // `R` cannot drift.
         let limit = catalog.limit(provider_name, model);
         let max_output_tokens = crate::route_output(adapter, &base_url, self.max_tokens)
-            .with_explicit(crate::explicit_max_tokens(&self.extra_body))
+            .with_explicit(crate::explicit_max_tokens(&self.extra_body, adapter))
             .resolve(
                 limit.and_then(|limit| limit.context),
                 limit.and_then(|limit| limit.output),
@@ -897,8 +897,9 @@ impl RouteContext {
             .provider_ref
             .endpoint_for(model, route.protocol, auth_base_url)
             .unwrap_or_default();
-        crate::route_output(route.protocol.adapter(), &base_url, self.max_tokens)
-            .with_explicit(crate::explicit_max_tokens(&self.extra_body))
+        crate::route_output(route.protocol.adapter(), &base_url, self.max_tokens).with_explicit(
+            crate::explicit_max_tokens(&self.extra_body, route.protocol.adapter()),
+        )
     }
 }
 

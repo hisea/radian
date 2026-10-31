@@ -36,6 +36,12 @@ pub(crate) fn build_body(
                     "the request setting `{key}` is set by the adapter and cannot be overridden"
                 )));
             }
+            // ADR 0018 §2: a `null` output cap is not a cap; it would let the server pick a
+            // default the host reservation cannot see. Dropping it keeps the wire value and
+            // the reserved `R` the same (the computed cap below then applies).
+            if value.is_null() && matches!(key.as_str(), "max_tokens" | "max_completion_tokens") {
+                continue;
+            }
             body.insert(key.clone(), value.clone());
         }
     }
@@ -699,7 +705,7 @@ mod tests {
         assert!(build_body(&req, &cfg, false).is_err());
     }
     #[test]
-    fn the_catalog_output_cap_is_the_ceiling_and_the_window_share() {
+    fn the_catalog_output_cap_is_the_ceiling_and_the_fifteen_percent_share() {
         // ADR 0018: C = 1000000, O = 384000 → 150000; C = 128000, O = 16384 → 16384.
         assert_eq!(
             catalog_max_tokens(Some(1_000_000), Some(384_000)),
@@ -775,6 +781,26 @@ mod tests {
             body["max_tokens"],
             json!(64),
             "per-request settings win at 128k"
+        );
+    }
+
+    #[test]
+    fn a_null_explicit_output_cap_is_not_sent() {
+        // ADR 0018 §2: a `null` cap would let the server pick a default the host cannot
+        // reserve for, so it is dropped and the computed cap the reservation counts is sent.
+        let mut cfg = config();
+        cfg.max_tokens = Some(19_200);
+        cfg.extra_body.insert("max_tokens".into(), Value::Null);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(19_200), "{body}");
+
+        cfg.extra_body.remove("max_tokens");
+        cfg.extra_body
+            .insert("max_completion_tokens".into(), Value::Null);
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "a null sibling is not sent either: {body}"
         );
     }
 

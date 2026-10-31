@@ -90,13 +90,45 @@ impl ExtraBody {
     }
 }
 
-/// The numeric `max_tokens` an explicit body sets (ADR 0026 D13). The OpenAI-compatible and
-/// Responses adapters do not reserve the key, so it wins over the computed chat cap on the
-/// wire; the host therefore counts it as the output the request really sends (ADR 0018 §2).
-/// A missing, non-numeric, negative or fractional value cannot be reserved for and is ignored.
-pub fn explicit_max_tokens(fields: &Map<String, Value>) -> Option<u32> {
-    let value = fields.get("max_tokens")?.as_u64()?;
-    Some(value.min(u64::from(u32::MAX)) as u32)
+/// The numeric output cap an explicit body sets (ADR 0026 D13). The OpenAI-compatible
+/// adapter does not reserve `max_tokens` (or the newer `max_completion_tokens` spelling), so
+/// it wins over the computed chat cap on the wire; the host therefore counts it as the output
+/// the request really sends (ADR 0018 §2). On the Anthropic and Responses routes only
+/// `max_tokens` is counted: they do not send either as their output (`max_tokens` on Anthropic
+/// is reserved and refused before here).
+///
+/// A non-negative integer, or an integral float of the same value, is reservable. A missing,
+/// `null`, negative, fractional or non-numeric value cannot be reserved for and is ignored;
+/// a `null` `max_tokens` is treated as absent by the chat adapter, so the computed cap the
+/// reservation counts is what goes on the wire.
+pub fn explicit_max_tokens(fields: &Map<String, Value>, adapter: Provider) -> Option<u32> {
+    let mut keys: &[&str] = &["max_tokens"];
+    if adapter == Provider::OpenAiCompatible {
+        // `max_completion_tokens` is the documented spelling on newer api.openai.com chat
+        // models; the reservation must not miss the output the body really sends.
+        keys = &["max_tokens", "max_completion_tokens"];
+    }
+    keys.iter()
+        .filter_map(|key| reservable_tokens(fields.get(*key)?))
+        .max()
+}
+
+/// A JSON number as the non-negative integer it represents, including an integral float such
+/// as `32000.0`. A negative, fractional, NaN/infinity or non-number value is `None`.
+fn reservable_tokens(value: &Value) -> Option<u32> {
+    let number = match value {
+        Value::Number(number) => number,
+        _ => return None,
+    };
+    if let Some(value) = number.as_u64() {
+        return Some(value.min(u64::from(u32::MAX)) as u32);
+    }
+    let value = number.as_f64()?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return None;
+    }
+    // `u32::MAX as f64` is exact; anything larger clamps like an oversized integer.
+    Some(value.min(f64::from(u32::MAX)) as u32)
 }
 
 /// Reads and validates the variable. Empty counts as unset.
@@ -247,22 +279,56 @@ mod tests {
         // The chat route's builder merges `max_tokens` from the body and skips its computed
         // cap, so this is the output the request really carries.
         let extra = parsed(r#"{"max_tokens":32000}"#);
-        assert_eq!(explicit_max_tokens(extra.fields()), Some(32_000));
+        assert_eq!(
+            explicit_max_tokens(extra.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        // The sibling spelling counts on the chat route too, and the larger wins if both are
+        // present.
+        let completion = parsed(r#"{"max_completion_tokens":32000}"#);
+        assert_eq!(
+            explicit_max_tokens(completion.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        let both = parsed(r#"{"max_tokens":16000,"max_completion_tokens":32000}"#);
+        assert_eq!(
+            explicit_max_tokens(both.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        // The other routes do not send `max_completion_tokens` as their output.
+        assert_eq!(
+            explicit_max_tokens(completion.fields(), Provider::Anthropic),
+            None
+        );
         // A value beyond `u32` is clamped: the reservation is a `u32` and must still see it.
         let huge = parsed(&json!({"max_tokens": u64::from(u32::MAX) + 1}).to_string());
-        assert_eq!(explicit_max_tokens(huge.fields()), Some(u32::MAX));
+        assert_eq!(
+            explicit_max_tokens(huge.fields(), Provider::OpenAiCompatible),
+            Some(u32::MAX)
+        );
         // Zero is a number the request sends; the window cap still reserves `R`.
         let zero = parsed(r#"{"max_tokens":0}"#);
-        assert_eq!(explicit_max_tokens(zero.fields()), Some(0));
+        assert_eq!(
+            explicit_max_tokens(zero.fields(), Provider::OpenAiCompatible),
+            Some(0)
+        );
+        // An integral float is the same output; a `null` or a fractional value is not
+        // reservable.
+        let integral = parsed(r#"{"max_tokens":32000.0}"#);
+        assert_eq!(
+            explicit_max_tokens(integral.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
         // Anything that is not a non-negative integer cannot be reserved for.
         for raw in [
             r#"{"max_tokens":-1}"#,
             r#"{"max_tokens":1.5}"#,
+            r#"{"max_tokens":null}"#,
             r#"{"max_tokens":"32000"}"#,
             r#"{"temperature":0.2}"#,
         ] {
             assert_eq!(
-                explicit_max_tokens(parsed(raw).fields()),
+                explicit_max_tokens(parsed(raw).fields(), Provider::OpenAiCompatible),
                 None,
                 "not a usable output: {raw}"
             );
