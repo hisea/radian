@@ -8,6 +8,7 @@ use std::sync::Arc;
 use common::*;
 use radian_core::testing::{FailingJournal, RecordingJournal};
 use radian_core::*;
+use serde_json::json;
 
 // ---------- serialization (AC-A5-6) ----------
 
@@ -309,7 +310,7 @@ async fn usage_is_journaled_after_the_assistant_message_and_only_when_present() 
     assert!(matches!(&records[1], JournalRecord::Message { .. }));
     assert!(matches!(
         &records[2],
-        JournalRecord::ModelUsage { usage } if *usage == usage_value()
+        JournalRecord::ModelUsage { usage, .. } if *usage == usage_value()
     ));
 
     // A turn without usage writes no usage record (J5): no empty shells.
@@ -383,6 +384,8 @@ async fn replay_and_recover_ignore_usage_records() {
         interleaved.push(record.clone());
         interleaved.push(JournalRecord::ModelUsage {
             usage: usage_value(),
+            stop_reason: None,
+            stop_reason_raw: None,
         });
         let _ = i;
     }
@@ -447,4 +450,154 @@ async fn usage_append_failure_sweep() {
             .await
             .unwrap();
     }
+}
+
+// ---------- the response's stop reason (ADR 0006 §5.7) ----------
+
+/// The one list drives both directions: every value serializes to itself and reads back, and
+/// an unknown future value maps to `Unknown` instead of failing (ADR 0006 §7(d)).
+#[test]
+fn every_recorded_stop_reason_round_trips_from_the_one_list() {
+    for value in MODEL_STOP_REASONS {
+        let reason: ModelStopReason = serde_json::from_value(json!(value)).unwrap();
+        assert_ne!(reason, ModelStopReason::Unknown, "{value}");
+        assert_eq!(serde_json::to_value(reason).unwrap(), json!(value));
+    }
+    let future: ModelStopReason = serde_json::from_value(json!("some_future_reason")).unwrap();
+    assert_eq!(future, ModelStopReason::Unknown);
+}
+
+/// A reply with a chosen stop reason, tool calls and usage.
+fn reply_with(reason: StopReason, tool_calls: Vec<ToolCall>, usage: ModelUsage) -> Reply {
+    Reply::Respond(ModelResponse {
+        limits: None,
+        reasoning: Vec::new(),
+        content: if tool_calls.is_empty() {
+            vec![ContentPart::text("answer")]
+        } else {
+            Vec::new()
+        },
+        tool_calls,
+        provider_payload: None,
+        stop_reason: reason,
+        usage: Some(usage),
+    })
+}
+
+/// Every usage record's durable stop reason and raw sibling, in journal order.
+fn recorded_stop_reasons(
+    records: &[JournalRecord],
+) -> Vec<(Option<ModelStopReason>, Option<String>)> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            JournalRecord::ModelUsage {
+                stop_reason,
+                stop_reason_raw,
+                ..
+            } => Some((*stop_reason, stop_reason_raw.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A truncated response that carries tool calls continues the turn; both calls record their
+/// own stop reason, so the `max_tokens` in the middle of a turn is not lost.
+#[tokio::test]
+async fn a_truncated_response_with_tool_calls_records_max_tokens_then_end_turn() {
+    let model = ScriptedModel::new([
+        reply_with(
+            StopReason::MaxTokens,
+            vec![call("c1", "echo", json!({}))],
+            usage_value(),
+        ),
+        reply_with(StopReason::EndTurn, Vec::new(), usage_value()),
+    ]);
+    let tools = MemTools::new(vec![(spec("echo"), Behavior::Echo)]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = agent(model, tools)
+        .open_session_with_journal(Vec::new(), journal.clone())
+        .await
+        .unwrap();
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(
+        recorded_stop_reasons(&journal.records()),
+        [
+            (Some(ModelStopReason::MaxTokens), None),
+            (Some(ModelStopReason::EndTurn), None),
+        ]
+    );
+}
+
+/// `StopReason::Other` writes `other` and the provider's raw text in the sibling field.
+#[tokio::test]
+async fn an_other_stop_reason_records_other_and_the_provider_text() {
+    let model = ScriptedModel::new([reply_with(
+        StopReason::Other("length_exceeded".into()),
+        Vec::new(),
+        usage_value(),
+    )]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, journal.clone()).await;
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.status,
+        RunStatus::Incomplete(IncompleteReason::UnknownStopReason(
+            "length_exceeded".into()
+        ))
+    );
+    assert_eq!(
+        recorded_stop_reasons(&journal.records()),
+        [(Some(ModelStopReason::Other), Some("length_exceeded".into()))]
+    );
+}
+
+/// A response with no usage writes no `ModelUsageRecorded` (ADR 0007 J5), so its stop reason
+/// is not recorded either. This is the behaviour before the field existed, unchanged.
+#[tokio::test]
+async fn a_response_without_usage_records_no_stop_reason() {
+    let model = ScriptedModel::new([stop(StopReason::MaxTokens, "half"), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, journal.clone()).await;
+
+    let outcome = chat
+        .run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert!(recorded_stop_reasons(&journal.records()).is_empty());
+}
+
+/// A reported-but-empty usage object (`{}`) still writes the record, exactly as before; the
+/// record now carries the response's stop reason too.
+#[tokio::test]
+async fn an_empty_usage_object_still_writes_the_record_with_its_stop_reason() {
+    let model = ScriptedModel::new([reply_with(
+        StopReason::EndTurn,
+        Vec::new(),
+        ModelUsage::default(),
+    )]);
+    let journal = Arc::new(RecordingJournal::new());
+    let mut chat = session_with(model, journal.clone()).await;
+
+    chat.run_turn("go", TurnOptions::default(), &NoopSink)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recorded_stop_reasons(&journal.records()),
+        [(Some(ModelStopReason::EndTurn), None)]
+    );
 }

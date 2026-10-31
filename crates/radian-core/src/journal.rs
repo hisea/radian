@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::message::{Message, MessageMeta, ToolResult};
-use crate::model::ModelUsage;
+use crate::model::{ModelStopReason, ModelUsage};
 
 /// One durable record. A1 journals transcript messages; A2 adds tool execution markers so
 /// a crash between "dispatched" and "result written" can be classified on recovery.
@@ -46,8 +46,14 @@ pub enum JournalRecord {
     ToolExecutionSettled { call_id: String, result: ToolResult },
     /// Usage the provider reported for the assistant message that precedes this record (J5).
     /// Written only when the response carried usage; failure to append fails the turn like any
-    /// other write (J6).
-    ModelUsage { usage: ModelUsage },
+    /// other write (J6). The response's stop reason travels with it (ADR 0006 §5.7):
+    /// `stop_reason_raw` is the provider's text and is present only with
+    /// [`ModelStopReason::Other`].
+    ModelUsage {
+        usage: ModelUsage,
+        stop_reason: Option<ModelStopReason>,
+        stop_reason_raw: Option<String>,
+    },
     /// The real usage of one summarization model call (ADR 0018). Written as soon as the call
     /// returns, whether or not the compaction it belongs to commits, so the session's usage
     /// total includes it. It is **not** a `ModelUsage`: it must never move the budget baseline.

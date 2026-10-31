@@ -106,6 +106,8 @@ async fn usage_session(label: &str) -> (Scratch, std::path::PathBuf) {
                 input_includes_cache: Some(false),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -125,6 +127,8 @@ async fn usage_session(label: &str) -> (Scratch, std::path::PathBuf) {
                 input_includes_cache: Some(false),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -260,6 +264,8 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
                     input_includes_cache: Some(false),
                     ..Default::default()
                 },
+                stop_reason: None,
+                stop_reason_raw: None,
             })
             .await
             .unwrap();
@@ -277,6 +283,8 @@ fn the_snapshot_route_prices_the_calls_before_the_first_switch() {
                     input_includes_cache: Some(false),
                     ..Default::default()
                 },
+                stop_reason: None,
+                stop_reason_raw: None,
             })
             .await
             .unwrap();
@@ -323,6 +331,8 @@ async fn a_recorded_fee_is_restored_as_it_stands_when_the_catalog_moves() {
                 input_includes_cache: Some(false),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -399,6 +409,8 @@ async fn a_recorded_incomplete_fee_keeps_the_total_incomplete() {
                 input_includes_cache: Some(false),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -435,6 +447,8 @@ async fn a_resumed_tiered_price_folds_each_call_by_its_own_length() {
                     input_includes_cache: Some(false),
                     ..Default::default()
                 },
+                stop_reason: None,
+                stop_reason_raw: None,
             })
             .await
             .unwrap();

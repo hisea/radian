@@ -23,11 +23,16 @@ KNOWN_EVENTS = {
     "GoalPaused", "GoalResumed", "GoalDropped", "GoalWait",
     "GoalBudgetExhausted",
 }
-# ADR 0005/0006 §5.5：InputSource 的 snake_case 全集。
+# ADR 0006 §5.5：InputSource 的 snake_case 全集。
 SOURCES = {
     "user", "slash_command", "permission_decision", "scheduler",
     "mcp", "subagent", "system",
 }
+# ADR 0006 §5.7：ModelUsageRecorded.stop_reason 的闭集（按 ADR 顺序）。
+STOP_REASONS = (
+    "end_turn", "tool_use", "max_tokens", "refusal",
+    "content_filtered", "pause_turn", "other",
+)
 META_FIELDS = {"id", "source", "origin"}
 RFC3339_UTC = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$"
@@ -229,6 +234,29 @@ EXPECT = {
         ],
         repair={},
     ),
+    "model-stop-reasons.jsonl": dict(
+        outcome="accept",
+        events=10,
+        skips=[],
+        # (stop_reason, stop_reason_raw) —— ADR 0006 §5.7：闭集值、other 的原文、
+        # 旧记录（没有字段）与未来值（读成 Unknown）。
+        usage_stop_reasons=[
+            ("end_turn", None),
+            ("tool_use", None),
+            ("max_tokens", None),
+            ("refusal", None),
+            ("content_filtered", None),
+            ("pause_turn", None),
+            ("other", "length_exceeded"),
+            (None, None),
+            ("some_future_reason", None),
+        ],
+        repair={},
+    ),
+    "model-stop-reason-raw-mismatch.jsonl": dict(
+        outcome="stop_reason_reject",
+        events=2,
+    ),
     "replace-resets-index.jsonl": dict(
         outcome="accept",
         events=11,
@@ -370,6 +398,22 @@ def fold_push(st, ev, lineno, name):
         # ModelUsageRecorded 与所有 runtime/未知事件：待定段内一律损坏。
         if st["pending"] is not None:
             raise Corruption(f"{name}: line {lineno}: {e} 出现在待定段里（ADR 0019 §2）")
+
+
+def check_stop_reason(name, lineno, data):
+    """ADR 0006 §5.7：stop_reason 是可选字符串；stop_reason_raw 只能与 other 同时出现。"""
+    reason = data.get("stop_reason")
+    raw = data.get("stop_reason_raw")
+    if reason is not None and (not isinstance(reason, str) or not reason):
+        raise Corruption(f"{name}: line {lineno}: stop_reason 必须是非空字符串")
+    if raw is not None:
+        if reason != "other":
+            raise Corruption(
+                f"{name}: line {lineno}: stop_reason_raw 只能与 "
+                'stop_reason="other" 同时出现'
+            )
+        if not isinstance(raw, str) or not raw:
+            raise Corruption(f"{name}: line {lineno}: stop_reason_raw 必须是非空字符串")
 
 
 def simulate_repair(events):
@@ -529,6 +573,13 @@ def check_fixture(name, exp):
                     or (isinstance(scope, dict) and isinstance(scope.get("project"), str))
                 ):
                     raise Corruption(f"{name}: line {i}: MemoryInjected.scope 形状错误")
+        if ev["event"] == "ModelUsageRecorded":
+            try:
+                check_stop_reason(name, i, ev["data"])
+            except Corruption:
+                if exp["outcome"] == "stop_reason_reject":
+                    return f"PASS {name}: 拒绝打开（line {i}, ModelUsageRecorded）"
+                raise
         # ADR 0019 §2：唯一的替换状态机（本文件独立实现，不调用 Rust）。
         try:
             fold_push(fold, ev, i, name)
@@ -541,6 +592,8 @@ def check_fixture(name, exp):
         events.append(ev)
 
     if exp["outcome"] in ("pending_event_reject", "replacement_mismatch_reject"):
+        raise Corruption(f"{name}: 期望拒绝打开，但文件被接受了")
+    if exp["outcome"] == "stop_reason_reject":
         raise Corruption(f"{name}: 期望拒绝打开，但文件被接受了")
     if fold["pending"] is not None:
         fold["uncommitted"].append(
@@ -712,6 +765,29 @@ def check_fixture(name, exp):
             raise Corruption(f"{name}: 期望至少一条没有 fee 的旧记录")
         if not any(fee is not None and fee.get("incomplete") for _, fee in got):
             raise Corruption(f"{name}: 期望至少一条标不完整的 fee")
+    if "usage_stop_reasons" in exp:
+        # ADR 0006 §5.7：`stop_reason` 是**可选**字段，旧记录没有它（读成「未记录」）；
+        # 闭集值逐一出现，`other` 带原文；未来值不属于闭集，按 Unknown 接受（§6(d)）。
+        got = []
+        for e in events:
+            if e["event"] != "ModelUsageRecorded":
+                continue
+            if e["critical"]:
+                raise Corruption(f"{name}: ModelUsageRecorded 必须是 critical:false")
+            data = e["data"]
+            got.append((data.get("stop_reason"), data.get("stop_reason_raw")))
+        if got != [tuple(x) for x in exp["usage_stop_reasons"]]:
+            raise Corruption(
+                f"{name}: usage_stop_reasons {got} != 期望 {exp['usage_stop_reasons']}"
+            )
+        if not any(reason is None for reason, _ in got):
+            raise Corruption(f"{name}: 期望至少一条旧记录（没有 stop_reason 字段）")
+        present = {reason for reason, _ in got if reason is not None}
+        missing = set(STOP_REASONS) - present
+        if missing:
+            raise Corruption(f"{name}: 闭集值没有全部出现：{sorted(missing)}")
+        if not any(reason == "other" and raw for reason, raw in got):
+            raise Corruption(f"{name}: 期望一条带 stop_reason_raw 的 other 记录")
     if "memory_injected" in exp:
         got = []
         for e in events:

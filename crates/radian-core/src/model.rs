@@ -26,6 +26,60 @@ pub enum StopReason {
     Other(String),
 }
 
+/// Declares the durable stop-reason set once: each variant's snake_case wire name, the
+/// [`MODEL_STOP_REASONS`] list the writer, the reader and the tests read, and the serde enum
+/// they both use. Add a variant here or change a name; nothing else names a value.
+macro_rules! model_stop_reasons {
+    ($($variant:ident => $wire:literal),+ $(,)?) => {
+        /// The closed set of `ModelUsageRecorded.stop_reason` values (ADR 0006 §5.7), in the
+        /// order the ADR lists them.
+        pub const MODEL_STOP_REASONS: &[&str] = &[$($wire),+];
+
+        /// The durable stop reason of one dialogue model call (ADR 0006 §5.7): the model's
+        /// [`StopReason`] in snake case. `Other` carries the provider's text in the sibling
+        /// `stop_reason_raw` field. An unknown future value reads as [`Self::Unknown`] and
+        /// never refuses the file (ADR 0006 §7(d)); it never writes back.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        #[non_exhaustive]
+        pub enum ModelStopReason {
+            $(
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+            /// A value this version does not know (ADR 0006 §7(d)).
+            #[serde(other)]
+            Unknown,
+        }
+    };
+}
+
+model_stop_reasons! {
+    EndTurn => "end_turn",
+    ToolUse => "tool_use",
+    MaxTokens => "max_tokens",
+    Refusal => "refusal",
+    ContentFiltered => "content_filtered",
+    PauseTurn => "pause_turn",
+    Other => "other",
+}
+
+impl ModelStopReason {
+    /// The durable value of a provider stop reason, plus the provider's raw text when the
+    /// value is `other`.
+    pub fn from_stop_reason(reason: &StopReason) -> (Self, Option<String>) {
+        match reason {
+            StopReason::EndTurn => (Self::EndTurn, None),
+            StopReason::ToolUse => (Self::ToolUse, None),
+            StopReason::MaxTokens => (Self::MaxTokens, None),
+            StopReason::Refusal => (Self::Refusal, None),
+            StopReason::ContentFiltered => (Self::ContentFiltered, None),
+            StopReason::PauseTurn => (Self::PauseTurn, None),
+            StopReason::Other(raw) => (Self::Other, Some(raw.clone())),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
     pub system_prompt: Option<String>,

@@ -93,6 +93,16 @@ mutation (`cmp` identical).
 | compaction-small-window-2-M2 | the over-long fallback never cuts the previous summary (`let kept_summary = match None::<u64> {`) | ✅ 2 failed | `tests/compaction_flow.rs::two_overlong_summaries_cut_the_previous_summary_to_half_the_ceiling` and `tests/compaction_flow.rs::the_summary_does_not_grow_across_two_overlong_fallbacks` |
 | compaction-small-window-2-M3 | every fallback cuts the previous summary (`match fallback_too_long.or(summary_budget.map(compaction::summary_max_tokens))`) | ✅ 1 failed | `tests/compaction_flow.rs::a_summarizer_failure_keeps_the_previous_summary_whole` |
 
+## TK0258: the stop reason on ModelUsageRecorded (2026-10-31, branch `work/TK0258-journal-stop-reason`)
+
+Each mutation was applied by hand to `crates/radian-core/src/turn.rs`, backed up under
+`.radian/turn.rs.orig` and restored from that copy (`cmp` identical); the named tests ran with
+`cargo nextest run -p radian-core --locked --profile sandbox --test usage -E 'test(...)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0258-M1 | the turn loop appends `JournalRecord::ModelUsage` with `stop_reason: None` (the field is omitted) | ✅ 2 failed (rc=100) | `tests/usage.rs::a_truncated_response_with_tool_calls_records_max_tokens_then_end_turn` and `tests/usage.rs::an_other_stop_reason_records_other_and_the_provider_text` |
+| TK0258-M2 | the turn loop writes `ModelStopReason::EndTurn` for every response | ✅ 2 failed (rc=100) | the same two tests (`max_tokens` read as `end_turn`; `other` lost its raw text) |
 ## One consolidated summary instead of a rolling append (TK0259, 2026-10-31)
 
 Branch `work/TK0259-summary-consolidate`. Each mutation was applied in place, only the two

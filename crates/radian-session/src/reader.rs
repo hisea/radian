@@ -10,8 +10,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use radian_core::{
-    InputSource, JournalRecord, Message, MessageId, ModelUsage, ReplacementEnd, ToolResult,
-    TranscriptFold, UsageSource, recover,
+    InputSource, JournalRecord, Message, MessageId, ModelStopReason, ModelUsage, ReplacementEnd,
+    ToolResult, TranscriptFold, UsageSource, recover,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -99,6 +99,11 @@ pub enum EventData {
     },
     ModelUsageRecorded {
         usage: ModelUsage,
+        /// The response's stop reason (ADR 0006 §5.7). `None` on a record written before
+        /// the field existed ("not recorded", never `end_turn`).
+        stop_reason: Option<ModelStopReason>,
+        /// The provider's raw stop reason text, present only with `other`.
+        stop_reason_raw: Option<String>,
         /// The fee the call was billed at (ADR 0027). `None` on a record written
         /// before the field existed (ADR 0007): a resume then re-prices it with the
         /// current catalog and marks the total an estimate.
@@ -658,16 +663,32 @@ impl LineScanner {
             }
             "ModelUsageRecorded" => {
                 let d: UsageData = data_of(raw, self.lineno, path)?;
+                // ADR 0006 §5.7: the provider's raw text is the sibling of `other` only. A
+                // line that pairs it with anything else is refused at that line, the same
+                // way the reference checker refuses the fixture.
+                if d.stop_reason_raw.is_some() && d.stop_reason != Some(ModelStopReason::Other) {
+                    return Err(E::from(ReadError::InvalidField {
+                        path: path.to_path_buf(),
+                        line: self.lineno,
+                        message: "stop_reason_raw is present but stop_reason is not \"other\" \
+                                  (ADR 0006 §5.7)"
+                            .into(),
+                    }));
+                }
                 fold_push(
                     &mut self.fold,
                     JournalRecord::ModelUsage {
                         usage: d.usage.clone(),
+                        stop_reason: d.stop_reason,
+                        stop_reason_raw: d.stop_reason_raw.clone(),
                     },
                     path,
                     self.lineno,
                 )?;
                 EventData::ModelUsageRecorded {
                     usage: d.usage,
+                    stop_reason: d.stop_reason,
+                    stop_reason_raw: d.stop_reason_raw,
                     fee: d.fee,
                 }
             }
@@ -1102,8 +1123,15 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
                 result: result.clone(),
             })
         }
-        EventData::ModelUsageRecorded { usage, .. } => Some(JournalRecord::ModelUsage {
+        EventData::ModelUsageRecorded {
+            usage,
+            stop_reason,
+            stop_reason_raw,
+            ..
+        } => Some(JournalRecord::ModelUsage {
             usage: usage.clone(),
+            stop_reason: *stop_reason,
+            stop_reason_raw: stop_reason_raw.clone(),
         }),
         EventData::CompactionUsageRecorded {
             revision,
@@ -1236,6 +1264,12 @@ struct SettledData {
 #[derive(Deserialize)]
 struct UsageData {
     usage: ModelUsage,
+    /// The response's stop reason (ADR 0006 §5.7); absent on an older record.
+    #[serde(default)]
+    stop_reason: Option<ModelStopReason>,
+    /// The provider's raw text, present only with `other`.
+    #[serde(default)]
+    stop_reason_raw: Option<String>,
     /// The fee the call was billed at; absent on an older record (ADR 0007).
     #[serde(default)]
     fee: Option<UsageFee>,

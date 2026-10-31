@@ -70,6 +70,15 @@ COLUMNS = (
         "unit": "calls",
     },
     {
+        "name": "max_tokens_responses",
+        "definition": (
+            "`ModelUsageRecorded` records whose `stop_reason` is `max_tokens`. "
+            "Empty when no record carries the field: an old journal is not read as "
+            "\"no truncation\"."
+        ),
+        "unit": "responses",
+    },
+    {
         "name": "input_uncached",
         "definition": (
             "Input tokens billed at the full price (ADR 0007 `uncached_input()`). "
@@ -456,6 +465,7 @@ def _facts(path: Path) -> dict[str, Any]:
         "journal": str(path),
         "source": None,
         "calls": 0,
+        "max_tokens_responses": None,
         "input_uncached": None,
         "input_cache_read": None,
         "input_total": None,
@@ -633,6 +643,15 @@ def _radian_record(row: dict[str, Any], record: dict[str, Any]) -> None:
             _radian_inputs(usage),
             fee_micros=_int(_dict(data.get("fee")).get("micros")),
         )
+        if event == "ModelUsageRecorded":
+            # A record carrying the field makes the column a count, even when it is 0.
+            # An old journal has no such record and keeps `None` (not "no truncation").
+            stop_reason = data.get("stop_reason")
+            if isinstance(stop_reason, str):
+                if row["max_tokens_responses"] is None:
+                    row["max_tokens_responses"] = 0
+                if stop_reason == "max_tokens":
+                    row["max_tokens_responses"] += 1
         if event == "CompactionUsageRecorded":
             row["calls"] += 1
             elapsed = _seconds(row["_anchor"], ts)
@@ -724,6 +743,7 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "journal": "TOTAL",
         "source": None,
         "calls": 0,
+        "max_tokens_responses": None,
         "input_uncached": None,
         "input_cache_read": None,
         "input_total": None,
@@ -747,6 +767,7 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
     for facts in facts_rows:
         for key in (
             "calls",
+            "max_tokens_responses",
             "input_uncached",
             "input_cache_read",
             "input_total",
@@ -970,6 +991,7 @@ def format_report(report: dict[str, Any]) -> str:
         "journal",
         "source",
         "calls",
+        "max_tokens_responses",
         "input_uncached",
         "input_cache_read",
         "input_total",
@@ -995,6 +1017,7 @@ def format_report(report: dict[str, Any]) -> str:
             row["journal"],
             row["source"] or "-",
             _count(row["calls"]),
+            _count(row["max_tokens_responses"]),
             _count(row["input_uncached"]),
             _count(row["input_cache_read"]),
             _count(row["input_total"]),

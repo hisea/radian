@@ -113,7 +113,7 @@ fn journal_usages(records: &[JournalRecord]) -> Vec<ModelUsage> {
     records
         .iter()
         .filter_map(|r| match r {
-            JournalRecord::ModelUsage { usage } => Some(usage.clone()),
+            JournalRecord::ModelUsage { usage, .. } => Some(usage.clone()),
             _ => None,
         })
         .collect()

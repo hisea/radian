@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use futures_util::future::BoxFuture;
 use radian_core::{
-    JournalError, JournalRecord, Message, ModelUsage, ToolResult, TranscriptJournal,
+    JournalError, JournalRecord, Message, ModelStopReason, ModelUsage, ToolResult,
+    TranscriptJournal,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1005,6 +1006,10 @@ struct SettledData<'a> {
 struct UsageData<'a> {
     usage: &'a ModelUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<ModelStopReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason_raw: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fee: Option<UsageFee>,
 }
 
@@ -1060,7 +1065,7 @@ fn gate_effect(record: &JournalRecord) -> GateEffect {
 /// only the two usage records are priced).
 fn usage_of(record: &JournalRecord) -> Option<&ModelUsage> {
     match record {
-        JournalRecord::ModelUsage { usage } | JournalRecord::CompactionUsage { usage, .. } => {
+        JournalRecord::ModelUsage { usage, .. } | JournalRecord::CompactionUsage { usage, .. } => {
             Some(usage)
         }
         _ => None,
@@ -1119,7 +1124,27 @@ fn render_record(
             EVT_TOOL_SETTLED,
             Render::Settled(SettledData { call_id, result }),
         ),
-        JournalRecord::ModelUsage { usage } => (EVT_USAGE, Render::Usage(UsageData { usage, fee })),
+        JournalRecord::ModelUsage {
+            usage,
+            stop_reason,
+            stop_reason_raw,
+        } => {
+            // The raw text is a sibling of `other` only (ADR 0006 §5.7): never write it
+            // beside any other value.
+            let raw = match stop_reason {
+                Some(ModelStopReason::Other) => stop_reason_raw.as_deref(),
+                _ => None,
+            };
+            (
+                EVT_USAGE,
+                Render::Usage(UsageData {
+                    usage,
+                    stop_reason: *stop_reason,
+                    stop_reason_raw: raw,
+                    fee,
+                }),
+            )
+        }
         JournalRecord::CompactionUsage {
             revision,
             model,

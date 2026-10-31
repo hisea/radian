@@ -25,7 +25,7 @@ Core `JournalRecord` is `#[non_exhaustive]`. Current variants: `Message`, `Trans
 | `TranscriptReplaced { revision, len }` | Same as above | One to one with `TranscriptReplaced` | **Intentionally asymmetric**: each replacement message in the journal is an independent `Message` record, but Core sends **no** `TranscriptAppended` per message, only one `TranscriptReplaced`. |
 | `ToolStarted { index, call_id, name }` | Same as above | One to one with `ToolExecutionStarted` (sent only after the `Started` append succeeds) | The audit receipt lives in the record. |
 | `ToolFinished { index, call_id, is_error }` | Live | Durable counterpart is `ToolExecutionSettled` (cancellation also settles) | `is_error` is rebuildable from the result. |
-| `ModelResponseReceived { stop_reason, tool_calls, usage, limits }` | Live plus partly durable | `usage` maps to the `ModelUsage` record. `limits` is live (limit headers are display facts). | The facts live in the assistant message and the usage record. |
+| `ModelResponseReceived { stop_reason, tool_calls, usage, limits }` | Live plus partly durable | `usage` maps to the `ModelUsage` record; `stop_reason` maps to that record's `stop_reason` (with `stop_reason_raw` when the value is `other`, ADR 0006 §5.7). `limits` is live (limit headers are display facts). | The facts live in the assistant message and the usage record. |
 | `TurnStarted` | Live signal | Runtime itself writes the 0006 `TurnStarted { turn_id }` | |
 | `SteeringApplied { count }` | Live | Steering messages themselves become `Message` records through `commit_parts` | The event only reports "how many messages applied". |
 | `ModelRequestStarted { model_call, budget }` | Live (typical R2) | None | Can drop/merge/rate-limit. |

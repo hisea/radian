@@ -539,7 +539,12 @@ mod tests {
             // Usage inside the still-open span bills to the goal.
             event(
                 "2026-10-20T10:00:09Z",
-                EventData::ModelUsageRecorded { usage, fee: None },
+                EventData::ModelUsageRecorded {
+                    usage,
+                    stop_reason: None,
+                    stop_reason_raw: None,
+                    fee: None,
+                },
             ),
             event("2026-10-20T10:00:10Z", EventData::GoalPaused {}),
             // Usage after the pause does not.
@@ -555,6 +560,8 @@ mod tests {
                         input_includes_cache: None,
                         details: None,
                     },
+                    stop_reason: None,
+                    stop_reason_raw: None,
                     fee: None,
                 },
             ),
@@ -586,7 +593,12 @@ mod tests {
             set("2026-10-20T10:00:00Z", "ship it"),
             event(
                 "2026-10-20T10:00:01Z",
-                EventData::ModelUsageRecorded { usage, fee: None },
+                EventData::ModelUsageRecorded {
+                    usage,
+                    stop_reason: None,
+                    stop_reason_raw: None,
+                    fee: None,
+                },
             ),
             event(
                 "2026-10-20T10:00:02Z",

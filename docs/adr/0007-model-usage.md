@@ -38,7 +38,7 @@ Usage belongs to one response, not to a session or a turn.
 
 ### J5: The journal records `ModelUsage` directly after its assistant message; no usage means no record
 
-`JournalRecord::ModelUsage { usage }` (the enum is already `#[non_exhaustive]`). Core appends it after the assistant message `commit` **succeeds** and before it dispatches tools. A `None` usage writes nothing. `replay`/`repair`/`recover` ignore it.
+`JournalRecord::ModelUsage { usage, stop_reason, stop_reason_raw }` (the enum is already `#[non_exhaustive]`). Core appends it after the assistant message `commit` **succeeds** and before it dispatches tools. The record carries the response's stop reason from the closed set in ADR 0006 §5.7; `stop_reason_raw` holds the provider's text and is present only when the reason is `other`. A `None` usage writes nothing, so its stop reason is not recorded either. `replay`/`repair`/`recover` ignore it.
 
 ### J6: A usage append failure follows the same rule as other write points
 

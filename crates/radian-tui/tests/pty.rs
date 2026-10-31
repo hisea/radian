@@ -12731,6 +12731,8 @@ async fn pty_a_resume_shows_the_sessions_earlier_tokens_and_fee() {
                     input_includes_cache: Some(true),
                     ..Default::default()
                 },
+                stop_reason: None,
+                stop_reason_raw: None,
             })
             .await
             .unwrap();

@@ -17,7 +17,8 @@ use crate::hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};
 use crate::journal::{JournalError, JournalRecord, TranscriptJournal};
 use crate::message::{ContentPart, InputSource, Message, MessageMeta, ToolCall, ToolResult};
 use crate::model::{
-    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelUsage, StopReason,
+    Model, ModelContext, ModelError, ModelRequest, ModelResponse, ModelStopReason, ModelUsage,
+    StopReason,
 };
 use crate::outcome::{
     CancelReason, CompactionError, CompactionFailure, CompactionOutcome, IncompleteReason,
@@ -1920,9 +1921,18 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
         // a failure is a journal failure, not a tolerated gap (D6/J6).
         if let Some(usage) = usage
             && let Some(journal) = self.run.session.journal.as_ref()
-            && let Err(e) = journal.append(JournalRecord::ModelUsage { usage }).await
         {
-            return Err(self.run.fail_journal(e, events));
+            let (stop_reason, stop_reason_raw) = ModelStopReason::from_stop_reason(&stop_reason);
+            if let Err(e) = journal
+                .append(JournalRecord::ModelUsage {
+                    usage,
+                    stop_reason: Some(stop_reason),
+                    stop_reason_raw,
+                })
+                .await
+            {
+                return Err(self.run.fail_journal(e, events));
+            }
         }
 
         // ADR 0017 §2: every consecutive truncated response in this turn counts, with or

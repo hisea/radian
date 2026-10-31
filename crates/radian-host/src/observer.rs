@@ -169,7 +169,7 @@ impl JournalObserver {
             }
             // A recorded fee is authoritative (ADR 0007). An old record has none, and
             // the observer has no route to price it (ADR 0027), so it adds tokens only.
-            EventData::ModelUsageRecorded { usage, fee }
+            EventData::ModelUsageRecorded { usage, fee, .. }
             | EventData::CompactionUsageRecorded { usage, fee, .. } => match fee {
                 Some(fee) => {
                     self.projection.add_recorded_usage(usage, *fee);

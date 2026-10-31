@@ -194,6 +194,8 @@ async fn non_sync_records_ride_the_next_sync_point() {
                 input: Some(1),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();

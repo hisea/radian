@@ -138,7 +138,7 @@ pub fn restore_usage(
                     price = price_for(&route.provider, &route.model);
                 }
             }
-            EventData::ModelUsageRecorded { usage, fee }
+            EventData::ModelUsageRecorded { usage, fee, .. }
             | EventData::CompactionUsageRecorded { usage, fee, .. } => {
                 match fee {
                     // The recorded fee is authoritative: no re-pricing.

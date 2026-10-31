@@ -1,0 +1,2 @@
+{"schema_version":1,"session_id":"77777778-7777-4777-8777-777777777777","seq":0,"ts":"2026-10-31T00:01:00.000000Z","event":"SessionCreated","critical":true,"data":{"workspace":"/work/example","config_snapshot":{"model":{"provider":"opencode-go","model":"deepseek-v4.1-flash"}}}}
+{"schema_version":1,"session_id":"77777778-7777-4777-8777-777777777777","seq":1,"ts":"2026-10-31T00:01:01.000000Z","event":"ModelUsageRecorded","critical":false,"data":{"usage":{"input":10,"output":2},"stop_reason":"end_turn","stop_reason_raw":"length_exceeded"}}

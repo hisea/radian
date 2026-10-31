@@ -604,6 +604,44 @@ fn the_adrs_are_snapshots_not_plans() {
     );
 }
 
+/// Every durable stop-reason value appears in ADR 0006 §5.7 and in the fixture table. The
+/// list lives once in `radian_core::MODEL_STOP_REASONS`; removing one value from the ADR
+/// fails here.
+#[test]
+fn every_model_stop_reason_is_documented() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let adr = std::fs::read_to_string(root.join("docs/adr/0006-session-jsonl-v1.md"))
+        .expect("ADR 0006 reads");
+    let fixtures = std::fs::read_to_string(root.join("docs/schema/fixtures/README.md"))
+        .expect("the fixture table reads");
+    // The field's own ADR entry, not the whole ADR: `content_filtered` also names a
+    // `TurnFinished.reason` value elsewhere.
+    let start = adr
+        .find("### 5.7 `ModelUsageRecorded`")
+        .expect("ADR 0006 has the ModelUsageRecorded section");
+    let section = &adr[start..];
+    let end = section[3..]
+        .find("\n### ")
+        .map(|offset| offset + 3)
+        .unwrap_or(section.len());
+    let section = &section[..end];
+    let row = fixtures
+        .lines()
+        .find(|line| line.contains("`model-stop-reasons.jsonl`"))
+        .expect("the fixture table has the model-stop-reasons row");
+    for value in radian_core::MODEL_STOP_REASONS {
+        let quoted = format!("`{value}`");
+        assert!(
+            section.contains(&quoted),
+            "ADR 0006 §5.7 does not name {quoted}"
+        );
+        assert!(
+            row.contains(&quoted),
+            "the fixture table row does not name {quoted}"
+        );
+    }
+}
+
 /// Every built-in tool name appears in the manual.
 #[test]
 fn every_tool_name_appears_in_the_manual() {

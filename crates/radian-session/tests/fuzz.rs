@@ -125,6 +125,8 @@ async fn build_base(dir: &TempDir) -> Base {
                 output: Some(5),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -223,6 +225,8 @@ async fn build_base(dir: &TempDir) -> Base {
                 output: Some(3),
                 ..Default::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
