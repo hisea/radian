@@ -50,6 +50,7 @@ fn a_verdict_for_an_old_sha_does_not_count_after_the_branch_moves() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     let old = verdict(
         Stage::Commands,
@@ -88,6 +89,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     let extra = vec![optional(Stage::Commands), optional(Stage::Review)];
 
@@ -112,6 +114,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     let stages = effective_stages(&optional_human, &[required(Stage::Human)]);
     assert_eq!(stages[1], required(Stage::Human));
@@ -122,6 +125,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     assert!(invalid.validate().is_err());
     let duplicate = Profile {
@@ -129,6 +133,7 @@ fn extra_stages_cannot_drop_a_required_stage() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     assert!(duplicate.validate().is_err());
 }
@@ -140,6 +145,7 @@ fn a_newer_attempt_decides_whether_a_required_stage_passed() {
         before_attempt: Vec::new(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: "default".to_owned(),
     };
     let sha = "aaaa";
     let human = verdict(

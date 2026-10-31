@@ -772,6 +772,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 );
                 if let Some(settings) = &verdict.review_settings {
                     field(&mut out, "review_round", &settings.round);
+                    field(&mut out, "review_reviewer", &settings.reviewer);
                     field(&mut out, "review_exec_args", &settings.exec_args);
                     field(
                         &mut out,

@@ -14,8 +14,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::gate::{
-    DEFAULT_COMMAND_TIMEOUT_SECS, GateConfig, Profile, ReviewConfig, Stage, StageSpec,
-    default_before_attempt,
+    DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEWER, GateConfig, Profile, REVIEW_LEVELS,
+    ReviewConfig, Reviewer, Stage, StageSpec, default_before_attempt,
 };
 use crate::store::model::{PREFIX_MAX_CHARS, valid_prefix};
 
@@ -55,6 +55,10 @@ pub const OPTIONAL_KEYS: &[&str] = &[
     "gate.review.prompt_file",
     "gate.review.first.exec_args",
     "gate.review.first.timeout_secs",
+    "gate.reviewers.<name>.exec_args",
+    "gate.reviewers.<name>.prompt_file",
+    "gate.reviewers.<name>.first.exec_args",
+    "gate.reviewers.<name>.first.timeout_secs",
     "integration.target_branch",
 ];
 
@@ -741,10 +745,13 @@ impl Default for Ids {
 fn default_gate() -> GateConfig {
     let mut profiles = BTreeMap::new();
     profiles.insert("default".to_owned(), default_profile());
+    let mut reviewers = BTreeMap::new();
+    reviewers.insert(DEFAULT_REVIEWER.to_owned(), Reviewer::default());
     GateConfig {
         profile: "default".to_owned(),
         command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
         profiles,
+        reviewers,
         review: ReviewConfig::default(),
     }
 }
@@ -764,6 +771,7 @@ fn default_profile() -> Profile {
         before_attempt: default_before_attempt(),
         commands: Vec::new(),
         key_commands: Vec::new(),
+        reviewer: DEFAULT_REVIEWER.to_owned(),
     }
 }
 
@@ -825,20 +833,24 @@ profile = "default"
 command_timeout_secs = 3600
 
 [gate.review]
-# exec_args = ["--model", "m"]   # not set: the same as [worker] exec_args
-timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
 concurrency = 2                 # how many review sessions run at once in this repository; 1 or more
 propose_followups = true        # add the plan's review follow-up once it has no open task
-# prompt_file = "review.md"      # not set: the built-in prompt only
 
-[gate.review.first]
-# exec_args = ["--model", "m"]   # not set: the same as [gate.review] exec_args
-# timeout_secs = 1800            # not set: the same as [gate.review] timeout_secs
+[gate.reviewers.default]
+timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
+# exec_args = ["--model", "m"]  # not set: the same as [worker] exec_args
+# prompt_file = "review.md"     # not set: the built-in prompt only
+# fix_level = "major"           # `critical`, `major` or `minor`; recorded in the review verdict
+
+# [gate.reviewers.default.first]
+# exec_args = ["--model", "m"]  # not set: the same as [gate.reviewers.default] exec_args
+# timeout_secs = 1800           # not set: the same as [gate.reviewers.default] timeout_secs
 
 [gate.profiles.default]
 stages = [{{ stage = "commands", required = true }}, {{ stage = "human", required = true }}]
 before_attempt = ["merge-main"]   # steps the wrapper runs in the worktree before the worker; [] runs none
 commands = []                 # shell command lines, run in order on the gate checkout
+# reviewer = "default"        # the [gate.reviewers.<name>] section this profile's review uses
 "#
     )
 }
@@ -850,6 +862,8 @@ commands = []                 # shell command lines, run in order on the gate ch
 pub fn parse(text: &str) -> Result<Config, String> {
     check_profile_key_commands(text)?;
     check_review_shape(text)?;
+    check_reviewer_shape(text)?;
+    check_legacy_review_conflict(text)?;
     check_worker_shape(text)?;
     check_hooks_shape(text)?;
     // A bare `[flows]` table counts too: the manual and the ADR say the per-flow limit is on
@@ -938,6 +952,50 @@ pub fn parse(text: &str) -> Result<Config, String> {
         ));
     }
     check_flows(&mut config)?;
+    // The legacy `[gate.review]` keys are the `default` reviewer's values when the file has
+    // no `[gate.reviewers.default]` section (ADR 0048 decision 15).
+    if !config.gate.reviewers.contains_key(DEFAULT_REVIEWER) {
+        let legacy = Reviewer::from_legacy(&config.gate.review);
+        config
+            .gate
+            .reviewers
+            .insert(DEFAULT_REVIEWER.to_owned(), legacy);
+    }
+    for (name, reviewer) in &config.gate.reviewers {
+        if !REVIEW_LEVELS.contains(&reviewer.fix_level.as_str()) {
+            return Err(format!(
+                "`{}` is `{}`; it must be one of {}",
+                reviewer.key(name, "fix_level"),
+                reviewer.fix_level,
+                REVIEW_LEVELS
+                    .iter()
+                    .map(|level| format!("`{level}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if reviewer.first.timeout_secs == Some(0) {
+            return Err(format!(
+                "`{}` is 0; it must be 1 or more (the wall-time limit of a first review's \
+                 session)",
+                reviewer.key(name, "first.timeout_secs")
+            ));
+        }
+        if let Some(file) = &reviewer.prompt_file {
+            check_prompt_file(&reviewer.key(name, "prompt_file"), file)?;
+        }
+    }
+    // A profile may only name a reviewer the file defines. The `default` reviewer always
+    // exists, because the legacy `[gate.review]` keys describe it.
+    for (name, profile) in &config.gate.profiles {
+        if !config.gate.reviewers.contains_key(&profile.reviewer) {
+            return Err(format!(
+                "`gate.profiles.{name}.reviewer` is `{}` but no [gate.reviewers.{}] section \
+                 exists",
+                profile.reviewer, profile.reviewer
+            ));
+        }
+    }
     check_prefix("ids.plan_prefix", &config.ids.plan_prefix)?;
     check_prefix("ids.task_prefix", &config.ids.task_prefix)?;
     if config.ids.plan_prefix == config.ids.task_prefix {
@@ -946,20 +1004,10 @@ pub fn parse(text: &str) -> Result<Config, String> {
             config.ids.plan_prefix
         ));
     }
-    if let Some(file) = &config.gate.review.prompt_file {
-        check_prompt_file(file)?;
-    }
     if config.gate.review.concurrency == 0 {
         return Err(
             "`gate.review.concurrency` is 0; it must be 1 or more (how many review sessions run \
              at once in the repository)"
-                .to_owned(),
-        );
-    }
-    if config.gate.review.first.timeout_secs == Some(0) {
-        return Err(
-            "`gate.review.first.timeout_secs` is 0; it must be 1 or more (the wall-time limit of \
-             a first review's session)"
                 .to_owned(),
         );
     }
@@ -1016,6 +1064,71 @@ fn check_exec_args_shape(review: &toml::Value, key: &str) -> Result<(), String> 
             "`{key}` must be an array of strings (the `radian exec` arguments of the review \
              session)"
         ));
+    }
+    Ok(())
+}
+
+/// Every `[gate.reviewers.<name>] exec_args` and `.first.exec_args` must be an array of strings
+/// before the TOML deserializer reports a position without the key. A non-array value is
+/// refused by name.
+fn check_reviewer_shape(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(reviewers) = document
+        .get("gate")
+        .and_then(|gate| gate.get("reviewers"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+    for (name, reviewer) in reviewers {
+        check_exec_args_shape(reviewer, &format!("gate.reviewers.{name}.exec_args"))?;
+        if let Some(first) = reviewer.get("first") {
+            check_exec_args_shape(first, &format!("gate.reviewers.{name}.first.exec_args"))?;
+        }
+    }
+    Ok(())
+}
+
+/// The legacy `[gate.review]` session keys are the `default` reviewer's values only when the
+/// file has no `[gate.reviewers.default]` section. A file that writes both is ambiguous, so it
+/// is refused by both names (ADR 0048 decision 15).
+fn check_legacy_review_conflict(text: &str) -> Result<(), String> {
+    let document: toml::Value = toml::from_str(text).map_err(|error| error.to_string())?;
+    let Some(reviewers) = document
+        .get("gate")
+        .and_then(|gate| gate.get("reviewers"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+    if !reviewers.contains_key(DEFAULT_REVIEWER) {
+        return Ok(());
+    }
+    let Some(review) = document
+        .get("gate")
+        .and_then(|gate| gate.get("review"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(());
+    };
+    for key in ["exec_args", "prompt_file", "timeout_secs"] {
+        if review.contains_key(key) {
+            return Err(format!(
+                "`gate.review.{key}` and `gate.reviewers.{DEFAULT_REVIEWER}.{key}` are both set; \
+                 the `default` reviewer's `{key}` is one place, so set one or the other"
+            ));
+        }
+    }
+    if let Some(first) = review.get("first").and_then(toml::Value::as_table) {
+        for key in ["exec_args", "timeout_secs"] {
+            if first.contains_key(key) {
+                return Err(format!(
+                    "`gate.review.first.{key}` and \
+                     `gate.reviewers.{DEFAULT_REVIEWER}.first.{key}` are both set; the `default` \
+                     reviewer's first-review `{key}` is one place, so set one or the other"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1175,9 +1288,9 @@ fn check_flows(config: &mut Config) -> Result<(), String> {
     Ok(())
 }
 
-/// `gate.review.prompt_file` is read from the repository root: it must be a relative path
+/// A reviewer's `prompt_file` is read from the repository root: it must be a relative path
 /// that does not climb out of it.
-fn check_prompt_file(file: &str) -> Result<(), String> {
+fn check_prompt_file(key: &str, file: &str) -> Result<(), String> {
     let path = Path::new(file);
     if file.trim().is_empty()
         || path.is_absolute()
@@ -1186,8 +1299,7 @@ fn check_prompt_file(file: &str) -> Result<(), String> {
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         return Err(format!(
-            "`gate.review.prompt_file` is `{file}`; it must be a path relative to the \
-             repository root without `..`"
+            "`{key}` is `{file}`; it must be a path relative to the repository root without `..`"
         ));
     }
     Ok(())

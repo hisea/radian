@@ -19,6 +19,13 @@ pub const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 3600;
 /// The default wall-time limit of one `review` session, in seconds (ADR 0048 decision 15).
 pub const DEFAULT_REVIEW_TIMEOUT_SECS: u64 = 900;
 
+/// The reviewer a profile uses when its `reviewer` key is absent.
+pub const DEFAULT_REVIEWER: &str = "default";
+
+/// The level a reviewer fails the round at when its `fix_level` key is absent (ADR 0048
+/// decision 15). It is recorded in the verdict and has no other effect in this build.
+pub const DEFAULT_FIX_LEVEL: &str = "major";
+
 /// The default number of review sessions that may run at once in a repository (ADR 0048
 /// decision 10).
 pub const DEFAULT_REVIEW_CONCURRENCY: u32 = 2;
@@ -260,6 +267,10 @@ pub struct Profile {
     /// value. A new profile record does not write it.
     #[serde(default, skip_serializing)]
     pub key_commands: Vec<String>,
+    /// The `[gate.reviewers.<name>]` section every review run of a task gated with this
+    /// profile uses (ADR 0048 decision 15). Absent: `default`.
+    #[serde(default = "default_reviewer")]
+    pub reviewer: String,
 }
 
 impl Default for Profile {
@@ -269,8 +280,13 @@ impl Default for Profile {
             before_attempt: default_before_attempt(),
             commands: Vec::new(),
             key_commands: Vec::new(),
+            reviewer: default_reviewer(),
         }
     }
+}
+
+fn default_reviewer() -> String {
+    DEFAULT_REVIEWER.to_owned()
 }
 
 impl Profile {
@@ -342,28 +358,32 @@ impl Profile {
     }
 }
 
-/// The `[gate.review]` table: how the `review` stage runs its read-only session (ADR 0048
-/// decision 10).
+/// The `[gate.review]` table: the repository-wide review settings and the legacy spellings of
+/// the `default` reviewer's keys (ADR 0048 decisions 10 and 15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ReviewConfig {
     /// Extra `radian exec` arguments of the review session, after the stage's own. Unset:
-    /// `[worker] exec_args`.
+    /// `[worker] exec_args`. This is the `default` reviewer's legacy spelling; the parser
+    /// refuses it beside a `[gate.reviewers.default]` section.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_args: Option<Vec<String>>,
     /// A file appended to the built-in prompt, relative to the repository root. Unset: only
-    /// the built-in prompt.
+    /// the built-in prompt. The `default` reviewer's legacy spelling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_file: Option<String>,
-    /// Wall-time limit of one review session, in seconds. `0` waits forever.
+    /// Wall-time limit of one review session, in seconds. `0` waits forever. The `default`
+    /// reviewer's legacy spelling.
     pub timeout_secs: u64,
     /// Whether arc proposes the plan's review follow-up task once the plan has no open task
-    /// (ADR 0048 decision 10). `true` by default; `false` turns the follow-up off.
+    /// (ADR 0048 decision 10). `true` by default; `false` turns the follow-up off. It belongs
+    /// to no reviewer.
     pub propose_followups: bool,
-    /// How many review sessions may run at once in the repository. `1` or more.
+    /// How many review sessions may run at once in the repository. `1` or more. It belongs to
+    /// no reviewer.
     pub concurrency: u32,
-    /// The values a task's first review uses in place of the keys above (ADR 0048
-    /// decision 10).
+    /// The values a task's first review uses in place of the keys above. The `default`
+    /// reviewer's legacy spelling (ADR 0048 decision 15).
     pub first: FirstReviewConfig,
 }
 
@@ -380,12 +400,12 @@ impl Default for ReviewConfig {
     }
 }
 
-/// `[gate.review.first]`: the two keys a task's first review may replace (ADR 0048
-/// decision 10). An unset key falls back to the `[gate.review]` key.
+/// `<table>.first`: the two keys a task's first review may replace (ADR 0048 decision 10). An
+/// unset key falls back to the reviewer's own key.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FirstReviewConfig {
-    /// Extra `radian exec` arguments of a first review, in place of `[gate.review] exec_args`.
+    /// Extra `radian exec` arguments of a first review, in place of the reviewer's `exec_args`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec_args: Option<Vec<String>>,
     /// Wall-time limit of a first review's session, in seconds. `1` or more.
@@ -393,20 +413,108 @@ pub struct FirstReviewConfig {
     pub timeout_secs: Option<u64>,
 }
 
-/// The settings one review session runs with, and where each came from (ADR 0048
-/// decision 10). [`ReviewConfig::choice`] fills it in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One `[gate.reviewers.<name>]` section: how the `review` stage runs its read-only session for
+/// the tasks whose profile names this reviewer (ADR 0048 decision 15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Reviewer {
+    /// Extra `radian exec` arguments of the review session, after the stage's own. Unset:
+    /// `[worker] exec_args`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_args: Option<Vec<String>>,
+    /// A file appended to the built-in prompt, relative to the repository root. Unset: only
+    /// the built-in prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
+    /// Wall-time limit of one review session, in seconds. `0` waits forever.
+    pub timeout_secs: u64,
+    /// The level a finding must reach to fail the round. The parser checks it against
+    /// [`super::verdict::REVIEW_LEVELS`]; the verdict records it and nothing else reads it.
+    pub fix_level: String,
+    /// The values a task's first review uses in place of the keys above.
+    pub first: FirstReviewConfig,
+    /// Whether this section was built from the legacy `[gate.review]` spellings. Set by the
+    /// parser; never read from the file.
+    #[serde(skip)]
+    pub legacy: bool,
+}
+
+impl Default for Reviewer {
+    fn default() -> Self {
+        Self {
+            exec_args: None,
+            prompt_file: None,
+            timeout_secs: DEFAULT_REVIEW_TIMEOUT_SECS,
+            fix_level: DEFAULT_FIX_LEVEL.to_owned(),
+            first: FirstReviewConfig::default(),
+            legacy: false,
+        }
+    }
+}
+
+impl Reviewer {
+    /// The `default` reviewer the legacy `[gate.review]` table describes: the same keys, with
+    /// the source keys naming the legacy spelling.
+    #[must_use]
+    pub fn from_legacy(review: &ReviewConfig) -> Self {
+        Self {
+            exec_args: review.exec_args.clone(),
+            prompt_file: review.prompt_file.clone(),
+            timeout_secs: review.timeout_secs,
+            fix_level: DEFAULT_FIX_LEVEL.to_owned(),
+            first: review.first.clone(),
+            legacy: true,
+        }
+    }
+
+    /// The config key a value of this reviewer came from: the legacy `[gate.review]` spelling,
+    /// or `gate.reviewers.<name>.<suffix>`.
+    #[must_use]
+    pub fn key(&self, name: &str, suffix: &str) -> String {
+        source_key(name, self.legacy, suffix)
+    }
+
+    /// The settings a review session runs with (ADR 0048 decision 15): a first review reads
+    /// `first` first, and an unset key falls back to the reviewer's own key and, for
+    /// `exec_args`, then to `[worker] exec_args`. A rework review never reads `first`.
+    #[must_use]
+    pub fn choice<'a>(
+        &'a self,
+        name: &'a str,
+        first: bool,
+        worker: &'a [String],
+    ) -> ReviewChoice<'a> {
+        choice_of(
+            name,
+            self.legacy,
+            self.exec_args.as_deref(),
+            &self.first,
+            self.timeout_secs,
+            &self.fix_level,
+            first,
+            worker,
+        )
+    }
+}
+
+/// The settings one review session runs with, and where each came from (ADR 0048 decisions 10
+/// and 15). [`Reviewer::choice`] fills it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewChoice<'a> {
     /// Whether this is a task's first review.
     pub first: bool,
+    /// The reviewer whose section the session used.
+    pub reviewer: &'a str,
     /// The arguments the session gets, after the stage's own.
     pub exec_args: &'a [String],
     /// The config key `exec_args` came from.
-    pub exec_args_key: &'static str,
+    pub exec_args_key: String,
     /// The wall-time limit of one session, in seconds.
     pub timeout_secs: u64,
     /// The config key `timeout_secs` came from.
-    pub timeout_key: &'static str,
+    pub timeout_key: String,
+    /// The reviewer's `fix_level`.
+    pub fix_level: &'a str,
 }
 
 impl ReviewConfig {
@@ -423,45 +531,80 @@ impl ReviewConfig {
         Duration::from_secs(self.timeout_secs)
     }
 
-    /// The settings a review session runs with (ADR 0048 decision 10): a first review reads
-    /// `[gate.review.first]` first, and an unset key falls back to `[gate.review]` and then,
-    /// for `exec_args`, to `[worker] exec_args`. A rework review never reads `first`.
+    /// The settings a review session runs with when the legacy `[gate.review]` table is the
+    /// `default` reviewer (ADR 0048 decision 15).
     #[must_use]
     pub fn choice<'a>(&'a self, first: bool, worker: &'a [String]) -> ReviewChoice<'a> {
-        let (exec_args, exec_args_key) = if first {
-            match &self.first.exec_args {
-                Some(args) => (args.as_slice(), "gate.review.first.exec_args"),
-                None => self.fallback_exec_args(worker),
-            }
-        } else {
-            self.fallback_exec_args(worker)
-        };
-        let (timeout_secs, timeout_key) = if first {
-            match self.first.timeout_secs {
-                Some(secs) => (secs, "gate.review.first.timeout_secs"),
-                None => (self.timeout_secs, "gate.review.timeout_secs"),
-            }
-        } else {
-            (self.timeout_secs, "gate.review.timeout_secs")
-        };
-        ReviewChoice {
+        choice_of(
+            DEFAULT_REVIEWER,
+            true,
+            self.exec_args.as_deref(),
+            &self.first,
+            self.timeout_secs,
+            DEFAULT_FIX_LEVEL,
             first,
-            exec_args,
-            exec_args_key,
-            timeout_secs,
-            timeout_key,
-        }
-    }
-
-    fn fallback_exec_args<'a>(&'a self, worker: &'a [String]) -> (&'a [String], &'static str) {
-        match &self.exec_args {
-            Some(args) => (args.as_slice(), "gate.review.exec_args"),
-            None => (worker, "worker.exec_args"),
-        }
+            worker,
+        )
     }
 }
 
-/// The `[gate]` table: the selected profile, the command timeout and the profiles.
+/// The key a reviewer value came from: its own table, or the legacy `[gate.review]` spelling.
+fn source_key(reviewer: &str, legacy: bool, suffix: &str) -> String {
+    if legacy {
+        format!("gate.review.{suffix}")
+    } else {
+        format!("gate.reviewers.{reviewer}.{suffix}")
+    }
+}
+
+/// The one resolution both a reviewer's section and the legacy `[gate.review]` table use.
+#[allow(clippy::too_many_arguments)]
+fn choice_of<'a>(
+    reviewer: &'a str,
+    legacy: bool,
+    exec_args: Option<&'a [String]>,
+    first: &'a FirstReviewConfig,
+    timeout_secs: u64,
+    fix_level: &'a str,
+    first_review: bool,
+    worker: &'a [String],
+) -> ReviewChoice<'a> {
+    let fallback_exec_args = |worker: &'a [String]| match exec_args {
+        Some(args) => (args, source_key(reviewer, legacy, "exec_args")),
+        None => (worker, "worker.exec_args".to_owned()),
+    };
+    let (exec_args, exec_args_key) = if first_review {
+        match &first.exec_args {
+            Some(args) => (
+                args.as_slice(),
+                source_key(reviewer, legacy, "first.exec_args"),
+            ),
+            None => fallback_exec_args(worker),
+        }
+    } else {
+        fallback_exec_args(worker)
+    };
+    let (timeout_secs, timeout_key) = if first_review {
+        match first.timeout_secs {
+            Some(secs) => (secs, source_key(reviewer, legacy, "first.timeout_secs")),
+            None => (timeout_secs, source_key(reviewer, legacy, "timeout_secs")),
+        }
+    } else {
+        (timeout_secs, source_key(reviewer, legacy, "timeout_secs"))
+    };
+    ReviewChoice {
+        first: first_review,
+        reviewer,
+        exec_args,
+        exec_args_key,
+        timeout_secs,
+        timeout_key,
+        fix_level,
+    }
+}
+
+/// The `[gate]` table: the selected profile, the command timeout, the profiles, the reviewers
+/// and the repository-wide review settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateConfig {
@@ -474,7 +617,11 @@ pub struct GateConfig {
     /// The profiles, by name.
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
-    /// The `review` stage's session configuration.
+    /// The reviewers, by name (ADR 0048 decision 15).
+    #[serde(default)]
+    pub reviewers: BTreeMap<String, Reviewer>,
+    /// The `review` stage's repository-wide session configuration and the legacy spellings of
+    /// the `default` reviewer's keys.
     #[serde(default)]
     pub review: ReviewConfig,
 }
@@ -493,6 +640,7 @@ impl Default for GateConfig {
             profile: default_profile_name(),
             command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
             profiles: BTreeMap::new(),
+            reviewers: BTreeMap::new(),
             review: ReviewConfig::default(),
         }
     }
@@ -503,6 +651,15 @@ impl GateConfig {
     #[must_use]
     pub fn selected_profile(&self) -> Option<&Profile> {
         self.profiles.get(&self.profile)
+    }
+
+    /// The reviewer `profile` names, with its name. `None` only when a `Config` was built
+    /// without its file's parser.
+    #[must_use]
+    pub fn reviewer(&self, profile: &Profile) -> Option<(&str, &Reviewer)> {
+        self.reviewers
+            .get_key_value(profile.reviewer.as_str())
+            .map(|(name, reviewer)| (name.as_str(), reviewer))
     }
 
     /// The per-command timeout as a [`Duration`]. Zero seconds means no timeout.

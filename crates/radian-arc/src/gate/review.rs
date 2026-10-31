@@ -4,7 +4,7 @@
 //! `radian exec` in `gates/review/`, on the verification candidate, mounted with exactly the
 //! `read`, `grep` and `glob` tools ([`REVIEW_TOOLS`]): no shell, no write, and no MCP server
 //! (the implicit sources are muted and no `--mcp-config` is passed). The session's model route
-//! comes from `[gate.review] exec_args`.
+//! comes from the reviewer the gate profile names, `[gate.reviewers.<name>] exec_args`.
 //!
 //! The prompt is built in ([`build_prompt`]): the task's brief, the commit list and the diff
 //! from the merge base of the remote main and `verified_sha` to `verified_sha` (the task's own
@@ -70,7 +70,7 @@ pub const REVIEW_RUNS: u32 = 2;
 pub const REVIEW_BLOCKING: &str = "review_blocking";
 /// A review stage's two runs left no usable report (ADR 0048 decision 10).
 pub const REVIEW_OUTPUT: &str = "review_output";
-/// A review stage's last run hit `[gate.review] timeout_secs` (ADR 0048 decision 10).
+/// A review stage's last run hit the reviewer's `timeout_secs` (ADR 0048 decision 10).
 pub const REVIEW_TIMEOUT: &str = "review_timeout";
 /// The review session's model was unavailable (`unavailable` or `usage_limit`), so the stage
 /// stops at once and the task waits on `retry_at` instead of running the session again
@@ -178,7 +178,7 @@ impl ReworkRound {
     }
 }
 
-/// The `radian exec` arguments the stage sets itself; `[gate.review] exec_args` may not
+/// The `radian exec` arguments the stage sets itself; a reviewer's `exec_args` may not
 /// repeat one, because the stage's value would be overridden (or the flag given twice). One
 /// closed list: the check and the manual's drift test read it.
 pub const OWNED_EXEC_ARGS: &[&str] = &[
@@ -623,7 +623,7 @@ impl ReviewRun<'_> {
 }
 
 /// The directory the review sessions' journals live in: a `--session-dir` in
-/// `[gate.review] exec_args`, else `RADIAN_SESSION_DIR`, else the user's data directory. The
+/// `[gate.reviewers.<name>] exec_args`, else `RADIAN_SESSION_DIR`, else the user's data directory. The
 /// session id of a review run is chosen against this directory, so a re-run never reuses a
 /// journal (ADR 0048 decision 10).
 fn review_session_dir(exec_args: &[String]) -> Option<PathBuf> {
@@ -1662,6 +1662,8 @@ mod tests {
             concurrency: 1,
             settings: ReviewSettings {
                 round: "first".to_owned(),
+                reviewer: "default".to_owned(),
+                fix_level: "major".to_owned(),
                 exec_args: "gate.review.exec_args".to_owned(),
                 timeout_secs: 0,
                 timeout: "gate.review.timeout_secs".to_owned(),
