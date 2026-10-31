@@ -1,6 +1,6 @@
 # memory：MemoryBackend trait、外部命令 backend、离线 capture
 
-- 状态：idea
+- 状态：idea（前提改为 `memory-files.md`：capture 的输出是文件，写进 scope 目录下的 `inbox/`，用户在 `/memory inbox` 里批准后才进索引，即 Gemini CLI 的形状；`MemoryBackend` trait 的接缝随之变成「谁往目录里放文件」）
 - 涉及 ADR：0021、0013、0031
 - 来源：`research/2026-10-18-area-deep-dive/9-long-tasks-memory.md` §6.5
 
