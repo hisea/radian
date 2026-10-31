@@ -335,3 +335,14 @@ restored from that copy (`diff -q` identical). The reader mutations ran
 | TK0269-M1 | reader: the both-shapes check removed — `(Some(_), Some(_))` now reads as a record | ✅ 1 failed (rc=100) | `tests/memory_injected.rs::a_line_with_both_records_and_indexes_is_refused_naming_its_line` (`unwrap_err` on `Ok`) |
 | TK0269-M2 | reader/writer: the `MEMORY_INJECTED_INDEX_SCOPES` check removed from `validate_memory_injected_index` | ✅ 1 failed (rc=100) | `tests/memory_injected.rs::an_unknown_scope_is_refused_with_the_allowed_values` (`scope: "session"` read as `Ok`; `the_index_writer_refuses_an_unknown_scope_or_short_hash` covers the writer half) |
 | TK0269-M3 | fixture: the new line's `"scope":"project"` changed to `"scope":"x"` | ✅ checker failed (exit 1) | `bash docs/schema/check-fixtures.sh`: `FAIL memory-injected.jsonl: line 4: MemoryInjected 索引 scope 'x' 不在 ['project', 'global']`; `tests/memory_injected.rs::the_fixture_passes_the_checker_and_an_unknown_scope_copy_fails_it` pins the same rule |
+## TK0286: follow-ups for the stop reason (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. Each mutation was applied to the
+named source file, backed up under `.radian/mut/`, the named test run with `cargo nextest run -p
+radian-session --locked --profile sandbox --test <binary> --no-fail-fast -E 'test(<name>)'`, and
+the source restored from the backup.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M1 | `optional_non_empty_string` accepts an empty string and a present `null` again (the pre-fix `Option<String>` shape) | ✅ 1 failed (rc=100) | `tests/read_fixtures.rs::an_empty_or_null_stop_reason_refuses_the_file` (`unwrap_err` on an `Ok` session carrying `stop_reason: ""`) |
+| TK0286-M2 | the JSON export serializes the enum instead of the stored wire text (`serde_json::to_value(stop_reason)`) | ✅ 1 failed (rc=100) | `tests/export.rs::an_unknown_stop_reason_exports_its_original_text` (`"unknown"` instead of `"some_future_reason"`) |

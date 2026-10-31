@@ -3429,3 +3429,15 @@ from a backup under `.radian/`.
 |---|---|---|---|
 | TK0257-M5 | the TUI's `request_output` drops `.with_explicit(...)` (the pre-fix separation between the window and the model build) | ✅ 1 failed (rc=100) | `pty_an_explicit_max_tokens_raises_the_reservation_it_counts` (the startup notice showed `R 19200, B 108800` while the body sends 32000) |
 | site-posthog-M1 | `page_html` drops `{ANALYTICS_SCRIPT}` before `</head>` (a docs page no longer loads `/analytics.js`) | ✅ 2 failed | `the_docs_pages_hold_no_script` (one script element, not two), `a_description_cannot_close_the_json_ld_element` (one `</script>`, not two) |
+
+## TK0286: the reserved-key refusal wins over the window check (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. The mutation was applied to
+`src/cli/run_resolve.rs`, backed up under `.radian/mut/`, the `radian` binary rebuilt, and the
+test run with `cargo nextest run -p radian-tui --locked --profile sandbox --test pty
+--no-fail-fast -E 'test(pty_a_reserved_extra_body_key_is_refused_before_the_window_check)'`;
+the source was restored from the backup.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M5 | the early per-route reserved-key check is removed (the window's `C <= R` check runs first again) | ✅ 1 failed (rc=100) | `pty_a_reserved_extra_body_key_is_refused_before_the_window_check` (the output reported `--context-window ... is not larger than the output reservation 32000`, not the reserved-key line) |

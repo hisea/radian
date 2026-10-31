@@ -51,6 +51,21 @@ macro_rules! model_stop_reasons {
             #[serde(other)]
             Unknown,
         }
+
+        impl ModelStopReason {
+            /// The enum value for a durable wire string (ADR 0006 §5.7). A value this
+            /// version does not know reads as [`Self::Unknown`] (ADR 0006 §6(d)); callers
+            /// keep the original text beside it so an export can write the future value back
+            /// rather than `unknown`.
+            pub fn from_wire(value: &str) -> Self {
+                match value {
+                    $(
+                        $wire => Self::$variant,
+                    )+
+                    _ => Self::Unknown,
+                }
+            }
+        }
     };
 }
 

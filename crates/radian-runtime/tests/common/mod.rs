@@ -255,8 +255,8 @@ impl Model for ScriptedModel {
 }
 
 /// A summarizer reply the ADR 0018 check accepts: a `## ` heading and at least
-/// [`SUMMARY_MIN_TOKENS`] tokens, so a long history clears the floor and a short one has an
-/// honest short summary. `label` stays in the text so a test can look for it on the wire.
+/// [`SUMMARY_MIN_TOKENS`] tokens, so every history length clears the floor and the heading
+/// check. `label` stays in the text so a test can look for it on the wire.
 pub fn valid_summary(label: &str) -> String {
     let mut text = format!("## Goal\n{label}\n## Progress\n");
     while message_tokens(&Message::user(&text)) < SUMMARY_MIN_TOKENS {

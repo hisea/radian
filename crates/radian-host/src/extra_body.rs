@@ -90,13 +90,73 @@ impl ExtraBody {
     }
 }
 
-/// The numeric `max_tokens` an explicit body sets (ADR 0026 D13). The OpenAI-compatible and
-/// Responses adapters do not reserve the key, so it wins over the computed chat cap on the
-/// wire; the host therefore counts it as the output the request really sends (ADR 0018 §2).
-/// A missing, non-numeric, negative or fractional value cannot be reserved for and is ignored.
-pub fn explicit_max_tokens(fields: &Map<String, Value>) -> Option<u32> {
-    let value = fields.get("max_tokens")?.as_u64()?;
-    Some(value.min(u64::from(u32::MAX)) as u32)
+/// The numeric output cap an explicit body sets (ADR 0026 D13). The OpenAI-compatible
+/// adapter does not reserve `max_tokens` (or the newer `max_completion_tokens` spelling), so
+/// it wins over the computed chat cap on the wire; the host therefore counts it as the output
+/// the request really sends (ADR 0018 §2). On the Anthropic and Responses routes only
+/// `max_tokens` is counted: they do not send either as their output (`max_tokens` on Anthropic
+/// is reserved and refused before here).
+///
+/// A non-negative integer, or an integral float of the same value, is reservable. A missing,
+/// `null`, negative, fractional or non-numeric value cannot be reserved for and is ignored;
+/// a `null` `max_tokens` is treated as absent by the chat adapter, so the computed cap the
+/// reservation counts is what goes on the wire. A number above `u32::MAX` cannot be reserved
+/// either, and [`parse_extra_body`] refuses it before a request is built.
+pub fn explicit_max_tokens(fields: &Map<String, Value>, adapter: Provider) -> Option<u32> {
+    let mut keys: &[&str] = &["max_tokens"];
+    if adapter == Provider::OpenAiCompatible {
+        // `max_completion_tokens` is the documented spelling on newer api.openai.com chat
+        // models; the reservation must not miss the output the body really sends.
+        keys = &["max_tokens", "max_completion_tokens"];
+    }
+    keys.iter()
+        .filter_map(|key| reservable_tokens(fields.get(*key)?))
+        .max()
+}
+
+/// A JSON number as the non-negative integer it represents, including an integral float such
+/// as `32000.0`. A negative, fractional, NaN/infinity or non-number value is `None`. So is a
+/// value above `u32::MAX`: [`parse_extra_body`] refuses one, so a parsed body never reaches
+/// here with it and the request never sends an output the reservation cannot count.
+fn reservable_tokens(value: &Value) -> Option<u32> {
+    let number = match value {
+        Value::Number(number) => number,
+        _ => return None,
+    };
+    if let Some(value) = number.as_u64() {
+        return u32::try_from(value).ok();
+    }
+    let value = number.as_f64()?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(value as u32)
+}
+
+/// The body keys whose number is an explicit output cap on some route (ADR 0018 §2).
+const OUTPUT_CAP_KEYS: [&str; 2] = ["max_tokens", "max_completion_tokens"];
+
+/// The first present output-cap number larger than the largest reservation `R` can hold, with
+/// its key and JSON text. The request would send such a value while `R` could not count it, so
+/// the parse refuses it before any request is built.
+fn unrepresentable_output_cap(fields: &Map<String, Value>) -> Option<(&'static str, String)> {
+    OUTPUT_CAP_KEYS.iter().find_map(|key| {
+        let Value::Number(number) = fields.get(*key)? else {
+            return None;
+        };
+        is_beyond_reservable(number).then(|| (*key, number.to_string()))
+    })
+}
+
+/// Whether `number` is larger than the largest output `R` can hold, whatever its fractional
+/// part: the budget carries `u32` token counts (ADR 0018 §2).
+fn is_beyond_reservable(number: &serde_json::Number) -> bool {
+    if let Some(value) = number.as_u64() {
+        return value > u64::from(u32::MAX);
+    }
+    number
+        .as_f64()
+        .is_some_and(|value| value > f64::from(u32::MAX))
 }
 
 /// Reads and validates the variable. Empty counts as unset.
@@ -126,6 +186,15 @@ pub fn parse_extra_body(raw: Option<String>) -> Result<Option<ExtraBody>, String
             json_kind(&value)
         ));
     };
+    // ADR 0018 §2: `R` counts the output the request sends. A larger cap cannot be reserved
+    // for, and sending it anyway would under-reserve, so it stops startup instead.
+    if let Some((key, value)) = unrepresentable_output_cap(&fields) {
+        return Err(format!(
+            "{EXTRA_BODY_ENV} sets `{key}` to {value}, which is larger than the {} tokens \
+             radian can reserve for; lower it",
+            u32::MAX
+        ));
+    }
     Ok((!fields.is_empty()).then_some(ExtraBody { fields }))
 }
 
@@ -243,26 +312,86 @@ mod tests {
     }
 
     #[test]
+    fn an_output_cap_the_reservation_cannot_hold_is_refused_at_startup() {
+        // ADR 0018 §2: `R` must count the output the request sends. A cap above `u32::MAX`
+        // cannot be reserved for, so it is a refusal instead of a clamp that silently
+        // under-reserves.
+        for (raw, key) in [
+            (r#"{"max_tokens":4294967296}"#, "max_tokens"),
+            (
+                r#"{"max_completion_tokens":5000000000}"#,
+                "max_completion_tokens",
+            ),
+            (r#"{"max_tokens":5000000000.0}"#, "max_tokens"),
+            (
+                r#"{"max_completion_tokens":5000000000.5}"#,
+                "max_completion_tokens",
+            ),
+        ] {
+            let error = parse_extra_body(Some(raw.to_owned())).expect_err(raw);
+            assert!(error.contains(EXTRA_BODY_ENV), "{raw}: {error}");
+            assert!(error.contains(&format!("`{key}`")), "{raw}: {error}");
+            assert!(error.contains("4294967295"), "{raw}: {error}");
+        }
+        // `u32::MAX` itself is still an output the reservation can count.
+        let max = parsed(&json!({"max_tokens": u64::from(u32::MAX)}).to_string());
+        assert_eq!(
+            explicit_max_tokens(max.fields(), Provider::OpenAiCompatible),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
     fn the_explicit_max_tokens_is_read_as_the_output_it_sends() {
         // The chat route's builder merges `max_tokens` from the body and skips its computed
         // cap, so this is the output the request really carries.
         let extra = parsed(r#"{"max_tokens":32000}"#);
-        assert_eq!(explicit_max_tokens(extra.fields()), Some(32_000));
-        // A value beyond `u32` is clamped: the reservation is a `u32` and must still see it.
-        let huge = parsed(&json!({"max_tokens": u64::from(u32::MAX) + 1}).to_string());
-        assert_eq!(explicit_max_tokens(huge.fields()), Some(u32::MAX));
+        assert_eq!(
+            explicit_max_tokens(extra.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        // The sibling spelling counts on the chat route too, and the larger wins if both are
+        // present.
+        let completion = parsed(r#"{"max_completion_tokens":32000}"#);
+        assert_eq!(
+            explicit_max_tokens(completion.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        let both = parsed(r#"{"max_tokens":16000,"max_completion_tokens":32000}"#);
+        assert_eq!(
+            explicit_max_tokens(both.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
+        // The other routes do not send `max_completion_tokens` as their output.
+        assert_eq!(
+            explicit_max_tokens(completion.fields(), Provider::Anthropic),
+            None
+        );
+        // A value beyond `u32` cannot be reserved for: the parse refuses it (see the test
+        // below), so no request is built with an output `R` cannot count.
         // Zero is a number the request sends; the window cap still reserves `R`.
         let zero = parsed(r#"{"max_tokens":0}"#);
-        assert_eq!(explicit_max_tokens(zero.fields()), Some(0));
+        assert_eq!(
+            explicit_max_tokens(zero.fields(), Provider::OpenAiCompatible),
+            Some(0)
+        );
+        // An integral float is the same output; a `null` or a fractional value is not
+        // reservable.
+        let integral = parsed(r#"{"max_tokens":32000.0}"#);
+        assert_eq!(
+            explicit_max_tokens(integral.fields(), Provider::OpenAiCompatible),
+            Some(32_000)
+        );
         // Anything that is not a non-negative integer cannot be reserved for.
         for raw in [
             r#"{"max_tokens":-1}"#,
             r#"{"max_tokens":1.5}"#,
+            r#"{"max_tokens":null}"#,
             r#"{"max_tokens":"32000"}"#,
             r#"{"temperature":0.2}"#,
         ] {
             assert_eq!(
-                explicit_max_tokens(parsed(raw).fields()),
+                explicit_max_tokens(parsed(raw).fields(), Provider::OpenAiCompatible),
                 None,
                 "not a usable output: {raw}"
             );

@@ -432,11 +432,15 @@ def fold_push(st, ev, lineno, name):
 
 def check_stop_reason(name, lineno, data):
     """ADR 0006 §5.7：stop_reason 是可选字符串；stop_reason_raw 只能与 other 同时出现。"""
+    # Presence is tested on the key, not `get()`: an explicitly present `null` is not the
+    # absent optional field (it is not a string at all), and it must not bypass the raw rule.
+    reason_present = "stop_reason" in data
+    raw_present = "stop_reason_raw" in data
     reason = data.get("stop_reason")
     raw = data.get("stop_reason_raw")
-    if reason is not None and (not isinstance(reason, str) or not reason):
+    if reason_present and (not isinstance(reason, str) or not reason):
         raise Corruption(f"{name}: line {lineno}: stop_reason 必须是非空字符串")
-    if raw is not None:
+    if raw_present:
         if reason != "other":
             raise Corruption(
                 f"{name}: line {lineno}: stop_reason_raw 只能与 "

@@ -92,8 +92,9 @@ REMOTE_OPTION_ARGS = frozenset({"-t", "--track", "-m", "--master"})
 # remote name or a location. The sets differ: `-t` is `--tags` for `fetch` (no
 # value), `-s` is `--strategy` for `pull` but `--shared` for `clone` (none).
 FETCH_OPTION_ARGS = frozenset({
-    "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "-j", "--jobs",
-    "--upload-pack", "--server-option", "--filter", "--refmap", "--negotiation-tip",
+    "-o", "--server-option", "--depth", "--shallow-since", "--shallow-exclude",
+    "--deepen", "-j", "--jobs", "--upload-pack", "--filter", "--refmap",
+    "--negotiation-tip",
 })
 PULL_OPTION_ARGS = FETCH_OPTION_ARGS | frozenset({
     "-s", "--strategy", "-X", "--strategy-option",
@@ -456,21 +457,28 @@ def scan(journals, source, base: str, own_shas=(), tree: str | None = None,
     outside: set[str] = set()
     for path in journals:
         results = tool_results(path)
-        # A journal can carry one call twice (the stream event and the
-        # message's tool call), but the two carry the same call id. Distinct
-        # calls keep their own ids even when the command text repeats, so the
-        # later one and its result are not dropped.
-        seen: set[str] = set()
+        # A journal can carry one call twice (the assistant message's tool call and the
+        # stream's `ToolExecutionStarted`), and a `before_tool_call` rewrite makes their
+        # arguments differ. Keep the LAST representation of a call id — the final arguments
+        # the command actually ran with — instead of the first, so the scanner cannot be
+        # blinded to the real command. Distinct calls keep their own ids even when the
+        # command text repeats, so the later one and its result are not dropped.
+        calls = []
+        position_by_id: dict[str, int] = {}
+        for call in tool_calls(path):
+            call_id = call[3]
+            if call_id:
+                if call_id in position_by_id:
+                    calls[position_by_id[call_id]] = call
+                    continue
+                position_by_id[call_id] = len(calls)
+            calls.append(call)
         seen_without_id: set[tuple] = set()
-        for journal_tree, name, args, call_id in tool_calls(path):
+        for journal_tree, name, args, call_id in calls:
             if scanner is None or (scanner.tree is None and journal_tree):
                 tree = tree or journal_tree
                 scanner = Scanner(source, base, own_shas, tree, home, remotes)
-            if call_id:
-                if call_id in seen:
-                    continue
-                seen.add(call_id)
-            else:
+            if not call_id:
                 key = (name, json.dumps(args, sort_keys=True))
                 if key in seen_without_id:
                     continue

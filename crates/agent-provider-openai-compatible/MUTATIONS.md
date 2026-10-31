@@ -97,3 +97,13 @@ Branch `work/TK0257-chat-reserve-15-percent`. Each mutation was applied in place
 |---|---|---|---|
 | TK0257-M1 | the factor `15 / 100` becomes `25 / 100` | caught: 5 failed (rc=100) | `config::tests::a_128k_window_sends_19200_with_a_large_ceiling` (the 1M test and three request tests fail too) |
 | TK0257-M2 | the inner floor is removed (`share.max(window_cap)` becomes `share`) | caught: 2 failed (rc=100) | `config::tests::a_32k_window_sends_8192_with_a_large_ceiling` (the 65k test fails too) |
+
+## TK0286: the sibling output-cap spelling and the computed `max_tokens` (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. The mutation was applied in place,
+`cargo nextest run -p agent-provider-openai-compatible --lib --locked --profile sandbox
+--no-fail-fast` was run, and the source was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0286-M10 | the computed `max_tokens` skips only when the body already has `max_tokens` (the `max_completion_tokens` check removed) | ✅ 1 failed (rc=100) | `request::tests::an_explicit_max_completion_tokens_keeps_the_computed_max_tokens_off_the_wire` (the body carried `max_completion_tokens:32000` beside the inserted `max_tokens:32000`) |

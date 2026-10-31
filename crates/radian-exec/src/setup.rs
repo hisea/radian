@@ -478,7 +478,10 @@ pub(crate) async fn setup(
         &route.base_url,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     )
-    .with_explicit(radian_host::explicit_max_tokens(&extra_fields));
+    .with_explicit(radian_host::explicit_max_tokens(
+        &extra_fields,
+        route.adapter(),
+    ));
     // The catalog groups by provider id: the resolved provider's own id when it is not the
     // generic descriptor (so a `chatgpt` route resolves through the descriptor table, which is
     // the only window source models.dev cannot answer for), else the hostname rule.
