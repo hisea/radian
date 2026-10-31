@@ -30,7 +30,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 36] = [
+pub(crate) const KNOWN_EVENTS: [&str; 37] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -52,6 +52,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 36] = [
     "PermissionResolved",
     "ApprovalPolicyChanged",
     "MemoryInjected",
+    "ContextFileAppended",
     "ModelUsageRecorded",
     "SessionForked",
     "ProjectTrustChanged",
@@ -216,6 +217,14 @@ pub enum EventData {
     /// trip; audit only, never a transcript record. Ids, revisions and scopes only.
     MemoryInjected {
         records: Vec<MemoryInjectedRecord>,
+    },
+    /// A subtree context file was appended to the transcript (ADR 0036). Typed for an exact
+    /// round trip; audit only, never a transcript record. A resume reads the paths so no file
+    /// appends twice.
+    ContextFileAppended {
+        path: String,
+        bytes: usize,
+        truncated: bool,
     },
     /// A project-trust decision was written (ADR 0031 T2). Typed for an exact round trip;
     /// audit only, never a transcript record.
@@ -767,6 +776,14 @@ impl LineScanner {
                 let d: MemoryInjectedData = data_of(raw, self.lineno, path)?;
                 EventData::MemoryInjected { records: d.records }
             }
+            "ContextFileAppended" => {
+                let d: ContextFileAppendedData = data_of(raw, self.lineno, path)?;
+                EventData::ContextFileAppended {
+                    path: d.path,
+                    bytes: d.bytes,
+                    truncated: d.truncated,
+                }
+            }
             "ProjectTrustChanged" => {
                 let d: ProjectTrustChangedData = data_of(raw, self.lineno, path)?;
                 EventData::ProjectTrustChanged {
@@ -1186,6 +1203,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::PermissionResolved { .. }
         | EventData::ApprovalPolicyChanged { .. }
         | EventData::MemoryInjected { .. }
+        | EventData::ContextFileAppended { .. }
         | EventData::ProjectTrustChanged { .. }
         | EventData::UserBash { .. }
         | EventData::BackgroundJobStarted { .. }
@@ -1401,6 +1419,13 @@ struct ApprovalPolicyChangedData {
 #[derive(Deserialize)]
 struct MemoryInjectedData {
     records: Vec<MemoryInjectedRecord>,
+}
+
+#[derive(Deserialize)]
+struct ContextFileAppendedData {
+    path: String,
+    bytes: usize,
+    truncated: bool,
 }
 
 #[derive(Deserialize)]

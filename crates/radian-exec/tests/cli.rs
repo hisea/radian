@@ -10575,3 +10575,484 @@ async fn the_extra_body_max_tokens_is_allowed_on_a_chat_route_and_refused_on_ant
     assert!(stderr.contains("RADIAN_EXTRA_BODY"), "{stderr}");
     assert!(stderr.contains("max_tokens"), "{stderr}");
 }
+
+// ---------- subtree context files (ADR 0036) ----------
+
+/// A one-call `read` reply.
+fn read_reply(id: &str, path: &str) -> Reply {
+    tool_reply(id, "read", &json!({"path": path}).to_string())
+}
+
+/// A one-call `grep` reply.
+fn grep_reply(id: &str, pattern: &str, path: &str) -> Reply {
+    tool_reply(
+        id,
+        "grep",
+        &json!({"pattern": pattern, "path": path}).to_string(),
+    )
+}
+
+/// A one-call `glob` reply.
+fn glob_reply(id: &str, pattern: &str) -> Reply {
+    tool_reply(id, "glob", &json!({"pattern": pattern}).to_string())
+}
+
+/// Writes a nested file under `dir`, creating its directories.
+fn write_nested(dir: &Path, relative: &str, text: &str) {
+    let path = dir.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// How often `needle` appears in the n-th recorded request's **conversation** messages. The
+/// system prompt is left out, so a startup file and an appended block cannot be confused.
+fn conversation_count(server: &MockServer, n: usize, needle: &str) -> usize {
+    messages_of(server, n)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] != "system")
+        .map(|message| message.to_string().matches(needle).count())
+        .sum()
+}
+
+/// The session files' text, concatenated.
+fn sessions_text(sessions: &Path) -> String {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return String::new();
+    };
+    let mut text = String::new();
+    for entry in entries.flatten() {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            text.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+    }
+    text
+}
+
+/// A workspace and session directory for one subtree test. `$TMPDIR`, not `/tmp`: the tests
+/// do not open a control socket, and this keeps the tree writable inside the workspace
+/// sandbox. The workspace is its own repository root, so discovery stops there.
+fn subtree_scratch(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let dir = common::process_dir(&format!("radian-exec-{label}"));
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    let sessions = fresh_session_dir();
+    (dir, ws, sessions)
+}
+
+/// 1 and 2: reading `crates/x/src/a.rs` appends `crates/x/AGENTS.md` once, before the next
+/// model request, and the journal has exactly one `ContextFileAppended`; reading
+/// `crates/x/src/b.rs` next appends nothing.
+#[tokio::test]
+async fn a_subtree_context_file_appends_once_before_the_next_request() {
+    let (_dir, ws, sessions) = subtree_scratch("subtree-once");
+    write_nested(&ws, "crates/x/AGENTS.md", "SUBTREE-X-RULES");
+    write_nested(&ws, "crates/x/src/a.rs", "fn a() {}");
+    write_nested(&ws, "crates/x/src/b.rs", "fn b() {}");
+    let server = MockServer::start(vec![
+        read_reply("c1", "crates/x/src/a.rs"),
+        read_reply("c2", "crates/x/src/b.rs"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests().len(), 3, "{stderr}");
+    assert_eq!(
+        conversation_count(&server, 0, "SUBTREE-X-RULES"),
+        0,
+        "nothing is appended before the first read"
+    );
+    assert_eq!(
+        conversation_count(&server, 1, "SUBTREE-X-RULES"),
+        1,
+        "the block is in the request after the first read"
+    );
+    assert_eq!(
+        conversation_count(&server, 2, "SUBTREE-X-RULES"),
+        1,
+        "the second read appends nothing"
+    );
+
+    let journal = sessions_text(&sessions);
+    assert_eq!(
+        journal.matches("\"event\":\"ContextFileAppended\"").count(),
+        1,
+        "{journal}"
+    );
+    assert!(
+        journal.contains("\"path\":\"crates/x/AGENTS.md\""),
+        "{journal}"
+    );
+    assert!(
+        journal.contains(&format!("\"bytes\":{}", "SUBTREE-X-RULES".len())),
+        "{journal}"
+    );
+}
+
+/// 2: after `crates/x/AGENTS.md` is loaded, reading `crates/x/sub/c.rs` appends only
+/// `crates/x/sub/AGENTS.md`.
+#[tokio::test]
+async fn a_deeper_subtree_appends_only_the_deeper_file() {
+    let (_dir, ws, sessions) = subtree_scratch("subtree-deeper");
+    write_nested(&ws, "crates/x/AGENTS.md", "SUBTREE-X-RULES");
+    write_nested(&ws, "crates/x/src/a.rs", "fn a() {}");
+    write_nested(&ws, "crates/x/sub/AGENTS.md", "SUBTREE-SUB-RULES");
+    write_nested(&ws, "crates/x/sub/c.rs", "fn c() {}");
+    let server = MockServer::start(vec![
+        read_reply("c1", "crates/x/src/a.rs"),
+        read_reply("c2", "crates/x/sub/c.rs"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        conversation_count(&server, 1, "SUBTREE-SUB-RULES"),
+        0,
+        "the deeper file is not loaded yet"
+    );
+    assert_eq!(
+        conversation_count(&server, 2, "SUBTREE-X-RULES"),
+        1,
+        "the parent file stays once"
+    );
+    assert_eq!(
+        conversation_count(&server, 2, "SUBTREE-SUB-RULES"),
+        1,
+        "only the deeper file is appended"
+    );
+    let journal = sessions_text(&sessions);
+    assert_eq!(
+        journal.matches("\"event\":\"ContextFileAppended\"").count(),
+        2,
+        "{journal}"
+    );
+    assert!(
+        journal.contains("\"path\":\"crates/x/sub/AGENTS.md\""),
+        "{journal}"
+    );
+}
+
+/// 3: the workspace root's `AGENTS.md` is loaded at startup and is never appended again.
+#[tokio::test]
+async fn a_startup_context_file_is_never_appended_again() {
+    let (_dir, ws, sessions) = subtree_scratch("subtree-startup");
+    write_nested(&ws, "AGENTS.md", "ROOT-RULES");
+    write_nested(&ws, "src/a.rs", "fn a() {}");
+    let server = MockServer::start(vec![read_reply("c1", "src/a.rs"), text_reply("done")]).await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        conversation_count(&server, 1, "ROOT-RULES"),
+        0,
+        "the startup file is not appended"
+    );
+    let journal = sessions_text(&sessions);
+    assert_eq!(
+        journal.matches("\"event\":\"ContextFileAppended\"").count(),
+        0,
+        "{journal}"
+    );
+}
+
+/// 5: `[context] subtree_files = false` appends nothing and writes no event.
+#[tokio::test]
+async fn the_subtree_switch_turns_the_append_off() {
+    let (dir, ws, sessions) = subtree_scratch("subtree-off");
+    write_nested(&ws, "crates/x/AGENTS.md", "SUBTREE-X-RULES");
+    write_nested(&ws, "crates/x/src/a.rs", "fn a() {}");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[context]\nsubtree_files = false\n",
+    );
+    let server = MockServer::start(vec![
+        read_reply("c1", "crates/x/src/a.rs"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        conversation_count(&server, 1, "SUBTREE-X-RULES"),
+        0,
+        "the switch appends nothing"
+    );
+    let journal = sessions_text(&sessions);
+    assert_eq!(
+        journal.matches("\"event\":\"ContextFileAppended\"").count(),
+        0,
+        "{journal}"
+    );
+}
+
+/// 7: a resumed session whose journal already has `ContextFileAppended` for
+/// `crates/x/AGENTS.md` does not append it again.
+#[tokio::test]
+async fn a_resumed_session_does_not_append_a_recorded_file_again() {
+    let (_dir, ws, sessions) = subtree_scratch("subtree-resume");
+    write_nested(&ws, "crates/x/AGENTS.md", "SUBTREE-X-RULES");
+    write_nested(&ws, "crates/x/src/a.rs", "fn a() {}");
+    write_nested(&ws, "crates/x/src/b.rs", "fn b() {}");
+    let first = MockServer::start(vec![
+        read_reply("c1", "crates/x/src/a.rs"),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &first.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-id",
+                "subtree-resume",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        sessions_text(&sessions)
+            .matches("\"event\":\"ContextFileAppended\"")
+            .count(),
+        1
+    );
+
+    let second = MockServer::start(vec![
+        read_reply("c2", "crates/x/src/b.rs"),
+        text_reply("done again"),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &second.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--resume",
+                "subtree-resume",
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go on",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        conversation_count(&second, 0, "SUBTREE-X-RULES"),
+        1,
+        "the resumed transcript carries the one appended message"
+    );
+    assert_eq!(
+        conversation_count(&second, 1, "SUBTREE-X-RULES"),
+        1,
+        "the resumed read appends nothing"
+    );
+    assert_eq!(
+        sessions_text(&sessions)
+            .matches("\"event\":\"ContextFileAppended\"")
+            .count(),
+        1
+    );
+}
+
+/// 9: a `grep` with `path: crates/x` appends `crates/x/AGENTS.md`; a `glob` whose results
+/// list files under two subtrees appends both subtrees' files, each once.
+#[tokio::test]
+async fn grep_paths_and_glob_results_trigger_their_subtrees() {
+    let (_dir, ws, sessions) = subtree_scratch("subtree-search");
+    write_nested(&ws, "crates/x/AGENTS.md", "SUBTREE-X-RULES");
+    write_nested(&ws, "crates/x/a.rs", "fn x() {}");
+    write_nested(&ws, "crates/y/AGENTS.md", "SUBTREE-Y-RULES");
+    write_nested(&ws, "crates/y/b.rs", "fn y() {}");
+    let server = MockServer::start(vec![
+        grep_reply("c1", "fn ", "crates/x"),
+        glob_reply("c2", "**/*.rs"),
+        text_reply("done"),
+    ])
+    .await;
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        conversation_count(&server, 1, "SUBTREE-X-RULES"),
+        1,
+        "the grep path triggered crates/x"
+    );
+    assert_eq!(
+        conversation_count(&server, 1, "SUBTREE-Y-RULES"),
+        0,
+        "crates/y was not touched yet"
+    );
+    assert_eq!(
+        conversation_count(&server, 2, "SUBTREE-X-RULES"),
+        1,
+        "crates/x stays once"
+    );
+    assert_eq!(
+        conversation_count(&server, 2, "SUBTREE-Y-RULES"),
+        1,
+        "the glob result triggered crates/y"
+    );
+    let journal = sessions_text(&sessions);
+    assert_eq!(
+        journal.matches("\"event\":\"ContextFileAppended\"").count(),
+        2,
+        "{journal}"
+    );
+}
+
+/// 10: `[context] other = 1` lands in `skipped`, the session starts, and the startup line
+/// names the ignored key.
+#[tokio::test]
+async fn an_unknown_context_key_is_skipped_and_the_session_starts() {
+    let (dir, ws, sessions) = subtree_scratch("subtree-unknown-key");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[context]\nother = 1\n",
+    );
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+    assert!(
+        stderr.contains("[config] ignored key `context.other`"),
+        "{stderr}"
+    );
+}

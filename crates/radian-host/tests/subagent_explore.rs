@@ -254,6 +254,7 @@ async fn open_case(
             extra_deny_read: Vec::new(),
             skills_allow: None,
             memory_injection: radian_host::memory::InjectionConfig::default(),
+            subtree_files: true,
             hooks: Default::default(),
             project_hooks: Default::default(),
             trust: radian_host::trust::Setup::untrusted(&workspace, false),
