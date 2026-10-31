@@ -257,9 +257,10 @@ addition_budget = 500
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
-The reader validates these keys now; the hub that uses them is not built yet, so they have no effect in this build.
-When it runs, a change takes effect at the hub's next start.
-See `arc/hub` for the registry and the subcommands.
+`radian hub` reads `hub.port` at start and binds the HTTP API there, on `127.0.0.1` only.
+`hub.concurrency` and `hub.interval_secs` belong to the scheduling loop, which this build does not have, so they have no effect yet; the reader validates them.
+A change takes effect at the hub's next start.
+See `arc/hub` for the registry, the routes and the subcommands.
 
 ```toml
 [hub]

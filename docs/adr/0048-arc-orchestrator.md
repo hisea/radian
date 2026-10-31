@@ -457,6 +457,30 @@ The `[hooks]` table holds the commands arc runs at fixed points:
 
 A hub is one process that manages every repository registered on this machine. The registration is an explicit list in `$RADIAN_HOME/hub/repos.toml`: a TOML document of `[[repos]]` tables, each with a `name` (1 to 48 characters from `a-z`, `0-9` and `-`, unique) and an absolute, canonical `path` (unique) to an arc repository. `radian hub add`, `radian hub remove` and `radian hub list` write and read it; a running hub re-reads it every interval and never writes it. Every write goes through a temporary file and an atomic rename, so a reader sees either the old or the new whole document. The hub's scheduling loop, its `hub.lock`, its bearer token and its HTTP API are described in this decision; `[hub] port`, `[hub] concurrency` and `[hub] interval_secs` configure them.
 
+**The listener.** `radian hub` serves the HTTP API on `127.0.0.1:<[hub] port>` (the key's default is `7341`) and on nothing else. There is no key that names another address and no key that turns the listener off; exposing it to another machine is `tailscale serve` or an ssh port forward, which radian does not manage. The hub takes `hub.lock`, a flock in `$RADIAN_HOME/hub/hub.lock` with its pid inside, before it binds and holds it for its whole life: a second hub is refused by that lock with the holder's pid, never by the port. A port another program holds is a startup error that names the port, exit `1`. Its first stdout line is `hub: listening on 127.0.0.1:<port>`. Until the scheduling loop exists, it prints one line saying the loop is not built and serves HTTP. The listener makes no outbound connection (ADR 0013).
+
+**The token.** Every request, `GET /v1/version` included, carries `Authorization: Bearer <token>`. The token file is `$RADIAN_HOME/hub/token` (0600, inside the sandbox-unreadable hub directory, ADR 0020) and holds 32 random bytes as 64 lowercase hex characters. It is created on the first `radian hub` start and by `radian hub pair` when it is missing. `radian hub token rotate` writes a new one through a temporary file and an atomic rename and prints `rotated`. The server reads the file at start and re-reads it when its mtime changed, checked with one `stat` per request, so a rotation takes effect on the next request without a restart. A missing, malformed or wrong token, and a token under any scheme other than `Bearer`, is `401` with an empty JSON object body and nothing else happens: no state changes, no file changes, and no log line carries the token. There is no way to turn the token off, and a Tailscale identity header is never a credential.
+
+**Pairing.** `radian hub pair` prints `http://127.0.0.1:<port>`, the token, and a QR code of `radian://hub?url=<url>&token=<token>` rendered as Unicode half blocks. `--no-qr` prints the text only, and a terminal that is not a TTY gets the text only.
+
+**The API.** The routes carry the `/v1/` prefix and an integer `api_version`, `1` in this decision. `api_version` names the route set and its behavior; `schema_version` (decision 5) names the plan and task file shape and changes on its own, so a route can be added without touching a file and a file field can be added while `api_version` stays `1`. `GET /v1/version` returns `{"api_version": 1, "schema_version": 1}`. Every body is `application/json`; a `204` has no body. The read bodies are produced by the same functions the CLI prints, so a field change in `radian arc list --json` or `radian arc show --json` changes the route with it.
+
+| Route | Method | Body |
+|---|---|---|
+| `/v1/version` | `GET` | `{"api_version": 1, "schema_version": 1}`. |
+| `/v1/repos` | `GET` | One array, in registry order: `{"name", "path", "scheduled", "lock_holder"}`. `scheduled` is `false` until the scheduling loop exists; `lock_holder` is `"hub"`, the pid a `runner.lock` names, or `null`. |
+| `/v1/repos/<name>/items` | `GET` | The bytes `radian arc list --json` prints in that repository. |
+| `/v1/repos/<name>/items/<id>` | `GET` | The bytes `radian arc show --json` prints for that plan or task. |
+| `/v1/repos/<name>/items/<task>/report` | `GET` | `{"attempt": "<attempt id>", "text": "<the last assistant message>"}`, the same `result.jsonl` record the hand-off of decision 7 reads. No attempt or no message: `204`. |
+| `/v1/repos/<name>/items/<task>/verdicts` | `GET` | One array for the newest attempt: `{"stage", "result", "reason", "path", "verdict"}`, in stage order. `result` is `pass` or `fail`; `path` is the verdict file; `verdict` is its JSON. |
+| `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `{"path", "added", "removed"}`, from the `git diff --numstat` of `read.rs` for the task's own change. |
+| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `{"path", "truncated", "text"}`: that file's unified diff, cut at 256 KiB with `truncated: true`. A path not in the list is `404`. |
+| `/v1/events` | `GET` | The event stream of decision 3. Until that stream exists the route answers `404`. |
+
+An unknown repository or id is `404` with the CLI's own message as `{"error": "<message>"}`. Any other path is `404` with `{"error": "no such route"}`, and a method a route does not take is `405`. The owner-action routes (`POST /v1/repos/<name>/items/<id>/<action>`) make the CLI's library calls of decision 11 and change the store, not these read routes.
+
+The route work runs on blocking threads, not on the runtime's async threads, so the scheduling loop's threads are never blocked by a request.
+
 ## Constraints and Costs
 
 - arc code is in the repository from the start, so prototype work goes through the gate and Verify.
