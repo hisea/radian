@@ -180,9 +180,11 @@ History compatibility: the reader accepts `outcome = "context_budget"` (`TurnOut
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `usage` | object | yes | `ModelUsage` serde shape. All seven subfields are optional and absent by default: `input`, `output`, `total`, `cache_read`, `cache_write`, `details` (`OpaqueJson`), `input_includes_cache` (boolean; default = unmarked). Empty usage is `{}`. "Not reported" is a missing field, not 0. Core never computes `total`. |
+| `stop_reason` | string | no | The model's stop reason for this response: the Core `StopReason` in snake case, from the closed set `end_turn`, `tool_use`, `max_tokens`, `refusal`, `content_filtered`, `pause_turn`, `other`. A record written before the field existed has none ("not recorded", not `end_turn`). An unknown future value reads as `Unknown` (ADR 0006 §6(d)). |
+| `stop_reason_raw` | string | no | The provider's raw stop reason text. Present only when `stop_reason` is `other`; a reader must not find it beside any other value. |
 | `fee` | object | no | `{ "micros": integer, "incomplete": boolean? }`. ADR 0027 call fee. An old record without it restores through the current price table and marks the value as estimated. |
 
-Order: directly after the assistant message it describes, before tool dispatch. When the response carries no usage, no record is written. `replay`/`repair`/`recover` ignore it.
+Order: directly after the assistant message it describes, before tool dispatch. When the response carries no usage, no record is written, so its stop reason is not recorded either. `replay`/`repair`/`recover` ignore it.
 
 ### 5.8 `CompactionUsageRecorded`
 
