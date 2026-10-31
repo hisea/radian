@@ -26,6 +26,15 @@ Levels:
   `show-ref` or `merge-base` with a later ref or `--all`.
 - 0: none of these.
 
+Two cases lower a segment's level. A ref the segment creates
+(`checkout -b <name>`, `checkout -B <name>`, `switch -c <name>`, `switch -C
+<name>`, `switch --create <name>`) is a new name, not a later ref, so it does not
+count; a start point after it still does. And a segment whose call failed
+because git did not know the later name (the call's result has `fatal:` with
+`ambiguous argument`, `unknown revision`, `bad revision` or `invalid object name`
+quoting that name, or `not a git repository`) is level 1 at most: the name was
+typed, and nothing was viewed. The evidence keeps the text in both cases.
+
 A sha is later when the source repository has it, it is not an ancestor of the
 run's base, and it is not one of the run's own commits (`commits.txt`). A later
 ref is `origin/*`, `remotes/*`, `work/TK*`, `refs/heads/work/*` or `main`. The
@@ -63,6 +72,13 @@ GIT_SEG = re.compile(
     r"\bgit\b(?:\s+-C\s+\S+|\s+-c\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+([\w-]+)([^;&|\n]*)"
 )
 SHOW_TO_FILE = re.compile(r"[0-9a-f]{7,40}:\S+\s*>")
+# The option that makes `checkout` or `switch` create its next word as a new branch.
+CREATES = {"checkout": ("-b", "-B"), "switch": ("-c", "-C", "--create")}
+# A git error that quotes the argument it could not resolve.
+UNKNOWN_NAME = re.compile(
+    r"fatal: (?:ambiguous argument|unknown revision|bad revision|invalid object name)[^\n']*'([^'\n]+)'"
+)
+NOT_A_REPO = "not a git repository"
 BRINGS = ("cherry-pick", "merge", "checkout", "switch", "restore", "reset", "rebase", "apply", "am")
 # Excluded from `outside`: the toolchain under the home directory.
 SAFE_HOME_DIRS = (".cargo", ".rustup")
@@ -113,33 +129,77 @@ class Scanner:
             paths.append(path)
         return paths
 
-    def git_level(self, sub: str, rest: str) -> tuple[int, str]:
-        """The level of one `git <sub> <rest>` segment and its evidence text."""
+    def git_level(self, sub: str, rest: str, result: str = "") -> tuple[int, str]:
+        """The level of one `git <sub> <rest>` segment and its evidence text.
+
+        `result` is the text the call's tool result returned, when the journal
+        has it; a later name that git reported as unknown there caps the level at 1.
+        """
+        level, snippet, later = self._level(sub, rest)
+        if level > 1 and later and unknown_to_git(later, result):
+            return 1, f"{snippet} [git did not know it]"
+        return level, snippet
+
+    def _level(self, sub: str, rest: str) -> tuple[int, str, list[str]]:
         snippet = (sub + rest).strip()[:200]
         second = second_history(sub, rest)
         if second is not None:
-            return 3, f"{snippet} [second history: {second}]"
-        later = [s for s in SHA_RE.findall(rest) if self.is_later(s)]
-        later += LATER_REF.findall(rest)
-        if MAIN_REF.search(rest):
+            return 3, f"{snippet} [second history: {second}]", []
+        named = rest
+        created = created_ref(sub, rest)
+        if created:
+            named = re.sub(r"(?<!\S)" + re.escape(created) + r"(?!\S)", " ", rest, count=1)
+        later = [s for s in SHA_RE.findall(named) if self.is_later(s)]
+        later += LATER_REF.findall(named)
+        if MAIN_REF.search(named):
             later.append("main")
+        return self._classify(sub, rest, later), snippet, later
+
+    def _classify(self, sub: str, rest: str, later: list[str]) -> int:
         if sub in BRINGS and later:
-            return 3, snippet
+            return 3
         if sub == "show" and later and SHOW_TO_FILE.search(rest):
-            return 3, snippet
+            return 3
         if sub in ("show", "diff", "cat-file", "format-patch") and later:
-            return 2, snippet
+            return 2
         if sub == "log" and later and re.search(r"(-p\b|--patch|--stat|-- )", rest):
-            return 2, snippet
+            return 2
         if sub == "log" and (later or "--all" in rest):
-            return 1, snippet
+            return 1
         if sub == "branch" and re.search(r"(-a\b|--all|-r\b|--contains|--list)", rest):
-            return 1, snippet
+            return 1
         if sub in ("rev-list", "reflog", "for-each-ref", "show-ref", "merge-base") and (
             later or "--all" in rest
         ):
-            return 1, snippet
-        return 0, snippet
+            return 1
+        return 0
+
+
+def created_ref(sub: str, rest: str) -> str | None:
+    """The branch name a `checkout -b` or `switch -c` segment creates, or None."""
+    options = CREATES.get(sub)
+    if not options:
+        return None
+    try:
+        tokens = shlex.split(rest)
+    except ValueError:
+        tokens = rest.split()
+    for index, token in enumerate(tokens[:-1]):
+        if token in options:
+            return tokens[index + 1]
+    return None
+
+
+def unknown_to_git(later: list[str], result: str) -> bool:
+    """Whether the call's result says git could not resolve one of `later`."""
+    if not result:
+        return False
+    if NOT_A_REPO in result:
+        return True
+    for quoted in UNKNOWN_NAME.findall(result):
+        if any(name in quoted for name in later):
+            return True
+    return False
 
 
 def _words(rest: str) -> list[str]:
@@ -193,8 +253,42 @@ def second_history(sub: str, rest: str) -> str | None:
     return None
 
 
+ID_KEYS = ("call_id", "toolCallId", "tool_call_id", "id")
+
+
+def tool_results(path: Path) -> dict[str, str]:
+    """The text of every tool result in a radian or pi journal, by call id.
+
+    A result is any object with a call id (`call_id`, `toolCallId` or
+    `tool_call_id`), a `content` and no tool name: radian's settled result and
+    tool message, and pi's `toolResult` message.
+    """
+    results: dict[str, str] = {}
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            stack = [record]
+            while stack:
+                value = stack.pop()
+                if isinstance(value, dict):
+                    call_id = next(
+                        (value[key] for key in ID_KEYS[:3] if isinstance(value.get(key), str)),
+                        None,
+                    )
+                    if call_id and "content" in value and not isinstance(value.get("name"), str):
+                        results[call_id] = "\n".join(strings(value["content"]))
+                        continue
+                    stack.extend(value.values())
+                elif isinstance(value, list):
+                    stack.extend(value)
+    return results
+
+
 def tool_calls(path: Path):
-    """Yield (tree, name, arguments) for every tool call in a radian or pi journal.
+    """Yield (tree, name, arguments, call id) for every tool call in a radian or pi journal.
 
     A call is any object with a string `name` (or `tool`, `tool_name`) and
     `arguments`, `input` or `args`: radian's `ToolExecutionStarted`, an
@@ -233,7 +327,11 @@ def tool_calls(path: Path):
                                 args = json.loads(args)
                             except ValueError:
                                 pass
-                        yield tree, name, args
+                        call_id = next(
+                            (value[key] for key in ID_KEYS if isinstance(value.get(key), str)),
+                            None,
+                        )
+                        yield tree, name, args, call_id
                         continue
                     stack.extend(value.values())
                 elif isinstance(value, list):
@@ -273,7 +371,8 @@ def scan(journals, source, base: str, own_shas=(), tree: str | None = None,
     level = 0
     outside: set[str] = set()
     for path in journals:
-        for journal_tree, name, args in tool_calls(path):
+        results = tool_results(path)
+        for journal_tree, name, args, call_id in tool_calls(path):
             if scanner is None or (scanner.tree is None and journal_tree):
                 tree = tree or journal_tree
                 scanner = Scanner(source, base, own_shas, tree, home)
@@ -287,7 +386,9 @@ def scan(journals, source, base: str, own_shas=(), tree: str | None = None,
             for text in strings(args):
                 outside.update(scanner.outside(text))
                 for match in GIT_SEG.finditer(text):
-                    found, snippet = scanner.git_level(match.group(1), match.group(2))
+                    found, snippet = scanner.git_level(
+                        match.group(1), match.group(2), results.get(call_id or "", "")
+                    )
                     if found:
                         level = max(level, found)
                         result["evidence"].append({"level": found, "text": snippet})

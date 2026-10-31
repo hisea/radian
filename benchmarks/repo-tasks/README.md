@@ -138,6 +138,7 @@ Environment inputs:
 target directory:
 
 ```sh
+cargo build -p agent-extensions --bin mcp-fixture --locked   # when the tree has it
 cargo fmt --all -- --check
 cargo clippy -p <crate> --all-targets -- -D warnings
 cargo nextest run -p <crate> --locked --no-fail-fast
@@ -145,6 +146,10 @@ cargo nextest run -p <crate> --locked --no-fail-fast
 
 Every listed crate is checked even after one fails: a two-crate task runs both,
 and either failure makes `checks.json`'s `checks_ok` false and the exit code 1.
+The fixture build is setup: tests that start the MCP fixture find it beside the
+test binaries and fail without it, whatever the agent changed. Its result is
+`fixture_ok` (null when the tree has no fixture), and it does not enter
+`checks_ok`.
 `REPO_TASKS_MAX_JOBS` is passed as `--jobs` to clippy and nextest; `cargo fmt`
 takes no job option, and passing one after `--` would reach rustfmt.
 
@@ -221,6 +226,14 @@ the run's base, and it is not one of the run's own commits (`commits.txt`). A
 | 1 | names | `log --all`, `log` of a later ref, `branch -a`, `--all`, `-r`, `--contains` or `--list`, and `rev-list`, `reflog`, `for-each-ref`, `show-ref` or `merge-base` with a later ref or `--all` |
 | 0 | clean | none of these |
 | null | no journal | the run has no journal |
+
+Two cases lower a level. A branch the segment creates (`checkout -b` or `-B`,
+`switch -c`, `-C` or `--create` and its name) is a new name, not a later ref; a
+start point after it still counts. A segment whose call failed because git did
+not know the later name (its tool result has `fatal:` with `ambiguous argument`,
+`unknown revision`, `bad revision` or `invalid object name` quoting that name, or
+`not a git repository`) is level 1 at most, with `[git did not know it]` in its
+evidence. Results are paired with calls by call id, in both formats.
 
 `outside` does not change the level. The scan cannot see content read without
 `git` (`.git/objects` read directly), a sha built at run time by a shell

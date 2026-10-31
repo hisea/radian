@@ -627,6 +627,52 @@ class CheckScriptTest(ScratchCase):
         self.assertTrue(data["checks_ok"])
         self.assertEqual(data["crates"], ["crate-a", "crate-b"])
 
+    def check(self, tasks, cargo):
+        return subprocess.run(
+            ["bash", str(ROOT / "check.sh"), "full", "T1", "1"],
+            capture_output=True,
+            text=True,
+            env=self.env(
+                REPO_TASKS_TASKS_DIR=tasks,
+                REPO_TASKS_RUNS=self.root / "runs",
+                REPO_TASKS_CARGO=cargo,
+            ),
+        )
+
+    def test_the_mcp_fixture_is_built_first_when_the_tree_has_it(self):
+        tasks, run, tree = self.make_run_tree()
+        cargo = write(self.root / "cargo-stub.sh", "#!/bin/sh\necho \"$@\"\nexit 0\n")
+        cargo.chmod(0o755)
+        write(tree / "crates" / "agent-extensions" / "Cargo.toml",
+              '[[bin]]\nname = "mcp-fixture"\n')
+        result = self.check(tasks, cargo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        steps = [line for line in (run / "checks.log").read_text().splitlines()
+                 if line.startswith("=== ") and "rc=" not in line]
+        self.assertIn("build -p agent-extensions --bin mcp-fixture --locked", steps[0])
+        self.assertTrue(json.loads((run / "checks.json").read_text())["fixture_ok"])
+
+    def test_a_failed_fixture_build_does_not_fail_the_checks(self):
+        tasks, run, tree = self.make_run_tree()
+        stub = '#!/bin/sh\necho "$@"\nif [ "$1" = "build" ]; then exit 1; fi\nexit 0\n'
+        cargo = write(self.root / "cargo-stub.sh", stub)
+        cargo.chmod(0o755)
+        write(tree / "crates" / "agent-extensions" / "Cargo.toml",
+              '[[bin]]\nname = "mcp-fixture"\n')
+        result = self.check(tasks, cargo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads((run / "checks.json").read_text())
+        self.assertFalse(data["fixture_ok"])
+        self.assertTrue(data["checks_ok"])
+
+    def test_a_tree_without_the_fixture_skips_the_build(self):
+        tasks, run, _ = self.make_run_tree()
+        cargo = write(self.root / "cargo-stub.sh", "#!/bin/sh\necho \"$@\"\nexit 0\n")
+        cargo.chmod(0o755)
+        self.assertEqual(self.check(tasks, cargo).returncode, 0)
+        self.assertNotIn("mcp-fixture", (run / "checks.log").read_text())
+        self.assertIsNone(json.loads((run / "checks.json").read_text())["fixture_ok"])
+
     def test_max_jobs_reaches_cargo_and_not_rustfmt(self):
         tasks, run, _ = self.make_run_tree()
         cargo = write(self.root / "cargo-jobs-stub.sh", CARGO_JOBS_STUB)
@@ -834,6 +880,44 @@ def pi_journal(tree: str, *commands: str) -> str:
     return journal(records)
 
 
+def radian_call_with_result(command: str, result: str, call_id: str = "c0") -> str:
+    settled = {
+        "event": "ToolExecutionSettled",
+        "data": {
+            "call_id": call_id,
+            "result": {
+                "call_id": call_id,
+                "content": [{"text": {"text": result}}],
+                "is_error": False,
+            },
+        },
+    }
+    return radian_call(command, call_id) + journal([settled])
+
+
+def pi_call_with_result(tree: str, command: str, result: str) -> str:
+    return journal([
+        {"type": "session", "version": 3, "id": "s", "cwd": tree},
+        {
+            "type": "message",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall", "id": "t0", "name": "bash",
+                    "arguments": {"command": command},
+                }],
+            },
+        },
+        {
+            "type": "message",
+            "message": {
+                "role": "toolResult", "toolCallId": "t0", "toolName": "bash",
+                "content": [{"type": "text", "text": result}],
+            },
+        },
+    ])
+
+
 class LeakTest(ScratchCase):
     def setUp(self):
         super().setUp()
@@ -915,6 +999,50 @@ class LeakTest(ScratchCase):
         self.assertEqual(
             result["outside"], [f"{self.home}/Code/radian", f"{self.home}/notes.txt"]
         )
+
+    def test_a_branch_the_segment_creates_is_not_a_later_ref(self):
+        for command in ("git switch -c work/TK0220-1", "git checkout -b work/TK0220-1",
+                        "git switch --create work/TK0220-1", "git branch work/TK0220-1"):
+            with self.subTest(command=command):
+                for result in self.both(command):
+                    self.assertEqual(result["level"], 0)
+        # A start point after the new name still counts.
+        for result in self.both("git checkout -b mine origin/work/TK0220-1"):
+            self.assertEqual(result["level"], 3)
+
+    def with_result(self, command: str, result: str) -> tuple[dict, dict]:
+        radian = self.level(
+            journal([{"event": "SessionCreated", "data": {"workspace": self.tree}}])
+            + radian_call_with_result(command, result),
+            name="r.jsonl",
+        )
+        pi = self.level(pi_call_with_result(self.tree, command, result), name="p.jsonl")
+        return radian, pi
+
+    def test_a_later_name_git_did_not_know_is_level_one(self):
+        command = "git diff --stat origin/main...HEAD"
+        unknown = (
+            "fatal: ambiguous argument 'origin/main...HEAD': unknown revision or path "
+            "not in the working tree."
+        )
+        for result in self.with_result(command, unknown):
+            self.assertEqual(result["level"], 1)
+            self.assertIn("origin/main...HEAD", result["evidence"][0]["text"])
+        for message in ("fatal: bad revision 'origin/main'",
+                        "fatal: invalid object name 'origin/main'.",
+                        "fatal: not a git repository (or any of the parent directories): .git"):
+            with self.subTest(message=message):
+                for result in self.with_result("git show origin/main", message):
+                    self.assertEqual(result["level"], 1)
+
+    def test_a_later_name_git_showed_keeps_its_level(self):
+        command = "git diff --stat origin/main...HEAD"
+        for result in self.with_result(command, " src/lib.rs | 4 ++--"):
+            self.assertEqual(result["level"], 2)
+        # An error about another name does not lower it.
+        other = "fatal: ambiguous argument 'nosuch': unknown revision"
+        for result in self.with_result("git show origin/main && git log nosuch", other):
+            self.assertEqual(result["level"], 2)
 
     def test_a_call_carried_twice_counts_once(self):
         line = radian_call("git branch -a")
