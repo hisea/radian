@@ -4,10 +4,11 @@ description: Which project direction files load, from where, in which order, and
 
 # Context files
 
-The model sees your project directions in every request. Radian reads them
-once at session start, outside the sandbox, and prepends them to the system
-prompt. They never enter the journal; only the loaded paths and sizes are
-recorded.
+The model sees your project directions in every request. Radian reads the startup set
+once at session start, outside the sandbox, and prepends it to the system prompt. It also
+appends a deeper context file on first use in its subtree (see below). The startup text
+never enters the journal; only the startup paths and sizes are recorded. An appended file
+is an ordinary message, so its text is recorded with the conversation.
 
 ## Which files load, and in which order
 
@@ -67,6 +68,34 @@ Imports expand before the size limits apply. Five rules keep imports safe:
 The startup line shows imports next to their file, and names the tokens that
 stayed literal.
 
+## Subtree files
+
+Radian also loads a context file that sits deeper than the workspace root, on
+first use. When a file tool (`read`, `grep`, `glob` or `patch`) first works with
+a path under the workspace, Radian walks from that path's directory up to the
+workspace and appends the first context file it finds in each directory, when
+that file has not loaded yet.
+
+- A `grep` or `glob` call uses its `path` argument's directory. A result that
+  lists files also counts each listed file, so one search can load two
+  subtrees' files.
+- Each file appends once per session. The startup set counts as loaded, and a
+  resumed session remembers the files its record lists.
+- The body is one message in the same labeled block the startup files use, with
+  the path relative to the workspace. The same escapes and `@path` imports
+  apply, and one file still holds at most 64 KiB; longer text is cut with the
+  same `[truncated: ...]` marker. The 128 KiB total does not apply to these
+  files: each stands alone.
+- The message arrives before the next model request. It is ordinary context
+  afterwards: a compaction may summarize it away, and it is not appended again.
+- Files outside the workspace, and a symlink that resolves outside it, never
+  load. An unreadable file warns once and is skipped.
+- The startup line names only the files loaded at session start. These later
+  files are not in it.
+
+Set `[context] subtree_files = false` in the configuration file to turn subtree
+loading off. The setting is read at session start.
+
 ## How to check what loaded
 
 The startup screen shows one summary line. It lists each loaded file with
@@ -75,7 +104,10 @@ its size, for example `AGENTS.md (2.1 KB)`. An expanded import reads
 `, not read: ../x.md`. A truncated file reads `, truncated`. No file reads
 `none`.
 
-The session record keeps the loaded paths, sizes and imports. It never keeps
-the text. To confirm the exact prompt block, read the file on disk: the
-model sees the file's text with imports expanded, wrapped in one labeled
-block per file, in the same order the startup line lists.
+The session record keeps each startup path and size, and each startup file's
+imports. It never keeps the startup text. An appended subtree file's text is in
+its message, like any other conversation text.
+
+To confirm the exact prompt block, read the file on disk: a startup file's text
+is wrapped in one labeled block per file, in the same order the startup line
+lists. An appended subtree file is its own labeled block in one message.

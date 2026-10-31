@@ -117,7 +117,7 @@ fn production_chain(
     let role = Arc::new(radian_host::RoleHooks::new("", "", None));
     let memory = Arc::new(radian_host::memory::MemoryHooks::new(
         None,
-        journal,
+        Arc::clone(&journal),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));
@@ -126,7 +126,25 @@ fn production_chain(
     // it writes nothing and the permission/command order this test pins is unaffected.
     let goal = Arc::new(radian_host::GoalHooks::new(radian_host::fresh_share()));
     let facts = Arc::new(radian_host::prompt::SessionFactsHooks::new(ws, "m-1", None));
-    session_hooks(role, permissions, commands, memory, skills, goal, facts)
+    // ADR 0036: the subtree context hook, empty here (no tool call), so the permission/command
+    // order this test pins is unaffected.
+    let context = Arc::new(radian_host::ContextHooks::new(
+        Arc::new(radian_host::SubtreeContext::new(ws, [])),
+        radian_runtime::Inbox::new(64),
+        journal,
+        Arc::new(|_message: &str| {}),
+        true,
+    ));
+    session_hooks(
+        role,
+        permissions,
+        commands,
+        memory,
+        skills,
+        goal,
+        facts,
+        context,
+    )
 }
 
 /// Edge case 5 + 7: a `permission_prompt` hook fires once, with the tool name and without its

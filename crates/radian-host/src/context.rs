@@ -13,6 +13,14 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use radian_core::{
+    ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageMeta, ToolCall,
+    ToolResult,
+};
+use radian_runtime::Inbox;
+use radian_session::{RuntimeEvent, SessionJournal};
 
 /// The names tried in one directory, in order; the first existing regular file wins (ADR 0036
 /// C2, pi's order).
@@ -213,51 +221,12 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         }
         // ADR 0039: the leaf is opened with `O_NOFOLLOW`, so a repository cannot point
         // `AGENTS.md` at a file outside it and have the host read that into the prompt.
-        let bytes = match radian_coding::safe_fs::read_nofollow(&path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                result
-                    .warnings
-                    .push(format!("cannot read {}: {error}", path.display()));
-                continue;
-            }
+        let Some((file, content)) =
+            read_context_file(&path, workspace, boundary, &mut result.warnings)
+        else {
+            continue;
         };
-        // `@path` imports expand before any budget applies: the per-file cap below and
-        // the total budget after it both count expanded bytes (ADR 0036).
-        let raw_text = String::from_utf8_lossy(&bytes).into_owned();
-        let importer_dir = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| workspace.to_path_buf());
-        let mut chain = vec![std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())];
-        let (expanded, imports, not_read, import_warnings) =
-            expand_imports(&raw_text, &importer_dir, boundary, 0, &mut chain);
-        result.warnings.extend(import_warnings);
-        // The per-file limit applies to the file **after** its imports are expanded; the
-        // total budget is applied after every file is read, so the outermost whole file is
-        // dropped before the innermost is truncated (ADR 0036).
-        let truncated = expanded.len() > MAX_FILE_BYTES;
-        let loaded = expanded.len().min(MAX_FILE_BYTES);
-        let content = String::from_utf8_lossy(&expanded.as_bytes()[..loaded]).into_owned();
-        let content = if truncated {
-            format!(
-                "{content}\n[truncated: only the first {} KiB of {} bytes were loaded]",
-                loaded / 1024,
-                expanded.len()
-            )
-        } else {
-            content
-        };
-        raw.push((
-            LoadedFile {
-                path,
-                bytes: loaded,
-                truncated,
-                imports,
-                not_read,
-            },
-            content,
-        ));
+        raw.push((file, content));
     }
 
     // The total budget: drop the outermost whole files (global, repository root) until the
@@ -284,6 +253,335 @@ pub fn load(workspace: &Path, radian_home: Option<&Path>) -> ContextFiles {
         .collect();
     result.files = raw.into_iter().map(|(file, _)| file).collect();
     result
+}
+
+/// Reads one context file and expands its `@path` imports, under the per-file cap. `workspace`
+/// only supplies the fallback import directory. A read failure is a warning and `None`.
+fn read_context_file(
+    path: &Path,
+    workspace: &Path,
+    boundary: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> Option<(LoadedFile, String)> {
+    // ADR 0039: the leaf is opened with `O_NOFOLLOW`, so a repository cannot point
+    // `AGENTS.md` at a file outside it and have the host read that into the prompt.
+    let bytes = match radian_coding::safe_fs::read_nofollow(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warnings.push(format!("cannot read {}: {error}", path.display()));
+            return None;
+        }
+    };
+    // `@path` imports expand before the per-file cap applies (ADR 0036).
+    let raw_text = String::from_utf8_lossy(&bytes).into_owned();
+    let importer_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.to_path_buf());
+    let mut chain = vec![std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())];
+    let (expanded, imports, not_read, import_warnings) =
+        expand_imports(&raw_text, &importer_dir, boundary, 0, &mut chain);
+    warnings.extend(import_warnings);
+    let (loaded, truncated, content) = limited_content(&expanded);
+    Some((
+        LoadedFile {
+            path: path.to_path_buf(),
+            bytes: loaded,
+            truncated,
+            imports,
+            not_read,
+        },
+        content,
+    ))
+}
+
+/// Applies the per-file cap to one file's expanded text: the loaded byte count, whether it was
+/// cut, and the text with the truncation note (ADR 0036).
+fn limited_content(expanded: &str) -> (usize, bool, String) {
+    let truncated = expanded.len() > MAX_FILE_BYTES;
+    let loaded = expanded.len().min(MAX_FILE_BYTES);
+    let content = String::from_utf8_lossy(&expanded.as_bytes()[..loaded]).into_owned();
+    let content = if truncated {
+        format!(
+            "{content}\n[truncated: only the first {} KiB of {} bytes were loaded]",
+            loaded / 1024,
+            expanded.len()
+        )
+    } else {
+        content
+    };
+    (loaded, truncated, content)
+}
+
+/// One subtree context file ready to append (ADR 0036).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtreeFile {
+    /// The real path the file was read from.
+    pub path: PathBuf,
+    /// The display path relative to the workspace.
+    pub relative: String,
+    /// How many bytes were loaded (after imports and truncation).
+    pub bytes: usize,
+    /// The file was longer than the per-file cap and was cut.
+    pub truncated: bool,
+    /// The `<project_instructions>` block to append as one message.
+    pub block: String,
+}
+
+/// The in-memory "already loaded" set for subtree context files (ADR 0036). The startup chain
+/// is seeded loaded, and a resume adds every path the journal's `ContextFileAppended` events
+/// name. A file appended once never appends again in this process, even after a compaction
+/// removed its message; a file whose read failed is not retried either, so it warns once.
+pub struct SubtreeContext {
+    workspace: PathBuf,
+    boundary: Option<PathBuf>,
+    loaded: Mutex<HashSet<PathBuf>>,
+}
+
+impl SubtreeContext {
+    /// Builds the set from `workspace` and the real paths already loaded (the startup chain
+    /// and, on a resume, the journal's appended files).
+    pub fn new(workspace: &Path, loaded: impl IntoIterator<Item = PathBuf>) -> Self {
+        let workspace =
+            std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let boundary = repo_root(&workspace)
+            .and_then(|root| std::fs::canonicalize(root).ok())
+            .or_else(|| Some(workspace.clone()));
+        let loaded = loaded
+            .into_iter()
+            .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+            .collect();
+        Self {
+            workspace,
+            boundary,
+            loaded: Mutex::new(loaded),
+        }
+    }
+
+    /// The set from the files [`load`] read at startup.
+    pub fn from_startup(workspace: &Path, files: &ContextFiles) -> Self {
+        Self::new(workspace, files.files.iter().map(|file| file.path.clone()))
+    }
+
+    /// Discovers the files to append for these trigger paths (tool arguments and listed result
+    /// files). For each path under the workspace, walks from its directory up to the workspace
+    /// and takes the first existing context file of each directory not yet loaded (ADR 0036),
+    /// inner directory first. The set is updated here before the read, so a parallel call
+    /// cannot append the same file twice, and a file that cannot be read is not retried.
+    pub fn discover(&self, triggers: &[PathBuf]) -> (Vec<SubtreeFile>, Vec<String>) {
+        let mut files = Vec::new();
+        let mut warnings = Vec::new();
+        let mut loaded = self
+            .loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for trigger in triggers {
+            let Some(path) = self.resolve(trigger) else {
+                continue;
+            };
+            let mut dir = if path.is_dir() {
+                Some(path.clone())
+            } else {
+                path.parent().map(Path::to_path_buf)
+            };
+            while let Some(current) = dir {
+                if !current.starts_with(&self.workspace) {
+                    break;
+                }
+                if let Some(candidate) = context_file_in(&current) {
+                    let key =
+                        std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    // A symlink that resolves outside the workspace is skipped (ADR 0036).
+                    // Record the candidate before the read, so a file that cannot be read
+                    // warns once per session instead of on every trigger.
+                    if key.starts_with(&self.workspace)
+                        && loaded.insert(key.clone())
+                        && let Some((file, content)) = read_context_file(
+                            &candidate,
+                            &self.workspace,
+                            self.boundary.as_deref(),
+                            &mut warnings,
+                        )
+                    {
+                        let relative = key
+                            .strip_prefix(&self.workspace)
+                            .unwrap_or(&key)
+                            .to_string_lossy()
+                            .into_owned();
+                        files.push(SubtreeFile {
+                            path: key,
+                            relative: relative.clone(),
+                            bytes: file.bytes,
+                            truncated: file.truncated,
+                            block: file_block(&relative, &content),
+                        });
+                    }
+                }
+                if current == self.workspace {
+                    break;
+                }
+                dir = current.parent().map(Path::to_path_buf);
+            }
+        }
+        (files, warnings)
+    }
+
+    /// Resolves a tool's path to a real path inside the workspace. A relative path is relative
+    /// to the workspace. Anything outside, missing or not canonicalizable is `None`.
+    fn resolve(&self, trigger: &Path) -> Option<PathBuf> {
+        let joined = if trigger.is_absolute() {
+            trigger.to_path_buf()
+        } else {
+            self.workspace.join(trigger)
+        };
+        let path = std::fs::canonicalize(joined).ok()?;
+        path.starts_with(&self.workspace).then_some(path)
+    }
+}
+
+/// The hooks that append subtree context files (ADR 0036). `after_tool_call` runs on each
+/// executed call's settled result; a `read`, `grep`, `glob` or `patch` call that touched a path
+/// under the workspace appends every not-yet-loaded context file above it as one `System`
+/// message on the inject lane, before the next model request.
+pub struct ContextHooks {
+    state: Arc<SubtreeContext>,
+    inbox: Arc<Inbox>,
+    journal: Arc<SessionJournal>,
+    warn: Arc<dyn Fn(&str) + Send + Sync>,
+    enabled: bool,
+}
+
+impl ContextHooks {
+    pub fn new(
+        state: Arc<SubtreeContext>,
+        inbox: Arc<Inbox>,
+        journal: Arc<SessionJournal>,
+        warn: Arc<dyn Fn(&str) + Send + Sync>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            state,
+            inbox,
+            journal,
+            warn,
+            enabled,
+        }
+    }
+}
+
+impl Hooks for ContextHooks {
+    async fn after_tool_call(
+        &self,
+        _cx: &HookContext,
+        call: &ToolCall,
+        result: &mut ToolResult,
+    ) -> Result<(), HookError> {
+        if !self.enabled || result.is_error {
+            return Ok(());
+        }
+        let triggers = trigger_paths(call, result);
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let (files, warnings) = self.state.discover(&triggers);
+        for warning in warnings {
+            (self.warn)(&warning);
+        }
+        for file in files {
+            // The audit record first, so a resume reads the path even when the process dies
+            // before the message commits.
+            if let Err(error) = self
+                .journal
+                .append_runtime_event(RuntimeEvent::ContextFileAppended {
+                    path: file.relative.clone(),
+                    bytes: file.bytes,
+                    truncated: file.truncated,
+                })
+                .await
+            {
+                (self.warn)(&format!(
+                    "could not record ContextFileAppended for {}: {error}",
+                    file.relative
+                ));
+            }
+            let message = Message::User {
+                content: vec![ContentPart::text(file.block)],
+                meta: MessageMeta {
+                    id: None,
+                    source: Some(InputSource::System),
+                    origin: None,
+                },
+            };
+            if let Err(error) = self.inbox.inject(message, InputSource::System).await {
+                (self.warn)(&format!(
+                    "could not append context file {}: {error}",
+                    file.relative
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The paths one settled call touched (ADR 0036): a `read`/`patch` path, a `grep`/`glob`
+/// `path` argument, and every file a `grep`/`glob` result lists. Empty for any other tool.
+fn trigger_paths(call: &ToolCall, result: &ToolResult) -> Vec<PathBuf> {
+    let some_path = || {
+        call.arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+    };
+    let mut paths = Vec::new();
+    match call.name.as_str() {
+        "read" | "patch" => paths.extend(some_path()),
+        "grep" | "glob" => {
+            paths.extend(some_path());
+            paths.extend(listed_files(&call.name, result));
+        }
+        _ => {}
+    }
+    paths
+}
+
+/// The files a `grep`/`glob` result text lists. `glob` prints one path per line; `grep` prints
+/// `path:line:text` in `content` mode and `path: N matches` in `files` mode (a `count` result
+/// and a note line name no file).
+fn listed_files(name: &str, result: &ToolResult) -> Vec<PathBuf> {
+    let text = result.text();
+    let mode = result
+        .structured
+        .as_ref()
+        .and_then(|value| value.get("output"))
+        .and_then(serde_json::Value::as_str);
+    let mut files = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+        let path = if name == "glob" {
+            Some(line)
+        } else {
+            match mode {
+                Some("count") => None,
+                Some("files") => line.split_once(": ").map(|(path, _)| path),
+                _ => line.split_once(':').and_then(|(path, rest)| {
+                    rest.chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_digit())
+                        .then_some(path)
+                }),
+            }
+        };
+        if let Some(path) = path {
+            let path = path.trim();
+            if !path.is_empty() {
+                files.push(PathBuf::from(path));
+            }
+        }
+    }
+    files
 }
 
 /// How many levels of `@path` imports expand: the top file is depth 0 and an import at
@@ -1270,5 +1568,188 @@ mod tests {
         for (block, file) in files.blocks.iter().zip(files.files.iter()) {
             assert_eq!(block.path, file.path);
         }
+    }
+
+    /// Subtree files (ADR 0036): reading a file under `crates/x/src` appends
+    /// `crates/x/AGENTS.md` once; a second read appends nothing; a deeper read appends only
+    /// the deeper file. Not updating the already-loaded set fails this.
+    #[test]
+    fn a_subtree_file_appends_once_and_a_deeper_file_follows() {
+        let dir = TempDir::new("subtree");
+        dir.write("ws/crates/x/AGENTS.md", "X-RULES");
+        dir.write("ws/crates/x/src/a.rs", "a");
+        dir.write("ws/crates/x/src/b.rs", "b");
+        dir.write("ws/crates/x/sub/AGENTS.md", "SUB-RULES");
+        dir.write("ws/crates/x/sub/c.rs", "c");
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+
+        let (files, warnings) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].relative, "crates/x/AGENTS.md");
+        assert_eq!(files[0].bytes, "X-RULES".len());
+        assert!(
+            files[0]
+                .block
+                .starts_with("<project_instructions path=\"crates/x/AGENTS.md\">"),
+            "{}",
+            files[0].block
+        );
+        assert!(files[0].block.contains("X-RULES"), "{}", files[0].block);
+
+        let (again, _) = state.discover(&[PathBuf::from("crates/x/src/b.rs")]);
+        assert!(again.is_empty(), "the file appends once: {again:?}");
+
+        let (deeper, _) = state.discover(&[PathBuf::from("crates/x/sub/c.rs")]);
+        assert_eq!(deeper.len(), 1, "{deeper:?}");
+        assert_eq!(deeper[0].relative, "crates/x/sub/AGENTS.md");
+    }
+
+    /// The startup chain counts as loaded: the workspace root's `AGENTS.md` is never appended
+    /// again. Seeding the set with only the journal fails this.
+    #[test]
+    fn the_startup_chain_counts_as_loaded() {
+        let dir = TempDir::new("subtree-startup");
+        dir.write("ws/AGENTS.md", "ROOT-RULES");
+        dir.write("ws/src/a.rs", "a");
+        // Mark the workspace as its own repository root: the test temp directory may sit
+        // under the checkout, and an ancestor `AGENTS.md` would otherwise be read too.
+        dir.mkdir("ws/.git");
+        let startup = load(&dir.path().join("ws"), None);
+        assert_eq!(startup.files.len(), 1);
+        let state = SubtreeContext::from_startup(&dir.path().join("ws"), &startup);
+        let (files, _) = state.discover(&[PathBuf::from("src/a.rs")]);
+        assert!(files.is_empty(), "{files:?}");
+    }
+
+    /// A subtree file over the per-file cap is truncated with the startup marking (ADR 0036).
+    #[test]
+    fn a_long_subtree_file_is_truncated() {
+        let dir = TempDir::new("subtree-big");
+        let big = "x".repeat(MAX_FILE_BYTES + 100);
+        dir.write("ws/crates/x/AGENTS.md", &big);
+        dir.write("ws/crates/x/src/a.rs", "a");
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+        let (files, _) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].truncated);
+        assert_eq!(files[0].bytes, MAX_FILE_BYTES);
+        assert!(
+            files[0].block.contains("[truncated: only the first 64 KiB"),
+            "{}",
+            files[0].block
+        );
+    }
+
+    /// A symlink that resolves outside the workspace is skipped, and no warning reads it
+    /// (ADR 0036 boundary).
+    #[test]
+    fn a_subtree_symlink_outside_the_workspace_is_skipped() {
+        let dir = TempDir::new("subtree-symlink");
+        dir.write("outside/AGENTS.md", "SECRET-CONTENT");
+        dir.mkdir("ws/crates/x");
+        dir.write("ws/crates/x/src/a.rs", "a");
+        std::os::unix::fs::symlink(
+            dir.path().join("outside/AGENTS.md"),
+            dir.path().join("ws/crates/x/AGENTS.md"),
+        )
+        .unwrap();
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+        let (files, warnings) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
+        assert!(files.is_empty(), "{files:?}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// An unreadable subtree file warns once and is skipped, not retried on every trigger
+    /// (ADR 0036). Recording only a successful read warns again on each later read.
+    #[test]
+    fn an_unreadable_subtree_file_warns_once() {
+        let dir = TempDir::new("subtree-unreadable");
+        dir.write("ws/crates/x/real.md", "SECRET-CONTENT");
+        dir.write("ws/crates/x/src/a.rs", "a");
+        dir.write("ws/crates/x/src/b.rs", "b");
+        // A symlink inside the workspace: `read_nofollow` refuses the leaf (ADR 0039), and
+        // the file is still the first existing candidate in its directory.
+        std::os::unix::fs::symlink("real.md", dir.path().join("ws/crates/x/AGENTS.md")).unwrap();
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+
+        let (files, warnings) = state.discover(&[PathBuf::from("crates/x/src/a.rs")]);
+        assert!(files.is_empty(), "{files:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("cannot read"), "{warnings:?}");
+
+        let (again, warnings) = state.discover(&[PathBuf::from("crates/x/src/b.rs")]);
+        assert!(again.is_empty(), "{again:?}");
+        assert!(
+            warnings.is_empty(),
+            "an unreadable file warns once: {warnings:?}"
+        );
+    }
+
+    /// A `grep` call with `path: crates/x` triggers that directory (ADR 0036).
+    #[test]
+    fn a_grep_path_argument_triggers_its_directory() {
+        let dir = TempDir::new("subtree-grep");
+        dir.write("ws/crates/x/AGENTS.md", "X-RULES");
+        dir.write("ws/crates/x/src/a.rs", "a");
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "grep".into(),
+            arguments: serde_json::json!({"pattern": "a", "path": "crates/x"}),
+        };
+        let result = ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("crates/x/src/a.rs:1:a")],
+            structured: Some(serde_json::json!({"output": "content"})),
+            is_error: false,
+            error_code: None,
+        };
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+        let (files, _) = state.discover(&trigger_paths(&call, &result));
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].relative, "crates/x/AGENTS.md");
+    }
+
+    /// A `glob` result listing files under two subtrees appends both subtrees' files, each
+    /// once (ADR 0036).
+    #[test]
+    fn a_glob_result_triggers_every_listed_subtree() {
+        let dir = TempDir::new("subtree-glob");
+        dir.write("ws/crates/x/AGENTS.md", "X-RULES");
+        dir.write("ws/crates/x/a.rs", "a");
+        dir.write("ws/crates/y/AGENTS.md", "Y-RULES");
+        dir.write("ws/crates/y/b.rs", "b");
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "glob".into(),
+            arguments: serde_json::json!({"pattern": "**/*.rs"}),
+        };
+        let result = ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("crates/x/a.rs\ncrates/y/b.rs\n")],
+            structured: Some(serde_json::json!({"matches": 2, "total_matches": 2})),
+            is_error: false,
+            error_code: None,
+        };
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+        let (files, _) = state.discover(&trigger_paths(&call, &result));
+        let names: Vec<&str> = files.iter().map(|file| file.relative.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["crates/x/AGENTS.md", "crates/y/AGENTS.md"],
+            "{files:?}"
+        );
+    }
+
+    /// A trigger outside the workspace appends nothing (ADR 0036 boundary).
+    #[test]
+    fn a_path_outside_the_workspace_appends_nothing() {
+        let dir = TempDir::new("subtree-outside");
+        dir.write("outside/AGENTS.md", "SECRET-CONTENT");
+        dir.write("outside/a.rs", "a");
+        dir.mkdir("ws");
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+        let (files, _) = state.discover(&[dir.path().join("outside/a.rs")]);
+        assert!(files.is_empty(), "{files:?}");
     }
 }

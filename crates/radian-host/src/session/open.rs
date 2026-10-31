@@ -3,6 +3,7 @@
 //!
 //! Split from `session/mod.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_extensions::McpToolProvider;
@@ -83,6 +84,7 @@ pub async fn open_session(
         extra_deny_read,
         skills_allow,
         memory_injection,
+        subtree_files,
         hooks: hooks_config,
         project_hooks: project_hooks_config,
         trust,
@@ -277,6 +279,30 @@ pub async fn open_session(
         }));
     }
     let inbox = Inbox::durable(64, Arc::clone(&journal));
+
+    // ADR 0036: the subtree context files. The startup chain counts as loaded, and a resume
+    // adds every path the journal already recorded, so a file appended once never appends
+    // again in the resumed process either.
+    let mut loaded_context: Vec<PathBuf> =
+        context.files.iter().map(|file| file.path.clone()).collect();
+    if let Some(parsed) = parsed.as_ref() {
+        for event in parsed.events() {
+            if let radian_session::EventData::ContextFileAppended { path, .. } = &event.data {
+                loaded_context.push(workspace.join(path));
+            }
+        }
+    }
+    let subtree_context = Arc::new(crate::context::SubtreeContext::new(
+        &workspace,
+        loaded_context,
+    ));
+    let context_hooks = Arc::new(crate::context::ContextHooks::new(
+        subtree_context,
+        Arc::clone(&inbox),
+        Arc::clone(&journal),
+        Arc::clone(&memory_warning),
+        subtree_files,
+    ));
 
     // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. It
     // runs before the coding tools are built so their read-only roots include each
@@ -546,6 +572,7 @@ pub async fn open_session(
                 Arc::clone(&skills_hooks),
                 Arc::clone(&goal_hooks),
                 Arc::clone(&facts_hooks),
+                Arc::clone(&context_hooks),
             )),
     );
 
