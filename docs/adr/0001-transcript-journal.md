@@ -26,7 +26,7 @@ Nine variants exist at present:
 - `ToolExecutionSettled { call_id: String, result: ToolResult }`
 - `ModelUsage { usage: ModelUsage }`
 - `CompactionUsage { revision: u64, model: String, usage: ModelUsage }`
-- `ContextCompacted { revision: u64, source_revision: u64, source_len: usize, summary: String, first_kept: usize, tokens_before: u64, tokens_after: u64, below_target: bool, model: String, deterministic: bool }`
+- `ContextCompacted { revision: u64, source_revision: u64, source_len: usize, summary: String, first_kept: usize, tokens_before: u64, tokens_after: u64, below_target: bool, model: String, deterministic: bool, retained_reads: Vec<String> }`
 
 External matches require a wildcard arm.
 
