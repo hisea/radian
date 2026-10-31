@@ -5,7 +5,9 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text};
+use common::{
+    MemTools, Recorder, ScriptedModel, TempDir, call, calls, created, text, valid_summary,
+};
 use radian_core::{Agent, InputSource, Message, MessageId, Step, TurnOptions};
 use radian_runtime::{ConfigQueue, Driver, Inbox};
 use radian_session::{EventData, Session, SessionJournal};
@@ -684,8 +686,9 @@ async fn switch_env(label: &str, startup_settings: serde_json::Value) -> SwitchE
     let journal = Arc::new(SessionJournal::create(&path, "sid", created()).unwrap());
     let inbox = Inbox::durable(16, Arc::clone(&journal));
     let recorder = Arc::new(Recorder::default());
-    // Turn 1's conversation reply, then turn 2's summary and conversation replies.
-    let model = ScriptedModel::new([text("ack"), text("summary"), text("done")]);
+    // Turn 1's conversation reply, then turn 2's summary and conversation replies. The summary
+    // reply carries a `## ` heading and clears the floor, as the ADR 0018 check requires.
+    let model = ScriptedModel::new([text("ack"), text(&valid_summary("summary")), text("done")]);
     let tools = MemTools::new();
     let agent = Arc::new(Agent::new(Arc::clone(&model), tools).with_config(
         radian_core::AgentConfig {
