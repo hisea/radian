@@ -27,6 +27,61 @@ that rename would otherwise replay the old content and fsync a write into a file
 On a mismatch the descriptor is dropped and the open+lock retried. (Non-Unix platforms skip
 this check; the memory store targets Unix.)
 
+## File store (ADR 0021 D3/D4)
+
+`files::FileStore` is the record store the host moves to: one Markdown file per record and one
+index per scope, beside the old logs above.
+
+```
+<root>/global/<name>.md                  a Global record
+<root>/global/MEMORY.md                  the Global index
+<root>/projects/<ProjectId>/<name>.md    a Project record
+<root>/projects/<ProjectId>/MEMORY.md    the Project index
+```
+
+Directories are `0700` and files `0600`. Every write goes through a temporary file in the same
+directory, an atomic rename over the path, and then a directory fsync.
+
+A record is YAML frontmatter between two `---` lines, then the body. The body keeps its bytes
+exactly: a trailing newline and a line that spells `---` included. Every frontmatter scalar is
+one line: plain, single-quoted or double-quoted. The writer leaves a value plain when that is
+unambiguous and double-quotes anything else (a value with `: `, a leading or trailing space, a
+quote at its start, or a control character), so a hand-written quoted value and a written
+record read back the same. The fields are `name` (the
+file stem; `[a-z0-9-]`, 1 to 64 characters), `description` (one line), `type` (the closed set
+`RECORD_TYPES`: `user`, `feedback`, `project`, `reference`), `source` (the closed set
+`RECORD_SOURCES`: `model`, `user`, `import`; the host sets it), `created` and `modified` (RFC
+3339 UTC; `created` is kept across a write and `modified` is set on every write), `last_used`
+(RFC 3339 UTC or absent, which means never read), and an optional `provenance` map with
+`session_id` and `turn_id`. `write` refuses a name outside the rule before it touches a file,
+and a record's `source` is fixed at its first write: replacing a file keeps its existing
+`source` and ignores the caller's new value. `touch_last_used` rewrites only the `last_used`
+line, or inserts one after `modified`; every other byte stays. The two closed sets are the
+slices the parser, the writer and the docs drift test read.
+
+The index is plain text the store does not interpret. `index_lines` parses the
+`- [title](file) — description` form and reports every line that is not in it with its 1-based
+number.
+
+`list` returns every readable record's frontmatter sorted by `name`, then one
+`ListEntry::Unreadable { path, reason }` for each file whose frontmatter does not parse, whose
+`type` or `source` is outside its set, or whose `name` is not its file stem. The other records
+still list. `read` of such a file is an error naming the path and the line.
+
+### Migration
+
+`migrate_log(scope_dir)` converts one scope's old `log.jsonl` once. When the log exists and
+`log.jsonl.migrated` does not, it replays the log with the old reader and writes every Active
+record as a file: the name is the record's key when it obeys the name rule, else a slug of the
+first words of the content made unique with `-2`, `-3`; the description is the first content
+line cut at 120 characters; `preference` becomes `user`, `decision` and `fact` become
+`project`, `lesson` becomes `feedback`; `User` becomes `user`, `Agent` becomes `model`,
+`Import` becomes `import`; `created` and `modified` come from the record, and `provenance`
+keeps `session_id`/`turn_id`. Archived and Forgotten records are dropped. It writes the index,
+then renames the log to `log.jsonl.migrated`. A second call finds the marker and does nothing.
+A crash before the rename leaves the log, and the next call writes the same bytes again: the
+writes are idempotent by content, not by modification time.
+
 ## Events and an envelope sample
 
 `MemoryCreated`, `MemoryRevised`, `MemoryArchived`, `MemoryRestored`, `MemoryConfirmed`,
@@ -63,6 +118,7 @@ confirmed (ADR 0021 D4, last bullet).
   D6): the match score orders, it does not select. The host's per-turn **addition** uses
   `search` instead (ADR 0021: a turn whose text hits nothing appends
   nothing).
+- `FileStore` and `migrate_log` — the file store and the one-time log migration above.
 - `export(records)` / `parse(text)` — the Markdown view (flat front matter, no YAML
   dependency). An import whose block changes an existing record's `key` or `kind` is reported
   in `ImportReport::rejections` and writes nothing, instead of silently dropping the edit; a
