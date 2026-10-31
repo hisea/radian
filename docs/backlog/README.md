@@ -40,6 +40,9 @@
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `memory-files.md` | idea（设计已写全，等 owner 反转 ADR 0021 D5 第 1 条） | 0021、0020、0036、0035、0043、0012 | 记忆改成模型可写的 Markdown 文件加 `MEMORY.md` 索引注入（Claude Code / Gemini CLI 的形状）；取消 JSONL 存储、排序注入、`memory_search` |
 | `memory-aging.md` | idea | 0021 | 宿主在 `read` 时写 `last_used`，`memory stale` 列久未用的；自动归档等数据 |
+| `memory-session-search.md` | idea | 0021、0006、0019、0043 | 过去的会话当记忆：模型能查「上次我们怎么做的」（Amp、Codex 的形状），工具还是会话索引文件待定 |
+| `memory-shared-tier.md` | idea | 0021、0020、0031、0036 | 随仓库走的共享记忆层与多机私有记忆：是否另开 `.radian/memory/`，倾向共享层由人经 PR 放 |
+| `context-files-subtree.md` | idea | 0036、0025、0031 | 子目录 AGENTS.md 在读到子树文件时按需装载；glob 触发的规则先不做 |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
 | `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
 | `mcp-full-tier-ask.md` | idea | 0012、0043 | full 档 MCP 按 server 首次询问，工具定义按哈希固定 |
