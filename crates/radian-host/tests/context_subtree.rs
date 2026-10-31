@@ -38,6 +38,19 @@ fn text_reply(text: &str) -> Reply {
     ])
 }
 
+/// A summarizer reply the ADR 0018 check accepts: a `## ` heading line and at least
+/// [`radian_core::SUMMARY_MIN_TOKENS`] tokens, so a history that carries the appended block
+/// (over `10 * SUMMARY_MIN_TOKENS`) clears the floor.
+fn valid_summary() -> String {
+    let mut text = String::from("## Goal\nthe work in `crates/x`\n## Progress\n");
+    while radian_core::message_tokens(&radian_core::Message::user(&text))
+        < radian_core::SUMMARY_MIN_TOKENS
+    {
+        text.push_str(" more detail");
+    }
+    text
+}
+
 fn read_reply(id: &str, path: &str) -> Reply {
     Reply::sse(&[
         chunk(
@@ -244,7 +257,7 @@ async fn a_compaction_summarizes_an_appended_file_and_it_is_not_appended_again()
     let server = MockServer::start(vec![
         read_reply("c1", "crates/x/src/a.rs"),
         text_reply("done"),
-        text_reply("short summary"),
+        text_reply(&valid_summary()),
         read_reply("c2", "crates/x/src/b.rs"),
         text_reply("done again"),
     ])
