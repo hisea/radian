@@ -47,9 +47,13 @@ pub(crate) fn build_body(
     }
     body.insert("model".into(), json!(config.model));
     body.insert("stream".into(), json!(true));
-    // ADR 0018: the catalog-derived chat output cap. An explicit `max_tokens` the request
-    // already carries (extra_body or request settings) wins and is never overwritten.
+    // ADR 0018: the catalog-derived chat output cap. An explicit output cap the request already
+    // carries (extra_body or request settings, under either spelling) wins and is never
+    // overwritten. The sibling spelling matters on `api.openai.com`'s chat route: it sends no
+    // `max_tokens` because its newer models reject it, and a body's `max_completion_tokens`
+    // must not make the adapter add one.
     if !body.contains_key("max_tokens")
+        && !body.contains_key("max_completion_tokens")
         && let Some(max_tokens) = config.max_tokens
     {
         body.insert("max_tokens".into(), json!(max_tokens));
@@ -782,6 +786,29 @@ mod tests {
             json!(64),
             "per-request settings win at 128k"
         );
+    }
+
+    #[test]
+    fn an_explicit_max_completion_tokens_keeps_the_computed_max_tokens_off_the_wire() {
+        // ADR 0018 §2: `api.openai.com`'s chat route sends no `max_tokens`, because its newer
+        // chat models reject it. The body's own `max_completion_tokens` is the output cap the
+        // reservation counts, and the adapter must not add a `max_tokens` beside it.
+        let mut cfg = config();
+        cfg.max_tokens = Some(32_000);
+        cfg.extra_body
+            .insert("max_completion_tokens".into(), json!(32_000));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_completion_tokens"], json!(32_000));
+        assert!(body.get("max_tokens").is_none(), "{body}");
+
+        // A per-request setting is the same: the sibling spelling is the cap.
+        let mut cfg = config();
+        cfg.max_tokens = Some(32_000);
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"max_completion_tokens": 32_000});
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(body["max_completion_tokens"], json!(32_000));
+        assert!(body.get("max_tokens").is_none(), "{body}");
     }
 
     #[test]
