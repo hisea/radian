@@ -46,6 +46,7 @@ fn the_reader_matches_the_reference_checker() {
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
         ("hub.toml", "accept"),
+        ("context-subtree-files.toml", "accept"),
         ("hooks.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
         ("schema-version-newer.toml", "readonly"),

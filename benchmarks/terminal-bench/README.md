@@ -237,6 +237,8 @@ and the code differ.
 | `read_unranged_calls` | `read` calls whose arguments hold neither `offset` nor `limit`. | calls |
 | `read_unranged_bytes` | Result-text bytes of the unranged `read` calls. | bytes |
 | `read_large_calls` | `read` results whose text is 20,480 bytes or more (20 KiB). | calls |
+| `memory_reads` | `read` calls, and `grep`/`glob` calls, whose `path` argument names a memory directory or a file under it: `<root>/global/` or `<root>/projects/<ProjectId>/`, where `<root>` is `~/.radian/memory` (matched as `memory/global` or `memory/projects` path components, since the script does not know the user's home) or the `RADIAN_HOME` override's `memory/` when the journal's `SessionCreated` record carries one (`radian_home`). `MEMORY.md` and `SESSIONS.md` reads count too. Empty for a pi journal. | calls |
+| `memory_writes` | `write` and `patch` calls whose `path` argument is under a memory directory (the same paths as `memory_reads`), counted only when the tool result was not an error. Empty for a pi journal. | calls |
 | `p50ms.<bucket>` | p50 of per-call latency in one prompt bucket: from the previous ready event (turn start, user message, tool settle, or the previous assistant message) to the usage record. Bucket 0 is 0-99,999 prompt tokens, bucket 1 is 100,000-199,999, and so on. | ms |
 | `p90ms.<bucket>` | p90 of the same per-bucket latency samples. | ms |
 | `compactions` | `ContextCompacted` records (pi: entries with type `compaction`). | count |

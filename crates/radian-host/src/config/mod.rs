@@ -224,6 +224,30 @@ impl Default for HubConfig {
     }
 }
 
+/// `[context]` (ADR 0036): when the host appends subtree context files on first use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextConfig {
+    /// `[context] subtree_files`: append a subtree `AGENTS.md` when a tool first works under
+    /// its directory. `None` means the default, **on**; the host reads
+    /// `unwrap_or(true)`.
+    pub subtree_files: Option<bool>,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            subtree_files: Some(true),
+        }
+    }
+}
+
+impl ContextConfig {
+    /// The switch with its default applied.
+    pub fn subtree_files(&self) -> bool {
+        self.subtree_files.unwrap_or(true)
+    }
+}
+
 /// One parsed configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
@@ -242,6 +266,8 @@ pub struct Config {
     pub control: ControlConfig,
     /// `[hub]` (ADR 0048): the port, concurrency and interval of the hub.
     pub hub: HubConfig,
+    /// `[context]` (ADR 0036): subtree context files.
+    pub context: ContextConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
     /// `[memory]` (ADR 0021): the injection keys this revision adds.
@@ -396,6 +422,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "integrations" => parse_integrations(value, path, &mut config)?,
             "control" => parse_control(value, path, &mut config)?,
             "hub" => parse_hub(value, path, &mut config)?,
+            "context" => parse_context(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "hooks" => hooks::parse_hooks(value, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
@@ -572,6 +599,22 @@ fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
                 return Err(wrong_type(path, "hub.interval_secs", "an integer"));
             }
             (other, _) => config.skipped.push(format!("hub.{other}")),
+        }
+    }
+    Ok(())
+}
+
+fn parse_context(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "context", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("subtree_files", Value::Boolean(on)) => config.context.subtree_files = Some(*on),
+            ("subtree_files", _) => {
+                return Err(wrong_type(path, "context.subtree_files", "a boolean"));
+            }
+            (other, _) => config.skipped.push(format!("context.{other}")),
         }
     }
     Ok(())
@@ -936,6 +979,23 @@ mod tests {
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
         parse(Path::new("/tmp/test/config.toml"), text)
+    }
+
+    /// ADR 0036: `[context] subtree_files` is read; an unknown key in the table is skipped by
+    /// name and the rest of the file still parses.
+    #[test]
+    fn context_subtree_files_is_read_and_an_unknown_key_is_skipped() {
+        let config = parse_str("schema_version = 1\n[context]\nsubtree_files = false\n")
+            .expect("the table parses");
+        assert!(!config.context.subtree_files());
+        assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+
+        let config = parse_str("schema_version = 1\n[context]\nother = 1\n")
+            .expect("an unknown key is skipped, not refused");
+        assert!(config.context.subtree_files());
+        assert_eq!(config.skipped, vec!["context.other".to_owned()]);
+
+        assert!(parse_str("schema_version = 1\n[context]\nsubtree_files = 1\n").is_err());
     }
 
     /// ADR 0034 H6: `[integrations] herdr` defaults to true; `false` turns it off and a
@@ -2022,6 +2082,7 @@ future_option = "alpha"
             "hub.port",
             "hub.concurrency",
             "hub.interval_secs",
+            "context.subtree_files",
             "compaction.auto",
             "compaction.thinking",
             "hooks.PreToolUse",
@@ -2340,6 +2401,7 @@ future_option = "alpha"
         "## `[memory.injection]`",
         "## `[control]`",
         "## `[hub]`",
+        "## `[context]`",
         "## `[integrations]`",
         "## `[compaction]`",
         "## `[tui]`",
@@ -2551,6 +2613,10 @@ future_option = "alpha"
             (
                 "control.enabled",
                 ControlConfig::default().enabled.to_string(),
+            ),
+            (
+                "context.subtree_files",
+                ContextConfig::default().subtree_files().to_string(),
             ),
             (
                 "permissions.profile",

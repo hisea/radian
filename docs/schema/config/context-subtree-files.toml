@@ -1,0 +1,7 @@
+# ADR 0036: `[context] subtree_files = true | false`, default true. When a `read`, `grep`,
+# `glob` or `patch` call first works under a subtree, the host appends that subtree's context
+# file as one System message before the next model request. `false` appends nothing.
+schema_version = 1
+
+[context]
+subtree_files = false

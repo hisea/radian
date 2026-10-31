@@ -268,6 +268,17 @@ concurrency = 4
 interval_secs = 30
 ```
 
+## `[context]`
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `context.subtree_files` | boolean | `true` | Append a subtree's context file when a file tool first works under its directory. `false` appends nothing. Read at session start. A non-boolean is refused. |
+
+```toml
+[context]
+subtree_files = false
+```
+
 ## `[integrations]`
 
 | Key | Type | Default | What it does |

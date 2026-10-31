@@ -220,6 +220,8 @@ pub struct SessionSettings {
     pub skills_disabled: Vec<String>,
     /// The memory injection configuration (ADR 0021).
     pub memory_injection: InjectionConfig,
+    /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
+    pub subtree_files: bool,
     /// The resolved `[hooks]` section (ADR 0045 slice A): user-level command hooks.
     pub hooks: crate::config::HooksConfig,
 }
@@ -286,6 +288,7 @@ impl SessionSettings {
                 .unwrap_or(crate::config::DEFAULT_SKILLS_BUILTIN),
             skills_disabled: config.skills.disabled.clone(),
             memory_injection: config.memory.injection(),
+            subtree_files: config.context.subtree_files(),
             hooks: config.hooks.clone(),
         };
         (settings, notice)
@@ -397,6 +400,7 @@ impl LeadSetup {
             extra_deny_read: self.extra_deny_read,
             skills_allow: None,
             memory_injection: settings.memory_injection,
+            subtree_files: settings.subtree_files,
             hooks: settings.hooks,
             project_hooks: self.project_hooks,
             trust: self.trust,
