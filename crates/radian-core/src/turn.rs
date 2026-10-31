@@ -144,8 +144,6 @@ enum CompactionDecision {
     Applied {
         size: RequestSize,
         report: BudgetReport,
-        /// The compaction committed over the 75% goal (ADR 0018).
-        below_target: bool,
     },
     /// The turn was cancelled while summarizing; no compaction was committed.
     Cancelled(CancelReason),
@@ -464,7 +462,9 @@ enum SummarizeOutcome {
     Model(String),
     /// The summary path failed; an automatic path may still fall back to the deterministic
     /// compaction. A manual `/compact` never sees this (it reports the error instead).
-    Fallback,
+    /// `too_long` carries the summary ceiling when both attempts were over it (ADR 0018): the
+    /// fallback then cuts the previous summary to half that ceiling instead of keeping it whole.
+    Fallback { too_long: Option<u64> },
     /// The turn was cancelled while summarizing.
     Cancelled(CancelReason),
 }
@@ -699,6 +699,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
 
         // The model summary first. When it fails on an automatic path the caller falls through
         // to the deterministic fallback below (ADR 0018).
+        let mut fallback_too_long = None;
         let model_summary = match self
             .summarize(
                 interrupt,
@@ -714,7 +715,10 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             .await?
         {
             SummarizeOutcome::Model(summary) => Some(summary),
-            SummarizeOutcome::Fallback => None,
+            SummarizeOutcome::Fallback { too_long } => {
+                fallback_too_long = too_long;
+                None
+            }
             SummarizeOutcome::Cancelled(reason) => {
                 return Ok(CompactionStep::Cancelled(reason));
             }
@@ -796,6 +800,15 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             .expect("the plan's cut is a unit boundary");
         let newest = units.len() - 1;
         let has_summary = previous_summary.is_some();
+        // ADR 0018: when the summary was over its ceiling twice, the previous summary is the
+        // likely cause (the summarizer appended to it), so the fallback keeps only its head, cut
+        // to half the ceiling. Any other fallback keeps it whole.
+        let kept_summary = match fallback_too_long {
+            Some(max) => previous_summary
+                .as_deref()
+                .map(|summary| compaction::truncate_to_tokens(summary, max / 2)),
+            None => previous_summary.clone(),
+        };
         let mut last_tokens = tokens_before;
         for drop in 0..=(newest - planned) {
             let first_kept = units[planned + drop].start;
@@ -820,7 +833,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             let start = if has_summary { 1 } else { 0 };
             let dropped = first_kept - start - carried;
             let summary =
-                compaction::deterministic_summary(previous_summary.as_deref(), dropped, truncated);
+                compaction::deterministic_summary(kept_summary.as_deref(), dropped, truncated);
             let history = self.compacted_view(&summary, &user_messages, &kept, events)?;
             let size_after = match self
                 .rebuild_and_measure(request, &history, hcx, interrupt, events)
@@ -910,6 +923,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             summary_max,
             settings.clone(),
         );
+        let mut first_too_long = false;
         for attempt in 0..2 {
             // The summary call shares the ADR 0017 retry/backoff/cancellation path
             // with the turn's conversation call, but each of the two sumlen attempts gets its
@@ -935,7 +949,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 ModelCallOutcome::Done(Ok(response)) => response,
                 ModelCallOutcome::Done(Err(error)) => {
                     if deterministic_allowed {
-                        return Ok(SummarizeOutcome::Fallback);
+                        return Ok(SummarizeOutcome::Fallback { too_long: None });
                     }
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),
@@ -978,6 +992,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
             match compaction::check_summary(&text, summary_max) {
                 Ok(checked) => return Ok(SummarizeOutcome::Model(checked)),
                 Err(error) if attempt == 0 => {
+                    first_too_long = matches!(error, compaction::SummaryError::TooLong { .. });
                     summary_request = match error {
                         compaction::SummaryError::TooLong { .. } => compaction::shorten_request(
                             text.trim(),
@@ -996,7 +1011,11 @@ impl<M: Model, P: ToolProvider, H: Hooks> AgentSession<M, P, H> {
                 }
                 Err(error) => {
                     if deterministic_allowed {
-                        return Ok(SummarizeOutcome::Fallback);
+                        let too_long = first_too_long
+                            && matches!(error, compaction::SummaryError::TooLong { .. });
+                        return Ok(SummarizeOutcome::Fallback {
+                            too_long: too_long.then_some(summary_max),
+                        });
                     }
                     events.emit(AgentEvent::CompactionFailed {
                         reason: error.to_string(),
@@ -1215,14 +1234,10 @@ pub struct ActiveRun<'s, M: Model, P: ToolProvider, H: Hooks> {
     started: bool,
     batch: Option<Batch>,
     outcome: Option<RunOutcome>,
-    /// Set once an automatic compaction in this turn came out below the 75% target (ADR
-    /// 0018). The next over-budget request gets one more compaction (see
-    /// `extra_compaction_used`); after that one, an over-budget request fails as
-    /// `InsufficientCompaction` instead.
-    below_target_compaction: bool,
-    /// Whether this turn already spent its one extra compaction after a below-target one
-    /// (ADR 0018). Never reset within a turn.
-    extra_compaction_used: bool,
+    /// How many compactions in a row this turn came out below the 75% target (ADR 0018). A
+    /// compaction that reaches the goal resets it to 0. At 2, an over-budget request fails
+    /// as `BelowTarget` instead of compacting again.
+    below_target_streak: u32,
     /// How many consecutive `MaxTokens` responses this turn has seen, with or without tool
     /// calls (ADR 0017 §2). Any other stop reason resets it to 0. The third consecutive
     /// truncation with no tool calls ends the turn instead of continuing.
@@ -1279,8 +1294,7 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
             started: false,
             batch: None,
             outcome: None,
-            below_target_compaction: false,
-            extra_compaction_used: false,
+            below_target_streak: 0,
             max_tokens_streak: 0,
         }
     }
@@ -1421,15 +1435,19 @@ impl<'s, M: Model, P: ToolProvider, H: Hooks> ActiveRun<'s, M, P, H> {
 
     /// Records a committed compaction against this turn's bookkeeping (ADR 0018 §B):
     /// `turn_start` tracks the first retained message of this turn in the new history (index 0
-    /// is the summary), and a below-target compaction stops further automatic compaction this
-    /// turn. Every compaction path calls this.
+    /// is the summary), and `below_target_streak` counts consecutive below-target compactions.
+    /// Every compaction path calls this.
     fn note_compaction(&mut self, below_target: bool, first_kept: usize) {
         self.turn_start = if self.turn_start < first_kept {
             1
         } else {
             self.turn_start - first_kept + 1
         };
-        self.below_target_compaction |= below_target;
+        if below_target {
+            self.below_target_streak += 1;
+        } else {
+            self.below_target_streak = 0;
+        }
     }
 
     fn finish(&mut self, status: RunStatus, events: &dyn EventSink) -> Step {
@@ -1655,22 +1673,16 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 BudgetStatus::Ok(report)
             };
             // ADR 0018: over the input budget `B` the request is normally compacted before it
-            // is sent. `--no-auto-compact` sends it anyway; a previous below-target compaction
-            // in this turn fails instead of compacting again.
+            // is sent. `--no-auto-compact` sends it anyway; after two below-target compactions
+            // in a row the turn fails instead of compacting again.
             if over && agent.config.auto_compact {
-                // After a below-target compaction the turn gets one more automatic
-                // compaction (ADR 0018); only an over-budget request after that one fails.
-                let extra = self.run.below_target_compaction;
-                if extra {
-                    if self.run.extra_compaction_used {
-                        events.emit(AgentEvent::CompactionFailed {
-                            reason: "a previous compaction this turn was below target".into(),
-                        });
-                        return Err(self
-                            .run
-                            .fail(RunError::Compaction(CompactionError::BelowTarget), events));
-                    }
-                    self.run.extra_compaction_used = true;
+                if self.run.below_target_streak >= 2 {
+                    events.emit(AgentEvent::CompactionFailed {
+                        reason: "two compactions in a row were below target".into(),
+                    });
+                    return Err(self
+                        .run
+                        .fail(RunError::Compaction(CompactionError::BelowTarget), events));
                 }
                 match self
                     .maybe_compact(
@@ -1689,16 +1701,7 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                         return Ok(self.run.finish(RunStatus::Cancelled(reason), events));
                     }
                     Ok(CompactionDecision::NotNeeded) => {}
-                    Ok(CompactionDecision::Applied {
-                        size,
-                        report,
-                        below_target,
-                    }) => {
-                        // The extra compaction that reached the 75% goal returns the turn to
-                        // the ordinary rule.
-                        if extra && !below_target {
-                            self.run.below_target_compaction = false;
-                        }
+                    Ok(CompactionDecision::Applied { size, report }) => {
                         request_size = Some(size);
                         self.run.session.budget_status = BudgetStatus::Ok(report);
                     }
@@ -2027,7 +2030,6 @@ impl<M: Model, P: ToolProvider, H: Hooks> StepGuard<'_, '_, M, P, H> {
                 Ok(CompactionDecision::Applied {
                     size: size_after,
                     report,
-                    below_target,
                 })
             }
             Ok(CompactionStep::NothingToCompact) => Ok(CompactionDecision::NotNeeded),

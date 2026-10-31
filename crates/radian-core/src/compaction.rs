@@ -595,10 +595,31 @@ pub fn deterministic_summary_line(dropped: usize, truncated: usize) -> String {
     )
 }
 
+/// The longest head of `text` whose ADR 0015 estimate is at most `max_tokens`: ASCII bytes at
+/// [`DEFAULT_BYTES_PER_TOKEN`] per token (rounded up), every other character one token. The
+/// deterministic fallback uses it to cut a previous summary that kept the summarizer over its
+/// ceiling (ADR 0018). Never cuts mid-character; `text` is returned whole when it fits.
+pub fn truncate_to_tokens(text: &str, max_tokens: u64) -> String {
+    let bytes_per_token = u64::from(DEFAULT_BYTES_PER_TOKEN);
+    let (mut ascii, mut other) = (0u64, 0u64);
+    for (index, ch) in text.char_indices() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            other += 1;
+        }
+        if ascii.div_ceil(bytes_per_token) + other > max_tokens {
+            return text[..index].to_owned();
+        }
+    }
+    text.to_owned()
+}
+
 /// The deterministic fallback's summary text (ADR 0018): the previous
-/// model summary **verbatim** (when there is one) followed by [`deterministic_summary_line`].
-/// The previous summary is kept because the fallback must not throw away what an earlier model
-/// summary established. The verbatim user messages are rendered by [`compacted_history`], not
+/// model summary (when there is one) followed by [`deterministic_summary_line`]. The caller
+/// passes the previous summary verbatim, because the fallback must not throw away what an
+/// earlier model summary established, unless the summary was over its ceiling twice; then it
+/// passes the head [`truncate_to_tokens`] keeps. The verbatim user messages are rendered by [`compacted_history`], not
 /// here.
 pub fn deterministic_summary(
     previous_summary: Option<&str>,

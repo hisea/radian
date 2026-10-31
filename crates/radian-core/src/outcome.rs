@@ -81,9 +81,9 @@ pub enum CompactionError {
     /// The summarizer returned text that is empty or over the summary length ceiling, twice.
     #[error("the summary was invalid: {0}")]
     InvalidSummary(String),
-    /// A previous compaction this turn was below the 75% target, so the turn must not
-    /// compact again (ADR 0018).
-    #[error("the previous compaction this turn was below target, so it will not compact again")]
+    /// The last two compactions this turn were both below the 75% target, so the turn must
+    /// not compact again (ADR 0018).
+    #[error("two compactions in a row were below target, so it will not compact again")]
     BelowTarget,
     /// The transcript changed between planning and commit, so the candidate view is stale
     /// (ADR 0018 §revision 与并发). Nothing is committed.

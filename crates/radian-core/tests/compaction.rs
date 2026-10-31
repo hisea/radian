@@ -7,7 +7,7 @@ use radian_core::{
     ToolCall, ToolResult, check_summary, compacted_history, deterministic_summary,
     deterministic_summary_line, keep_target, message_tokens, plan, shorten_request, shorten_target,
     summary_max_tokens, summary_request, summary_system_prompt, truncate_kept_tool_results,
-    truncate_tool_result_text, units, verified_facts_max_tokens,
+    truncate_to_tokens, truncate_tool_result_text, units, verified_facts_max_tokens,
 };
 use serde_json::{Value, json};
 
@@ -1118,4 +1118,18 @@ fn the_deterministic_summary_keeps_the_previous_summary_verbatim() {
         deterministic_summary(Some("   "), 1, 0),
         deterministic_summary_line(1, 0)
     );
+}
+
+/// The cut a previous summary gets in an over-long fallback keeps the longest head within the
+/// ADR 0015 estimate: four ASCII bytes per token (rounded up), one token per other character,
+/// never splitting a character.
+#[test]
+fn truncate_to_tokens_keeps_the_longest_head_within_the_estimate() {
+    assert_eq!(truncate_to_tokens("short", 10), "short");
+    assert_eq!(truncate_to_tokens(&"a".repeat(100), 10), "a".repeat(40));
+    // Each CJK character is one token.
+    assert_eq!(truncate_to_tokens("摘要摘要摘要", 4), "摘要摘要");
+    // `aaaa` is one token, `é` another; a fifth ASCII byte would start a third.
+    assert_eq!(truncate_to_tokens("aaaaéb", 2), "aaaaé");
+    assert_eq!(truncate_to_tokens("anything", 0), "");
 }

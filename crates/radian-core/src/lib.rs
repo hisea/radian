@@ -33,8 +33,8 @@ pub use compaction::{
     deterministic_summary_line, is_compaction_summary, keep_target, message_tokens, omitted_marker,
     plan, plan_with_keep, select_user_messages, select_user_messages_tracked, shorten_request,
     shorten_target, summary_max_tokens, summary_request, summary_system_prompt,
-    truncate_kept_tool_results, truncate_tool_result_text, units, user_message_budget,
-    verified_facts_max_tokens,
+    truncate_kept_tool_results, truncate_to_tokens, truncate_tool_result_text, units,
+    user_message_budget, verified_facts_max_tokens,
 };
 pub use event::{AgentEvent, CompactionTrigger, EventSink, NoopSink};
 pub use hooks::{HookContext, HookError, HookPoint, Hooks, ToolDecision};

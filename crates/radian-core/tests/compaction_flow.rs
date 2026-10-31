@@ -973,8 +973,8 @@ fn assistant_heavy_history() -> Vec<Message> {
 }
 
 /// After a below-target compaction, the next over-budget request gets one more compaction
-/// (ADR 0018). When that one is below target too, the next over-budget request in the same
-/// turn fails instead of compacting a third time.
+/// (ADR 0018). When that one is below target too, two compactions in a row were below target,
+/// and the next over-budget request in the same turn fails instead of compacting a third time.
 #[tokio::test]
 async fn a_below_target_extra_compaction_stops_auto_compaction_for_the_turn() {
     use common::stop;
@@ -1013,6 +1013,15 @@ async fn a_below_target_extra_compaction_stops_auto_compaction_for_the_turn() {
     assert!(
         targets.iter().all(|t| t.0),
         "both below target: {targets:?}"
+    );
+    assert!(
+        recorder.events().iter().any(|event| matches!(
+            event,
+            AgentEvent::CompactionFailed { reason }
+                if reason == "two compactions in a row were below target"
+        )),
+        "the stated reason: {:?}",
+        recorder.events()
     );
 }
 
@@ -1276,6 +1285,135 @@ async fn two_overlong_summaries_fall_back_deterministically() {
         session.transcript()[0].text().contains("without a summary"),
         "{}",
         session.transcript()[0].text()
+    );
+}
+
+// ---------- ADR 0018: an over-long summary is cut in the fallback ----------
+
+/// A compacted history whose previous summary is `summary` and whose dropped part is an
+/// assistant message, so the verbatim user list stays empty and the summary decides the size
+/// (`compaction_agent`, `B = 8000`: the summary ceiling is 2048 tokens, half of it 4096 ASCII
+/// bytes).
+fn history_with_summary(summary: &str) -> Vec<Message> {
+    compaction::compacted_history(
+        summary,
+        &[],
+        &[Message::assistant("x".repeat(2_000)), Message::user("last")],
+    )
+    .unwrap()
+}
+
+/// The model summary part of the compacted history's first message.
+fn summary_text(transcript: &[Message]) -> String {
+    compaction::compaction_summary_text(&transcript[0]).expect("a compaction summary")
+}
+
+/// Both summaries over the ceiling: the fallback cuts the previous summary to half the
+/// ceiling before the fixed line (ADR 0018), instead of keeping it whole.
+#[tokio::test]
+async fn two_overlong_summaries_cut_the_previous_summary_to_half_the_ceiling() {
+    let overlong = "L".repeat(9_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply(&overlong, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(history_with_summary(&"P".repeat(7_000)), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(compacted_records(&journal).len(), 1);
+    assert!(compacted_records(&journal)[0].0, "deterministic");
+    let half = compaction::summary_max_tokens(8_000) / 2;
+    let summary = summary_text(session.transcript());
+    let (head, line) = summary
+        .rsplit_once("\n\n")
+        .expect("summary, then the fixed line");
+    assert!(
+        line.starts_with("[context compacted without a summary"),
+        "{line}"
+    );
+    assert_eq!(
+        head,
+        "P".repeat(half as usize * 4),
+        "the head, cut to half the ceiling"
+    );
+}
+
+/// A fallback for any other reason (here the summarizer fails) keeps the previous summary
+/// whole (ADR 0018).
+#[tokio::test]
+async fn a_summarizer_failure_keeps_the_previous_summary_whole() {
+    let model = ScriptedModel::new([Reply::Fail("summarizer down".into()), text("done")]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let previous = "P".repeat(7_000);
+    let mut session = agent
+        .open_session_with_journal(history_with_summary(&previous), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert!(compacted_records(&journal)[0].0, "deterministic");
+    let summary = summary_text(session.transcript());
+    assert!(
+        summary.starts_with(&format!("{previous}\n\n")),
+        "kept whole"
+    );
+}
+
+/// Two over-long fallbacks in a row: the second one cuts the first one's summary again, so
+/// the summary does not grow from one compaction to the next (the snowball ADR 0018 stops).
+#[tokio::test]
+async fn the_summary_does_not_grow_across_two_overlong_fallbacks() {
+    let overlong = "L".repeat(9_000);
+    let model = ScriptedModel::new([
+        summary_reply(&overlong, 50),
+        summary_reply(&overlong, 10),
+        text(&"d".repeat(2_000)),
+        summary_reply(&overlong, 50),
+        summary_reply(&overlong, 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(history_with_summary(&"P".repeat(7_000)), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    let first = summary_text(session.transcript());
+    let outcome = session
+        .run_turn("y".repeat(2_500), TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    assert_eq!(compacted_records(&journal).len(), 2, "two fallbacks");
+    let second = summary_text(session.transcript());
+    assert!(
+        second.len() <= first.len(),
+        "{} > {}",
+        second.len(),
+        first.len()
     );
 }
 
@@ -1819,4 +1957,46 @@ async fn a_second_compaction_after_a_below_target_one_lets_the_turn_finish() {
     assert_eq!(targets.len(), 3, "{targets:?}");
     assert!(targets[0].0, "the first is below target: {targets:?}");
     assert!(!targets[1].0, "the extra one reaches the goal: {targets:?}");
+}
+
+/// ADR 0018: a compaction that reaches the goal resets the below-target count, so a later
+/// below-target compaction in the same turn gets its own extra compaction. Only two
+/// below-target compactions in a row stop the turn.
+#[tokio::test]
+async fn a_compaction_that_reaches_the_goal_allows_another_extra_compaction() {
+    use common::stop;
+
+    let model = ScriptedModel::new([
+        // Below target.
+        summary_reply(&"s".repeat(6_500), 10),
+        stop(StopReason::PauseTurn, &"a".repeat(2_000)),
+        // The extra compaction reaches the goal.
+        summary_reply("short", 10),
+        stop(StopReason::PauseTurn, &"b".repeat(4_000)),
+        stop(StopReason::PauseTurn, &"c".repeat(5_000)),
+        // An ordinary compaction that keeps only the newest message and reaches the goal.
+        summary_reply("shorter", 10),
+        stop(StopReason::PauseTurn, &"d".repeat(3_500)),
+        // Below target again, not in a row with the first one.
+        summary_reply(&"u".repeat(3_000), 10),
+        stop(StopReason::PauseTurn, &"e".repeat(1_500)),
+        // So this one is allowed too, and reaches the goal.
+        summary_reply("again short", 10),
+        text("done"),
+    ]);
+    let journal = Arc::new(RecordingJournal::new());
+    let agent = compaction_agent(model.clone(), 8_000, true);
+    let mut session = agent
+        .open_session_with_journal(assistant_heavy_history(), journal.clone())
+        .await
+        .unwrap();
+    let recorder = Recorder::default();
+
+    let outcome = session
+        .run_turn("go", TurnOptions::default(), &recorder)
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, RunStatus::Completed);
+    let flags: Vec<bool> = compaction_targets(&journal).iter().map(|t| t.0).collect();
+    assert_eq!(flags, vec![true, false, false, true, false]);
 }
