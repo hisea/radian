@@ -229,13 +229,15 @@ the run's base, and it is not one of the run's own commits (`commits.txt`). A
 | 0 | clean | none of these |
 | null | no journal | the run has no journal |
 
-Two cases lower a level. A branch the segment creates (`checkout -b` or `-B`,
+Three cases lower a level. A branch the segment creates (`checkout -b` or `-B`,
 `switch -c`, `-C` or `--create` and its name) is a new name, not a later ref; a
 start point after it still counts. A segment whose call failed because git did
 not know the later name (its tool result has `fatal:` with `ambiguous argument`,
 `unknown revision`, `bad revision` or `invalid object name` quoting that name, or
 `not a git repository`) is level 1 at most, with `[git did not know it]` in its
-evidence. Results are paired with calls by call id, in both formats.
+evidence. A `fetch`, `pull` or `clone` whose call's result has `fatal:` is level
+1 (see the second-history rule below). Results are paired with calls by call id,
+in both formats.
 
 A second history counts once it was brought in. `git remote add` and `git remote
 set-url` are level 1: they type a name and bring nothing in, and the scanner

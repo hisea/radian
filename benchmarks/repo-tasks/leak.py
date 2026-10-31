@@ -86,6 +86,27 @@ GIT_SEG = re.compile(
 SHOW_TO_FILE = re.compile(r"[0-9a-f]{7,40}:\S+\s*>")
 # The option that makes `checkout` or `switch` create its next word as a new branch.
 CREATES = {"checkout": ("-b", "-B"), "switch": ("-c", "-C", "--create")}
+# `git remote add` options whose next word is their value, not the remote name.
+REMOTE_OPTION_ARGS = frozenset({"-t", "--track", "-m", "--master"})
+# `fetch`, `pull` and `clone` options whose next word is their value, not a
+# remote name or a location. The sets differ: `-t` is `--tags` for `fetch` (no
+# value), `-s` is `--strategy` for `pull` but `--shared` for `clone` (none).
+FETCH_OPTION_ARGS = frozenset({
+    "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "-j", "--jobs",
+    "--upload-pack", "--server-option", "--filter", "--refmap", "--negotiation-tip",
+})
+PULL_OPTION_ARGS = FETCH_OPTION_ARGS | frozenset({
+    "-s", "--strategy", "-X", "--strategy-option",
+})
+CLONE_OPTION_ARGS = frozenset({
+    "-b", "--branch", "--depth", "--shallow-since", "--shallow-exclude", "-j",
+    "--jobs", "-o", "--origin", "-u", "--upload-pack", "--server-option",
+    "--filter", "-c", "--config", "--template", "--reference",
+    "--reference-if-able", "--separate-git-dir",
+})
+SECOND_HISTORY_OPTION_ARGS = {
+    "fetch": FETCH_OPTION_ARGS, "pull": PULL_OPTION_ARGS, "clone": CLONE_OPTION_ARGS,
+}
 # A git error that quotes the argument it could not resolve.
 UNKNOWN_NAME = re.compile(
     r"fatal: (?:ambiguous argument|unknown revision|bad revision|invalid object name)[^\n']*'([^'\n]+)'"
@@ -181,7 +202,7 @@ class Scanner:
         """
         if sub != "remote":
             return None
-        words = _words(rest)
+        words = _words(rest, REMOTE_OPTION_ARGS)
         if len(words) < 2 or words[0] not in ("add", "set-url"):
             return None
         name = words[1]
@@ -253,23 +274,33 @@ def unknown_to_git(later: list[str], result: str) -> bool:
     return False
 
 
-def _words(rest: str) -> list[str]:
-    """The segment's arguments without options and shell redirections."""
+def _words(rest: str, option_args: frozenset[str] = frozenset()) -> list[str]:
+    """The segment's arguments without options, their values and redirections.
+
+    An option named in `option_args` takes the next token as its value (for
+    example `git remote add -t <branch>`); that value is skipped with it, so it
+    is not mistaken for a remote name or a location.
+    """
     try:
         tokens = shlex.split(rest)
     except ValueError:
         tokens = rest.split()
     words = []
     skip = False
+    takes_value = False
     for token in tokens:
         if skip:
             skip = False
+            continue
+        if takes_value:
+            takes_value = False
             continue
         if re.match(r"^\d*[<>]", token):
             # `>` or `2>` alone takes the next token as its file.
             skip = re.fullmatch(r"\d*[<>]+&?", token) is not None
             continue
         if token.startswith("-"):
+            takes_value = token in option_args
             continue
         words.append(token)
     return words
@@ -293,7 +324,7 @@ def second_history(sub: str, rest: str, remotes: dict[str, str] | None = None) -
     `remote add` or `set-url` of the same run set up). `remote add` and
     `set-url` are not one: they only type a name.
     """
-    words = _words(rest)
+    words = _words(rest, SECOND_HISTORY_OPTION_ARGS.get(sub, frozenset()))
     if sub == "clone":
         return words[0] if words else "(clone)"
     if sub in ("fetch", "pull"):
@@ -421,21 +452,29 @@ def scan(journals, source, base: str, own_shas=(), tree: str | None = None,
     scanner = None
     # The remote names the run set up; kept across the run's journals.
     remotes: dict[str, str] = {}
-    seen = set()
     level = 0
     outside: set[str] = set()
     for path in journals:
         results = tool_results(path)
+        # A journal can carry one call twice (the stream event and the
+        # message's tool call), but the two carry the same call id. Distinct
+        # calls keep their own ids even when the command text repeats, so the
+        # later one and its result are not dropped.
+        seen: set[str] = set()
+        seen_without_id: set[tuple] = set()
         for journal_tree, name, args, call_id in tool_calls(path):
             if scanner is None or (scanner.tree is None and journal_tree):
                 tree = tree or journal_tree
                 scanner = Scanner(source, base, own_shas, tree, home, remotes)
-            # A journal can carry one call twice (the stream event and the
-            # message's tool call); count it once.
-            key = (name, json.dumps(args, sort_keys=True))
-            if key in seen:
-                continue
-            seen.add(key)
+            if call_id:
+                if call_id in seen:
+                    continue
+                seen.add(call_id)
+            else:
+                key = (name, json.dumps(args, sort_keys=True))
+                if key in seen_without_id:
+                    continue
+                seen_without_id.add(key)
             result["calls"] += 1
             for text in strings(args):
                 outside.update(scanner.outside(text))

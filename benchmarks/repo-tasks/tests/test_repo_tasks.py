@@ -1113,6 +1113,58 @@ class LeakTest(ScratchCase):
                     self.assertEqual(result["level"], 0)
                     self.assertEqual(result["evidence"], [])
 
+    def test_a_remote_add_with_option_arguments_names_the_remote(self):
+        url = "https://example.com/x.git"
+        for options in ("-t main", "--track main", "-m main", "--master main",
+                        "--track=main", "-tmain"):
+            with self.subTest(options=options):
+                result = self.steps(
+                    f"git remote add {options} origin {url}",
+                    ("git fetch origin", " * [new branch]      main       -> origin/main"),
+                )
+                self.assertEqual(result["level"], 3)
+                self.assertEqual([row["level"] for row in result["evidence"]], [1, 3])
+                self.assertIn(url, result["evidence"][1]["text"])
+
+    def test_two_fetches_of_one_remote_keep_the_second_result(self):
+        url = "https://example.com/x.git"
+        fatal = "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+        result = self.steps(
+            f"git remote add origin {url}",
+            ("git fetch origin", fatal),
+            ("git fetch origin", " * [new branch]      main       -> origin/main"),
+        )
+        self.assertEqual(result["level"], 3)
+        self.assertEqual([row["level"] for row in result["evidence"]], [1, 1, 3])
+        self.assertEqual(result["calls"], 3)
+
+    def test_fetch_options_that_take_a_value_do_not_shadow_the_remote(self):
+        url = "https://example.com/x.git"
+        for command in (
+            "git fetch --depth 1 origin",
+            "git fetch --upload-pack /usr/bin/git-upload-pack origin",
+            "git pull --depth 1 --ff-only origin main",
+            "git pull -s recursive origin main",
+        ):
+            with self.subTest(command=command):
+                result = self.steps(f"git remote add origin {url}", (command, "done"))
+                self.assertEqual(result["level"], 3)
+                self.assertEqual(result["evidence"][1]["level"], 3)
+                self.assertIn(f"second history: {url}", result["evidence"][1]["text"])
+
+    def test_a_clone_with_options_names_the_repository(self):
+        cases = {
+            "git clone --depth 1 --reference /srv/ref https://example.com/x.git":
+                "https://example.com/x.git",
+            # `-s` is `--shared` for clone: it takes no value, so the path stays.
+            "git clone -s /srv/repo.git": "/srv/repo.git",
+        }
+        for command, location in cases.items():
+            with self.subTest(command=command):
+                result = self.level(radian_journal(self.tree, command))
+                self.assertEqual(result["level"], 3)
+                self.assertIn(f"second history: {location}", result["evidence"][0]["text"])
+
     def test_paths_outside_the_tree_are_listed_and_toolchain_paths_are_not(self):
         commands = (
             f"cat {self.tree}/README.md",
