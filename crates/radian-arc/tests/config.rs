@@ -475,6 +475,34 @@ fn the_legacy_review_table_is_the_default_reviewers_values() {
     assert_eq!(choice.timeout_secs, 900);
 }
 
+/// The legacy spelling describes the `default` reviewer whenever the file has no
+/// `[gate.reviewers.default]` section, even when another reviewer's section is present.
+#[test]
+fn legacy_review_keys_beside_another_reviewer_still_describe_the_default() {
+    let worker = vec!["--model".to_owned(), "worker".to_owned()];
+    let text = format!(
+        "{BASE}[gate.reviewers.cheap]\ntimeout_secs = 60\n\
+         [gate.review]\nexec_args = [\"--model\", \"legacy\"]\n\
+         [gate.review.first]\ntimeout_secs = 12\n"
+    );
+    let config = radian_arc::store::config::parse(&text).expect("the file parses");
+    assert_eq!(config.gate.reviewers["cheap"].timeout_secs, 60);
+    let reviewer = &config.gate.reviewers["default"];
+    assert!(
+        reviewer.legacy,
+        "the default reviewer came from [gate.review]"
+    );
+    assert_eq!(
+        reviewer.exec_args.as_deref(),
+        Some(["--model".to_owned(), "legacy".to_owned()].as_slice())
+    );
+    assert_eq!(reviewer.first.timeout_secs, Some(12));
+
+    let choice = reviewer.choice("default", true, &worker);
+    assert_eq!(choice.exec_args_key, "gate.review.exec_args");
+    assert_eq!(choice.timeout_key, "gate.review.first.timeout_secs");
+}
+
 /// `init` writes `[gate.reviewers.default]`, and a file the previous `init` wrote still loads
 /// with the same effective review settings.
 #[test]
