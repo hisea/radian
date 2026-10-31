@@ -198,6 +198,53 @@ COLUMNS = (
         "unit": "count",
     },
     {
+        "name": "rereads_after_compaction",
+        "definition": (
+            "For each committed compaction (a `ContextCompacted` whose revision "
+            "a later `TranscriptReplacementCommitted` commits), the `read` calls "
+            "in the first 5 `ModelUsageRecorded` calls after it whose `path` was "
+            "also read earlier in the session, before that compaction. Summed "
+            "over the committed compactions; every call counts, even a repeat."
+        ),
+        "unit": "calls",
+    },
+    {
+        "name": "rereads_after_compaction_max",
+        "definition": (
+            "The largest per-compaction `rereads_after_compaction` count. Empty "
+            "when the journal has no committed compaction."
+        ),
+        "unit": "calls",
+    },
+    {
+        "name": "retained_reads",
+        "definition": (
+            "Paths named in `ContextCompacted.retained_reads` over the committed "
+            "compactions. A record without the field counts 0."
+        ),
+        "unit": "paths",
+    },
+    {
+        "name": "compaction_seconds",
+        "definition": (
+            "For each committed compaction, the seconds from the `ts` of the "
+            "journal record immediately before its first "
+            "`CompactionUsageRecorded` to the `ts` of its `ContextCompacted`, "
+            "summed. A compaction without a usage record counts 0. Empty when a "
+            "needed timestamp is absent."
+        ),
+        "unit": "seconds",
+    },
+    {
+        "name": "compaction_wall_share",
+        "definition": (
+            "`compaction_seconds` divided by `wall_seconds`, as a ratio with "
+            "three decimals. Empty when `wall_seconds` is empty or 0, or the "
+            "journal has no committed compaction."
+        ),
+        "unit": "ratio",
+    },
+    {
         "name": "outcomes",
         "definition": (
             "Turn outcome counts. radian counts every `TurnFinished.outcome`; pi "
@@ -481,6 +528,11 @@ def _facts(path: Path) -> dict[str, Any]:
         "read_large_calls": 0,
         "compactions": 0,
         "deterministic_compactions": 0,
+        "rereads_after_compaction": None,
+        "rereads_after_compaction_max": None,
+        "retained_reads": None,
+        "compaction_seconds": None,
+        "compaction_wall_share": None,
         "outcomes": {},
         "wall_seconds": None,
         # Latency samples stay a list until the row is final; the public field is
@@ -499,7 +551,18 @@ def _facts(path: Path) -> dict[str, Any]:
         "_first_ts": None,
         "_last_ts": None,
         "_pi_stop_reason": None,
+        # Compaction closure: a `ContextCompacted` is only a candidate until a
+        # later `TranscriptReplacementCommitted` with the same revision lands
+        # (ADR 0019). These stay lists until the whole journal is read.
+        "_model_calls": 0,
+        "_reads": [],
+        "_compaction_candidates": [],
+        "_compaction_commits": [],
+        "_compaction_usages": [],
+        "_prev_ts": None,
+        "_compaction_count": 0,
     }
+    position = 0
     try:
         for line in _iter_lines(path):
             if not line.endswith("\n"):
@@ -514,7 +577,7 @@ def _facts(path: Path) -> dict[str, Any]:
                 continue
             if "event" in record:
                 row["source"] = row["source"] or "radian"
-                _radian_record(row, record)
+                _radian_record(row, record, position)
             elif record.get("type") == "message":
                 row["source"] = row["source"] or "pi"
                 _pi_message(row, record)
@@ -526,11 +589,13 @@ def _facts(path: Path) -> dict[str, Any]:
                 row["compactions"] += 1
                 if record.get("deterministic") is True:
                     row["deterministic_compactions"] += 1
+            position += 1
     except OSError:
         pass
     _finish_inputs(row)
     if row["_first_ts"] is not None and row["_last_ts"] is not None:
         row["wall_seconds"] = _seconds(row["_first_ts"], row["_last_ts"])
+    _finish_compaction_columns(row)
     if row["source"] == "pi" and row["_pi_stop_reason"] is not None:
         outcome = PI_OUTCOMES.get(row["_pi_stop_reason"], row["_pi_stop_reason"])
         row["outcomes"][outcome] = row["outcomes"].get(outcome, 0) + 1
@@ -589,16 +654,27 @@ def _usage(
         row["_latency_anchor"] = ts
 
 
-def _radian_record(row: dict[str, Any], record: dict[str, Any]) -> None:
+def _radian_record(
+    row: dict[str, Any], record: dict[str, Any], position: int
+) -> None:
     event = record.get("event")
     data = _dict(record.get("data"))
     ts = _time(record.get("ts"))
+    # `_prev_ts` is the timestamp of the record immediately before this one, which
+    # is where a compaction's summary call starts (it may carry no timestamp).
+    previous_ts = row["_prev_ts"]
     _note_time(row, ts)
     if event == "ToolExecutionStarted":
         call_id = data.get("call_id")
         name = data.get("name")
         if isinstance(call_id, str) and isinstance(name, str):
-            row["_pending"][call_id] = (name, _arguments(data.get("arguments")))
+            arguments = _arguments(data.get("arguments"))
+            row["_pending"][call_id] = (name, arguments)
+            path = arguments.get("path")
+            if name == "read" and isinstance(path, str):
+                # The call is attributed to the model call whose tool loop it is
+                # in: the latest `ModelUsageRecorded` before it.
+                row["_reads"].append((position, path, row["_model_calls"]))
             if ts is not None:
                 row["_tool_starts"][call_id] = ts
     elif event == "ToolExecutionSettled":
@@ -644,6 +720,7 @@ def _radian_record(row: dict[str, Any], record: dict[str, Any]) -> None:
             fee_micros=_int(_dict(data.get("fee")).get("micros")),
         )
         if event == "ModelUsageRecorded":
+            row["_model_calls"] += 1
             # A record carrying the field makes the column a count, even when it is 0.
             # An old journal has no such record and keeps `None` (not "no truncation").
             stop_reason = data.get("stop_reason")
@@ -653,6 +730,9 @@ def _radian_record(row: dict[str, Any], record: dict[str, Any]) -> None:
                 if stop_reason == "max_tokens":
                     row["max_tokens_responses"] += 1
         if event == "CompactionUsageRecorded":
+            row["_compaction_usages"].append(
+                (position, data.get("revision"), previous_ts)
+            )
             row["calls"] += 1
             elapsed = _seconds(row["_anchor"], ts)
             if elapsed is not None:
@@ -669,6 +749,97 @@ def _radian_record(row: dict[str, Any], record: dict[str, Any]) -> None:
         row["compactions"] += 1
         if data.get("deterministic") is True:
             row["deterministic_compactions"] += 1
+        # Only a candidate until the matching commit lands (ADR 0019). Keep the
+        # model-call ordinal the compaction happened after for the re-read window.
+        row["_compaction_candidates"].append(
+            {
+                "position": position,
+                "revision": data.get("revision"),
+                "retained_reads": data.get("retained_reads"),
+                "ts": ts,
+                "base": row["_model_calls"],
+            }
+        )
+    elif event == "TranscriptReplacementCommitted":
+        row["_compaction_commits"].append((position, data.get("revision")))
+    row["_prev_ts"] = ts
+
+
+def _finish_compaction_columns(row: dict[str, Any]) -> None:
+    """Resolve committed compactions and fill the five compaction columns.
+
+    A `ContextCompacted` is a compaction only when a later
+    `TranscriptReplacementCommitted` carries the same revision (ADR 0019); an
+    aborted or end-of-file candidate is not one. pi journals have no such
+    records, so their five values stay empty.
+    """
+    if row["source"] != "radian":
+        return
+    committed = [
+        candidate
+        for candidate in row["_compaction_candidates"]
+        if any(
+            revision == candidate["revision"] and position > candidate["position"]
+            for position, revision in row["_compaction_commits"]
+        )
+    ]
+    row["_compaction_count"] = len(committed)
+    reads = row["_reads"]
+    per_compaction = []
+    for candidate in committed:
+        position = candidate["position"]
+        base = candidate["base"]
+        earlier_paths = {path for seen, path, _ in reads if seen < position}
+        per_compaction.append(
+            sum(
+                1
+                for seen, path, call in reads
+                if seen > position
+                and base < call <= base + 5
+                and path in earlier_paths
+            )
+        )
+    row["rereads_after_compaction"] = sum(per_compaction)
+    row["rereads_after_compaction_max"] = (
+        max(per_compaction) if per_compaction else None
+    )
+    row["retained_reads"] = sum(
+        len(candidate["retained_reads"])
+        if isinstance(candidate["retained_reads"], list)
+        else 0
+        for candidate in committed
+    )
+    seconds = 0.0
+    missing = False
+    for candidate in committed:
+        usage = next(
+            (
+                entry
+                for entry in row["_compaction_usages"]
+                if entry[1] == candidate["revision"]
+                and entry[0] < candidate["position"]
+            ),
+            None,
+        )
+        if usage is None:
+            continue  # a deterministic fallback: no summary call, 0 seconds
+        elapsed = _seconds(usage[2], candidate["ts"])
+        if elapsed is None:
+            missing = True
+        else:
+            seconds += elapsed
+    row["compaction_seconds"] = None if missing else seconds
+    if committed and row["_first_ts"] is None:
+        # An old journal with no timestamps anywhere cannot measure a compaction.
+        row["compaction_seconds"] = None
+    if (
+        committed
+        and row["compaction_seconds"] is not None
+        and row["wall_seconds"]
+    ):
+        row["compaction_wall_share"] = round(
+            row["compaction_seconds"] / row["wall_seconds"], 3
+        )
 
 
 def _pi_message(row: dict[str, Any], record: dict[str, Any]) -> None:
@@ -759,6 +930,11 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "read_large_calls": 0,
         "compactions": 0,
         "deterministic_compactions": 0,
+        "rereads_after_compaction": None,
+        "rereads_after_compaction_max": None,
+        "retained_reads": None,
+        "compaction_seconds": None,
+        "compaction_wall_share": None,
         "outcomes": {},
         "wall_seconds": None,
         "latency": {},
@@ -782,6 +958,9 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
             "read_large_calls",
             "compactions",
             "deterministic_compactions",
+            "rereads_after_compaction",
+            "retained_reads",
+            "compaction_seconds",
         ):
             totals[key] = _add(totals[key], facts[key])
         for name, count in facts["tool_calls"].items():
@@ -793,6 +972,20 @@ def _totals(facts_rows: list[dict[str, Any]]) -> dict[str, Any]:
         for bucket, samples in facts["_latencies"].items():
             pooled.setdefault(bucket, []).extend(samples)
     _finish_inputs(totals)
+    maxima = [
+        facts["rereads_after_compaction_max"]
+        for facts in facts_rows
+        if facts["rereads_after_compaction_max"] is not None
+    ]
+    totals["rereads_after_compaction_max"] = max(maxima) if maxima else None
+    if (
+        totals["compaction_seconds"] is not None
+        and totals["wall_seconds"]
+        and any(facts["_compaction_count"] for facts in facts_rows)
+    ):
+        totals["compaction_wall_share"] = round(
+            totals["compaction_seconds"] / totals["wall_seconds"], 3
+        )
     totals["latency"] = {
         _bucket_label(bucket): {
             "calls": len(samples),
@@ -1008,6 +1201,11 @@ def format_report(report: dict[str, Any]) -> str:
         *(f"p90ms.{bucket}" for bucket in buckets),
         "compactions",
         "deterministic_compactions",
+        "rereads_after_compaction",
+        "rereads_after_compaction_max",
+        "retained_reads",
+        "compaction_seconds",
+        "compaction_wall_share",
         "outcomes",
         "wall_seconds",
     ]
@@ -1048,6 +1246,11 @@ def format_report(report: dict[str, Any]) -> str:
             [
                 _count(row["compactions"]),
                 _count(row["deterministic_compactions"]),
+                _count(row["rereads_after_compaction"]),
+                _count(row["rereads_after_compaction_max"]),
+                _count(row["retained_reads"]),
+                _number(row["compaction_seconds"], ".3f"),
+                _number(row["compaction_wall_share"], ".3f"),
                 _outcomes_text(row["outcomes"]),
                 _number(row["wall_seconds"], ".3f"),
             ]

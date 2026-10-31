@@ -13,3 +13,19 @@ failure, restore the file from a backup.
 | repo-tasks-leak-rules-M2 | `leak.py` `git_level`: the unknown-name cap is removed | `LeakTest.test_a_later_name_git_did_not_know_is_level_one` | ✅ failed |
 | repo-tasks-leak-rules-M3 | `leak.py` `unknown_to_git`: any `fatal:` lowers the level, whatever name it quotes | `LeakTest.test_a_later_name_git_showed_keeps_its_level` | ✅ failed |
 | repo-tasks-check-builds-radian-M1 | `check.sh`: the `radian` binary build is skipped (`if false && grep ...`) | `CheckScriptTest.test_the_radian_binary_is_built_before_the_fixture_when_the_tree_has_both` | ✅ failed |
+
+## TK0261: journal metrics compaction columns
+
+Base: `work/TK0261-metrics-rereads-after-compaction` · method: apply the
+mutation to `benchmarks/journal_metrics.py`, run the named test with
+`cd benchmarks/terminal-bench/tests && python3 -m unittest
+test_metrics.CompactionMetricsTest.<test>`, expect a non-zero exit, restore the
+file from a backup under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0261-M1 | the re-read window is 6 model calls instead of 5 (`base + 5` → `base + 6`) | `CompactionMetricsTest.test_the_compaction_window_ends_after_five_model_calls` (6 re-reads instead of 5) | ✅ failed |
+| TK0261-M2 | the "read before the compaction" check is removed (`path in earlier_paths` → `True`) | `CompactionMetricsTest.test_a_read_first_seen_after_the_compaction_is_not_a_reread` (2 re-reads instead of 1) | ✅ failed |
+| TK0261-M3 | every `ContextCompacted` candidate counts, committed or not (no `TranscriptReplacementCommitted` match) | `CompactionMetricsTest.test_an_uncommitted_compaction_candidate_is_not_a_compaction` (2 re-reads instead of 0, 1 retained path instead of 0) | ✅ failed |
+| TK0261-M4 | `compaction_seconds` starts at the first `CompactionUsageRecorded`'s own `ts` instead of the record before it | `CompactionMetricsTest.test_compaction_seconds_run_from_the_record_before_the_first_usage` (20 s instead of 30 s; also `test_the_totals_sum_and_recompute_the_compaction_columns`) | ✅ failed |
+

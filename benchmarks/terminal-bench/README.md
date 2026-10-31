@@ -241,6 +241,11 @@ and the code differ.
 | `p90ms.<bucket>` | p90 of the same per-bucket latency samples. | ms |
 | `compactions` | `ContextCompacted` records (pi: entries with type `compaction`). | count |
 | `deterministic_compactions` | The compactions whose `deterministic` field is true. | count |
+| `rereads_after_compaction` | For each committed compaction (a `ContextCompacted` whose revision a later `TranscriptReplacementCommitted` commits), the `read` calls in the first 5 `ModelUsageRecorded` calls after it whose `path` was also read earlier in the session, before that compaction. Summed over the committed compactions; every call counts, even a repeat. | calls |
+| `rereads_after_compaction_max` | The largest per-compaction `rereads_after_compaction` count. Empty when the journal has no committed compaction. | calls |
+| `retained_reads` | Paths named in `ContextCompacted.retained_reads` over the committed compactions. A record without the field counts 0. | paths |
+| `compaction_seconds` | For each committed compaction, the seconds from the `ts` of the journal record immediately before its first `CompactionUsageRecorded` to the `ts` of its `ContextCompacted`, summed. A compaction without a usage record counts 0. Empty when a needed timestamp is absent. | seconds |
+| `compaction_wall_share` | `compaction_seconds` divided by `wall_seconds`, as a ratio with three decimals. Empty when `wall_seconds` is empty or 0, or the journal has no committed compaction. | ratio |
 | `outcomes` | Turn outcome counts. radian counts every `TurnFinished.outcome`; pi counts the last assistant `stopReason` (stop -> completed, length -> incomplete, error -> failed, aborted -> cancelled, toolUse -> incomplete). | count |
 | `wall_seconds` | First committed timestamp to last committed timestamp. | seconds |
 
