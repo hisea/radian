@@ -50,9 +50,10 @@ pub struct OpenAiCompatibleConfig {
     /// `Some(b)` = explicit override.
     pub include_usage: Option<bool>,
     /// The output cap the request sends as `max_tokens` (ADR 0018), from
-    /// [`catalog_max_tokens`]: `min(limit.output, ⌊C/4⌋)` when the route knows both,
-    /// `min(16384, ⌊C/4⌋)` when it knows only the window. `None` sends no field. An explicit
-    /// `max_tokens` in `extra_body` or in the request settings wins and is never overwritten.
+    /// [`catalog_max_tokens`]: `min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))` when the route knows
+    /// both, `min(16384, ⌊C/4⌋)` when it knows only the window. `None` sends no field. An
+    /// explicit `max_tokens` in `extra_body` or in the request settings wins and is never
+    /// overwritten.
     pub max_tokens: Option<u32>,
     /// The unified thinking level's wire value, sent as `reasoning_effort` (ADR 0026 D11).
     /// `None` sends no key, which is byte-identical to the adapter before the feature.
@@ -147,16 +148,24 @@ pub(crate) fn openai_host_is_default(host: &str) -> bool {
 /// value sent is exactly the `R` the host already reserves and `B` does not change.
 pub const WINDOW_ONLY_OUTPUT_CAP: u64 = 16_384;
 
-/// The `max_tokens` an OpenAI-compatible chat request sends (ADR 0018): `min(O, ⌊C/4⌋)` when
-/// the route knows both the context window `C` and the output ceiling `O`,
-/// `min(WINDOW_ONLY_OUTPUT_CAP, ⌊C/4⌋)` when it knows only `C`, and no field when `C` is
-/// unknown. A zero or missing number is unknown. Never returns zero.
+/// The `max_tokens` an OpenAI-compatible chat request sends (ADR 0018):
+/// `min(O, max(⌊0.15·C⌋, min(WINDOW_ONLY_OUTPUT_CAP, ⌊C/4⌋)))` when the route knows both the
+/// context window `C` and the output ceiling `O`, `min(WINDOW_ONLY_OUTPUT_CAP, ⌊C/4⌋)` when it
+/// knows only `C`, and no field when `C` is unknown. A zero or missing number is unknown. Never
+/// returns zero.
 pub fn catalog_max_tokens(context: Option<u64>, output: Option<u64>) -> Option<u32> {
     let context = context.filter(|value| *value > 0)?;
-    let ceiling = output
-        .filter(|value| *value > 0)
-        .unwrap_or(WINDOW_ONLY_OUTPUT_CAP);
-    let cap = ceiling.min(context / 4);
+    let output = output.filter(|value| *value > 0);
+    let window_cap = WINDOW_ONLY_OUTPUT_CAP.min(context / 4);
+    let cap = match output {
+        // Both known: a 15% share of the window, but never below the window-only cap. The
+        // share is computed in `u128` so an extreme `C` cannot overflow the multiplication.
+        Some(output) => {
+            let share = (u128::from(context) * 15 / 100) as u64;
+            output.min(share.max(window_cap))
+        }
+        None => window_cap,
+    };
     (cap > 0).then(|| cap.min(u64::from(u32::MAX)) as u32)
 }
 
@@ -179,4 +188,71 @@ pub fn redact_url(raw: &str) -> String {
             .extend_pairs(keys.iter().map(|key| (key.as_str(), "<redacted>")));
     }
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catalog_max_tokens;
+
+    /// The result at each window with an output ceiling large enough not to bind (ADR 0018).
+    #[test]
+    fn a_32k_window_sends_8192_with_a_large_ceiling() {
+        assert_eq!(catalog_max_tokens(Some(32_768), Some(384_000)), Some(8_192));
+    }
+
+    #[test]
+    fn a_65k_window_sends_16384_with_a_large_ceiling() {
+        assert_eq!(
+            catalog_max_tokens(Some(65_536), Some(384_000)),
+            Some(16_384)
+        );
+    }
+
+    #[test]
+    fn a_128k_window_sends_19200_with_a_large_ceiling() {
+        assert_eq!(
+            catalog_max_tokens(Some(128_000), Some(384_000)),
+            Some(19_200)
+        );
+    }
+
+    #[test]
+    fn a_1m_window_sends_150000_with_a_large_ceiling() {
+        assert_eq!(
+            catalog_max_tokens(Some(1_000_000), Some(384_000)),
+            Some(150_000)
+        );
+    }
+
+    /// A ceiling below the computed value is the value (edge case: 4096 at a 128k window).
+    #[test]
+    fn a_smaller_output_ceiling_wins_at_128k() {
+        assert_eq!(catalog_max_tokens(Some(128_000), Some(4_096)), Some(4_096));
+    }
+
+    /// Only the window known: the old window cap, unchanged.
+    #[test]
+    fn a_128k_window_known_alone_sends_16384() {
+        assert_eq!(catalog_max_tokens(Some(128_000), None), Some(16_384));
+    }
+
+    /// No window: the request sends no field, even with a known output ceiling.
+    #[test]
+    fn an_unknown_window_sends_nothing_even_with_an_output_ceiling() {
+        assert_eq!(catalog_max_tokens(None, Some(64_000)), None);
+    }
+
+    /// A `u64`-sized window must not overflow the 15% multiplication, and the result stays in
+    /// `u32`.
+    #[test]
+    fn an_extreme_window_does_not_overflow_and_stays_within_u32() {
+        let context = u64::MAX / 10;
+        assert_eq!(
+            catalog_max_tokens(Some(context), Some(u64::MAX)),
+            Some(u32::MAX)
+        );
+        // The zero and sub-token cases still send nothing.
+        assert_eq!(catalog_max_tokens(Some(0), Some(384_000)), None);
+        assert_eq!(catalog_max_tokens(Some(3), Some(1_000)), None);
+    }
 }

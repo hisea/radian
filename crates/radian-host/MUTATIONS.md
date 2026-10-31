@@ -1858,3 +1858,14 @@ An attempted strong-`Arc` mutation (the TK0236-M9 cycle: `HookRuntimeEvents` hol
 a plain `exec -p` run exits even with the leaked session, because only the `--output jsonl`
 printer waits on the tee sender. The plain test is a regression net for the exit path, not a
 second catcher for that cycle.
+
+## TK0257: an explicit max_tokens decides the output reservation (2026-10-31)
+
+Branch `work/TK0257-chat-reserve-15-percent` (rework 2). Each mutation was applied in place and
+the named test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(an_explicit_max_tokens_override_decides_the_reservation)'`; the source
+was restored from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0257-M3 | `RouteOutput::with_explicit` ignores its argument and returns `self` | ✅ 1 failed (rc=100) | `catalog::tests::an_explicit_max_tokens_override_decides_the_reservation` (the request would send 19200 while the body's 32000 wins on the wire) |

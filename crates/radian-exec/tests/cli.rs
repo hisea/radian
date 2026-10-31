@@ -6863,20 +6863,64 @@ async fn the_startup_line_names_the_catalog() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("B 750000 from models.dev (opencode/deepseek-v4.1-flash"),
+        stderr.contains("B 850000 from models.dev (opencode/deepseek-v4.1-flash"),
         "{stderr}"
     );
     assert!(stderr.contains("C 1000000"), "{stderr}");
     assert!(stderr.contains("I 922000"), "{stderr}");
     assert!(stderr.contains("output 384000"), "{stderr}");
-    // R is the output actually sent: min(384000, 1000000 / 4) = 250000.
-    assert!(stderr.contains("R 250000"), "{stderr}");
+    // R is the output actually sent: min(384000, max(150000, min(16384, 1000000 / 4)))
+    // = 150000.
+    assert!(stderr.contains("R 150000"), "{stderr}");
     assert_eq!(
         provider.requests()[0].json()["max_tokens"],
-        json!(250000),
+        json!(150000),
         "the catalog cap is sent as max_tokens"
     );
     assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
+}
+
+/// ADR 0018 §2: an explicit `max_tokens` from `RADIAN_EXTRA_BODY` wins on the wire, so the
+/// reservation counts it instead of the computed chat cap. C = 128000 with O = 384000 would
+/// send 19200; the body's 32000 is what the request sends, so R = 32000 and B = 96000.
+#[tokio::test]
+async fn an_explicit_max_tokens_raises_the_reservation_it_counts() {
+    let provider = MockServer::start(vec![text_reply("ok")]).await;
+    let home = common::process_dir("radian-exec-override-home");
+    let cache = home.join("cache/catalog");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("models.json"), CATALOG_JSON).unwrap();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "deepseek-v4.1-flash",
+                "--base-url",
+                &provider.base_url,
+                "--catalog-provider",
+                "opencode",
+                "--context-window",
+                "128000",
+                "-p",
+                "hi",
+            ],
+            &[
+                ("RADIAN_HOME", home.to_str().unwrap()),
+                ("RADIAN_EXTRA_BODY", r#"{"max_tokens":32000}"#),
+            ],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("output 384000"), "{stderr}");
+    assert!(stderr.contains("R 32000"), "{stderr}");
+    assert!(stderr.contains("B 96000"), "{stderr}");
+    assert_eq!(
+        provider.requests()[0].json()["max_tokens"],
+        json!(32000),
+        "the explicit value is what the request sends"
+    );
 }
 
 // ---------- ADR 0020: the `~/.radian/` layout ----------

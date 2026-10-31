@@ -420,6 +420,15 @@ pub(super) fn resolve_window_and_route(
     // The app was built before the model was resolved (review M1): the status bar's model name
     // is set here, once, from the effective route.
     app.session.model_name = resolved.model_name.clone();
+    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body — on the startup route
+    // and on every later `/model` route. It is read once here, before the window, because an
+    // explicit `max_tokens` in it is what the request sends and `R` must count it. The
+    // per-route reserved-key check needs the resolved route and stays below.
+    let extra_body = radian_host::read_extra_body()?;
+    let extra_fields = extra_body
+        .clone()
+        .map(radian_host::ExtraBody::into_fields)
+        .unwrap_or_default();
     // The window's base URL: the provider's endpoint (for a named provider, its declaration).
     let catalog_base_url =
         resolved
@@ -442,7 +451,8 @@ pub(super) fn resolve_window_and_route(
         resolved.provider,
         &output_base_url,
         cli.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-    );
+    )
+    .with_explicit(radian_host::explicit_max_tokens(&extra_fields));
     // The catalog groups by provider id; the generic descriptor is not one, so its provider
     // is derived from the base URL hostname. A named provider is its own group only when its
     // name is a catalog provider; otherwise the hostname rule applies (the fallback below).
@@ -552,11 +562,8 @@ pub(super) fn resolve_window_and_route(
     if let Some(notice) = compaction_notice {
         startup_log.line(format!("radian: [compaction] {notice}"));
     }
-    // ADR 0026 D13: `RADIAN_EXTRA_BODY` merges into every request body — on the startup route
-    // and on every later `/model` route. It is read once here, before any session file exists;
-    // an invalid value is a startup refusal. Reserved keys are checked per route, so only the
-    // startup route's adapter is consulted here.
-    let extra_body = radian_host::read_extra_body()?;
+    // ADR 0026 D13: reserved keys are checked per route, so only the startup route's adapter
+    // is consulted here.
     if let Some(extra) = &extra_body
         && let Some(refusal) = extra.refusal_for(route.adapter())
     {
@@ -571,10 +578,6 @@ pub(super) fn resolve_window_and_route(
             startup_log.line(line);
         }
     }
-    let extra_fields = extra_body
-        .clone()
-        .map(radian_host::ExtraBody::into_fields)
-        .unwrap_or_default();
     // ADR 0014 R5: the catalog (or a `[providers.<id>]` override) decides whether
     // this route replays reasoning.
     let reasoning_replay =

@@ -153,13 +153,13 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
 
     // A plain chat model on the same descriptor still resolves to the chat protocol, asks for
     // streamed usage by default (ADR 0026 D0), and sends the catalog-derived `max_tokens`
-    // (ADR 0018 §2): min(384000, 1000000 / 4) = 250000.
+    // (ADR 0018 §2): min(384000, max(150000, min(16384, 1000000 / 4))) = 150000.
     let chat = ctx
         .args_for("opencode-go", "deepseek-v4.1-flash", None)
         .expect("the chat route resolves");
     assert_eq!(chat.provider, Provider::OpenAiCompatible);
     assert_eq!(chat.include_usage, Some(true), "the descriptor's default");
-    assert_eq!(chat.max_output_tokens, Some(250_000));
+    assert_eq!(chat.max_output_tokens, Some(150_000));
     let chat_model = build_model(chat).expect("the chat model builds");
     chat_model
         .complete(
@@ -182,7 +182,7 @@ async fn a_catalog_responses_model_on_a_built_in_descriptor_uses_the_api_key_rou
         serde_json::json!({"include_usage": true}),
         "the request asks for streamed usage: {body}"
     );
-    assert_eq!(body["max_tokens"], serde_json::json!(250_000), "{body}");
+    assert_eq!(body["max_tokens"], serde_json::json!(150_000), "{body}");
 
     // `--include-usage false` overrides the descriptor default.
     let off = RouteContext {

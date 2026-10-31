@@ -86,3 +86,14 @@ was run, and the source was restored from a copy under `.radian/`.
 | truncated-call-replay-M1 | `arguments_string` drops the truncated arm, so a truncated call's non-JSON arguments go back as received | caught: 1 failed (rc=101) | `request::tests::a_truncated_call_whose_arguments_are_not_json_goes_back_with_empty_arguments` |
 | truncated-call-replay-M2 | the truncated check is removed: every non-JSON argument string goes back as `{}` | caught: 1 failed (rc=101) | `request::tests::arguments_that_were_not_json_go_back_as_received_when_the_call_was_not_truncated` |
 | truncated-call-replay-M3 | `catalog_max_tokens` returns `None` when only the window is known (the window-only `min(16384, ⌊C/4⌋)` removed) | caught: 2 failed (rc=101) | `request::tests::the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window`, `request::tests::a_resolved_output_cap_is_sent_as_max_tokens`; the host's `catalog::tests::a_chat_route_reserves_the_max_tokens_it_sends` fails too |
+
+## TK0257: the chat route's 15% output share at large windows (2026-10-31)
+
+Branch `work/TK0257-chat-reserve-15-percent`. Each mutation was applied in place,
+`cargo nextest run -p agent-provider-openai-compatible --lib --locked --profile sandbox
+--no-fail-fast` was run, and the source was restored from a copy under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0257-M1 | the factor `15 / 100` becomes `25 / 100` | caught: 5 failed (rc=100) | `config::tests::a_128k_window_sends_19200_with_a_large_ceiling` (the 1M test and three request tests fail too) |
+| TK0257-M2 | the inner floor is removed (`share.max(window_cap)` becomes `share`) | caught: 2 failed (rc=100) | `config::tests::a_32k_window_sends_8192_with_a_large_ceiling` (the 65k test fails too) |
