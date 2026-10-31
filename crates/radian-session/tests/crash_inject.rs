@@ -234,6 +234,8 @@ async fn every_partial_line_is_truncated_before_the_next_append() {
                         output: Some(2),
                         ..Default::default()
                     },
+                    stop_reason: None,
+                    stop_reason_raw: None,
                 })
                 .await
                 .unwrap();

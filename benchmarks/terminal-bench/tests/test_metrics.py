@@ -628,6 +628,7 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertEqual(row["source"], "radian")
         # Two assistant responses plus one summary call.
         self.assertEqual(row["calls"], 3)
+        self.assertIsNone(row["max_tokens_responses"])
         # input 1000 includes a 200 cache read; the two other calls are uncached.
         self.assertEqual(row["input_uncached"], 110_800)
         self.assertEqual(row["input_cache_read"], 200)
@@ -649,6 +650,54 @@ class JournalMetricsTest(unittest.TestCase):
         self.assertEqual(row["latency"]["0-99999"]["calls"], 3)
         self.assertAlmostEqual(row["latency"]["0-99999"]["p50_ms"], 2_000)
         self.assertAlmostEqual(row["latency"]["0-99999"]["p90_ms"], 8_400)
+
+    def test_max_tokens_responses_counts_only_records_that_carry_the_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "j.jsonl"
+            write_journal(
+                path,
+                [
+                    # An old record: no `stop_reason`, so it is not counted as either.
+                    {"event": "ModelUsageRecorded", "data": {"usage": {"input": 1}}},
+                    {
+                        "event": "ModelUsageRecorded",
+                        "data": {"usage": {"input": 2}, "stop_reason": "max_tokens"},
+                    },
+                    {
+                        "event": "ModelUsageRecorded",
+                        "data": {"usage": {"input": 3}, "stop_reason": "end_turn"},
+                    },
+                    # A future value is a recorded (non-max) response, not an old record.
+                    {
+                        "event": "ModelUsageRecorded",
+                        "data": {
+                            "usage": {"input": 4},
+                            "stop_reason": "some_future_reason",
+                        },
+                    },
+                ],
+            )
+            row = self.row(path)
+            self.assertEqual(row["max_tokens_responses"], 1)
+            totals = journal_metrics.build_report([path])["totals"]
+            self.assertEqual(totals["max_tokens_responses"], 1)
+
+    def test_max_tokens_responses_is_empty_for_an_old_journal(self):
+        # A journal whose usage records all predate the field reads as "not recorded",
+        # never as "no truncation" (0).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "j.jsonl"
+            write_journal(
+                path,
+                [
+                    {"event": "ModelUsageRecorded", "data": {"usage": {"input": 1}}},
+                    {"event": "ModelUsageRecorded", "data": {"usage": {"input": 2}}},
+                ],
+            )
+            row = self.row(path)
+            self.assertIsNone(row["max_tokens_responses"])
+            totals = journal_metrics.build_report([path])["totals"]
+            self.assertIsNone(totals["max_tokens_responses"])
 
     def test_a_pi_session_uses_the_same_columns_and_bash_is_shell(self):
         row = self.row(PI_SESSION)

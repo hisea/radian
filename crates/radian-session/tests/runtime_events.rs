@@ -482,6 +482,8 @@ async fn concurrent_runtime_and_core_appends_keep_seq_in_file_order() {
                         journal
                             .append(JournalRecord::ModelUsage {
                                 usage: radian_core::ModelUsage::default(),
+                                stop_reason: None,
+                                stop_reason_raw: None,
                             })
                             .await
                             .unwrap();

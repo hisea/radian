@@ -1054,3 +1054,14 @@ with `shasum -a 256`; the named test ran alone with
 | TK0255-M1 | the description's cost sentence back to "A whole file enters the context at its full size" (the stale claim) | ✅ 1 failed (rc=100) | `the_read_description_teaches_ranged_reads` ("the description states the real default cost from `Limits`") |
 | TK0255-M2 | `default_manual_read_bytes: 64 << 10` → `32 << 10` (the manual budget drifts from the manual's 65536) | ✅ 1 failed (rc=100) | `the_manual_names_the_read_limits_from_the_code` ("the manual page budget comes from the code: 32768") |
 | TK0255-M3 | an explicit `max_bytes` is capped at 32 KiB (`Some((n as usize).min(32 << 10))`), a narrower window than the name promises | ✅ 1 failed (rc=100) | `an_explicit_budget_and_limit_restore_the_old_64_kib_window` (`end_line` 655, `bytes_read` 32750, not 1310/65500) |
+
+## TK0258: the stop reason on ModelUsageRecorded (2026-10-31, branch `work/TK0258-journal-stop-reason`)
+
+The mutation removed `content_filtered` from the ADR 0006 §5.7 closed-set sentence; the ADR was
+backed up under `.radian/adr0006.orig` and restored from that copy (`cmp` identical). The test
+ran with `cargo nextest run -p radian-coding --locked --profile sandbox --test docs
+-E 'test(every_model_stop_reason_is_documented)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0258-M1 | one value removed from the ADR 0006 §5.7 list (`content_filtered`) | ✅ 1 failed (rc=100) | `tests/docs.rs::every_model_stop_reason_is_documented` ("ADR 0006 §5.7 does not name `content_filtered`") |

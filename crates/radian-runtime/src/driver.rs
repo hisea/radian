@@ -1361,7 +1361,11 @@ mod tests {
             .await
             .unwrap();
         journal
-            .append(JournalRecord::ModelUsage { usage: usage(500) })
+            .append(JournalRecord::ModelUsage {
+                usage: usage(500),
+                stop_reason: None,
+                stop_reason_raw: None,
+            })
             .await
             .unwrap();
         journal
@@ -1440,7 +1444,11 @@ mod tests {
                     .await
                     .unwrap();
                 journal
-                    .append(JournalRecord::ModelUsage { usage })
+                    .append(JournalRecord::ModelUsage {
+                        usage,
+                        stop_reason: None,
+                        stop_reason_raw: None,
+                    })
                     .await
                     .unwrap();
             }
@@ -1515,6 +1523,8 @@ mod tests {
                     input_includes_cache: Some(false),
                     ..Default::default()
                 },
+                stop_reason: None,
+                stop_reason_raw: None,
             })
             .await
             .unwrap();

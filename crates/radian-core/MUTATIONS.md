@@ -92,3 +92,14 @@ mutation (`cmp` identical).
 | compaction-small-window-2-M1 | a compaction that reaches the goal does not reset the below-target count (the `else { self.below_target_streak = 0; }` arm emptied in `note_compaction`) | ✅ 1 failed | `tests/compaction_flow.rs::a_compaction_that_reaches_the_goal_allows_another_extra_compaction` (failed `BelowTarget` at the second, non-consecutive below-target compaction); `a_below_target_extra_compaction_stops_auto_compaction_for_the_turn` and `a_second_compaction_after_a_below_target_one_lets_the_turn_finish` still pass |
 | compaction-small-window-2-M2 | the over-long fallback never cuts the previous summary (`let kept_summary = match None::<u64> {`) | ✅ 2 failed | `tests/compaction_flow.rs::two_overlong_summaries_cut_the_previous_summary_to_half_the_ceiling` and `tests/compaction_flow.rs::the_summary_does_not_grow_across_two_overlong_fallbacks` |
 | compaction-small-window-2-M3 | every fallback cuts the previous summary (`match fallback_too_long.or(summary_budget.map(compaction::summary_max_tokens))`) | ✅ 1 failed | `tests/compaction_flow.rs::a_summarizer_failure_keeps_the_previous_summary_whole` |
+
+## TK0258: the stop reason on ModelUsageRecorded (2026-10-31, branch `work/TK0258-journal-stop-reason`)
+
+Each mutation was applied by hand to `crates/radian-core/src/turn.rs`, backed up under
+`.radian/turn.rs.orig` and restored from that copy (`cmp` identical); the named tests ran with
+`cargo nextest run -p radian-core --locked --profile sandbox --test usage -E 'test(...)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0258-M1 | the turn loop appends `JournalRecord::ModelUsage` with `stop_reason: None` (the field is omitted) | ✅ 2 failed (rc=100) | `tests/usage.rs::a_truncated_response_with_tool_calls_records_max_tokens_then_end_turn` and `tests/usage.rs::an_other_stop_reason_records_other_and_the_provider_text` |
+| TK0258-M2 | the turn loop writes `ModelStopReason::EndTurn` for every response | ✅ 2 failed (rc=100) | the same two tests (`max_tokens` read as `end_turn`; `other` lost its raw text) |

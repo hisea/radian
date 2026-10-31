@@ -292,9 +292,22 @@ fn event_data_value(
         EventData::ToolExecutionSettled { call_id, result } => {
             json!({"call_id": call_id, "result": serde_json::to_value(result)?})
         }
-        EventData::ModelUsageRecorded { usage, fee } => {
+        EventData::ModelUsageRecorded {
+            usage,
+            stop_reason,
+            stop_reason_raw,
+            fee,
+        } => {
             let mut data = serde_json::Map::new();
             data.insert("usage".into(), serde_json::to_value(usage)?);
+            // Optional, additive fields: absent on an older record, and `stop_reason_raw`
+            // only accompanies `other` (ADR 0006 §5.7).
+            if let Some(stop_reason) = stop_reason {
+                data.insert("stop_reason".into(), serde_json::to_value(stop_reason)?);
+            }
+            if let Some(stop_reason_raw) = stop_reason_raw {
+                data.insert("stop_reason_raw".into(), json!(stop_reason_raw));
+            }
             // The fee is optional (ADR 0007): an old record has none, and the key is
             // omitted rather than written as `null`, matching the file.
             if let Some(fee) = fee {

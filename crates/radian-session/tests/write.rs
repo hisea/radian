@@ -5,8 +5,8 @@ mod common;
 
 use common::TempDir;
 use radian_core::{
-    ContentPart, JournalRecord, Message, MessageMeta, ModelUsage, OpaqueJson, ToolCall, ToolResult,
-    TranscriptJournal,
+    ContentPart, JournalRecord, Message, MessageMeta, ModelStopReason, ModelUsage, OpaqueJson,
+    ToolCall, ToolResult, TranscriptJournal,
 };
 use radian_session::{EventData, Session, SessionCreatedData, SessionJournal, UsageFee};
 use serde_json::json;
@@ -42,6 +42,8 @@ async fn a_session_file_has_the_v1_envelope_and_sequential_seqs() {
     journal
         .append(JournalRecord::ModelUsage {
             usage: ModelUsage::default(),
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -113,6 +115,8 @@ async fn a_usage_record_carries_the_fee_the_writer_computed() {
                 input_includes_cache: Some(false),
                 ..ModelUsage::default()
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();
@@ -158,6 +162,76 @@ async fn a_usage_record_carries_the_fee_the_writer_computed() {
     assert_eq!(fee, Some(UsageFee::new(42, false)));
 }
 
+/// ADR 0006 §5.7: a usage record writes the response's stop reason; `stop_reason_raw` is
+/// written only beside `other`, never beside another value. An old record (`None`) writes no
+/// key at all.
+#[tokio::test]
+async fn a_usage_record_carries_the_response_stop_reason() {
+    let dir = TempDir::new("usage-stop-reason");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid-stop", created()).unwrap();
+    for (stop_reason, stop_reason_raw) in [
+        (Some(ModelStopReason::MaxTokens), None),
+        (
+            Some(ModelStopReason::Other),
+            Some("length_exceeded".to_owned()),
+        ),
+        // A raw beside a non-other value is never written.
+        (
+            Some(ModelStopReason::EndTurn),
+            Some("must_not_appear".to_owned()),
+        ),
+        (None, None),
+    ] {
+        journal
+            .append(JournalRecord::ModelUsage {
+                usage: ModelUsage::default(),
+                stop_reason,
+                stop_reason_raw,
+            })
+            .await
+            .unwrap();
+    }
+    drop(journal);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines[1]["data"]["stop_reason"], "max_tokens");
+    assert!(lines[1]["data"].get("stop_reason_raw").is_none());
+    assert_eq!(lines[2]["data"]["stop_reason"], "other");
+    assert_eq!(lines[2]["data"]["stop_reason_raw"], "length_exceeded");
+    assert_eq!(lines[3]["data"]["stop_reason"], "end_turn");
+    assert!(lines[3]["data"].get("stop_reason_raw").is_none());
+    assert!(lines[4]["data"].get("stop_reason").is_none());
+    assert!(lines[4]["data"].get("stop_reason_raw").is_none());
+
+    let session = Session::open(&path).unwrap();
+    let reasons: Vec<(Option<ModelStopReason>, Option<String>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ModelUsageRecorded {
+                stop_reason,
+                stop_reason_raw,
+                ..
+            } => Some((*stop_reason, stop_reason_raw.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            (Some(ModelStopReason::MaxTokens), None),
+            (Some(ModelStopReason::Other), Some("length_exceeded".into())),
+            (Some(ModelStopReason::EndTurn), None),
+            (None, None),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn opaque_json_round_trips_byte_for_byte_through_the_file() {
     let dir = TempDir::new("opaque");
@@ -200,6 +274,8 @@ async fn opaque_json_round_trips_byte_for_byte_through_the_file() {
                 input_includes_cache: None,
                 details: Some(OpaqueJson::parse(details_raw).unwrap()),
             },
+            stop_reason: None,
+            stop_reason_raw: None,
         })
         .await
         .unwrap();

@@ -308,3 +308,16 @@ Base: `d2d0f7f` · worktree `.radian-worktrees/group-commit` · `writer.rs` 先 
 | # | 变异 | 抓住它的测试 | 结果 |
 |---|---|---|---|
 | LIVE-1 | `session_is_live` 直接 `return false` | `writer::tests::the_liveness_probe_follows_the_writer_lock`（writer 持锁却说不是活） | ✅ 1 failed |
+
+## TK0258: the stop reason on ModelUsageRecorded (2026-10-31, branch `work/TK0258-journal-stop-reason`)
+
+Each mutation was applied by hand to `crates/radian-session/src/writer.rs` or `src/reader.rs`,
+backed up under `.radian/*.orig` and restored from that copy (`cmp` identical); the named test
+ran with `cargo nextest run -p radian-session --locked --profile sandbox --test <binary>
+-E 'test(...)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0258-M1 | the writer serializes no `stop_reason`/`stop_reason_raw` (the field is omitted) | ✅ 1 failed (rc=100) | `tests/write.rs::a_usage_record_carries_the_response_stop_reason` |
+| TK0258-M2 | the writer writes `end_turn` for every response | ✅ 1 failed (rc=100) | `tests/write.rs::a_usage_record_carries_the_response_stop_reason` (`max_tokens` read back as `end_turn`) |
+| TK0258-M3 | the reader turns a missing `stop_reason` into `end_turn` (`d.stop_reason.or(Some(EndTurn))`) | ✅ 2 failed (rc=100) | `tests/read_fixtures.rs::an_old_usage_record_without_a_stop_reason_reads_as_not_recorded_and_resumes` and `tests/read_fixtures.rs::the_model_stop_reason_fixture_reads_every_value` |

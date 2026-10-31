@@ -5,7 +5,7 @@
 mod common;
 
 use common::{TempDir, fixture};
-use radian_core::{InputSource, Message, recover};
+use radian_core::{InputSource, Message, ModelStopReason, recover};
 use radian_session::{
     EventData, InboxLane, PermissionApprover, PermissionDecision, ReadError, ReplacementEnd,
     Session, SessionJournal, TurnOutcome, TurnReason, UsageFee, WriteError,
@@ -452,6 +452,88 @@ fn the_usage_fee_fixture_reads_the_recorded_fee() {
             ("ModelUsageRecorded", None),
         ]
     );
+}
+
+/// ADR 0006 §5.7: every closed-set value reads back, `other` carries the provider's raw text,
+/// an old record has no value ("not recorded"), and a future value maps to `Unknown` without
+/// refusing the file (ADR 0006 §6(d)). Rust half of the differential check.
+#[test]
+fn the_model_stop_reason_fixture_reads_every_value() {
+    let session = Session::open(fixture("model-stop-reasons.jsonl")).unwrap();
+    assert!(session.skipped().is_empty());
+    assert_eq!(session.events().len(), 10);
+
+    let reasons: Vec<(Option<ModelStopReason>, Option<String>)> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ModelUsageRecorded {
+                stop_reason,
+                stop_reason_raw,
+                ..
+            } => Some((*stop_reason, stop_reason_raw.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            (Some(ModelStopReason::EndTurn), None),
+            (Some(ModelStopReason::ToolUse), None),
+            (Some(ModelStopReason::MaxTokens), None),
+            (Some(ModelStopReason::Refusal), None),
+            (Some(ModelStopReason::ContentFiltered), None),
+            (Some(ModelStopReason::PauseTurn), None),
+            (Some(ModelStopReason::Other), Some("length_exceeded".into())),
+            // The old record has no field at all: not recorded, not `end_turn`.
+            (None, None),
+            // A value this version does not know.
+            (Some(ModelStopReason::Unknown), None),
+        ]
+    );
+}
+
+/// ADR 0006 §5.7: a journal line written before the field existed reads as "not recorded",
+/// and the session still resumes (the missing field is not corruption).
+#[test]
+fn an_old_usage_record_without_a_stop_reason_reads_as_not_recorded_and_resumes() {
+    let dir = TempDir::new("old-stop-reason");
+    let path = dir.file("s.jsonl");
+    let sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let lines = [
+        format!(
+            r#"{{"schema_version":1,"session_id":"{sid}","seq":0,"ts":"2026-10-31T00:00:00.000000Z","event":"SessionCreated","critical":true,"data":{{"workspace":"/work/example","config_snapshot":{{}}}}}}"#
+        ),
+        format!(
+            r#"{{"schema_version":1,"session_id":"{sid}","seq":1,"ts":"2026-10-31T00:00:01.000000Z","event":"MessageAppended","critical":true,"data":{{"index":0,"message":{{"user":{{"content":[{{"text":{{"text":"hi"}}}}]}}}}}}}}"#
+        ),
+        format!(
+            r#"{{"schema_version":1,"session_id":"{sid}","seq":2,"ts":"2026-10-31T00:00:02.000000Z","event":"MessageAppended","critical":true,"data":{{"index":1,"message":{{"assistant":{{"content":[{{"text":{{"text":"hello"}}}}]}}}}}}}}"#
+        ),
+        format!(
+            r#"{{"schema_version":1,"session_id":"{sid}","seq":3,"ts":"2026-10-31T00:00:03.000000Z","event":"ModelUsageRecorded","critical":false,"data":{{"usage":{{"input":12,"output":3}}}}}}"#
+        ),
+    ];
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+    let session = Session::open(&path).unwrap();
+    let reasons: Vec<Option<ModelStopReason>> = session
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ModelUsageRecorded { stop_reason, .. } => Some(*stop_reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [None],
+        "a missing field is not recorded, not end_turn"
+    );
+
+    // The old journal resumes: the reader accepts it and the next seq continues after it.
+    let journal = SessionJournal::resume(&path, sid).unwrap();
+    assert_eq!(journal.next_seq(), 4);
 }
 
 /// ADR 0037 decision 5: the background-job start/settle audit records round-trip and never
