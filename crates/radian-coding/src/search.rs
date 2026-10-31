@@ -251,6 +251,7 @@ fn open_child_file(dir: &File, name: &OsStr) -> Result<File, ()> {
         &[name.to_os_string()],
         OpenMode::Read,
         false,
+        0o644,
     )
     .map_err(|_| ())
 }

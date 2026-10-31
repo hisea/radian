@@ -2311,6 +2311,105 @@ async fn built_in_read_outside_the_workspace_reads_in_the_full_tier() {
     );
 }
 
+/// ADR 0039 decision 4 end to end: a scripted model `write`s a memory file and `read`s it
+/// back in `radian exec --profile workspace`. The journal settles both calls without error,
+/// and the file on disk carries the bytes — the file tools' half of the memory opening.
+#[tokio::test]
+async fn a_scripted_model_writes_and_reads_a_memory_file_in_the_workspace_tier() {
+    // `common::process_dir`, not `scratch`: this test never binds its own Unix socket, and the
+    // system temp dir keeps it runnable inside the `workspace` sandbox too (a `/tmp` scratch
+    // is refused there). The session's control socket may fail to bind on a long macOS temp
+    // path; that is a warning, never a startup refusal (ADR 0043).
+    let dir = common::process_dir("radian-exec-memory-roots");
+    let ws = dir.join("ws");
+    let home = dir.join("radian");
+    let sessions = dir.join("sessions");
+    for path in [&ws, &home, &sessions] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    // The host creates `memory/global/` when it builds the file tools; the model writes a
+    // file straight into it, with no memory command in between.
+    let memory_file = home.join("memory/global/e2e.md");
+    let target = serde_json::to_string(memory_file.to_str().unwrap()).unwrap();
+
+    let server = MockServer::start(vec![
+        tool_reply(
+            "w1",
+            "write",
+            &format!("{{\"path\":{target},\"content\":\"E2E-MEMORY\\n\"}}"),
+        ),
+        tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
+        text_reply("done"),
+    ])
+    .await;
+
+    let envs = [
+        ("RADIAN_HOME", home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", sessions.to_str().unwrap()),
+    ];
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "--session-id",
+                "memory-files",
+                "--yes",
+                "-p",
+                "write and read a memory file",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&memory_file).unwrap(),
+        "E2E-MEMORY\n",
+        "the memory file was written where the model named it"
+    );
+
+    // Both tool calls settled without error in the journal, and the read returned the bytes
+    // the write had just written.
+    let raw = std::fs::read_to_string(sessions.join("memory-files.jsonl")).unwrap();
+    let settled: Vec<Value> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value["event"] == "ToolExecutionSettled")
+        .map(|value| value["data"].clone())
+        .collect();
+    let settled_for = |call: &str| -> Value {
+        settled
+            .iter()
+            .find(|data| data["call_id"] == call)
+            .unwrap_or_else(|| panic!("no settled event for {call}: {settled:#?}"))
+            .clone()
+    };
+    assert_eq!(settled.len(), 2, "one settled event per call: {settled:#?}");
+    for call in ["w1", "r1"] {
+        assert_eq!(
+            settled_for(call)["result"]["is_error"],
+            false,
+            "{call} succeeded: {}",
+            settled_for(call)
+        );
+    }
+    assert!(
+        settled_for("r1").to_string().contains("E2E-MEMORY"),
+        "the read returned the written bytes: {}",
+        settled_for("r1")
+    );
+}
+
 #[tokio::test]
 async fn without_workspace_the_built_in_tools_do_not_exist() {
     let server = MockServer::start(vec![
