@@ -1,6 +1,6 @@
 # getrad.dev
 
-Static site. Two source files, `index.html` (radian) and `arc.html` (arc), each hold English and Chinese in one file (`class="en"` / `class="zh"` pairs, an `EN / 中` toggle with a script) so they are written and previewed in one place. The deployed site is four pages: the generator (`crates/radian-tui/src/site_docs.rs`, `split_page`) splits each source into an English page (`/`, `/arc.html`) and a Chinese page (`/zh/`, `/zh/arc.html`) that hold one language each, link each other with the toggle, and name `hreflang` alternates (`en`, `zh-Hans`, `x-default` = the English page), their own canonical URL and a JSON-LD record with `inLanguage`. The manual under `/docs/` stays English. There is no redirect by browser language, so a search engine reaches both pages. Next to these, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds the arc videos and their poster frames, and `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies. Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
+Static site. Two source files, `index.html` (radian) and `arc.html` (arc), each hold English and Chinese in one file (`class="en"` / `class="zh"` pairs, an `EN / 中` toggle with a script) so they are written and previewed in one place. The deployed site is four pages: the generator (`crates/radian-tui/src/site_docs.rs`, `split_page`) splits each source into an English page (`/`, `/arc.html`) and a Chinese page (`/zh/`, `/zh/arc.html`) that hold one language each, link each other with the toggle, and name `hreflang` alternates (`en`, `zh-Hans`, `x-default` = the English page), their own canonical URL and a JSON-LD record with `inLanguage`. The manual under `/docs/` stays English. There is no redirect by browser language, so a search engine reaches both pages. Next to these, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds the arc videos and their poster frames, and `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies beyond `analytics.js` (below). Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
 
 Preview a source file with its toggle: `python3 -m http.server -d site 8000`. Preview the four deployed pages: see "Preview the docs" below.
 
@@ -47,16 +47,22 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 Every push to `main` that changes `site/**`, `docs/user/**`, the generator
 (`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
 or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
-copies `404.html`, `robots.txt`, `favicon.svg`, `docs.css` and `media/` from `site/` into `_site/`,
+copies `404.html`, `robots.txt`, `favicon.svg`, `docs.css`, `analytics.js` and `media/` from `site/` into `_site/`,
 runs the generator into `_site/` (it writes `index.html`, `arc.html`, `zh/index.html` and `zh/arc.html` from the two sources, `docs/`, and also `_site/llms.txt`,
 `_site/llms-full.txt` and `_site/sitemap.xml`), writes `_site/CNAME` with `getrad.dev`,
 then configures and uploads the Pages artifact.
+
+## Analytics
+
+Every page (the four hand-written pages, `404.html` and every docs page) loads one external script, `/analytics.js`, with `defer`; no page holds inline analytics code, and the docs tests check that each page loads it exactly once. The file sends one anonymous PostHog `$pageview` per page load and nothing else: autocapture, dead-click capture and session recording are off, `person_profiles` is `identified_only` and nobody is identified. It runs only when `location.hostname` is `getrad.dev` or `www.getrad.dev`, so a local preview, a fork's Pages site and the README renderer send nothing.
+
+`POSTHOG_KEY` at the top of the file is the project API key (`phc_…`, public by design: it can only write events). An empty key turns analytics off. The project is shared with anylut.com (the free plan allows one project); in PostHog, filter on the event property `$host` (`getrad.dev`) to see this site alone. `api_host` and `ui_host` name the project's cloud region (EU as written); change both together if the project is on US Cloud. This is the website only: the binary sends no telemetry (ADR 0013).
 
 ## Preview the docs
 
 ```sh
 cargo run -p radian-tui --example site-docs --locked -- /tmp/site
-cp site/404.html site/robots.txt site/favicon.svg site/docs.css /tmp/site/
+cp site/404.html site/robots.txt site/favicon.svg site/docs.css site/analytics.js /tmp/site/
 cp -r site/media /tmp/site/media
 python3 -m http.server -d /tmp/site 8000
 ```

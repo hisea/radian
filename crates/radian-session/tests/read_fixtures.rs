@@ -381,6 +381,27 @@ fn the_compaction_fixtures_agree_with_the_reference_checker() {
     );
 }
 
+/// ADR 0018: an old journal whose `ContextCompacted` has no `retained_reads` replays, and a
+/// reader treats the missing field as an empty list.
+#[test]
+fn an_old_compaction_record_without_retained_reads_replays() {
+    let session = Session::open(fixture("compaction-committed.jsonl")).unwrap();
+    assert_eq!(session.last_committed_revision(), 1);
+    assert_eq!(session.history().unwrap().len(), 2);
+    let retained = session
+        .events()
+        .iter()
+        .find_map(|event| match &event.data {
+            EventData::ContextCompacted { retained_reads, .. } => Some(retained_reads.clone()),
+            _ => None,
+        })
+        .expect("the fixture has a ContextCompacted");
+    assert!(
+        retained.is_empty(),
+        "a missing retained_reads reads as an empty list"
+    );
+}
+
 /// ADR 0007's `input_includes_cache`: the fixture carries a marked `true` (OpenAI
 /// shape), a marked `false` (Anthropic shape) and an **unmarked** old record. Rust half of the
 /// differential check with `docs/schema/check-fixtures.sh`.

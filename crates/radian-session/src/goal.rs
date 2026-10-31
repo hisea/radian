@@ -613,6 +613,7 @@ mod tests {
                     below_target: true,
                     model: "m".into(),
                     deterministic: false,
+                    retained_reads: Vec::new(),
                 },
             ),
         ])

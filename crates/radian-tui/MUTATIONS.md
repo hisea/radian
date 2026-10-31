@@ -3428,3 +3428,4 @@ from a backup under `.radian/`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0257-M5 | the TUI's `request_output` drops `.with_explicit(...)` (the pre-fix separation between the window and the model build) | ✅ 1 failed (rc=100) | `pty_an_explicit_max_tokens_raises_the_reservation_it_counts` (the startup notice showed `R 19200, B 108800` while the body sends 32000) |
+| site-posthog-M1 | `page_html` drops `{ANALYTICS_SCRIPT}` before `</head>` (a docs page no longer loads `/analytics.js`) | ✅ 2 failed | `the_docs_pages_hold_no_script` (one script element, not two), `a_description_cannot_close_the_json_ld_element` (one `</script>`, not two) |

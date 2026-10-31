@@ -19,6 +19,7 @@
 //!   `validate_history`, because a summary that breaks tool pairing would poison the next
 //!   request.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use serde_json::Value;
@@ -330,6 +331,107 @@ pub fn plan_with_keep(
     })
 }
 
+/// The share of the keep target a compaction may spend on retained `read` units (ADR 0018):
+/// `⌊K/2⌋` tokens, in addition to `K`.
+pub const RETAINED_READ_BUDGET_DIVISOR: u64 = 2;
+
+/// The token budget for retained `read` units: `⌊K/2⌋` (ADR 0018).
+pub fn retained_read_budget(keep: u64) -> u64 {
+    keep / RETAINED_READ_BUDGET_DIVISOR
+}
+
+/// The `read` units a compaction retains from the summarized part, and the paths they cover
+/// (ADR 0018).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetainedReads {
+    /// The message ranges of the retained units, in original order.
+    pub units: Vec<Range<usize>>,
+    /// The paths whose newest read unit was kept, newest first.
+    pub paths: Vec<String>,
+}
+
+/// The non-error `read` paths a unit holds, in call order (ADR 0018). A unit with no
+/// assistant call, a call whose result is an error, or a call without a string `path`
+/// contributes nothing.
+fn read_paths_of_unit(history: &[Message], unit: &Range<usize>) -> Vec<String> {
+    let mut errors = HashMap::new();
+    for message in &history[unit.clone()] {
+        if let Message::Tool { result, .. } = message {
+            errors.insert(result.call_id.as_str(), result.is_error);
+        }
+    }
+    let mut paths = Vec::new();
+    if let Some(Message::Assistant { tool_calls, .. }) = history.get(unit.start) {
+        for call in tool_calls {
+            if call.name != "read" {
+                continue;
+            }
+            let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            if errors.get(call.id.as_str()).copied() == Some(false) {
+                paths.push(path.to_owned());
+            }
+        }
+    }
+    paths
+}
+
+/// Selects the `read` units a compaction retains from `history[..first_kept]` (ADR 0018).
+///
+/// `first_kept` is the plan's cut, a unit boundary. Walk the units before it newest first;
+/// each path is taken only at its newest non-error `read`, and a path whose newest read is in
+/// the kept tail takes nothing. A unit that holds the newest read of at least one path is a
+/// candidate and is kept whole. Candidates are taken newest first while their
+/// [`message_tokens`] sum fits `⌊keep/2⌋`; one that does not fit is skipped and older ones are
+/// still tried. A read result is never cut to fit. `units` comes back in original order and
+/// `paths` newest first.
+pub fn retained_read_units(
+    history: &[Message],
+    first_kept: usize,
+    keep: u64,
+) -> Result<RetainedReads, SessionError> {
+    let units = units(history)?;
+    let budget = retained_read_budget(keep);
+    let mut seen = HashSet::new();
+    // The newest read of a path inside the kept tail supersedes every older read of it.
+    for unit in units.iter().filter(|unit| unit.start >= first_kept) {
+        seen.extend(read_paths_of_unit(history, unit));
+    }
+    // Candidates, newest first: each holds the newest read of at least one path.
+    let mut candidates: Vec<(Range<usize>, Vec<String>)> = Vec::new();
+    for unit in units.iter().filter(|unit| unit.end <= first_kept).rev() {
+        let mut newest = Vec::new();
+        for path in read_paths_of_unit(history, unit) {
+            if seen.insert(path.clone()) {
+                newest.push(path);
+            }
+        }
+        if !newest.is_empty() {
+            candidates.push((unit.clone(), newest));
+        }
+    }
+    let mut used = 0u64;
+    let mut selected: Vec<(Range<usize>, Vec<String>)> = Vec::new();
+    for (range, paths) in candidates {
+        let size: u64 = history[range.clone()].iter().map(message_tokens).sum();
+        if used.saturating_add(size) > budget {
+            continue;
+        }
+        used += size;
+        selected.push((range, paths));
+    }
+    let mut paths = Vec::new();
+    for (_, unit_paths) in &selected {
+        paths.extend(unit_paths.iter().cloned());
+    }
+    selected.reverse();
+    Ok(RetainedReads {
+        units: selected.into_iter().map(|(range, _)| range).collect(),
+        paths,
+    })
+}
+
 /// Why a summary was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SummaryError {
@@ -435,18 +537,31 @@ pub fn shorten_request(
     }
 }
 
-/// The compacted history: the summary message followed by `kept` unchanged.
+/// The compacted history: the summary message followed by `retained` and then `kept`
+/// unchanged.
 ///
 /// The summary is a [`Message::User`] with `source = System` and an
 /// `origin = {"kind":"compaction_summary","user_messages":[…]}` marker, so a host, an exporter
 /// or a future compactor can recognize it without parsing the text. `user_messages` are the
 /// user's words Core carries verbatim (ADR 0018): they are rendered into the body
 /// for the model, and written into `origin` so [`compaction_user_messages`] reads them back
-/// without parsing the body. The result must pass [`validate_history`]; a failure is returned,
-/// never committed.
+/// without parsing the body. `retained` are the newest `read` units kept from the summarized
+/// part; they sit right after the summary and before the kept tail (ADR 0018). The result must
+/// pass [`validate_history`]; a failure is returned, never committed.
 pub fn compacted_history(
     summary: &str,
     user_messages: &[RetainedUserMessage],
+    kept: &[Message],
+) -> Result<Vec<Message>, SessionError> {
+    compacted_history_with_retained(summary, user_messages, &[], kept)
+}
+
+/// [`compacted_history`] with the retained `read` units placed between the summary message and
+/// the kept tail (ADR 0018).
+pub fn compacted_history_with_retained(
+    summary: &str,
+    user_messages: &[RetainedUserMessage],
+    retained: &[Message],
     kept: &[Message],
 ) -> Result<Vec<Message>, SessionError> {
     let mut body = format!("{SUMMARY_MESSAGE_PREFIX}\n\n{}", summary.trim());
@@ -468,7 +583,7 @@ pub fn compacted_history(
             .map(|message| message.text.as_str())
             .collect::<Vec<_>>(),
     });
-    let mut history = Vec::with_capacity(kept.len() + 1);
+    let mut history = Vec::with_capacity(retained.len() + kept.len() + 1);
     history.push(Message::User {
         content: vec![ContentPart::text(body)],
         meta: MessageMeta {
@@ -479,6 +594,7 @@ pub fn compacted_history(
             ),
         },
     });
+    history.extend(retained.iter().cloned());
     history.extend(kept.iter().cloned());
     validate_history(&history)?;
     Ok(history)

@@ -78,6 +78,9 @@ pub enum JournalRecord {
         /// ADR 0018: `true` for the deterministic fallback (no model
         /// call, so no `CompactionUsage`). `false` for a model summary.
         deterministic: bool,
+        /// ADR 0018: the paths whose newest `read` unit was kept from the summarized part,
+        /// newest first. Empty when none were kept; the writer omits the field then.
+        retained_reads: Vec<String>,
     },
 }
 

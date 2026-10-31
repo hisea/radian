@@ -341,6 +341,7 @@ fn event_data_value(
             below_target,
             model,
             deterministic,
+            retained_reads,
         } => json!({
             "revision": revision,
             "source_revision": source_revision,
@@ -352,6 +353,7 @@ fn event_data_value(
             "below_target": below_target,
             "model": model,
             "deterministic": deterministic,
+            "retained_reads": retained_reads,
         }),
         EventData::InboxEnqueued {
             message,

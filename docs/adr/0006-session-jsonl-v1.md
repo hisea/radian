@@ -192,7 +192,7 @@ Order: directly after the assistant message it describes, before tool dispatch. 
 
 ### 5.9 `ContextCompacted`
 
-`revision`, `source_revision`, `source_len`, `summary`, `first_kept`, `tokens_before`, `tokens_after`, `below_target`, `model`, `deterministic` (optional, default false; true for the deterministic fallback). It is only a candidate record: compaction takes effect only after the `TranscriptReplacementCommitted` with the same `revision` reaches the disk.
+`revision`, `source_revision`, `source_len`, `summary`, `first_kept`, `tokens_before`, `tokens_after`, `below_target`, `model`, `deterministic` (optional, default false; true for the deterministic fallback), `retained_reads` (optional, default empty; the paths whose newest read unit the compaction kept, newest first). It is only a candidate record: compaction takes effect only after the `TranscriptReplacementCommitted` with the same `revision` reaches the disk.
 
 ### 5.9a Compatible shapes: `Rewound` / `ContextBudgetReached`
 

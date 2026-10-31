@@ -9,8 +9,10 @@
 //! page's own directory. Links between pages (`foo.md`, `../foo.md`, `foo.md#bar`)
 //! resolve from the source page's directory, as GitHub renders them, and fail the build
 //! when the target page or heading does not exist; relative links out of the manual become
-//! `blob/main` URLs. No JavaScript is emitted on any page: the one `<script>` element is
-//! the `application/ld+json` `TechArticle` record a search engine reads, never run code.
+//! `blob/main` URLs. No page holds inline JavaScript: its two `<script>` elements are the
+//! `application/ld+json` `TechArticle` record a search engine reads, never run code, and
+//! the one external file `/analytics.js` (the website's pageview counter, which every
+//! page of the site loads; it is off without a project key and off outside `getrad.dev`).
 //!
 //! The same table also gives three files at the site root: `llms.txt` (one line per page
 //! with its description, in sidebar order), `llms-full.txt` (every page's Markdown in one
@@ -22,6 +24,10 @@
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 use std::collections::{HashMap, HashSet};
+
+/// The one external script every page of the site loads: the website's pageview counter
+/// (`site/analytics.js`). The hand-written pages carry the same element in their source.
+pub const ANALYTICS_SCRIPT: &str = "<script src=\"/analytics.js\" defer></script>\n";
 
 /// The repo URL relative manual links resolve against.
 const REPO_BLOB: &str = "https://github.com/hisea/radian/blob/main";
@@ -283,7 +289,7 @@ pub fn page_html(site: &RenderedSite, index: usize) -> String {
     out.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap\">\n");
     out.push_str("<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Sora:wght@600&text=radian&display=swap\">\n");
     out.push_str(&format!(
-        "<link rel=\"stylesheet\" href=\"{assets}docs.css\">\n</head>\n<body>\n"
+        "<link rel=\"stylesheet\" href=\"{assets}docs.css\">\n{ANALYTICS_SCRIPT}</head>\n<body>\n"
     ));
     out.push_str("<div class=\"sheet\">\n<header class=\"top\">\n<nav aria-label=\"Main\">\n");
     out.push_str("<a class=\"brand lf-sora\" href=\"/\" aria-label=\"radian home\">\n");
