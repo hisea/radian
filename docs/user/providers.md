@@ -64,7 +64,7 @@ The default is 16384.
 This flag is refused for `openai-compatible` requests.
 
 An OpenAI-compatible chat request sets its own output cap `max_tokens`, where `C` is the context window (from the models catalog, `--context-window` or `model.context_window`) and `O` is the models catalog's output limit:
-`min(O, ⌊C/4⌋)` when both are known, `min(16384, ⌊C/4⌋)` when only `C` is known, and no `max_tokens` when `C` is unknown.
+`min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))` when both are known, `min(16384, ⌊C/4⌋)` when only `C` is known, and no `max_tokens` when `C` is unknown.
 An explicit `max_tokens` in an extra request body or a per-request setting wins.
 Set `RADIAN_EXTRA_BODY` to merge top-level fields into every request body; see `environment` for the per-route reserved keys, the startup line, and the refused `/model` switch.
 A route to `api.openai.com` sends none, because its newer chat models reject `max_tokens`.

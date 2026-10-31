@@ -5069,9 +5069,9 @@ async fn pty_the_startup_notice_names_the_window_source() {
 }
 
 /// ADR 0018 §2: the chat route's output reservation `R` is the catalog cap the request sends
-/// (`min(output, C/4)`), so `B` counts what is really sent. The TUI resolves that cap once, at
-/// startup; a stale `RouteOutput::None` reports `R 16384` / `B 922000` and sends no
-/// `max_tokens`.
+/// (`min(output, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`), so `B` counts what is really sent. The TUI
+/// resolves that cap once, at startup; a stale `RouteOutput::None` reports `R 16384` / `B 922000`
+/// and sends no `max_tokens`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     let dir = TempDir::new("catalog-cap");
@@ -5119,12 +5119,12 @@ async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     );
     pty.expand_startup();
     assert!(
-        pty.wait_for_screen("R 250000", wait_positive()),
+        pty.wait_for_screen("R 150000", wait_positive()),
         "the startup notice does not count the sent cap as R:\n{}",
         pty.screen()
     );
     assert!(
-        pty.wait_for_screen("B 750000", wait_positive()),
+        pty.wait_for_screen("B 850000", wait_positive()),
         "the startup notice does not name B:\n{}",
         pty.screen()
     );
@@ -5136,7 +5136,7 @@ async fn pty_the_startup_notice_names_the_catalog_cap_and_sends_it() {
     );
     assert_eq!(
         server.requests()[0].json()["max_tokens"],
-        serde_json::json!(250000),
+        serde_json::json!(150000),
         "the catalog cap is sent as max_tokens"
     );
     pty.quit();

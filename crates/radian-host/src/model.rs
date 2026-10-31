@@ -837,8 +837,9 @@ impl RouteContext {
             Some(self.max_tokens),
         );
         let reasoning_replay = resolve_reasoning_replay(&provider_ref, model);
-        // ADR 0018 §2: the chat route sends `min(limit.output, ⌊C/4⌋)` when the catalog knows
-        // both. The same number goes into the model and into the switched route's budget
+        // ADR 0018 §2: the chat route sends `min(limit.output, max(⌊0.15·C⌋,
+        // min(16384, ⌊C/4⌋)))` when the catalog knows both. The same number goes into the
+        // model and into the switched route's budget
         // (`RouteContext::output_for`), so the sent value and `R` cannot drift.
         let limit = catalog.limit(provider_name, model);
         let max_output_tokens = crate::route_output(adapter, &base_url, self.max_tokens).resolve(

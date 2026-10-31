@@ -469,8 +469,9 @@ pub(crate) async fn setup(
     let reasoning_replay = radian_host::resolve_reasoning_replay(&provider_ref, &model_name);
     let replays_reasoning = reasoning_replay.is_some();
     // ADR 0018 §2: the output the request will really send. The chat route sends the
-    // catalog-derived `max_tokens` (`min(limit.output, ⌊C/4⌋)`), the Anthropic route its
-    // `max_tokens`, and the Responses route none. `R` and `B` count exactly this value.
+    // catalog-derived `max_tokens` (`min(limit.output, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`),
+    // the Anthropic route its `max_tokens`, and the Responses route none. `R` and `B` count
+    // exactly this value.
     let request_output = radian_host::route_output(
         route.adapter(),
         &route.base_url,

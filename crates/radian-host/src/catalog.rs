@@ -309,9 +309,9 @@ pub enum RouteOutput {
     None,
     /// The request sends this exact value (Anthropic's `max_tokens`).
     Fixed(u32),
-    /// An OpenAI-compatible chat request sends `min(limit.output, ⌊C/4⌋)` when the route knows
-    /// both numbers, `min(16384, ⌊C/4⌋)` when it knows only `C`, and nothing when `C` is
-    /// unknown (ADR 0018).
+    /// An OpenAI-compatible chat request sends `min(O, max(⌊0.15·C⌋, min(16384, ⌊C/4⌋)))`
+    /// when the route knows both numbers, `min(16384, ⌊C/4⌋)` when it knows only `C`, and
+    /// nothing when `C` is unknown (ADR 0018).
     CatalogChat,
 }
 
@@ -1013,8 +1013,8 @@ fn build_window(
     limit: Option<ModelLimit>,
     price: Option<ModelPrice>,
 ) -> Window {
-    // ADR 0018 §2: the chat cap is `min(output, ⌊context/4⌋)`. Resolve it before `R`, so the
-    // reservation and `B` count exactly the value the request will send.
+    // ADR 0018 §2: the chat cap is `catalog_max_tokens(context, output)`. Resolve it before
+    // `R`, so the reservation and `B` count exactly the value the request will send.
     let request_output = request_output.resolve(context, output);
     let reservation = output_reservation(context, request_output);
     match input_budget(context, input, request_output) {
@@ -1304,16 +1304,16 @@ mod tests {
 
     #[test]
     fn a_chat_route_reserves_the_max_tokens_it_sends() {
-        // ADR 0018 §2: C = 1000000, O = 384000 → the chat request sends 250000, so
-        // R = 250000 and B = min(922000, 1000000 - 250000) = 750000.
+        // ADR 0018 §2: C = 1000000, O = 384000 → the chat request sends 150000, so
+        // R = 150000 and B = min(922000, 1000000 - 150000) = 850000.
         let output = RouteOutput::CatalogChat.resolve(Some(1_000_000), Some(384_000));
-        assert_eq!(output, Some(250_000));
-        assert_eq!(output_reservation(Some(1_000_000), output), 250_000);
+        assert_eq!(output, Some(150_000));
+        assert_eq!(output_reservation(Some(1_000_000), output), 150_000);
         assert_eq!(
             input_budget(Some(1_000_000), Some(922_000), output),
-            Ok(Some(750_000))
+            Ok(Some(850_000))
         );
-        // C = 128000, O = 16384: the ceiling is below the quarter (32000).
+        // C = 128000, O = 16384: the ceiling is below the computed share (19200).
         assert_eq!(
             RouteOutput::CatalogChat.resolve(Some(128_000), Some(16_384)),
             Some(16_384)
@@ -1345,6 +1345,39 @@ mod tests {
             RouteOutput::None.resolve(Some(1_000_000), Some(384_000)),
             None
         );
+    }
+
+    #[test]
+    fn a_128k_chat_route_sends_19200_and_keeps_108800_for_input() {
+        // ADR 0018 §2: C = 128000, O = 384000 → the chat request sends 19200, so R = 19200
+        // and B = min(I, 128000 - 19200) = 108800.
+        let output = RouteOutput::CatalogChat.resolve(Some(128_000), Some(384_000));
+        assert_eq!(output, Some(19_200));
+        assert_eq!(output_reservation(Some(128_000), output), 19_200);
+        assert_eq!(input_budget(Some(128_000), None, output), Ok(Some(108_800)));
+    }
+
+    #[test]
+    fn an_explicit_window_decides_the_chat_cap_not_the_catalog_window() {
+        // `--context-window 128000` on a route whose catalog entry says C = 1000000: the cap
+        // follows the window in effect.
+        let window = build_window(
+            Some(128_000),
+            None,
+            Some(384_000),
+            RouteOutput::CatalogChat,
+            WindowSource::Explicit,
+            Some(ModelLimit {
+                context: Some(1_000_000),
+                output: Some(384_000),
+                input: None,
+            }),
+            None,
+        );
+        assert_eq!(window.context, Some(128_000));
+        assert_eq!(window.request_output, Some(19_200));
+        assert_eq!(window.reservation, 19_200);
+        assert_eq!(window.budget, Some(108_800));
     }
 
     #[test]

@@ -700,10 +700,10 @@ mod tests {
     }
     #[test]
     fn the_catalog_output_cap_is_min_of_the_ceiling_and_a_quarter_of_the_window() {
-        // ADR 0018: C = 1000000, O = 384000 → 250000; C = 128000, O = 16384 → 16384.
+        // ADR 0018: C = 1000000, O = 384000 → 150000; C = 128000, O = 16384 → 16384.
         assert_eq!(
             catalog_max_tokens(Some(1_000_000), Some(384_000)),
-            Some(250_000)
+            Some(150_000)
         );
         assert_eq!(
             catalog_max_tokens(Some(128_000), Some(16_384)),
@@ -722,11 +722,11 @@ mod tests {
 
     #[test]
     fn a_resolved_output_cap_is_sent_as_max_tokens() {
-        // ADR 0018 §2: C = 1000000, O = 384000 → 250000; C = 128000, O = 16384 → 16384.
+        // ADR 0018 §2: C = 1000000, O = 384000 → 150000; C = 128000, O = 16384 → 16384.
         let mut cfg = config();
         cfg.max_tokens = catalog_max_tokens(Some(1_000_000), Some(384_000));
         let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
-        assert_eq!(body["max_tokens"], json!(250_000));
+        assert_eq!(body["max_tokens"], json!(150_000));
 
         cfg.max_tokens = catalog_max_tokens(Some(128_000), Some(16_384));
         let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
@@ -759,6 +759,23 @@ mod tests {
         req.settings = json!({"max_tokens": 64});
         let body = build_body(&req, &cfg, false).unwrap();
         assert_eq!(body["max_tokens"], json!(64), "per-request settings win");
+
+        // The same holds for the cap the catalog computes at a 128k window (19200).
+        let mut cfg = config();
+        cfg.max_tokens = catalog_max_tokens(Some(128_000), Some(384_000));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(19_200));
+        cfg.extra_body.insert("max_tokens".into(), json!(100));
+        let body = build_body(&request(vec![Message::user("hi")]), &cfg, false).unwrap();
+        assert_eq!(body["max_tokens"], json!(100), "extra_body wins at 128k");
+        let mut req = request(vec![Message::user("hi")]);
+        req.settings = json!({"max_tokens": 64});
+        let body = build_body(&req, &cfg, false).unwrap();
+        assert_eq!(
+            body["max_tokens"],
+            json!(64),
+            "per-request settings win at 128k"
+        );
     }
 
     // ---------- cross-provider history (ADR 0026 D6) ----------

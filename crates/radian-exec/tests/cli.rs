@@ -6863,17 +6863,18 @@ async fn the_startup_line_names_the_catalog() {
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("B 750000 from models.dev (opencode/deepseek-v4.1-flash"),
+        stderr.contains("B 850000 from models.dev (opencode/deepseek-v4.1-flash"),
         "{stderr}"
     );
     assert!(stderr.contains("C 1000000"), "{stderr}");
     assert!(stderr.contains("I 922000"), "{stderr}");
     assert!(stderr.contains("output 384000"), "{stderr}");
-    // R is the output actually sent: min(384000, 1000000 / 4) = 250000.
-    assert!(stderr.contains("R 250000"), "{stderr}");
+    // R is the output actually sent: min(384000, max(150000, min(16384, 1000000 / 4)))
+    // = 150000.
+    assert!(stderr.contains("R 150000"), "{stderr}");
     assert_eq!(
         provider.requests()[0].json()["max_tokens"],
-        json!(250000),
+        json!(150000),
         "the catalog cap is sent as max_tokens"
     );
     assert_eq!(catalog.requests().len(), 1, "the catalog was fetched once");
