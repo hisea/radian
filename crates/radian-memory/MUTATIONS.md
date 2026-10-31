@@ -48,3 +48,17 @@ empty at the end.
 a thread-local open hook, between `open()` and the lock); M9 uses the move hook to check the
 target log is locked at the check-to-write point. M7 from round 1 (the directory fsync) stays
 as the documented equivalent mutation.
+
+## TK0268: the file store and the log migration
+
+Base: this branch's code commit · each mutation run with
+`cargo nextest run -p radian-memory --locked --profile sandbox --test <binary> -E 'test(<name>)'`,
+then restored from `.radian/files.rs.bak`; `git status --short` empty at the end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0268-M1 | `touch_last_used` rewrites `modified` too | `files::touch_last_used_changes_only_the_last_used_line` | ✅ failed |
+| TK0268-M2 | the migration keeps Archived records | `migrate::two_active_one_archived_and_one_forgotten_become_two_files_and_an_index` | ✅ failed |
+| TK0268-M3 | the `type` closed-set check is removed from the reader | `files::a_type_outside_the_closed_set_is_unreadable_and_reports_its_line` | ✅ failed |
+
+3/3 caught.

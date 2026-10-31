@@ -3,6 +3,8 @@
 //! It is deliberately host-free: the caller passes the root directory (the host will pass
 //! `~/.radian/memory/`), and the crate never reads `HOME`. It provides:
 //!
+//! - [`FileStore`] and [`migrate_log`] — the file store beside the old logs: one Markdown
+//!   record per file, one `MEMORY.md` index per scope, and the one-time `log.jsonl` migration;
 //! - [`MemoryStore`] — Global and Project scope logs with CRUD, revision checks, the source
 //!   rules (an agent cannot touch a user record), Forget/Purge, split/merge primitives, and
 //!   the cross-scope view;
@@ -16,6 +18,7 @@
 
 mod error;
 mod event;
+mod files;
 mod fs;
 mod log;
 mod markdown;
@@ -26,6 +29,10 @@ mod store;
 
 pub use error::{MemoryError, PurgeStep};
 pub use event::MemoryEvent;
+pub use files::{
+    DESCRIPTION_MAX, FileProvenance, FileStore, Frontmatter, IndexLine, ListEntry, NAME_MAX,
+    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, index_lines, migrate_log,
+};
 #[doc(hidden)]
 pub use log::set_open_hook;
 pub use markdown::{ParsedRecord, export, parse};
