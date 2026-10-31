@@ -247,6 +247,27 @@ addition_budget = 500
 |---|---|---|---|
 | `control.enabled` | boolean | `true` | Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`. `false` turns the port off for the process. A non-boolean is refused. |
 
+## `[hub]`
+
+| Key | Type | Default | Allowed | What it does |
+|---|---|---|---|---|
+| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
+| `hub.concurrency` | integer | `4` | `1` or more | Tasks in `doing` across every registered repository. |
+| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two scheduling passes. |
+
+A value outside its range is a configuration error naming the key and the range.
+An unknown key under `[hub]` is skipped and named at startup.
+The reader validates these keys now; the hub that uses them is not built yet, so they have no effect in this build.
+When it runs, a change takes effect at the hub's next start.
+See `arc/hub` for the registry and the subcommands.
+
+```toml
+[hub]
+port = 7341
+concurrency = 4
+interval_secs = 30
+```
+
 ## `[context]`
 
 | Key | Type | Default | What it does |

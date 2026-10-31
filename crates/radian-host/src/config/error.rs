@@ -73,6 +73,13 @@ pub enum ConfigError {
         key: String,
         reason: String,
     },
+    /// A key whose value is outside its closed range (ADR 0048's `[hub]`): the message names
+    /// the key and the range, never the value.
+    ValueOutOfRange {
+        path: PathBuf,
+        key: String,
+        range: &'static str,
+    },
     /// A rules-only `[providers.<name>]` table (no `kind`, no `base_url`) whose name has no
     /// `auth.json` entry to add to (ADR 0026 D10). Checked for **every** table at startup,
     /// not only the provider the run resolves, so a table that can never resolve is refused
@@ -152,6 +159,13 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::InvalidProviderField { path, key, reason } => {
                 write!(f, "{}: `{key}` {reason}", path.display())
+            }
+            ConfigError::ValueOutOfRange { path, key, range } => {
+                write!(
+                    f,
+                    "{}: `{key}` must be in the range {range}",
+                    path.display()
+                )
             }
             ConfigError::RulesOnlyProvider { path, name } => write!(
                 f,

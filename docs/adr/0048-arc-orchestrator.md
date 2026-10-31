@@ -453,6 +453,10 @@ The `[hooks]` table holds the commands arc runs at fixed points:
 - A worktree is created on the first attempt of a task. The default `[hooks] after_merge` lines remove it when the task is merged; arc itself removes nothing, so a repository that removes those lines keeps the worktree.
 - `.radian-worktrees/` is not a radian location. Search (`grep`, `glob`), skill discovery, and `@` completion skip `.radian/arc/worktrees/` and `.radian/arc/gates/` (they skipped `.radian-worktrees/` before). Both are arc's own full-tree checkouts, one per worker task and one per gate stage.
 
+### 16. The hub
+
+A hub is one process that manages every repository registered on this machine. The registration is an explicit list in `$RADIAN_HOME/hub/repos.toml`: a TOML document of `[[repos]]` tables, each with a `name` (1 to 48 characters from `a-z`, `0-9` and `-`, unique) and an absolute, canonical `path` (unique) to an arc repository. `radian hub add`, `radian hub remove` and `radian hub list` write and read it; a running hub re-reads it every interval and never writes it. Every write goes through a temporary file and an atomic rename, so a reader sees either the old or the new whole document. The hub's scheduling loop, its `hub.lock`, its bearer token and its HTTP API are described in this decision; `[hub] port`, `[hub] concurrency` and `[hub] interval_secs` configure them.
+
 ## Constraints and Costs
 
 - arc code is in the repository from the start, so prototype work goes through the gate and Verify.

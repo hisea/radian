@@ -1,0 +1,9 @@
+schema_version = 1
+
+[hub]
+# The HTTP API's port; it binds loopback only.
+port = 7341
+# Tasks in `doing` across every registered repository.
+concurrency = 4
+# Seconds between two scheduling passes.
+interval_secs = 30

@@ -228,9 +228,9 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     std::fs::create_dir_all(home.join(".ssh"))?;
     std::fs::write(home.join(".ssh/id_ed25519"), "FAKE-KEY-NOT-A-REAL-SECRET\n")?;
     std::fs::write(home.join("readable.txt"), "plain\n")?;
-    // ADR 0020: a fake `~/.radian/` with the four subdirectories, so the matrix can assert
-    // sessions/memory are unreadable and config/cache are readable. The test only ever reads
-    // these through the sandbox (redirected to /dev/null) or not at all.
+    // ADR 0020: a fake `~/.radian/` with its subdirectories, so the matrix can assert
+    // sessions/memory/credentials/hub are unreadable and config/cache are readable. The test
+    // only ever reads these through the sandbox (redirected to /dev/null) or not at all.
     let radian_home = home.join(".radian");
     for (dir, file) in [
         ("sessions", "s.jsonl"),
@@ -238,6 +238,7 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         ("config", "c.toml"),
         ("cache", "cache.txt"),
         ("credentials", "auth.json"),
+        ("hub", "repos.toml"),
     ] {
         std::fs::create_dir_all(radian_home.join(dir))?;
         std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
@@ -269,6 +270,8 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
             .deny_read(radian_home.join("memory"))
             // ADR 0026 D4: the credential store is denied in every enforced tier.
             .deny_read(radian_home.join("credentials"))
+            // ADR 0020 / ADR 0048: the hub's registry, token and lock are denied too.
+            .deny_read(radian_home.join("hub"))
             // ADR 0031 T2: the trust store is denied too.
             .deny_read(radian_home.join("trust"))
             .deny_read(&custom_sessions)
@@ -877,9 +880,9 @@ impl Rig {
         );
     }
 
-    /// ADR 0020: `~/.radian/sessions` and `~/.radian/memory` are not readable; `config` and
-    /// `cache` are. A sessions directory moved by `--session-dir` is denied as well. Each case
-    /// carries the transparent control (which can read everything).
+    /// ADR 0020: `~/.radian/sessions`, `~/.radian/memory` and `~/.radian/hub` are not
+    /// readable; `config` and `cache` are. A sessions directory moved by `--session-dir` is
+    /// denied as well. Each case carries the transparent control (which can read everything).
     fn radian_home(&mut self, sandbox: &Sandbox, control: &Sandbox) {
         let g = "radian_home";
         let radian = self.home.join(".radian");
@@ -964,6 +967,16 @@ impl Rig {
                 "cat {} > /dev/null",
                 q(&radian.join("credentials/auth.json"))
             ),
+        );
+        // ADR 0020 / ADR 0048: `hub/repos.toml` (and the token and lock beside it) is denied;
+        // the control (FullAccess) reads it, so the denial is the sandbox.
+        self.sh_case(
+            sandbox,
+            control,
+            g,
+            "hub_unreadable",
+            Expect::MustFail,
+            &format!("cat {} > /dev/null", q(&radian.join("hub/repos.toml"))),
         );
         // ADR 0031 T2 / ADR 0020: `trust/` is denied like sessions, memory and
         // credentials; the control (FullAccess) reads it, so the denial is the sandbox.
