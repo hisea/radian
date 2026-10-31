@@ -1,6 +1,6 @@
 # journal 不记模型的停止原因
 
-- 状态：idea
+- 状态：decided（2026-10-31，方向 1）
 - 涉及 ADR：0006（session JSONL）、0007（usage）、0010（durable 与 live 事件）
 - 来源：2026-10-31 本地线路统计截断调用和填满窗口的响应时发现
 
