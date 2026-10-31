@@ -3,11 +3,12 @@
 
 use radian_core::{
     ContentPart, InputSource, Message, MessageMeta, PlanError, SUMMARY_FACTS_DELETE_OLDEST,
-    SUMMARY_FACTS_ORDER_RULE, SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, TOOL_RESULT_LIMIT_CHARS,
-    ToolCall, ToolResult, check_summary, compacted_history, deterministic_summary,
-    deterministic_summary_line, keep_target, message_tokens, plan, shorten_request, shorten_target,
-    summary_max_tokens, summary_request, summary_system_prompt, truncate_kept_tool_results,
-    truncate_to_tokens, truncate_tool_result_text, units, verified_facts_max_tokens,
+    SUMMARY_FACTS_ORDER_RULE, SUMMARY_NEWER_MESSAGES_WIN, SUMMARY_ONE_CONSOLIDATED,
+    SUMMARY_PLANS_ARE_NOT_FACTS, SummaryError, TOOL_RESULT_LIMIT_CHARS, ToolCall, ToolResult,
+    check_summary, compacted_history, deterministic_summary, deterministic_summary_line,
+    keep_target, message_tokens, plan, shorten_request, shorten_target, summary_max_tokens,
+    summary_request, summary_system_prompt, truncate_kept_tool_results, truncate_to_tokens,
+    truncate_tool_result_text, units, verified_facts_max_tokens,
 };
 use serde_json::{Value, json};
 
@@ -270,7 +271,8 @@ fn the_summary_request_serializes_text_and_truncates_tool_results() {
     assert!(body.contains("focus on the API"), "{body}");
     // The tool result is cut to 2000 characters and the cut is stated.
     assert!(body.contains("truncated 500 characters"), "{body}");
-    assert_eq!(body.matches('x').count(), 2_000, "{body}");
+    assert!(body.contains(&"x".repeat(2_000)), "{body}");
+    assert!(!body.contains(&"x".repeat(2_001)), "{body}");
     // An assistant's reasoning is provider-invisible and must not reach the summarizer.
     assert!(!body.contains("SECRET-REASONING"), "{body}");
 }
@@ -285,10 +287,9 @@ fn the_summary_request_states_the_length_ceiling() {
     // 1 token ≈ 0.75 words, so 8192 tokens is about 6144 words; the prompt says it is
     // approximate.
     assert!(system.contains("6144 English words"), "{system}");
-    assert!(
-        system.contains("shorten it, do not only append"),
-        "{system}"
-    );
+    // The update rule matches the consolidate rewrite, not an append.
+    assert!(system.contains(SUMMARY_ONE_CONSOLIDATED), "{system}");
+    assert!(system.contains(SUMMARY_NEWER_MESSAGES_WIN), "{system}");
     // A different ceiling produces a different prompt.
     let smaller = summary_request(None, &[Message::user("only")], None, 2_048, Value::Null);
     assert!(
@@ -298,6 +299,24 @@ fn the_summary_request_states_the_length_ceiling() {
             .unwrap()
             .contains("2048 tokens")
     );
+}
+
+/// The summary ceiling at `B = 24576` is `min(K, max(8192, B/8)) = 6144`: the system prompt
+/// states exactly that (ADR 0018), whether the request continues a previous summary or not.
+#[test]
+fn the_summary_prompt_at_a_24576_budget_keeps_the_6144_token_ceiling() {
+    let max = summary_max_tokens(24_576);
+    assert_eq!(max, 6_144);
+    let request = summary_request(
+        Some("PREVIOUS"),
+        &[Message::user("new")],
+        None,
+        max,
+        Value::Null,
+    );
+    let system = request.system_prompt.as_deref().unwrap();
+    assert!(system.contains("6144 tokens"), "{system}");
+    assert!(system.contains(SUMMARY_ONE_CONSOLIDATED), "{system}");
 }
 
 #[test]
@@ -398,12 +417,47 @@ fn truncating_a_tool_result_never_splits_a_character() {
 }
 
 #[test]
+fn a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite() {
+    let request = summary_request(
+        Some("PREVIOUS SUMMARY"),
+        &[Message::user("new message")],
+        None,
+        8_192,
+        Value::Null,
+    );
+    let body = request.messages[0].text();
+    assert!(body.contains("PREVIOUS SUMMARY"), "{body}");
+    assert!(body.contains(SUMMARY_ONE_CONSOLIDATED), "{body}");
+    assert!(body.contains(SUMMARY_NEWER_MESSAGES_WIN), "{body}");
+    // The old append-and-preserve wording is gone from the whole request, system prompt too.
+    for text in [body.as_str(), request.system_prompt.as_deref().unwrap()] {
+        for old in [
+            "preserving what is still relevant",
+            "rolling update",
+            "do not only append",
+        ] {
+            assert!(
+                !text.contains(old),
+                "the old wording {old:?} survives: {text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_summary_request_without_previous_or_instructions_is_just_the_conversation() {
     let request = summary_request(None, &[Message::user("only")], None, 8_192, Value::Null);
     let body = request.messages[0].text();
     assert!(body.contains("only"), "{body}");
     assert!(!body.contains("<previous-summary>"), "{body}");
     assert!(!body.contains("Additional instructions"), "{body}");
+    // No previous summary, so no consolidate paragraph in the request body.
+    assert!(!body.contains(SUMMARY_ONE_CONSOLIDATED), "{body}");
+    assert!(!body.contains(SUMMARY_NEWER_MESSAGES_WIN), "{body}");
+    assert!(
+        !body.contains("one of the inputs, not text to keep"),
+        "{body}"
+    );
 }
 
 // ---------- check_summary ----------

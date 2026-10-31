@@ -92,3 +92,14 @@ mutation (`cmp` identical).
 | compaction-small-window-2-M1 | a compaction that reaches the goal does not reset the below-target count (the `else { self.below_target_streak = 0; }` arm emptied in `note_compaction`) | ✅ 1 failed | `tests/compaction_flow.rs::a_compaction_that_reaches_the_goal_allows_another_extra_compaction` (failed `BelowTarget` at the second, non-consecutive below-target compaction); `a_below_target_extra_compaction_stops_auto_compaction_for_the_turn` and `a_second_compaction_after_a_below_target_one_lets_the_turn_finish` still pass |
 | compaction-small-window-2-M2 | the over-long fallback never cuts the previous summary (`let kept_summary = match None::<u64> {`) | ✅ 2 failed | `tests/compaction_flow.rs::two_overlong_summaries_cut_the_previous_summary_to_half_the_ceiling` and `tests/compaction_flow.rs::the_summary_does_not_grow_across_two_overlong_fallbacks` |
 | compaction-small-window-2-M3 | every fallback cuts the previous summary (`match fallback_too_long.or(summary_budget.map(compaction::summary_max_tokens))`) | ✅ 1 failed | `tests/compaction_flow.rs::a_summarizer_failure_keeps_the_previous_summary_whole` |
+
+## One consolidated summary instead of a rolling append (TK0259, 2026-10-31)
+
+Branch `work/TK0259-summary-consolidate`. Each mutation was applied in place, only the two
+compaction test binaries were run, and the source was restored from `.radian/compaction.rs.clean`
+(`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0259-M1 | the update paragraph restored to the old "Update the previous summary above with them, preserving what is still relevant" | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
+| TK0259-M2 | the "newer messages win" sentence removed from the update paragraph | ✅ 2 failed | `tests/compaction.rs::a_summary_request_with_a_previous_summary_asks_for_one_consolidated_rewrite` and `tests/compaction_flow.rs::a_large_previous_summary_is_consolidated_into_a_small_one` |
