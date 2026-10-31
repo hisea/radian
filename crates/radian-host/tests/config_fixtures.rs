@@ -42,7 +42,7 @@ fn the_reader_matches_the_reference_checker() {
         ("model-smol.toml", "accept"),
         ("mcp-servers.toml", "accept"),
         ("mcp-mcp-servers.toml", "accept"),
-        ("memory-injection.toml", "accept"),
+        ("memory.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
         ("context-subtree-files.toml", "accept"),
@@ -391,37 +391,53 @@ fn the_minimal_fixture_mcp_server_is_wired() {
         config.skipped
     );
 }
-/// `memory-injection.toml` (ADR 0021): the two keys this revision adds
-/// are read; the rest of D6's table is known but unwired, so it is reported as skipped rather
-/// than refused.
+/// `memory.toml` (ADR 0021 D6): the four `[memory]` keys are read; the injected
+/// configuration is the documented default for anything the file leaves out.
 #[test]
-fn the_memory_injection_keys_are_read_and_the_rest_is_reported() {
-    let (path, text) = fixture("memory-injection.toml");
+fn the_memory_keys_are_read() {
+    let (path, text) = fixture("memory.toml");
     let config = config::parse(&path, &text).unwrap();
-    assert_eq!(config.memory.additions, Some(false));
-    assert_eq!(config.memory.addition_budget, Some(750));
+    assert_eq!(config.memory.enabled, Some(true));
+    assert_eq!(
+        config.memory.scopes.as_deref(),
+        Some(&["project".to_owned(), "global".to_owned()][..])
+    );
+    assert_eq!(config.memory.index_max_lines, Some(200));
+    assert_eq!(config.memory.index_max_bytes, Some(25600));
     let injection = config.memory.injection();
-    assert!(!injection.additions);
-    assert_eq!(injection.addition_budget, 750);
-    // Everything the file did not set keeps the documented default.
-    assert_eq!(injection.max_tokens, 2000);
-    for key in [
-        "memory.injection.max_tokens",
-        "memory.injection.global_budget",
-        "memory.injection.project_budget",
-        "memory.injection.overflow",
-    ] {
-        assert!(
-            config.skipped.contains(&key.to_string()),
-            "{:?}",
-            config.skipped
-        );
-    }
+    assert!(injection.enabled);
+    assert_eq!(injection.scopes, ["project", "global"]);
+    assert_eq!(injection.index_max_lines, 200);
+    assert_eq!(injection.index_max_bytes, 25600);
+    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+}
+
+/// The retired `[memory.injection]` table: every key is named once and ignored (ADR 0008
+/// migration), never refused, and the new keys keep their defaults.
+#[test]
+fn the_retired_injection_keys_warn_and_are_ignored() {
+    let path = PathBuf::from("retired-memory.toml");
+    let config = config::parse(
+        &path,
+        "schema_version = 1\n[memory.injection]\nmax_tokens = 1000\nglobal_budget = 1\n",
+    )
+    .unwrap();
+    assert_eq!(config.memory, config::MemoryConfig::default());
+    assert_eq!(config.skipped.len(), 2, "{:?}", config.skipped);
     assert!(
-        !config
+        config
             .skipped
             .iter()
-            .any(|key| key.starts_with("memory.injection.additions")),
+            .any(|line| line.contains("memory.injection.max_tokens")
+                && line.contains("index_max_lines")),
+        "{:?}",
+        config.skipped
+    );
+    assert!(
+        config
+            .skipped
+            .iter()
+            .any(|line| line.contains("memory.injection.global_budget")),
         "{:?}",
         config.skipped
     );

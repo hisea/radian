@@ -119,6 +119,8 @@ fn production_chain(
         None,
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
+        Some(Arc::clone(&journal)),
+        None,
     ));
     let skills = Arc::new(radian_host::SkillsHooks::new(&[]));
     // ADR 0047: the goal block rides between skills and the session facts; empty here, so

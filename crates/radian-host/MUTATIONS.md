@@ -1895,3 +1895,15 @@ stale one) and the named tests run with `cargo nextest run ... --profile sandbox
 | TK0277-M1 | `SubtreeContext::discover` does not insert an appended path into the already-loaded set | ✅ 2 failed (rc=100) | `context::tests::a_subtree_file_appends_once_and_a_deeper_file_follows` (the second read appended `crates/x/AGENTS.md` again) and `cli::a_subtree_context_file_appends_once_before_the_next_request` (two `ContextFileAppended` events and two blocks) |
 | TK0277-M2 | `open_session` seeds the loaded set without the startup chain (`Vec::new()`) | ✅ 1 failed (rc=100) | `cli::a_startup_context_file_is_never_appended_again` (the workspace `AGENTS.md` was appended again) |
 | TK0277-M3 | `open_session` passes `true` to `ContextHooks` instead of `[context] subtree_files` | ✅ 1 failed (rc=100) | `cli::the_subtree_switch_turns_the_append_off` (the disabled switch still appended) |
+
+## TK0271: the two memory index files are injected, capped, and noticed (2026-10-31)
+
+Branch `work/TK0271-memory-index-injection`. Each mutation was applied in place and the named
+test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast
+-E 'test(<name>)'`; the source was restored from `.radian/mut/injection.rs.bak`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0271-M1 | the line cap is off by one (`taken > max_lines` instead of `taken >= max_lines`) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (line-201 was injected) |
+| TK0271-M2 | the rewrite notice is returned on every call (the `notices_sent` guard is removed) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (the third call got a second notice) |
+| TK0271-M3 | global is selected before project (`selected` push order swapped) | ✅ 1 failed (rc=100) | `memory::injection::tests::two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte` (the global section came first) |
