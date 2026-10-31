@@ -44,6 +44,12 @@ pub const COMPACTION_MODEL_CURRENT: &str = "current";
 /// does not fix one; this slice fixes 8192 tokens, deliberately not `B`).
 pub const DEFAULT_SUMMARY_MAX_TOKENS: u64 = 8_192;
 
+/// The smallest summary a long history may produce (ADR 0018). A summarizer reply that is
+/// shorter than this is prose about the work, not a summary, and storing it would lose the
+/// history. The floor is far below the smallest cap [`summary_max_tokens`] can return (2048,
+/// from [`MIN_KEEP_TARGET`]), so the floor and the cap never contradict each other.
+pub const SUMMARY_MIN_TOKENS: u64 = 100;
+
 /// How many characters of one tool result (ADR 0018), and of one tool call's arguments,
 /// reach the summarizer.
 pub const TOOL_RESULT_LIMIT_CHARS: usize = 2_000;
@@ -182,6 +188,18 @@ pub const USER_MESSAGES_HEADING: &str = "\n\n---\nUser messages kept verbatim (o
 /// no window to scale against.
 pub fn summary_max_tokens(input_budget: u64) -> u64 {
     keep_target(input_budget).min(DEFAULT_SUMMARY_MAX_TOKENS.max(input_budget / 8))
+}
+
+/// The smallest summary accepted for a history that measures `history_tokens` by
+/// [`message_tokens`] (ADR 0018): [`SUMMARY_MIN_TOKENS`] once the history reaches
+/// `10 * SUMMARY_MIN_TOKENS` (1000) tokens, and 0 below that. A short history may have an
+/// honest short summary; the heading check alone guards it.
+pub fn summary_min_tokens(history_tokens: u64) -> u64 {
+    if history_tokens >= 10 * SUMMARY_MIN_TOKENS {
+        SUMMARY_MIN_TOKENS
+    } else {
+        0
+    }
 }
 
 /// ADR 0018's keep target `K = min(20000, max(2048, ⌊input_budget/4⌋))`. A target, not a hard
@@ -439,11 +457,17 @@ pub enum SummaryError {
     Empty,
     #[error("the summary is {tokens} tokens, over the limit of {max}")]
     TooLong { tokens: u64, max: u64 },
+    #[error("the summary is {tokens} tokens, under the minimum of {min}")]
+    TooShort { tokens: u64, min: u64 },
+    #[error("the summary has no line starting with `## `")]
+    NoHeading,
 }
 
-/// Validates a summary: non-empty after trimming, and within `max_tokens` by the same
-/// conservative ruler the keep target uses. Returns the trimmed summary on success.
-pub fn check_summary(text: &str, max_tokens: u64) -> Result<String, SummaryError> {
+/// Validates a summary: non-empty after trimming, within `max_tokens`, at least `min_tokens`,
+/// and with at least one line that starts with `## `. All lengths use the same conservative
+/// ruler the keep target uses. Returns the trimmed summary on success. The checks run in that
+/// order: the cap before the floor, so an over-long answer still takes the shortening retry.
+pub fn check_summary(text: &str, max_tokens: u64, min_tokens: u64) -> Result<String, SummaryError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(SummaryError::Empty);
@@ -454,6 +478,15 @@ pub fn check_summary(text: &str, max_tokens: u64) -> Result<String, SummaryError
             tokens,
             max: max_tokens,
         });
+    }
+    if tokens < min_tokens {
+        return Err(SummaryError::TooShort {
+            tokens,
+            min: min_tokens,
+        });
+    }
+    if !trimmed.lines().any(|line| line.starts_with("## ")) {
+        return Err(SummaryError::NoHeading);
     }
     Ok(trimmed.to_owned())
 }

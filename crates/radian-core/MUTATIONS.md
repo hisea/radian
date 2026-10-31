@@ -126,3 +126,16 @@ or `.radian/turn.rs.bak` (`cmp` identical).
 | TK0260-M2 | the budget check removed (`if used.saturating_add(size) > budget` → `if false && …`) | ✅ 2 failed | `tests/compaction_flow.rs::a_budget_for_two_keeps_only_the_two_newest_paths` (the oldest path is kept too) and `a_32k_window_retains_no_read_over_its_budget` (the 3250-token read is retained with a 3072-token budget) |
 | TK0260-M3 | the kept-part cut applied to retained units (a `truncate_kept_tool_results` call on `retained_messages` when `plan.kept_tokens > keep`) | ✅ 1 failed | `tests/compaction_flow.rs::a_retained_result_is_not_cut_when_the_kept_tail_is` (the retained 3000-character result comes back cut) |
 | TK0260-M4 | the "measure again without" step removed (`if retained_messages.is_empty()` → `if true \|\| …`) | ✅ 1 failed | `tests/compaction_flow.rs::retaining_that_misses_the_goal_measures_again_without` (the committed view keeps the retained unit and is marked `below_target`) |
+
+## A summary floor and a heading (TK0263, 2026-10-31)
+
+Branch `work/TK0263-summary-floor-rejects-non-summaries`. Each mutation was applied in place,
+`tests/compaction.rs` and `tests/compaction_flow.rs` were run, and the source was restored from
+`.radian/compaction.rs.clean` or `.radian/turn.rs.clean` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0263-M1 | `SUMMARY_MIN_TOKENS` set to 0 | ✅ 5 failed | `tests/compaction.rs::a_prose_answer_is_too_short` (the prose answer passes the floor and comes back `NoHeading`) and `tests/compaction.rs::the_floor_applies_only_at_ten_times_the_minimum` |
+| TK0263-M2 | the heading check removed | ✅ 2 failed | `tests/compaction.rs::a_long_answer_without_a_heading_has_no_heading` (300 tokens of `**Goal**` labels are accepted) and `tests/compaction_flow.rs::two_non_summaries_fall_back_without_too_long` (the second reply is accepted instead of falling back) |
+| TK0263-M3 | `TooShort` routed to `shorten_request` instead of the resend | ✅ 2 failed | `tests/compaction_flow.rs::a_prose_answer_resends_the_original_request_and_the_retry_commits` (the second request carries `<summary-to-shorten>`) and `a_short_summary_of_a_long_history_resends_the_original_request` |
+| TK0263-M4 | `summary_min_tokens` returns the floor for every history | ✅ 2 failed | `tests/compaction_flow.rs::a_manual_compact_of_a_short_history_accepts_a_short_summary` (the 300-token history's 60-token summary is rejected) and `tests/compaction.rs::the_floor_applies_only_at_ten_times_the_minimum` |

@@ -865,6 +865,29 @@ class ReportTest(ScratchCase):
         self.assertIsNone(json.loads((out / "leak.json").read_text())["level"])
 
 
+class ColumnsDocTest(unittest.TestCase):
+    """This report's Columns section is the index of `journal_metrics.COLUMNS`.
+
+    A column the module adds must be named there, whether or not these tables
+    show it, so a reader learns from this page which fixed columns exist.
+    """
+
+    def section(self) -> str:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = readme.index("\n## Columns\n")
+        end = readme.index("\n## ", start + 1)
+        return readme[start:end]
+
+    def test_the_columns_section_names_every_fixed_column(self):
+        section = self.section()
+        missing = [
+            column["name"]
+            for column in journal_metrics.COLUMNS
+            if f"`{column['name']}`" not in section
+        ]
+        self.assertEqual(missing, [])
+
+
 def radian_call(command: str, call_id: str = "c9") -> str:
     """A radian journal line: a shell call with JSON-string arguments."""
     return journal([

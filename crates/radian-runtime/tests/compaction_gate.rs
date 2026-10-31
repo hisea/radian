@@ -7,7 +7,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Recorder, ScriptedModel, TempDir, created, text};
+use common::{Recorder, ScriptedModel, TempDir, created, text, valid_summary};
 use radian_core::{
     Agent, AgentConfig, ContentPart, ContextBudget, InputSource, JournalRecord, Message,
     ModelResponse, StopReason, TranscriptJournal, TurnOptions,
@@ -65,7 +65,7 @@ async fn a_steer_during_an_open_segment_does_not_deadlock_the_driver() {
 
     // Summary first, then a `PauseTurn` step (so steering is drained), then the final answer.
     let model = ScriptedModel::new([
-        summary_response("short summary"),
+        summary_response(&valid_summary("short summary")),
         pause_turn_response(),
         text("done"),
     ]);

@@ -1,6 +1,6 @@
 # arc：hub 接口与通知钩子（远程客户端的服务端）
 
-- 状态：decided（派发前要定的小事见末尾；§4 的两个通知时间点已随 ADR 0048 的 `[hooks]` 落地）
+- 状态：decided（2026-10-31 派发前的小事已定，见末尾；§4 的两个通知时间点已随 ADR 0048 的 `[hooks]` 落地）
 - 涉及 ADR：0048（§11 owner 动作、§13 调度循环与 `runner.lock`、§14 v0 排除项、§15 配置与目录）、0013（新的监听口）、0020（`~/.radian/` 下的新文件）、0008（新配置键）、0034（通知内容的隐私口径）
 - 来源：`docs/backlog/arc.md` 里「v1 要 desktop / iOS / web app」一条；`research/2026-10-22-arc-app-product-design.md`；客户端本身见 `arc-ios.md`
 
@@ -16,12 +16,21 @@ arc 的全部状态是 `<repo>/.radian/arc/` 下的文件，单写者。调度�
 
 - 读：直接读各仓库的 arc 文件，返回与 `list --json` / `show --json` 相同的结构。
 - 写：owner 动作调 CLI 的同一组库函数，只拿该仓库的 `state.lock`；拿不到锁时返回 CLI 的那句消息，什么都不改。
-- 调度：hub 对每个登记的仓库各拿一把 `runner.lock`，在自己的 task 里跑该仓库的调度循环，与 `radian arc serve` 调同一个库函数。ADR 0048 §13 的单写者规则是每仓库一把锁、持有者是唯一写者，一个进程可以持有多把；仓库之间的状态文件本来就分开。某仓库已被 `arc serve` 持锁时，hub 拿不到锁就只读它、不调度它，接口如实报告持锁者（hub、某个 pid、还是没有）。`radian arc serve` 保留为单仓库形态，TUI 打开时没锁就起一个的规则不变。
+- 调度：hub 对每个登记的仓库各拿一把 `runner.lock`，在自己的 task 里跑该仓库的调度循环，与 `radian arc serve` 调同一个库函数。ADR 0048 §13 的单写者规则是每仓库一把锁、持有者是唯一写者，一个进程可以持有多把；仓库之间的状态文件本来就分开。某仓库已被 `arc serve` 持锁时，hub 拿不到锁就只读它、不调度它，接口如实报告持锁者（hub、某个 pid、还是没有）。（§1a 改掉了这一句：`arc serve` 并入 hub）原文：`radian arc serve` 保留为单仓库形态，TUI 打开时没锁就起一个的规则不变。
 - 全机上限 `[hub] concurrency`：所有登记仓库同时在 `doing` 的 task 总数；与每仓库的 `[limits] concurrency` 的关系（都要有空位，还是全机覆盖仓库）派发前定。
 - 故障隔离：一个仓库的 pass 出错只记进该仓库的 `loop.log`，HTTP 继续服务；二进制被替换时的重启沿用 `arc serve` 的规则，SSE 断一次，客户端按第 3 条重连重读。
 - 仓库登记是显式列表，不自动发现。
 
 hub 是登记仓库的调度者加对外接口，不是第二种写者：每个仓库仍只有一个 `runner.lock` 持有者，ADR 0048 §13 的措辞从「每仓库一个 `serve` 进程」改为「每仓库一把锁，持有者是 `arc serve` 或 hub」。进程模型见 `research/2026-10-29-radian-app-bundle.md`。
+
+### 1a. `radian arc serve` 并入 hub（2026-10-31）
+
+调度循环只有一个实现、一个命令：`radian hub`。`radian arc serve` 取消（`radian arc run` 保留：它是无界面的一次 pass，不持续）。
+
+- `radian hub` 每个 `[hub] interval_secs` 重读 `~/.radian/hub/repos.toml`：新登记的仓库在下一轮拿锁、调度；被 `remove` 的仓库释放锁。登记仍是显式列表。
+- `radian arc` 的 TUI 打开或按 `R` 时没有进程持有本仓库的 `runner.lock`：本仓库没登记就先 `hub add` 它（登记表加一行，TUI 显示一行说明）；hub 没在跑就起一个 `radian hub`（与今天起 serve 的方式相同，detached）；hub 已在跑就什么都不做，它下一轮会接上。探测规则（只探不持）不变。
+- 只登记一个仓库的用户，hub 就是今天的 serve；HTTP 随 hub 一起起，只绑 loopback，没有关闭 HTTP 的键。
+- ADR 0048 §13 改为「每仓库一把 `runner.lock`，持有者是 hub」，§14 的 hub 一句同步；TUI 起循环的那句改成起 hub。ADR 0032 的子命令表删 `arc serve`、加 `hub`。手册 `loop.md` 的 `serve` 一节改写成 hub 页的链接，`tui.md` 的「the loop」一节改成起 hub。旧命令 `radian arc serve` 退出 `2`，一行 stderr 指向 `radian hub`（与 `run --watch` 被拒的写法相同）。
 
 ### 2. 只听 loopback，token 必须
 
@@ -63,12 +72,13 @@ v1 不提供会话的实时查看：不投影 journal，不发 block，不需要
 - 钩子是 ADR 0048 decision 10 的 `[hooks]`（同一组环境变量，同样的超时、输出与"失败只警告"规则），在调度循环里跑，所以 hub 不在时通知照样发。通知要的两个时间点 `after_awaiting_human`、`after_proposed` 已随 `[hooks]` 落地；hub 本身只需要在手册里给出示例钩子。
 - 隐私口径（ADR 0034）：手册的示例钩子只发仓库名、task id 与 phase，正文由客户端打开后连 hub 取。示例里通知点开后跳到客户端的 task 页（客户端的 URL scheme 见 `arc-ios.md`）。
 
-## 派发前要定的小事
+## 派发前的小事（已定，2026-10-31）
 
-- 子命令是 `radian hub`（无参数起服务；hub 还列会话，位于 arc 之上，所以不在 `radian arc` 下）、`radian hub add | remove | list | pair | token rotate`；要定的只剩默认端口。
-- 仓库登记放在哪：`~/.radian/config/config.toml` 的一节，还是 `~/.radian/` 下单独一个文件；token 文件的路径。两者都要改 ADR 0020 的目录表。
-- 用哪个 HTTP 服务端 crate（工作区今天没有）。
-- `api_version` 与 `schema_version` 之间的关系写在哪一页手册。
+- 子命令：`radian hub`（无参数起服务：调度循环加 HTTP）、`radian hub add <path> [--name <name>]`、`remove <name>`、`list [--json]`、`pair`、`token rotate`。ADR 0032 的子命令表加 `hub`。默认端口 `7341`，配置键 `[hub] port`（整数，1 到 65535）；只绑 `127.0.0.1`，没有 bind 键。
+- 仓库登记放单独文件 `~/.radian/hub/repos.toml`（`[[repos]]`，`name` 与 `path`；由 `hub add` / `remove` 写，用户配置文件不碰它）；token 放 `~/.radian/hub/token`（0600）。`hub/` 整个目录进 ADR 0020 的 sandbox 不可读清单，与 `credentials/` 同级。
+- `[hub]` 配置节在 `~/.radian/config/config.toml`：`port`（缺省 7341）、`concurrency`（整数 ≥ 1，缺省 4：所有登记仓库同时在 `doing` 的 task 总数；一个 task 要起，仓库自己的 `[limits] concurrency` 与全机的 `[hub] concurrency` 都要有空位）、`interval_secs`（缺省与 `radian arc serve` 相同）。
+- HTTP 服务端用工作区里已经有的 `hyper` 1 加 `hyper-util`（reqwest 的依赖），手写路由表，不引入 axum 一类框架。`hub pair` 的二维码用纯 Rust 的 `qrcode` crate（新依赖，无网络）；没有它也要能打印文本形式的地址与 token。
+- `api_version` 与 `schema_version` 的关系写在手册的 hub 页（`docs/user/arc/hub.md`），`files.md` 的 `schema_version` 处链接过去。
 
 ## 验收
 
