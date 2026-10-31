@@ -31,6 +31,7 @@ use crate::trust;
 /// `tests/command_hooks.rs` pins the command hooks after permissions. Swapping `memory` and
 /// `skills` here is the mutation that `skills_order` catches; moving `commands` before
 /// `permissions` is the one `command_hooks` catches.
+#[allow(clippy::too_many_arguments)]
 pub fn session_hooks(
     role: Arc<crate::prompt::RoleHooks>,
     permissions: Arc<PermissionHooks>,
@@ -39,12 +40,17 @@ pub fn session_hooks(
     skills: Arc<SkillsHooks>,
     goal: Arc<crate::goal::GoalHooks>,
     facts: Arc<crate::prompt::SessionFactsHooks>,
+    context: Arc<crate::context::ContextHooks>,
 ) -> impl Hooks {
     // The order is the promise: the role layers, permissions, commands, memory, skills,
-    // goal, then the volatile <session> facts (ADR 0025 S6, ADR 0036, ADR 0045, ADR 0047).
+    // goal, then the volatile <session> facts, then the subtree context hook (ADR 0025 S6,
+    // ADR 0036, ADR 0045, ADR 0047).
     (
-        (((((role, permissions), commands), memory), skills), goal),
-        facts,
+        (
+            (((((role, permissions), commands), memory), skills), goal),
+            facts,
+        ),
+        context,
     )
 }
 
