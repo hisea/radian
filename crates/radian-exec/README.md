@@ -153,7 +153,7 @@ records' estimated total exceeds `[memory.injection] max_tokens` (ADR 0021 D7). 
 profile allows the model's `write` and `patch` to the two memory scope directories in both
 tiers (ADR 0012; ADR 0021 invariant 5); whether a call reaches the file is the file tools'
 root boundary (ADR 0039 §4). Memory records are written with those ordinary file tools —
-there is no dedicated memory tool — and old `source: agent` records in existing logs stay
+there is no dedicated memory-write tool — and old `source: agent` records in existing logs stay
 readable. When the user asks the model to remember something, the model routes it by content
 (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
 `AGENTS.md`, a procedure useful across projects becomes a user-level skill at

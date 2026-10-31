@@ -128,6 +128,7 @@ impl Profile {
     pub fn workspace_write(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend(git_exec_denies(ws));
@@ -158,6 +159,7 @@ impl Profile {
         }
         let mut profile = Self::build(Preset::WorkspaceWrite, workspace, |ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
@@ -181,6 +183,7 @@ impl Profile {
     pub fn full_access(workspace: impl AsRef<Path>) -> Result<Self, ProfileError> {
         Self::build(Preset::FullAccess, workspace, |ws| {
             let mut rules = read_only();
+            rules.extend(memory_rules());
             rules.extend(always_allowed());
             rules.extend(write_under(ws));
             rules.extend([
@@ -347,6 +350,25 @@ fn canonical_workspace(path: &Path) -> Result<PathBuf, ProfileError> {
         return Err(ProfileError::NotADirectory(canonical));
     }
     Ok(canonical)
+}
+
+/// ADR 0021 D7: `memory_search` is the model's only memory tool, so every tier allows it and
+/// it never prompts. It is still mounted when the injection budget is exceeded
+/// (`radian-host`), so removing the rule would turn every call into an `ask` — a prompt in
+/// the TUI and a denial in a headless turn. There is no memory write tool: the model writes
+/// records with `write` and `patch` (see [`Profile::with_memory_root`]). A `deny` rule still
+/// wins.
+fn memory_rules() -> Vec<Rule> {
+    ["memory_search"]
+        .into_iter()
+        .map(|name| {
+            Rule::new(
+                ToolMatcher::Name(name.into()),
+                ResourceMatcher::Any,
+                Action::Allow,
+            )
+        })
+        .collect()
 }
 
 /// The read-only built-ins, allowed regardless of path: `radian-coding` enforces the
@@ -600,14 +622,26 @@ mod tests {
         }
     }
 
-    /// Edge case 7: `memory_search` is no longer a built-in `allow` rule. An unknown tool name
-    /// falls to the tier's default, which is `ask` in every profile.
+    /// ADR 0021 D7: `memory_search` is still mounted, so every tier must allow it; the
+    /// tier default would prompt in the TUI and deny in a headless turn. No memory write
+    /// tool exists — those names have no rule, so they stay unknown and fall to `ask`.
     #[test]
-    fn memory_search_is_no_longer_a_known_allow_rule() {
+    fn memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks() {
         let ws = TestDir::new("memory-search-ws");
         let root = TestDir::new("memory-search-root");
         for (tier, profile) in memory_profiles(&ws, &root) {
-            assert_eq!(action(&profile, "memory_search"), Action::Ask, "{tier}");
+            assert_eq!(action(&profile, "memory_search"), Action::Allow, "{tier}");
+            for name in [
+                "memory_save",
+                "memory_revise",
+                "memory_get",
+                "memory_archive",
+                "memory_forget",
+                "memory_purge",
+                "memory_confirm",
+            ] {
+                assert_eq!(action(&profile, name), Action::Ask, "{tier}: {name}");
+            }
         }
     }
 
