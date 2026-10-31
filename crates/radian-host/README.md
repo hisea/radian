@@ -232,9 +232,9 @@ transcript is the dedup ledger, so a compaction that folds an addition into a su
 its ids again. The driver's `TurnAdditions` seam (`radian_runtime::Driver::set_turn_additions`)
 places it in the inbox's `inject` lane for a turn claimed from a user input, after the user
 message and before the turn's first model call; a turn whose source is not `User` (a background
-job notification) never calls it. When the injected `(id, revision, scope)` set — the fixed block
-plus the transcript's additions — changes, the hook writes a `critical: false` `MemoryInjected`
-event: ids/revisions/scopes only, never content.
+job notification) never calls it. The hook does not write a legacy `MemoryInjected` record:
+this build's writer records the injected index files only (ADR 0021 D6), and the file-store
+injection writes it.
 
 `[memory.injection] additions` (default true) and `addition_budget` (default 500) come from the
 config file; the rest of the D6 table is still a documented default and is named in the startup
@@ -250,13 +250,13 @@ line's skipped list.
 | A scope borrows the other's unused share; a record is dropped whole, not truncated | `a_global_record_borrows_the_projects_unused_share`, `a_record_that_does_not_fit_is_dropped_whole_not_truncated` | `src/memory/injection.rs` |
 | The same inputs give a byte-identical block | `the_same_inputs_produce_a_byte_identical_block` | `src/memory/injection.rs` |
 | The query is the session's first user message, not the last | `the_query_is_the_first_user_message`, `the_fixed_block_orders_by_the_first_user_message_not_the_last` | `src/memory/injection.rs` |
-| The block reaches the system prompt and `MemoryInjected` is written once, without content | `the_block_reaches_the_system_prompt_and_the_event_is_written_once` | `tests/memory_injection.rs` |
+| The block reaches the system prompt and no legacy `MemoryInjected` record is written | `the_block_reaches_the_system_prompt_and_writes_no_legacy_record` | `tests/memory_injection.rs` |
 | A later turn's new hits become one System message, deduplicated against the block and the ledger | `a_later_turn_appends_its_new_hits_as_one_system_message` | `tests/memory_injection.rs` |
 | The addition budget drops whole records; `additions = false` sends nothing | `an_addition_budget_drops_whole_records_and_additions_can_be_off` | `tests/memory_injection.rs` |
 | Resume rebuilds from the current memory | `a_new_hook_instance_resumes_with_the_current_memory` | `tests/memory_injection.rs` |
 | A broken memory log warns but never fails the turn | `a_broken_memory_log_warns_but_does_not_fail_the_turn` | `tests/memory_injection.rs` |
 | The driver places an addition after the user message and before the first call; a System turn gets none | `a_host_addition_lands_after_the_user_message_and_before_the_first_call` | `radian-runtime/tests/driver.rs` |
-| One process, two turns: byte-identical system prompts and tool definitions, the addition in the transcript | `the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | `radian-exec/tests/cli.rs` |
+| One process, two turns: byte-identical system prompts and tool definitions, the addition in the transcript, no legacy record | `the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once` | `radian-exec/tests/cli.rs` |
 | `memory_search` mounts only past the budget; a `memory_save` call is an unknown tool and the turn still succeeds | `memory_search_mounts_only_past_the_injection_budget`, `a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
 | A single-turn run (`-p`) appends nothing; a resume ranks by the session's first user message | `exec_p_ranks_the_block_by_its_prompt_and_appends_nothing`, `a_resumed_session_ranks_the_block_by_its_first_user_message` | `radian-exec/tests/cli.rs` |
 | `[memory.injection]` carries `additions`/`addition_budget`; the rest is reported as skipped | `the_memory_injection_keys_are_read_and_the_rest_is_reported` | `tests/config_fixtures.rs` |

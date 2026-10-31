@@ -104,7 +104,8 @@ pub enum ApprovalPolicyValue {
 
 /// One record that was injected before a model request, in the **old** JSONL store's shape
 /// (ADR 0021 D6 before the file store): only the id, revision and scope — never the content.
-/// It is kept so an old journal still reads; this build writes [`MemoryInjectedIndex`] instead.
+/// This build writes only [`MemoryInjectedIndex`]; the type stays so an old journal still reads
+/// and so a transcript addition can carry its `(id, revision, scope)` origin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryInjectedRecord {
     pub id: String,
@@ -248,12 +249,6 @@ pub enum RuntimeEvent {
     /// record the host writes alongside (`{"approval": …}`); this event is the permission
     /// audit of the switch itself.
     ApprovalPolicyChanged { policy: ApprovalPolicyValue },
-    /// The memory injected before a model request (ADR 0021 D6). Audit only:
-    /// `critical = false`. This variant keeps the **old** JSONL store's ordered list of
-    /// `{ id, revision, scope }` for the legacy host path; the file store's writer is
-    /// [`crate::SessionJournal::append_memory_injected_indexes`], which records the injected
-    /// index files instead.
-    MemoryInjected { records: Vec<MemoryInjectedRecord> },
     /// A child session was forked from this one (ADR 0022 §3). Audit only: `critical = false`.
     /// The child's own `SessionCreated.parent` is the authority on the lineage; this record is
     /// the parent's index of it. `parent_seq` names the fork point and matches the child's
@@ -351,7 +346,6 @@ impl RuntimeEvent {
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
             RuntimeEvent::ApprovalPolicyChanged { .. } => "ApprovalPolicyChanged",
-            RuntimeEvent::MemoryInjected { .. } => "MemoryInjected",
             RuntimeEvent::SessionForked { .. } => "SessionForked",
             RuntimeEvent::ProjectTrustChanged { .. } => "ProjectTrustChanged",
             RuntimeEvent::UserBash { .. } => "UserBash",
@@ -371,7 +365,7 @@ impl RuntimeEvent {
 
     /// The `critical` flag (ADR 0006 §4). State/rebuild events are `true`; audit events are
     /// `false` (`TurnFailed`, `ContextBudgetReached`, `PermissionResolved`,
-    /// `ApprovalPolicyChanged`, `MemoryInjected`, `SessionForked`, `ProjectTrustChanged`,
+    /// `ApprovalPolicyChanged`, `SessionForked`, `ProjectTrustChanged`,
     /// `UserBash`, `BackgroundJobStarted`, `BackgroundJobSettled`, and every `Goal*`
     /// event). A reader may skip a `false` event without breaking reconstruction.
     pub fn critical(&self) -> bool {
@@ -386,7 +380,6 @@ impl RuntimeEvent {
             | RuntimeEvent::ContextBudgetReached { .. }
             | RuntimeEvent::PermissionResolved { .. }
             | RuntimeEvent::ApprovalPolicyChanged { .. }
-            | RuntimeEvent::MemoryInjected { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::ProjectTrustChanged { .. }
             | RuntimeEvent::UserBash { .. }
@@ -530,11 +523,6 @@ pub(crate) struct SessionForkedData<'a> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct MemoryInjectedData<'a> {
-    pub records: &'a [MemoryInjectedRecord],
-}
-
-#[derive(Serialize)]
 pub(crate) struct MemoryIndexesData<'a> {
     pub indexes: &'a [MemoryInjectedIndex],
 }
@@ -625,7 +613,6 @@ pub(crate) enum RuntimeData<'a> {
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
     ApprovalPolicyChanged(ApprovalPolicyChangedData),
-    MemoryInjected(MemoryInjectedData<'a>),
     SessionForked(SessionForkedData<'a>),
     ProjectTrustChanged(ProjectTrustChangedData),
     UserBash(UserBashData<'a>),
@@ -655,7 +642,6 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
             RuntimeData::ApprovalPolicyChanged(d) => d.serialize(serializer),
-            RuntimeData::MemoryInjected(d) => d.serialize(serializer),
             RuntimeData::SessionForked(d) => d.serialize(serializer),
             RuntimeData::ProjectTrustChanged(d) => d.serialize(serializer),
             RuntimeData::UserBash(d) => d.serialize(serializer),
@@ -766,9 +752,6 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         }),
         RuntimeEvent::ApprovalPolicyChanged { policy } => {
             RuntimeData::ApprovalPolicyChanged(ApprovalPolicyChangedData { policy: *policy })
-        }
-        RuntimeEvent::MemoryInjected { records } => {
-            RuntimeData::MemoryInjected(MemoryInjectedData { records })
         }
         RuntimeEvent::SessionForked {
             child_session_id,

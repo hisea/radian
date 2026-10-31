@@ -15,25 +15,10 @@ use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, WriteScop
 use radian_host::{Skill, SkillsHooks, session_hooks};
 use radian_memory::Kind;
 use radian_permissions::{NoopAudit, PermissionHooks, Profile};
-use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
 
 fn scratch(label: &str) -> common::TempDir {
     common::TempDir::named(&format!("radian-skills-order-{label}"))
-}
-
-fn journal(dir: &std::path::Path) -> Arc<SessionJournal> {
-    Arc::new(
-        SessionJournal::create(
-            dir.join("s.jsonl"),
-            "sid",
-            SessionCreatedData::new(
-                "/work/example",
-                json!({"provider": "example", "model": "m"}),
-            ),
-        )
-        .unwrap(),
-    )
 }
 
 fn context() -> HookContext {
@@ -64,7 +49,6 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         .unwrap();
     let memory = Arc::new(MemoryHooks::new(
         Some(service),
-        journal(&dir),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));

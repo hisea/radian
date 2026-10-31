@@ -418,12 +418,7 @@ pub async fn open_session(
     // ADR 0021: one injection object per session. The fixed block is computed once
     // (by whichever of the two seams runs first) and the driver's per-turn seam appends later
     // turns' new hits as one System message through the inbox's inject lane.
-    let injection = MemoryInjection::new(
-        memory.clone(),
-        Arc::clone(&journal),
-        injection_config,
-        memory_warning,
-    );
+    let injection = MemoryInjection::new(memory.clone(), injection_config, memory_warning);
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =

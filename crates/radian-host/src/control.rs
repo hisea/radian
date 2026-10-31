@@ -510,7 +510,6 @@ fn runtime_event_json(event: &RuntimeEvent) -> Value {
             "policy": policy,
         }),
         RuntimeEvent::ApprovalPolicyChanged { policy } => json!({ "policy": policy }),
-        RuntimeEvent::MemoryInjected { records } => json!({ "records": records }),
         RuntimeEvent::SessionForked {
             child_session_id,
             parent_seq,

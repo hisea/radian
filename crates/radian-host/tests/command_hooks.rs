@@ -106,18 +106,9 @@ fn production_chain(
     permissions: Arc<PermissionHooks>,
     commands: Arc<CommandHooks>,
 ) -> impl Hooks {
-    let journal = Arc::new(
-        SessionJournal::create(
-            ws.join("journal.jsonl"),
-            "sid",
-            SessionCreatedData::new("/work/example", json!({"provider": "example"})),
-        )
-        .unwrap(),
-    );
     let role = Arc::new(radian_host::RoleHooks::new("", "", None));
     let memory = Arc::new(radian_host::memory::MemoryHooks::new(
         None,
-        journal,
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
     ));
