@@ -73,7 +73,7 @@ fn injected(session: &Session) -> Vec<(u64, String)> {
 fn injected_sets(session: &Session) -> Vec<Vec<(u64, String)>> {
     let mut out = Vec::new();
     for event in session.events() {
-        if let EventData::MemoryInjected { records } = &event.data {
+        if let EventData::MemoryInjected { records, .. } = &event.data {
             out.push(
                 records
                     .iter()

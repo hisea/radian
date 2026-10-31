@@ -7899,7 +7899,7 @@ async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once
         .events()
         .iter()
         .filter_map(|event| match &event.data {
-            radian_session::EventData::MemoryInjected { records } => Some(
+            radian_session::EventData::MemoryInjected { records, .. } => Some(
                 records
                     .iter()
                     .map(|record| record.id.clone())

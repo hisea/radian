@@ -226,7 +226,7 @@ async fn memory_injected_round_trips_without_content_and_is_not_critical() {
         .expect("the event round-trips");
     assert!(!injected.critical);
     match &injected.data {
-        EventData::MemoryInjected { records } => {
+        EventData::MemoryInjected { records, .. } => {
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].id, "mem-1");
             assert_eq!(records[0].revision, 3);
