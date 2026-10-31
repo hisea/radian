@@ -39,3 +39,15 @@ file from a backup under `.radian/`.
 | TK0262-M4 | `leak.py` `Scanner._pointed`: `remote add` option values are not skipped (`_words(rest, REMOTE_OPTION_ARGS)` → `_words(rest)`) | `LeakTest.test_a_remote_add_with_option_arguments_names_the_remote` (4 subtests: `-t main`, `--track main`, `-m main`, `--master main`) | ✅ failed |
 | TK0262-M5 | `leak.py` `scan`: calls are de-duplicated by `(name, arguments)` again instead of call id | `LeakTest.test_two_fetches_of_one_remote_keep_the_second_result` | ✅ failed |
 | TK0262-M6 | `leak.py` `second_history`: `fetch`/`pull`/`clone` option values are not skipped (`_words(rest, SECOND_HISTORY_OPTION_ARGS.get(sub, frozenset()))` → `_words(rest)`) | `LeakTest.test_fetch_options_that_take_a_value_do_not_shadow_the_remote` (4 subtests) and `test_a_clone_with_options_names_the_repository` (`--depth 1 --reference /srv/ref`) | ✅ failed |
+
+## TK0286: follow-ups for the leak scanner and the columns guard (2026-10-31)
+
+Branch `work/TK0286-compaction-rereads-reserve-followups`. Each mutation was applied to the
+named file, backed up under `.radian/mut/`, and the named test run outside the workspace
+sandbox (the leak tests skip when the sandbox puts their temp tree inside a checkout).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0286-M6 | `leak.py` `FETCH_OPTION_ARGS` drops `-o` (the short `--server-option`) | `LeakTest.test_fetch_options_that_take_a_value_do_not_shadow_the_remote` (`git fetch -o foo origin` and `git pull -o foo origin main` stay level 1) | ✅ failed |
+| TK0286-M7 | `leak.py` `scan` keeps the first representation of a call id again (`calls[position] = call` → `continue`) | `LeakTest.test_a_rewritten_call_is_scanned_with_its_final_arguments` (level 1 instead of 3: the rewrite's `git status` hides the `git fetch`) | ✅ failed |
+| TK0286-M8 | `README.md`'s displayed-name list drops `compactions` and repeats `output` | `ColumnsDocTest.test_the_displayed_names_are_exactly_the_table_columns` (the list no longer equals `report.TABLE_COLUMNS`) | ✅ failed |
