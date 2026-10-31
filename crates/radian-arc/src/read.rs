@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{Stage, Verdict};
+use super::gate::{DEFAULT_FIX_LEVEL, Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -136,7 +136,9 @@ pub struct StageView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReviewSummaryView {
     pub summary: String,
+    /// The failing findings: at or above the verdict's `fix_level`, not `pre_existing`.
     pub blocking: Vec<String>,
+    /// The rest: below the `fix_level`, or `pre_existing`.
     pub suggestions: Vec<String>,
     pub verified: Vec<String>,
 }
@@ -966,12 +968,25 @@ pub fn merge_view(store: &Store, task: &str, gate_running: bool) -> Result<Merge
                 None => true,
             })
             .max_by(|(_, one), (_, other)| one.ended_at.cmp(&other.ended_at))
-            .and_then(|(_, verdict)| verdict.review.as_ref())
-            .map(|report| ReviewSummaryView {
-                summary: report.summary.clone(),
-                blocking: report.blocking.iter().map(ToString::to_string).collect(),
-                suggestions: report.suggestions.iter().map(ToString::to_string).collect(),
-                verified: report.verified.clone(),
+            .and_then(|(_, verdict)| {
+                let fix_level = verdict
+                    .review_settings
+                    .as_ref()
+                    .map_or(DEFAULT_FIX_LEVEL, |settings| settings.fix_level.as_str());
+                verdict.review.as_ref().map(|report| ReviewSummaryView {
+                    summary: report.summary.clone(),
+                    blocking: report
+                        .failing(fix_level)
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    suggestions: report
+                        .rest(fix_level)
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    verified: report.verified.clone(),
+                })
             })
     } else {
         None

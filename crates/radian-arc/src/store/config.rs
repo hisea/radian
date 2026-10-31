@@ -840,7 +840,7 @@ propose_followups = true        # add the plan's review follow-up once it has no
 timeout_secs = 900              # wall-time limit of one review session; 0 waits forever
 # exec_args = ["--model", "m"]  # not set: the same as [worker] exec_args
 # prompt_file = "review.md"     # not set: the built-in prompt only
-# fix_level = "major"           # `critical`, `major` or `minor`; recorded in the review verdict
+# fix_level = "major"           # `critical`, `major` or `minor`; a finding at or above it fails the round
 
 # [gate.reviewers.default.first]
 # exec_args = ["--model", "m"]  # not set: the same as [gate.reviewers.default] exec_args

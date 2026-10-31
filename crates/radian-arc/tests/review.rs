@@ -12,8 +12,8 @@ use std::process::{Command, Stdio};
 
 use common::*;
 use radian_arc::gate::{
-    ReviewItem, ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult,
-    effective_stages, required_passed, verdict_path, verdict_set_digest,
+    Finding, ReviewReport, Stage, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, effective_stages,
+    required_passed, verdict_path, verdict_set_digest,
 };
 use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
@@ -309,6 +309,16 @@ impl Fixture {
         self.tune(
             "# prompt_file = \"review.md\"",
             &format!("prompt_file = \"{file}\""),
+        );
+    }
+
+    /// Sets `[gate.reviewers.default] fix_level`.
+    fn review_fix_level(&self, level: &str) {
+        self.tune(
+            "# fix_level = \"major\"           # `critical`, `major` or `minor`; a finding at or above it fails the round",
+            &format!(
+                "fix_level = \"{level}\"           # `critical`, `major` or `minor`; a finding at or above it fails the round"
+            ),
         );
     }
 
@@ -2495,6 +2505,50 @@ fn review_object_message(summary: &str, blocking: &[Value], suggestions: &[Value
     )
 }
 
+/// One finding in the new report shape. A `trigger` of `""` is left out.
+fn finding_json(severity: &str, file: &str, line: u32, summary: &str, trigger: &str) -> Value {
+    let mut value = serde_json::json!({
+        "severity": severity,
+        "file": file,
+        "line": line,
+        "summary": summary,
+    });
+    if !trigger.is_empty() {
+        value["trigger"] = json!(trigger);
+    }
+    value
+}
+
+/// A finding without a place: the no-place rule keeps it failing at its severity.
+fn unplaced_finding_json(severity: &str, summary: &str) -> Value {
+    serde_json::json!({"severity": severity, "summary": summary})
+}
+
+/// A decoded finding with a place and no trigger.
+fn graded(severity: &str, file: &str, line: u32, summary: &str) -> Finding {
+    Finding {
+        severity: severity.to_owned(),
+        file: Some(file.to_owned()),
+        line: Some(line),
+        summary: summary.to_owned(),
+        trigger: String::new(),
+        pre_existing: false,
+    }
+}
+
+/// A session's final message with one fenced report in the new shape.
+fn findings_message(summary: &str, findings: &[Value]) -> String {
+    let value = serde_json::json!({
+        "summary": summary,
+        "findings": findings,
+        "verified": ["the diff reads correctly"],
+    });
+    format!(
+        "Here is my review.\n\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&value).expect("the report serializes")
+    )
+}
+
 /// A file with `count` numbered lines.
 fn numbered(count: u32) -> String {
     (1..=count).map(|n| format!("line {n}\n")).collect()
@@ -2536,8 +2590,9 @@ fn a_review_with_no_blocking_findings_passes_and_keeps_its_summary() {
     assert!(verdict.is_pass(), "{:?}", verdict.reason);
     let report = verdict.review.clone().expect("the review report");
     assert_eq!(report.summary, summary);
-    assert!(report.blocking.is_empty(), "{report:?}");
-    assert_eq!(report.suggestions, vec![ReviewItem::text("a nicer name")]);
+    assert_eq!(report.findings.len(), 1, "{report:?}");
+    assert_eq!(report.findings[0].severity, "minor");
+    assert_eq!(report.findings[0].summary, "a nicer name");
     assert_eq!(verdict.sha, head);
     assert_eq!(verdict.main_sha.as_deref(), Some(fixture.base.as_str()));
     assert_eq!(verdict.candidate_sha.as_deref(), Some(head.as_str()));
@@ -2568,7 +2623,7 @@ fn a_review_with_no_blocking_findings_passes_and_keeps_its_summary() {
         prompt.contains(&format!("{}..{}", fixture.base, head)),
         "{prompt}"
     );
-    assert!(prompt.contains("\"blocking\""), "{prompt}");
+    assert!(prompt.contains("\"findings\""), "{prompt}");
 }
 
 /// The review session reviews the task's own change only. Main was merged into the branch
@@ -2630,26 +2685,26 @@ fn a_blocking_finding_sends_the_task_to_rework_with_the_item_in_the_reason() {
     assert_eq!(verified.phase, "rework_pending", "{verified:?}");
     let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
     assert!(!verdict.is_pass());
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
     assert!(
         stored.verdict_set_digest.is_none(),
         "no digest without a pass"
     );
     let reason = review::rework_reason(&fixture.store, &stored).expect("a rework reason");
-    assert!(reason.contains("review_blocking"), "{reason}");
+    assert!(reason.contains("review_findings"), "{reason}");
     assert!(reason.contains("rename the helper"), "{reason}");
     assert!(reason.contains("add a test"), "{reason}");
-    // A plain string in the report is an item with only its text.
+    // A plain string in the old shape is a finding at the default severity, `major`.
     let report = verdict.review.clone().expect("a report");
     assert_eq!(
-        report.blocking,
+        report.findings,
         vec![
-            ReviewItem::text("rename the helper"),
-            ReviewItem::text("add a test"),
+            Finding::new("major", "rename the helper"),
+            Finding::new("major", "add a test"),
         ]
     );
-    assert!(!report.blocking[0].pre_existing);
+    assert!(!report.findings[0].pre_existing);
 
     // The rework path is the same as after a failed `commands` stage.
     plan_ops::add_rework(&fixture.store, &fixture.task, "fix the review").expect("a rework");
@@ -2819,7 +2874,7 @@ fn a_review_failure_after_a_passing_commands_stage_writes_the_automatic_rework()
         "{verified:?}"
     );
     let rework = verified.review.clone().expect("the review rework");
-    assert_eq!(rework.items, vec![ReviewItem::text("add a test")]);
+    assert_eq!(rework.findings, vec![Finding::new("major", "add a test")]);
     assert!(
         fixture
             .verdict(&fixture.attempt_label(), Stage::Commands)
@@ -2827,7 +2882,7 @@ fn a_review_failure_after_a_passing_commands_stage_writes_the_automatic_rework()
     );
     let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
     assert!(!review.is_pass());
-    assert_eq!(review.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(review.reason.as_deref(), Some("review_findings"));
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
     assert!(
         stored.body.contains("## Rework 2 (review)"),
@@ -2872,9 +2927,9 @@ fn a_commands_failure_decides_the_round_when_the_review_fails_too() {
     );
     let review = fixture.verdict(&fixture.attempt_label(), Stage::Review);
     assert!(!review.is_pass());
-    assert_eq!(review.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(review.reason.as_deref(), Some("review_findings"));
     assert_eq!(
-        review.review.as_ref().map(|report| report.blocking.len()),
+        review.review.as_ref().map(|report| report.findings.len()),
         Some(1),
         "the review verdict keeps its items for `show`"
     );
@@ -3424,8 +3479,10 @@ fn show_exposes_the_review_findings() {
     let value: Value =
         radian_arc::store::cli::show_json(&fixture.store, &fixture.task).expect("show json");
     assert_eq!(value["review"]["summary"], "the change adds one line");
-    assert_eq!(value["review"]["blocking"], serde_json::json!([]));
-    assert_eq!(value["review"]["suggestions"][0], "cite it");
+    assert_eq!(
+        value["review"]["findings"],
+        serde_json::json!([{"severity": "minor", "summary": "cite it"}])
+    );
     assert!(
         value["review_verdict"]
             .as_str()
@@ -3566,16 +3623,10 @@ fn the_first_review_prompt_holds_the_full_diff_and_its_item_blocks() {
     assert!(prompt.contains("+one"), "{prompt}");
     assert!(!prompt.contains("## The previous review"), "{prompt}");
     let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(
-        verdict.review.expect("a report").blocking,
-        vec![ReviewItem {
-            level: Some("major".to_owned()),
-            file: Some("one.txt".to_owned()),
-            line: Some(1),
-            text: "the line is wrong".to_owned(),
-            pre_existing: false,
-        }]
+        verdict.review.expect("a report").findings,
+        vec![graded("major", "one.txt", 1, "the line is wrong")]
     );
     assert_eq!(
         verdict.review_pre_existing, None,
@@ -3644,7 +3695,7 @@ fn a_rework_prompt_holds_the_increment_and_the_previous_items() {
         "a file only the first attempt changed is in the increment:\n{prompt}"
     );
     assert!(
-        prompt.contains("Check that each blocking item of the previous review is fixed"),
+        prompt.contains("Check that each failing finding of the previous review is fixed"),
         "{prompt}"
     );
     assert!(!prompt.contains("## The diff"), "{prompt}");
@@ -3711,15 +3762,12 @@ fn an_item_in_a_file_the_task_did_not_touch_is_moved_and_the_stage_passes() {
     assert!(verdict.is_pass(), "{:?}", verdict.reason);
     assert_eq!(verdict.review_pre_existing, Some(1));
     let report = verdict.review.expect("a report");
-    assert!(report.blocking.is_empty(), "{report:?}");
+    assert!(report.failing("major").is_empty(), "{report:?}");
     assert_eq!(
-        report.suggestions,
-        vec![ReviewItem {
-            level: Some("minor".to_owned()),
-            file: Some("file.txt".to_owned()),
-            line: Some(1),
-            text: "this line was always odd".to_owned(),
+        report.findings,
+        vec![Finding {
             pre_existing: true,
+            ..graded("minor", "file.txt", 1, "this line was always odd")
         }]
     );
     let stored = fixture.store.load_task(&fixture.task).unwrap().item;
@@ -3772,10 +3820,10 @@ fn an_item_on_a_line_the_task_changed_in_an_earlier_attempt_keeps_blocking() {
         .expect("the rework round runs");
     assert_eq!(verified.phase, "rework_pending", "{verified:?}");
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(verdict.review_pre_existing, Some(0));
     assert_eq!(
-        verdict.review.expect("a report").blocking.len(),
+        verdict.review.expect("a report").findings.len(),
         1,
         "the item on a line the task changed stayed blocking"
     );
@@ -3833,7 +3881,13 @@ fn an_item_far_from_every_changed_line_of_its_file_is_moved() {
     assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
     assert_eq!(verdict.review_pre_existing, Some(1));
-    assert!(verdict.review.expect("a report").blocking.is_empty());
+    assert!(
+        verdict
+            .review
+            .expect("a report")
+            .failing("major")
+            .is_empty()
+    );
 }
 
 /// A blocking item on a line the rework added blocks: it is part of the task's own change.
@@ -3872,10 +3926,10 @@ fn a_blocking_item_on_an_increment_line_blocks() {
         .expect("the rework round runs");
     assert_eq!(verified.phase, "rework_pending", "{verified:?}");
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(verdict.review_pre_existing, Some(0));
     assert_eq!(
-        verdict.review.expect("a report").blocking.len(),
+        verdict.review.expect("a report").findings.len(),
         1,
         "the item on the increment line stayed blocking"
     );
@@ -3932,7 +3986,11 @@ fn a_blocking_item_near_an_unfixed_previous_item_still_blocks() {
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
     assert_eq!(verdict.review_pre_existing, Some(0));
     assert!(
-        !verdict.review.expect("a report").blocking.is_empty(),
+        !verdict
+            .review
+            .expect("a report")
+            .failing("major")
+            .is_empty(),
         "an unfixed earlier item stopped blocking"
     );
 }
@@ -3989,17 +4047,11 @@ fn a_critical_item_far_from_the_rework_and_the_previous_items_still_blocks() {
         .expect("the rework round runs");
     assert_eq!(verified.phase, "rework_pending", "{verified:?}");
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(verdict.review_pre_existing, Some(0));
     assert_eq!(
-        verdict.review.expect("a report").blocking,
-        vec![ReviewItem {
-            level: Some("critical".to_owned()),
-            file: Some("file.txt".to_owned()),
-            line: Some(30),
-            text: "a permission bypass".to_owned(),
-            pre_existing: false,
-        }]
+        verdict.review.expect("a report").findings,
+        vec![graded("critical", "file.txt", 30, "a permission bypass")]
     );
 }
 
@@ -4134,14 +4186,14 @@ fn a_reverify_of_the_same_head_gets_the_first_review_prompt_and_still_blocks() {
 
     let label = format!("{}-2", fixture.task);
     let verdict = fixture.verdict(&label, Stage::Review);
-    assert_eq!(verdict.reason.as_deref(), Some("review_blocking"));
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
     assert_eq!(verdict.sha, head, "the same commit is reviewed again");
     assert_eq!(
         verdict.review_pre_existing, None,
         "a first review moves nothing"
     );
     assert_eq!(
-        verdict.review.expect("a report").blocking.len(),
+        verdict.review.expect("a report").findings.len(),
         1,
         "an item 29 lines from the previous one still blocks"
     );
@@ -4180,7 +4232,12 @@ fn a_failed_review_with_auto_merge_writes_its_own_rework() {
         "{verified:?}"
     );
     let rework = verified.review.clone().expect("the review rework");
-    assert_eq!(rework.items.len(), 2);
+    assert_eq!(
+        rework.findings.len(),
+        1,
+        "only the failing finding is carried"
+    );
+    assert_eq!(rework.findings[0].severity, "critical");
     assert_eq!(
         verified.line(),
         format!(
@@ -4222,10 +4279,8 @@ fn a_failed_review_with_auto_merge_writes_its_own_rework() {
         stored.body
     );
     assert!(
-        stored
-            .body
-            .contains("- [minor] one.txt:1 and the name is odd"),
-        "{}",
+        !stored.body.contains("and the name is odd"),
+        "a below-threshold finding is in the brief: {}",
         stored.body
     );
     let verdict_path = fixture
@@ -4420,7 +4475,7 @@ fn a_reverify_whose_review_fails_does_not_count_as_an_auto_rework() {
     );
     assert_eq!(stored.attempt, 2);
     let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
-    assert!(reason.contains("review: review_blocking"), "{reason}");
+    assert!(reason.contains("review: review_findings"), "{reason}");
 }
 
 // ---- the review's follow-up task (ADR 0048 decision 10) ------------------------------
@@ -4487,25 +4542,18 @@ fn review_verdict_path(fixture: &Fixture, task: &str, attempt: u32) -> PathBuf {
     .expect("the verdict path")
 }
 
-/// A report with only a summary and the given suggestion items.
-fn suggestions(items: Vec<ReviewItem>) -> ReviewReport {
+/// A report with only a summary and the given items as its non-failing findings.
+fn suggestions(items: Vec<Finding>) -> ReviewReport {
     ReviewReport {
         summary: "the change adds feature.txt".to_owned(),
-        blocking: Vec::new(),
-        suggestions: items,
+        findings: items,
         verified: Vec::new(),
     }
 }
 
-/// A review item with a level, a place and a text.
-fn item(level: &str, file: &str, line: u32, text: &str) -> ReviewItem {
-    ReviewItem {
-        level: Some(level.to_owned()),
-        file: Some(file.to_owned()),
-        line: Some(line),
-        text: text.to_owned(),
-        pre_existing: false,
-    }
+/// A finding with a place and no trigger.
+fn item(severity: &str, file: &str, line: u32, text: &str) -> Finding {
+    graded(severity, file, line, text)
 }
 
 /// Publishes `file` on `task`'s branch, writes a passing review that suggests `items`, verifies
@@ -4514,7 +4562,7 @@ fn merge_with_suggestions(
     fixture: &Fixture,
     task: &str,
     file: &str,
-    items: Vec<ReviewItem>,
+    items: Vec<Finding>,
 ) -> review::Merged {
     let head = fixture.publish_for(task, &fixture.base, file, &format!("{file}\n"));
     fixture.set_verifying_for(task, &head, 1, &fixture.base);
@@ -5324,8 +5372,7 @@ fn a_followup_that_adds_no_commit_passes_every_stage_and_merges() {
     );
     let report = verdict.review.as_ref().expect("the empty report");
     assert!(report.summary.contains("empty"), "{}", report.summary);
-    assert!(report.blocking.is_empty(), "{report:?}");
-    assert!(report.suggestions.is_empty(), "{report:?}");
+    assert!(report.findings.is_empty(), "{report:?}");
     assert!(report.verified.is_empty(), "{report:?}");
     assert!(verdict.review_cost_micros.is_none(), "{verdict:?}");
 
@@ -5522,13 +5569,10 @@ fn a_demoted_major_item_reaches_the_followup_at_its_level() {
     let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
     assert_eq!(verdict.review_pre_existing, Some(1));
     assert_eq!(
-        verdict.review.expect("a report").suggestions,
-        vec![ReviewItem {
-            level: Some("major".to_owned()),
-            file: Some("file.txt".to_owned()),
-            line: Some(30),
-            text: "this line is still wrong".to_owned(),
+        verdict.review.expect("a report").findings,
+        vec![Finding {
             pre_existing: true,
+            ..graded("major", "file.txt", 30, "this line is still wrong")
         }]
     );
 
@@ -5596,14 +5640,8 @@ fn a_major_item_a_failing_round_demoted_reaches_the_followup() {
     let report = verdict.review.clone().expect("a report");
     assert_eq!(verdict.review_pre_existing, Some(1), "{report:?}");
     assert_eq!(
-        report.blocking,
-        vec![ReviewItem {
-            level: Some("critical".to_owned()),
-            file: Some("new.txt".to_owned()),
-            line: Some(1),
-            text: "a permission bypass".to_owned(),
-            pre_existing: false,
-        }]
+        report.failing("major"),
+        vec![&graded("critical", "new.txt", 1, "a permission bypass")]
     );
 
     // The next round fixes the bypass and suggests nothing: the demoted item must still reach
@@ -6225,14 +6263,7 @@ fn a_blocking_item_is_never_carried_into_the_followup() {
         &head,
         ReviewReport {
             summary: "the change adds feature.txt".to_owned(),
-            blocking: vec![ReviewItem {
-                level: Some("major".to_owned()),
-                file: Some("feature.txt".to_owned()),
-                line: Some(1),
-                text: "this must change".to_owned(),
-                pre_existing: false,
-            }],
-            suggestions: Vec::new(),
+            findings: vec![graded("major", "feature.txt", 1, "this must change")],
             verified: Vec::new(),
         },
     );
@@ -6410,6 +6441,7 @@ fn a_merge_of_a_followup_task_proposes_no_followup() {
 fn a_followup_holds_every_round_grouped_and_drops_a_repeat() {
     let fixture = Fixture::new("followup-rounds");
     fixture.add_review_stage();
+    fixture.review_fix_level("critical");
     let first = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     let first_fake = FakeReview::new(
         "followup-rounds-first",
@@ -6519,8 +6551,7 @@ fn a_round_with_only_blocking_items_carries_nothing() {
         &second,
         ReviewReport {
             summary: "the rework adds two.txt".to_owned(),
-            blocking: vec![item("major", "feature.txt", 2, "a blocking item round two")],
-            suggestions: Vec::new(),
+            findings: vec![item("major", "feature.txt", 2, "a blocking item round two")],
             verified: Vec::new(),
         },
     );
@@ -6699,6 +6730,7 @@ fn a_rework_brief_prints_a_duplicated_level_tag_once() {
 fn a_followup_brief_prints_a_duplicated_level_tag_once() {
     let fixture = Fixture::new("followup-tag-once");
     fixture.add_review_stage();
+    fixture.review_fix_level("critical");
     let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
     let fake = FakeReview::new(
         "followup-tag-once-fake",
@@ -7775,4 +7807,606 @@ fn a_reviewers_exec_args_that_repeat_an_owned_argument_are_refused() {
     assert!(error.message().contains("--tools"), "{error:?}");
     assert_eq!(fake.count(), 0, "the session ran");
     assert_state(&fixture, ("review", "verifying"));
+}
+
+// ---- findings and `fix_level` (ADR 0048 decision 10) --------------------------------
+
+/// A new-shape report with one `minor` finding under `fix_level = major` passes and the
+/// finding is recorded.
+#[test]
+fn a_minor_finding_below_the_fix_level_passes_and_is_recorded() {
+    let fixture = Fixture::new("findings-minor-under-major");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-minor-under-major-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[finding_json("minor", "one.txt", 1, "a naming nit", "")],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(
+        verdict.review.expect("a report").findings,
+        vec![graded("minor", "one.txt", 1, "a naming nit")]
+    );
+}
+
+/// The same report under `fix_level = minor` fails with `review_findings`, and the automatic
+/// rework brief lists the finding.
+#[test]
+fn a_minor_finding_at_the_fix_level_fails_with_review_findings() {
+    let fixture = Fixture::new("findings-minor-at-minor");
+    fixture.add_review_stage();
+    fixture.review_fix_level("minor");
+    fixture.set_auto("merge");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-minor-at-minor-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[finding_json("minor", "one.txt", 1, "a naming nit", "")],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.body.contains("## Rework 2 (review)"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored.body.contains("- [minor] one.txt:1 a naming nit"),
+        "{}",
+        stored.body
+    );
+}
+
+/// A `major` finding outside the change's lines in a rework round is marked `pre_existing`,
+/// the stage passes, and `review_pre_existing` counts it.
+#[test]
+fn a_major_finding_outside_the_change_is_pre_existing_and_passes() {
+    let fixture = Fixture::new("findings-major-pre-existing");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "findings-major-pre-existing-first",
+        &[findings_message(
+            "the change adds old.txt",
+            &[finding_json(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+                "",
+            )],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "findings-major-pre-existing-second",
+        &[findings_message(
+            "the rework adds new.txt",
+            &[finding_json(
+                "major",
+                "file.txt",
+                30,
+                "this line is still wrong",
+                "",
+            )],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(verdict.review_pre_existing, Some(1));
+    assert_eq!(
+        verdict.review.expect("a report").findings,
+        vec![Finding {
+            pre_existing: true,
+            ..graded("major", "file.txt", 30, "this line is still wrong")
+        }]
+    );
+}
+
+/// A `critical` finding outside the change's lines is never `pre_existing`, and the stage
+/// fails.
+#[test]
+fn a_critical_finding_outside_the_change_is_never_pre_existing() {
+    let fixture = Fixture::new("findings-critical-never-old");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "findings-critical-never-old-first",
+        &[findings_message(
+            "the change adds old.txt",
+            &[finding_json(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+                "",
+            )],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "findings-critical-never-old-second",
+        &[findings_message(
+            "the rework adds new.txt",
+            &[finding_json(
+                "critical",
+                "file.txt",
+                30,
+                "a permission bypass",
+                "",
+            )],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    let report = verdict.review.expect("a report");
+    assert!(!report.findings[0].pre_existing, "{report:?}");
+    assert_eq!(report.findings[0].severity, "critical");
+}
+
+/// An old-shape `blocking` item with `level: minor` reads as a `minor` finding and passes
+/// under `major`.
+#[test]
+fn an_old_blocking_item_graded_minor_reads_as_a_minor_finding() {
+    let fixture = Fixture::new("old-shape-minor");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "old-shape-minor-fake",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("minor", "one.txt", 1, "a naming nit")],
+            &[],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(verdict.is_pass(), "{:?}", verdict.reason);
+    assert_eq!(
+        verdict.review.expect("a report").findings,
+        vec![graded("minor", "one.txt", 1, "a naming nit")]
+    );
+}
+
+/// An old-shape report without levels: `blocking` reads as `major`, `suggestions` as `minor`.
+#[test]
+fn an_old_shape_without_levels_maps_blocking_to_major_and_suggestions_to_minor() {
+    let fixture = Fixture::new("old-shape-levels");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "old-shape-levels-fake",
+        &[review_message(
+            "the change adds one.txt",
+            &["a bug"],
+            &["a nit"],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    let report = verdict.review.expect("a report");
+    assert_eq!(
+        report.findings,
+        vec![
+            Finding::new("major", "a bug"),
+            Finding::new("minor", "a nit"),
+        ]
+    );
+    assert_eq!(
+        report
+            .failing("major")
+            .into_iter()
+            .map(|finding| finding.summary.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a bug"]
+    );
+}
+
+/// A `severity` outside the closed list makes the report unusable, so the stage runs the
+/// session again.
+#[test]
+fn a_severity_outside_the_list_runs_the_session_again() {
+    let fixture = Fixture::new("findings-bad-severity");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let bad = findings_message(
+        "the first run is unusable",
+        &[serde_json::json!({"severity": "blocker", "summary": "x"})],
+    );
+    let good = findings_message("the change adds one.txt", &[]);
+    let fake = FakeReview::new("findings-bad-severity-fake", &[bad, good], 0);
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert!(verdict.is_pass());
+    assert_eq!(
+        verdict.review_session_ids.len(),
+        2,
+        "the session ran once more"
+    );
+    assert_eq!(fake.count(), 2);
+}
+
+/// A finding without a `trigger` is accepted and its rework line has no ` — ` part; one with
+/// a trigger prints it.
+#[test]
+fn a_finding_without_a_trigger_has_no_trigger_part_in_the_rework_line() {
+    let fixture = Fixture::new("findings-triggers");
+    fixture.add_review_stage();
+    fixture.set_auto("merge");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-triggers-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[
+                finding_json("major", "one.txt", 1, "the bug", "pass a FIFO"),
+                finding_json("major", "one.txt", 1, "a nit", ""),
+            ],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored
+            .body
+            .contains("- [major] one.txt:1 the bug — pass a FIFO"),
+        "{}",
+        stored.body
+    );
+    assert!(
+        stored.body.contains("- [major] one.txt:1 a nit\n"),
+        "the empty trigger left a ` — ` part: {}",
+        stored.body
+    );
+}
+
+/// A `review.json` written before the change (the old shape, kept as a fixture string) reads
+/// back as findings, and `show` prints the same items in the same order within a severity.
+#[test]
+fn an_old_shape_review_json_reads_back_and_show_prints_its_items() {
+    /// The old shape exactly as a build before findings wrote it.
+    const OLD_SHAPE: &str = r#"{
+        "summary": "the change adds one.txt",
+        "blocking": [
+            {"level": "major", "file": "a.txt", "line": 2, "text": "[major] the second line is wrong"},
+            {"text": "a plain major item"}
+        ],
+        "suggestions": [
+            {"level": "minor", "file": "a.txt", "line": 5, "text": "a nit"},
+            "another nit"
+        ],
+        "verified": ["it compiles"]
+    }"#;
+
+    let fixture = Fixture::new("old-shape-show");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    fixture.set_verifying(&head);
+    let path = review_verdict_path(&fixture, &fixture.task, 1);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the verdict directory");
+    let at = "2026-01-01T00:00:00.000000Z".to_owned();
+    let verdict = Verdict {
+        schema_version: VERDICT_SCHEMA_VERSION,
+        stage: Stage::Review,
+        sha: head.clone(),
+        main_sha: Some(fixture.base.clone()),
+        result: VerdictResult::Pass,
+        reason: None,
+        commands: Vec::new(),
+        started_at: at.clone(),
+        ended_at: at,
+        base_sha: None,
+        candidate_sha: Some(head),
+        conflict_paths: Vec::new(),
+        approver: None,
+        review: None,
+        review_session_ids: vec!["old".to_owned()],
+        review_cost_micros: None,
+        review_model_error: None,
+        review_pre_existing: None,
+        review_settings: None,
+        profile: Some("default".to_owned()),
+        integration_style: None,
+    };
+    let mut value = serde_json::to_value(&verdict).expect("the verdict serializes");
+    value["review"] = serde_json::from_str(OLD_SHAPE).expect("the fixture is JSON");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("the verdict serializes")
+        ),
+    )
+    .expect("the old verdict is written");
+
+    let shown =
+        radian_arc::store::cli::show_json(&fixture.store, &fixture.task).expect("show json");
+    let findings = shown["review"]["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .map(|finding| finding["summary"].as_str().expect("a summary"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        findings,
+        vec![
+            "the second line is wrong",
+            "a plain major item",
+            "a nit",
+            "another nit",
+        ]
+    );
+    let text = radian_arc::store::cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(
+        text.contains(
+            "review_findings: [major] a.txt:2 the second line is wrong; [major] a plain major \
+             item; [minor] a.txt:5 a nit; [minor] another nit"
+        ),
+        "{text}"
+    );
+}
+
+/// A finding with a severity but no `file` or `line` stays failing at its severity, and its
+/// rework line leaves the place out.
+#[test]
+fn a_finding_without_a_place_stays_failing_and_its_rework_line_has_no_place() {
+    let fixture = Fixture::new("findings-no-place");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "old.txt", &numbered(40));
+    let first_fake = FakeReview::new(
+        "findings-no-place-first",
+        &[findings_message(
+            "the change adds old.txt",
+            &[finding_json(
+                "major",
+                "old.txt",
+                1,
+                "the first line is wrong",
+                "",
+            )],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+    fixture.set_auto("merge");
+
+    fixture.rework(&first, "new.txt", "new\n");
+    let fake = FakeReview::new(
+        "findings-no-place-second",
+        &[findings_message(
+            "the rework adds new.txt",
+            &[unplaced_finding_json("major", "something vague")],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    assert!(
+        stored.body.contains("- [major] something vague\n"),
+        "{:?}",
+        stored.body
+    );
+}
+
+/// A rework reason for a verdict that fails with two findings lists both, highest severity
+/// first.
+#[test]
+fn a_rework_reason_lists_the_findings_highest_severity_first() {
+    let fixture = Fixture::new("findings-reason-order");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-reason-order-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[
+                finding_json("major", "one.txt", 1, "the wrong result", ""),
+                finding_json("critical", "one.txt", 1, "a permission bypass", ""),
+            ],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let stored = fixture.store.load_task(&fixture.task).unwrap().item;
+    let reason = review::rework_reason(&fixture.store, &stored).expect("a reason");
+    let critical = reason.find("a permission bypass").expect(&reason);
+    let major = reason.find("the wrong result").expect(&reason);
+    assert!(
+        critical < major,
+        "the reason is not highest severity first: {reason}"
+    );
+}
+
+/// A rework round names only the previous round's failing findings in its prompt; a finding
+/// near an old below-threshold one is demoted, and one near an old failing one stays failing.
+#[test]
+fn a_rework_round_anchors_on_failing_findings_only() {
+    let fixture = Fixture::new("findings-failing-anchors");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "changed.txt", "changed\n");
+    let first_fake = FakeReview::new(
+        "findings-failing-anchors-first",
+        &[findings_message(
+            "the change adds changed.txt",
+            &[
+                finding_json("major", "anchor.txt", 10, "the major bug", ""),
+                finding_json("minor", "old.txt", 30, "the minor nit", ""),
+            ],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "findings-failing-anchors-second",
+        &[findings_message(
+            "the rework adds two.txt",
+            &[
+                finding_json("major", "anchor.txt", 15, "still the major bug", ""),
+                finding_json("major", "old.txt", 35, "a problem near the old nit", ""),
+            ],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let prompt = fake.prompt(1);
+    assert!(
+        prompt.contains("- [major] anchor.txt:10 the major bug"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("the minor nit"),
+        "a below-threshold finding reached the prompt:\n{prompt}"
+    );
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(verdict.review_pre_existing, Some(1));
+    let report = verdict.review.expect("a report");
+    let failing = report
+        .failing("major")
+        .into_iter()
+        .map(|finding| finding.summary.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(failing, vec!["still the major bug"]);
+    let demoted = report
+        .findings
+        .iter()
+        .find(|finding| finding.summary == "a problem near the old nit")
+        .expect("the demoted finding");
+    assert!(demoted.pre_existing);
+}
+
+/// A rework round whose previous verdict is old-shape lists its `blocking` items as the
+/// failing findings and uses them as window anchors.
+#[test]
+fn a_rework_round_reads_an_old_shape_previous_verdict() {
+    let fixture = Fixture::new("findings-old-previous");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "changed.txt", "changed\n");
+    let first_fake = FakeReview::new(
+        "findings-old-previous-first",
+        &[review_object_message(
+            "the change adds changed.txt",
+            &[review_item("major", "anchor.txt", 10, "the old bug")],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "findings-old-previous-second",
+        &[findings_message(
+            "the rework adds two.txt",
+            &[finding_json(
+                "major",
+                "anchor.txt",
+                15,
+                "still the old bug",
+                "",
+            )],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "rework_pending", "{verified:?}");
+    let prompt = fake.prompt(1);
+    assert!(
+        prompt.contains("- [major] anchor.txt:10 the old bug"),
+        "{prompt}"
+    );
+    let verdict = fixture.verdict(&format!("{}-2", fixture.task), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(verdict.review_pre_existing, Some(0));
 }

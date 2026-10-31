@@ -1205,6 +1205,89 @@ def check_result_fixture(name):
 
 RESULT_FIXTURES = ["exec-result.jsonl"]
 
+# 评审 verdict 的两种形状（ADR 0048 决定 10）：旧形状的 blocking/suggestions 映射到
+# findings，并与新形状给出同一份问题列表。`check-fixtures.sh` 两种都读。
+REVIEW_FIXTURES = ["review-verdict-old.json", "review-verdict-new.json"]
+REVIEW_LEVELS = ("critical", "major", "minor")
+
+
+def _strip_level_tag(text, level):
+    trimmed = text.lstrip()
+    if not trimmed.startswith("["):
+        return text
+    tag, sep, after = trimmed[1:].partition("]")
+    if sep and tag.strip().lower() == level.lower():
+        return after.lstrip()
+    return text
+
+
+def _review_finding(value, name, default_severity, allow_string=False):
+    if isinstance(value, str):
+        if not allow_string:
+            raise Corruption(f"{name}: 新的评审条目必须是对象")
+        return (default_severity, None, None, value, "", False)
+    if not isinstance(value, dict):
+        raise Corruption(f"{name}: 评审条目必须是对象")
+    if "severity" in value:
+        severity = value["severity"]
+        if severity not in REVIEW_LEVELS:
+            raise Corruption(f"{name}: severity 不在闭集: {severity!r}")
+        summary = value.get("summary")
+        if not isinstance(summary, str):
+            raise Corruption(f"{name}: 新的评审条目缺少字符串 summary")
+    else:
+        text = value.get("text")
+        if not isinstance(text, str):
+            raise Corruption(f"{name}: 旧的评审条目缺少字符串 text")
+        level = value.get("level")
+        if level is not None and level not in REVIEW_LEVELS:
+            raise Corruption(f"{name}: level 不在闭集: {level!r}")
+        severity = level or default_severity
+        summary = _strip_level_tag(text, level) if level else text
+    file = value.get("file")
+    if file is not None and not isinstance(file, str):
+        raise Corruption(f"{name}: file 必须是字符串")
+    line = value.get("line")
+    if line is not None and (not isinstance(line, int) or isinstance(line, bool) or line < 0):
+        raise Corruption(f"{name}: line 必须是非负整数")
+    trigger = value.get("trigger", "")
+    if not isinstance(trigger, str):
+        raise Corruption(f"{name}: trigger 必须是字符串")
+    pre_existing = value.get("pre_existing", False)
+    if not isinstance(pre_existing, bool):
+        raise Corruption(f"{name}: pre_existing 必须是布尔值")
+    return (severity, file, line, summary, trigger, pre_existing)
+
+
+def check_review_fixture(name):
+    with open(f"fixtures/{name}", encoding="utf-8") as handle:
+        verdict = json.load(handle)
+    if verdict.get("stage") != "review":
+        raise Corruption(f"{name}: stage 不是 review")
+    review = verdict.get("review")
+    if not isinstance(review, dict):
+        raise Corruption(f"{name}: 缺少 review 对象")
+    if not isinstance(review.get("verified"), list):
+        raise Corruption(f"{name}: verified 必须是列表")
+    if "findings" in review:
+        values = review["findings"]
+        if not isinstance(values, list):
+            raise Corruption(f"{name}: findings 必须是列表")
+        findings = [_review_finding(value, name, "major") for value in values]
+    else:
+        if not isinstance(review.get("blocking"), list) or not isinstance(
+            review.get("suggestions"), list
+        ):
+            raise Corruption(f"{name}: 旧形状需要 blocking 和 suggestions 两个列表")
+        findings = [
+            _review_finding(value, name, "major", allow_string=True)
+            for value in review["blocking"]
+        ] + [
+            _review_finding(value, name, "minor", allow_string=True)
+            for value in review["suggestions"]
+        ]
+    return findings
+
 
 failures = 0
 for name in sorted(EXPECT):
@@ -1219,6 +1302,22 @@ for name in RESULT_FIXTURES:
     except Corruption as e:
         print(f"FAIL {e}")
         failures += 1
+seen = {}
+for name in REVIEW_FIXTURES:
+    try:
+        seen[name] = check_review_fixture(name)
+        print(f"PASS {name}: review verdict 形状正确")
+    except Corruption as e:
+        print(f"FAIL {e}")
+        failures += 1
+if len(seen) == len(REVIEW_FIXTURES):
+    first, *rest = REVIEW_FIXTURES
+    if any(seen[name] != seen[first] for name in rest):
+        print("FAIL review-verdict-old.json 与 review-verdict-new.json 映射出的问题不同")
+        failures += 1
+    else:
+        print("PASS review verdict: 旧形状映射到与新形状相同的问题")
+
 if failures:
     print(f"\n{failures} 个 fixture 不符合期望")
     sys.exit(1)

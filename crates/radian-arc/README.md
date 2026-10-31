@@ -72,7 +72,7 @@ propose_followups = true
 exec_args = ["--model", "m"]  # unset: `[worker] exec_args`
 prompt_file = "review.md"      # unset: the built-in prompt only
 timeout_secs = 900
-fix_level = "major"            # recorded in the verdict; no stage reads it yet
+fix_level = "major"            # a finding at or above this fails the round; also in the verdict
 
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
@@ -557,12 +557,17 @@ section, whose `exec_args` (default `[worker] exec_args`) and `timeout_secs` the
 task's first review reads that reviewer's `first.exec_args` and `first.timeout_secs` first, and
 a later review never does (`Reviewer::choice`). The prompt is built from the brief, the commit
 list and the diff `base_sha..verified_sha`, plus the reviewer's `prompt_file`. The last
-fenced `json` block of the final message is parsed; an empty `blocking` list passes, any item
-fails with `review_blocking`. An item is `{level, file, line, text, pre_existing}`; a plain
-string is an item with only its text, so an old verdict reads and re-serializes unchanged (the
-digest is computed from the re-serialized verdict). Unusable output (no block, a missing
-field, a level outside `REVIEW_LEVELS`, a timeout, a session error) runs the session once more;
-two unusable runs fail with `review_output`, or `review_timeout` when the last run timed out.
+fenced `json` block of the final message is parsed: it holds `summary`, `findings` and
+`verified`. A finding is `{severity, file, line, summary, trigger, pre_existing}`: `severity`
+(one of `REVIEW_LEVELS`) and `summary` are required, `file`, `line` and `trigger` are optional
+(an absent trigger reads as empty), and arc sets `pre_existing`. A finding at or above the
+reviewer's `fix_level` and not `pre_existing` fails with `review_findings`; the rest is
+recorded (`ReviewReport::failing` / `rest`). A report in the old `blocking` / `suggestions`
+shape maps to findings: `blocking` at its own `level` else `major`, `suggestions` at its own
+`level` else `minor`, `text` as the summary, no trigger. The digest is computed from the
+re-serialized verdict. Unusable output (no block, a missing field, a `severity` outside
+`REVIEW_LEVELS`, a timeout, a session error) runs the session once more; two unusable runs
+fail with `review_output`, or `review_timeout` when the last run timed out.
 The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
 (`round`, `reviewer`, `fix_level`, the `exec_args` source key, `timeout_secs` and its source
 key) and, in a rework round, `review_pre_existing`.
@@ -570,16 +575,16 @@ key) and, in a rework round, `review_pre_existing`.
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
 gets the first review's prompt, though it reads the reviewer's own settings rather than its
-`first` table. A rework round's prompt holds the previous blocking items, the commits
+`first` table. A rework round's prompt holds the previous round's failing findings, the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
-`git diff <previous sha> <sha>` also has. arc, not the session, moves a blocking item to
-`suggestions` with `pre_existing` unless its `file:line` is within 3 lines of a line the task's
-own change added or changed, or within 10 lines of a previous blocking item in the same file
-(`ReworkRound`). The task's own change is the whole diff from the merge base of the remote
+`git diff <previous sha> <sha>` also has. arc, not the session, marks a finding `pre_existing`
+unless its `file:line` is within 3 lines of a line the task's own change added or changed, or
+within 10 lines of a failing finding of the previous round in the same file (`ReworkRound`).
+The task's own change is the whole diff from the merge base of the remote
 target branch and the head, not the rework's increment: a file it does not touch, or a line
 more than 3 lines
-from any changed line in its file, is demoted. A `critical` item and an item without a `file` or
-a `line` are never moved; a moved item keeps its `level`.
+from any changed line in its file, is marked. A `critical` finding and one without a `file` or
+a `line` are never marked; a marked finding keeps its `severity`.
 
 Any failing stage moves the task to `review.rework_pending`; a candidate merge conflict is
 such a failure, with reason `conflict` and the paths. `review::conflict_auto_rework` writes
@@ -589,7 +594,7 @@ no brief is written, the task stays in `review.rework_pending`, and the stop tex
 the recorded reason, so `show` prints it. A verification that does not end in a conflict, an
 attempt that never reaches the gate, and the lead's own rework (`plan_ops::add_rework`, the
 empty heading suffix) call `reset_conflict_rework`; arc's review and conflict reworks keep the
-run. A `review_blocking` failure on a plan
+run. A `review_findings` failure (or an old verdict's `review_blocking`) on a plan
 whose `auto` is not `off` instead writes `## Rework <n> (review)` itself
 (`review::review_auto_rework`), counts an automatic rework, and returns the task to
 `todo.ready`; at `max_auto_rework` the plan pauses and the task stays in
@@ -664,10 +669,10 @@ waiting (ADR 0048 decisions 10 and 13).
 `finish_integration` then asks `review::propose_followup` for the plan's review follow-up (ADR
 0048 decision 10): when no task of the plan is open (`todo.ready`, `doing.*` or `review.*`), it
 reads every `review` verdict of every merged task the plan has and no earlier follow-up
-collected, oldest attempt first, and collects every round's `suggestions` (the moved
-`pre_existing` items among them), never a `blocking` item, so a round that only had blocking
-items contributes nothing. Repeats within one task are dropped: two items are the same when
-their `file`, `line` and `text` match after a leading tag that repeats the item's own level is
+collected, oldest attempt first, and collects every round's findings that are below that
+round's `fix_level` or `pre_existing` (the marked findings among them), never a failing
+finding, so a round that only had failing findings contributes nothing. Repeats within one task are dropped: two findings are the same when
+their `file`, `line` and `summary` match after a leading tag that repeats the finding's own severity is
 removed and whitespace is collapsed, and the newest copy is kept. The rest become one
 `todo.proposed` task of the plan, `after` the collected tasks in merge order, when
 `[gate.review] propose_followups` is true; its brief groups each task's items by the round they

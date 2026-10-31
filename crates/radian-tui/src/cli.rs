@@ -2608,13 +2608,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         assert!(
-            doc.contains(&format!("`level` is one of {listed}")),
-            "arc/gate-review.md does not say `level` is one of {listed}"
+            doc.contains(&format!("`severity` is one of {listed}")),
+            "arc/gate-review.md does not say `severity` is one of {listed}"
         );
-        // The report's example is the object form the parser reads.
+        // The report's example is the finding form the parser reads.
         assert!(
-            doc.contains("\"blocking\": [{\"level\""),
-            "arc/gate-review.md's report example is not the object form"
+            doc.contains("\"findings\": [{\"severity\""),
+            "arc/gate-review.md's report example is not the finding form"
         );
     }
 

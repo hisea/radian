@@ -1900,3 +1900,20 @@ gate_profile`, and the file was restored from a copy under `.radian/`.
 | TK0264-M3 | `config::parse` no longer checks that each profile's `reviewer` names a section | `config::a_profile_names_a_missing_reviewer_is_refused` (the file parsed with reviewer `cheap` absent) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0265: review findings and `fix_level` (2026-10-31, branch `work/TK0265-review-findings-fix-level`)
+
+A review report now holds `findings`, each at one of `REVIEW_LEVELS`, and a finding at or above
+the reviewer's `fix_level` that is not `pre_existing` fails the round with `review_findings`.
+Each mutation was applied by hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test review`, and the file was
+restored from a copy under `.radian/`, which `diff -q` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0265-M1 | `Finding::at_or_above` compares `severity == fix_rank(fix_level)` instead of `<=` | `review::a_critical_finding_outside_the_change_is_never_pre_existing` (a `critical` finding no longer failed under `major`, so the task reached `awaiting_human`) | ✅ 1 failed |
+| TK0265-M2 | `ReviewReport::failing` drops the `!pre_existing` exemption | `review::a_major_finding_outside_the_change_is_pre_existing_and_passes` (the demoted `major` finding failed the round with `review_findings`) | ✅ 1 failed |
+| TK0265-M3 | `ReviewReport::from_json` refuses a report without `findings`, dropping the old `blocking` / `suggestions` mapping | `review::an_old_blocking_item_graded_minor_reads_as_a_minor_finding`, `review::an_old_shape_review_json_reads_back_and_show_prints_its_items` (the old report was unusable: `review_output`; the old verdict did not read) | ✅ 2 failed |
+| TK0265-M4 | the rework round's `PreviousReview` holds every previous finding, so the 10-line window is measured from below-threshold and `pre_existing` ones too | `review::a_rework_round_anchors_on_failing_findings_only` (the below-threshold minor was in the prompt and kept the new `major` from being demoted) | ✅ 1 failed |
+
+4/4 caught.

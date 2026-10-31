@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use radian_arc::gate::{CommandRecord, ReviewItem, ReviewReport, Stage, Verdict, verdict_path};
+use radian_arc::gate::{CommandRecord, Finding, ReviewReport, Stage, Verdict, verdict_path};
 use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
@@ -364,26 +364,22 @@ impl Fixture {
     }
 }
 
-fn report(
-    blocking: Vec<ReviewItem>,
-    suggestions: Vec<ReviewItem>,
-    verified: Vec<&str>,
-) -> ReviewReport {
+fn report(findings: Vec<Finding>, verified: Vec<&str>) -> ReviewReport {
     ReviewReport {
         summary: "Adds the reverify command: the owner re-runs the gate without a worker."
             .to_owned(),
-        blocking,
-        suggestions,
+        findings,
         verified: verified.into_iter().map(str::to_owned).collect(),
     }
 }
 
-fn item(level: &str, file: &str, line: u32, text: &str) -> ReviewItem {
-    ReviewItem {
-        level: Some(level.to_owned()),
+fn item(severity: &str, file: &str, line: u32, summary: &str) -> Finding {
+    Finding {
+        severity: severity.to_owned(),
         file: Some(file.to_owned()),
         line: Some(line),
-        text: text.to_owned(),
+        summary: summary.to_owned(),
+        trigger: String::new(),
         pre_existing: false,
     }
 }
@@ -394,7 +390,6 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
     let theme = radian_tui::theme::Theme::default();
     fixture.write(&mut fixture.commands(true, None));
     fixture.write(&mut fixture.review(report(
-        Vec::new(),
         vec![item("minor", "src/x.rs", 3, "use a helper")],
         vec!["the CLI prints one line"],
     )));
@@ -547,8 +542,10 @@ fn a_moved_branch_turns_every_mark_weak_and_says_the_task_is_back_in_verificatio
     fixture.verify_sha(&fixture.base);
     fixture.write(&mut fixture.commands(true, None));
     fixture.write(&mut fixture.review(report(
-        vec![item("critical", "src/a.rs", 7, "the lock is dropped early")],
-        vec![item("minor", "src/b.rs", 2, "name it better")],
+        vec![
+            item("critical", "src/a.rs", 7, "the lock is dropped early"),
+            item("minor", "src/b.rs", 2, "name it better"),
+        ],
         vec!["the exit codes"],
     )));
     fixture.write(&mut fixture.human(Some("auto")));
@@ -606,7 +603,7 @@ fn a_task_whose_extra_stages_list_review_shows_its_review_and_summary() {
         })
         .unwrap();
     fixture.write(&mut fixture.commands(true, None));
-    fixture.write(&mut fixture.review(report(Vec::new(), Vec::new(), vec!["the extra stage"])));
+    fixture.write(&mut fixture.review(report(vec![], vec!["the extra stage"])));
     let mut app = fixture.app();
     let text = screen(&mut app, 120, 44);
     assert!(text.contains("✓ review"), "{text}");
@@ -624,8 +621,10 @@ fn the_review_draws_blocking_suggestions_and_verified_for_the_three_groups() {
     let fixture = Fixture::new("groups", &["commands", "review", "human"]);
     fixture.write(&mut fixture.commands(true, None));
     fixture.write(&mut fixture.review(report(
-        vec![item("critical", "src/a.rs", 7, "the lock is dropped early")],
-        vec![item("minor", "src/b.rs", 2, "name it better")],
+        vec![
+            item("critical", "src/a.rs", 7, "the lock is dropped early"),
+            item("minor", "src/b.rs", 2, "name it better"),
+        ],
         vec!["the exit codes", "the lock order"],
     )));
     let mut app = fixture.app();
@@ -647,7 +646,7 @@ fn the_review_draws_blocking_suggestions_and_verified_for_the_three_groups() {
 fn a_review_with_no_items_shows_only_its_summary() {
     let fixture = Fixture::new("no-groups", &["commands", "review", "human"]);
     fixture.write(&mut fixture.commands(true, None));
-    fixture.write(&mut fixture.review(report(Vec::new(), Vec::new(), Vec::new())));
+    fixture.write(&mut fixture.review(report(vec![], vec![])));
     let mut app = fixture.app();
     let text = screen(&mut app, 120, 44);
     assert!(text.contains("Adds the reverify command"), "{text}");

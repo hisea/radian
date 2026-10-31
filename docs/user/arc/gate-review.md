@@ -22,17 +22,25 @@ The gate's `review` stage.
   The session must end with one fenced `json` block, and arc parses the last such block:
 
   ```json
-  {"summary": "what the change does", "blocking": [{"level": "major", "file": "path", "line": 12, "text": "what is wrong"}], "suggestions": [], "verified": []}
+  {"summary": "what the change does", "findings": [{"severity": "major", "file": "path", "line": 12, "summary": "what is wrong", "trigger": "the input that shows it"}], "verified": []}
   ```
 
-  `summary` is 2 to 6 sentences. Each item of `blocking` and `suggestions` is an object: `text` is required, and `level`, `file` and `line` are optional. `level` is one of `critical`, `major`, `minor`. A plain string is an item with only its `text`, so a verdict written before the object form still reads.
-  `blocking` lists what must change before the change can merge; an empty list passes the stage. `suggestions` and `verified` never fail the stage; the suggestions of the review rounds of a plan's merged tasks become the plan's follow-up task once the plan has no open task (see [The review's follow-up](#the-reviews-follow-up)).
-  A blocking item fails the stage with reason `review_blocking`; the task goes to `review.rework_pending` and `rework_reason` lists the items, each as `[level] path:line text` with the parts an item does not have left out. An item whose `text` starts with a tag that repeats its own level (`[major]`, any case, spaces allowed) prints the level once: the leading tag is dropped from the text. A `text` that starts with another tag keeps it, and the verdict on disk is never rewritten.
-  No parsable block, a missing field, a `level` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
+  `summary` is 2 to 6 sentences on what the change does. Each finding is an object: `severity` and `summary` are required, and `file`, `line` and `trigger` are given when they apply. An absent `trigger` reads as empty. `severity` is one of `critical`, `major`, `minor`. `trigger` is the input or state that shows the problem. `findings` lists every problem found, not only the first.
+  The three severities are calibrated by these examples:
+
+  - `critical`: security, data loss or corruption, a state the program cannot recover from, a hang or a leak. Examples: a cancel signals only the direct child, so a command the wrapper started in another process group keeps running after the task is cancelled; a file the code reads whole is replaced by a FIFO, and the read blocks forever before any timeout applies; a struct that holds an API key derives `Debug`, so a panic or an error path prints the key.
+  - `major`: a wrong result, a contradiction of the brief or a design record, a manual sentence the code does not do, a test that fails or cannot fail. Examples: the test binary no longer compiles on Linux because a helper has no such method; a JSON `null` for a field deserializes as absent, so the documented "a present value that is not an array is an error" never fires; the manual says the flag is set only for a hook exit 2, but an exit 0 with a block decision also sets it; a new edge-case test passes against the code before the change, so it proves nothing; attempt directories are sorted by name, so attempt 10 sorts before attempt 2 and the newest verdict is the wrong one.
+  - `minor`: everything else: a rare edge case, wording, naming, style. Examples: a pronoun in a doc sentence can refer to two nouns, say which; the summary row's indentation no longer aligns under the id column after a column was inserted; a comment describes a key-handler arm that an earlier handler now intercepts, so the arm is unreachable; a tool's schema still says "default: every plan" after the default changed.
+
+  A finding at or above the reviewer's `fix_level` and not `pre_existing` fails the stage with reason `review_findings`. The task goes to `review.rework_pending` and `rework_reason` lists the failing findings, highest severity first, each as `[severity] path:line summary — trigger` with the parts a finding does not have left out; the ` — trigger` part goes when the trigger is empty. A finding below `fix_level`, and a `pre_existing` one, is recorded and does not fail the stage.
+  `fix_level` is the reviewer's [`fix_level`](config.md#configtoml): `critical`, `major` (the default) or `minor`. `critical` sends back only critical findings, `major` sends back critical and major ones, and `minor` sends back every finding.
+  `verified` never fails the stage.
+  A verdict written before findings existed holds `blocking` and `suggestions`; it still reads back as findings: a `blocking` item at its own `level`, else `major`, a `suggestions` item at its own `level`, else `minor`, its `text` as the summary, and no trigger. A `text` that starts with a tag that repeats that level loses the tag. `show` prints the same items for such a verdict.
+  No parsable block, a missing field, a `severity` outside the three values, a timeout, or a session error runs the session once more; when the second run is unusable too the stage fails with reason `review_output`, or `review_timeout` when the last run timed out. Both runs' session ids and their summed cost are in the verdict.
   A session whose `Result` carries a `model_error` with `kind` `unavailable` or `usage_limit` is **model unavailable**: the stage does not run it a second time, fails at once with reason `review_unavailable`, and its verdict records the session id, its summed cost and that `model_error` object as `review_model_error` (see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
   A gate that is started again for the same attempt does not reuse a review session whose journal exists: the stage names the run `<attempt id>-review-<run>-<k>` with the smallest free `k`, writes its logs as `review-<run>-<k>.jsonl` and `review-<run>-<k>.stderr.log`, and `review_session_ids` lists the ids it used, so every run's session is found.
-  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (the four fields), `review_session_ids`, `review_cost_micros`, `review_model_error` (only on a `review_unavailable` failure), `review_settings` (`round`, `first` or `rework`; `reviewer`, the section's name; `fix_level`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many items arc moved), beside the usual `sha`, `main_sha`, `candidate_sha` and `profile`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
-- `review` failure reasons: `review_blocking` (with its items in `rework_reason`), `review_output` (no usable block after two runs), `review_timeout` (the last run hit the reviewer's `timeout_secs`), and `review_unavailable` (the session's model was unavailable; see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)).
+  The review verdict is `runs/<task>/attempts/<attempt id>/verdicts/review.json`; it records `review` (`summary`, `findings` and `verified`), `review_session_ids`, `review_cost_micros`, `review_model_error` (only on a `review_unavailable` failure), `review_settings` (`round`, `first` or `rework`; `reviewer`, the section's name; `fix_level`; the `exec_args` source key; `timeout_secs` and the key it came from) and, in a rework round, `review_pre_existing` (how many findings arc marked), beside the usual `sha`, `main_sha`, `candidate_sha` and `profile`. It is bound to `verified_sha`, is part of `verdict_set_digest`, and `reverify` runs it again.
+- `review` failure reasons: `review_findings` (with its failing findings in `rework_reason`), `review_output` (no usable block after two runs), `review_timeout` (the last run hit the reviewer's `timeout_secs`), and `review_unavailable` (the session's model was unavailable; see [A review wait on an unavailable model](#a-review-wait-on-an-unavailable-model)). `review_blocking` is the reason a verdict or task file written by an earlier build may carry; this build reads it and never writes it.
 - When the profile lists both `commands` and `review`, the round's outcome follows the profile order.
   A `commands` failure decides it with the commands reason, even when the review passed or failed too: the review verdict is still written, its cost counts, `show` lists its items, and arc writes no automatic review rework for that round.
   When `commands` passes and `review` fails, the review path runs (see [A failed review](#a-failed-review)).
@@ -43,36 +51,39 @@ The gate's `review` stage.
 ### A rework round
 
 A review is a rework round when an earlier attempt of the same task has a review verdict for a `sha` other than the commit under review; the newest such verdict is the previous review.
-A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no item is pre-existing.
+A review of the same commit as the previous review (a `reverify` of an unchanged head) gets the first review's prompt: the full diff, and no finding is pre-existing.
 It reads the reviewer's own settings, not its `first` table, because an earlier review verdict exists, so it is not a first review.
 A genuine first review, one with no earlier verdict at all, keeps the full-diff prompt and the reviewer's `first` settings.
 
-A rework round's prompt holds the brief, the previous review's blocking items, the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
-It asks the session to check that each previous blocking item is fixed, to review the increment, and to list every problem it finds; the session can read the files.
+A rework round's prompt holds the brief, the previous review's failing findings (at or above that round's recorded `fix_level`, not `pre_existing`), the commit list `<previous sha>..<sha>`, and the increment instead of the full diff.
+It lists each failing finding as `[severity] path:line summary — trigger`, with the ` — trigger` part left out when the trigger is empty, and it does not list a finding below that round's `fix_level` or a `pre_existing` one.
+It asks the session to check that each failing finding is fixed, to review the increment, and to list every problem it finds; the session can read the files.
+
+A previous verdict in the old shape has no `findings`: its `blocking` items are the failing findings the prompt lists and the window anchors below, at their own `level`, else `major`.
 
 The increment is the task's own diff restricted to the hunks that hold a line the rework changed.
 A line is an increment line when it is a new-side line of `git diff <previous sha> <sha>` and also a new-side line of the task's own diff, which starts at the merge base of the remote target branch and `sha`.
 A line that came in only with a merge of main is not in the task's own diff, so it drops out.
 
-arc, not the session, decides whether a blocking item is pre-existing.
-After a rework round's report is parsed, an item is moved to `suggestions` and marked `"pre_existing": true` unless one of these holds:
+arc, not the session, decides whether a finding is pre-existing.
+After a rework round's report is parsed, a finding is marked `"pre_existing": true` unless one of these holds:
 
 - its `file:line` is within 3 lines of a line the task's own change added or changed in that file (the new side of `git diff <the merge base of the remote target branch and the head>..<head>`): a problem in code the task itself wrote in an earlier attempt is the task's, not pre-existing, so the rework's increment does not decide this;
-- it is in the same file as and within 10 lines of a blocking item of the previous review, so an item that was not fixed stays blocking;
-- its `level` is `critical`: a `critical` item blocks in every round, wherever it is;
-- it has no `file` or no `line`: it stays in `blocking` at its level, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
+- it is in the same file as and within 10 lines of a failing finding of the previous review, so a finding that was not fixed stays failing; only the previous round's failing findings are anchors, never a finding below that round's `fix_level` or a `pre_existing` one;
+- its `severity` is `critical`: a `critical` finding fails in every round, wherever it is;
+- it has no `file` or no `line`: it stays failing at its severity, because the review prompt asks for both fields and an omission is not evidence that the problem is old.
 
-A moved item keeps its `level` (`major` included), and a `major` item in a file the task's own change does not touch, or more than 3 lines from any changed line in that file, is still moved, so the rework is not sent back for a problem that predates the task; `minor` items follow the same window rules.
-The stage passes when no blocking item is left, and the verdict records how many items arc moved as `review_pre_existing`.
-The follow-up task of a plan carries a moved item at its level (see [The review's follow-up](#the-reviews-follow-up)).
+A marked finding keeps its `severity` (`major` included), and a `major` finding in a file the task's own change does not touch, or more than 3 lines from any changed line in that file, is still marked, so the rework is not sent back for a problem that predates the task; `minor` findings follow the same window rules.
+The stage's decision is the reviewer's `fix_level`: it passes when no finding at or above that level is left unmarked, and the verdict records how many findings arc marked as `review_pre_existing`.
+The follow-up task of a plan carries a marked finding at its severity (see [The review's follow-up](#the-reviews-follow-up)).
 
-When a rework round's review still fails with blocking items and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
+When a rework round's review still fails on a failing finding and the plan's `auto` is not `off`, arc writes the next attempt's brief itself (see [A failed review](#a-failed-review)).
 
 ### A failed review
 
-A review that failed with `review_blocking` returns the task to `todo.ready` with a brief arc writes, the way a conflict with main does, when the plan's `auto` is not `off`.
+A review that failed with `review_findings` (or an old verdict's `review_blocking`) returns the task to `todo.ready` with a brief arc writes, the way a conflict with main does, when the plan's `auto` is not `off`.
 The heading is `## Rework <n> (review)`, with the lead's `add_rework` numbering.
-The text says the review found these items, to fix them and nothing else, to append commits and not to rebase; it lists the blocking items, one per line, as `[level] path:line text`; and it names the review verdict to read for detail.
+The text says the review found these items, to fix them and nothing else, to append commits and not to rebase; it lists the round's failing findings, one per line, as `[severity] path:line summary — trigger`, with the ` — trigger` part left out when the trigger is empty and the parts a finding does not have left out; a finding below `fix_level` or a `pre_existing` one is not listed; and it names the review verdict to read for detail.
 The worker cannot read `runs/`, so the wrapper copies the verdict into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief; the task file keeps the absolute path. A verdict that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as it is, and the attempt record carries `verdict copy skipped: <path>: <reason>`, which [`radian arc show`](planning.md#radian-arc-show-id-json) prints as `attempt_note`.
 It counts as an automatic rework: it raises `auto_rework`, and `max_auto_rework` pauses the plan (see the [`limits.max_auto_rework` row](config.md#configtoml)); the task then stays in `review.rework_pending`.
 With `auto` `off`, the task stays in `review.rework_pending` and waits for you, as before.
@@ -81,7 +92,7 @@ With `auto` `off`, the task stays in `review.rework_pending` and waits for you, 
 ### The review's follow-up
 
 A task is **open** when it is in `todo.ready`, `doing.*` or `review.*`; a `todo.proposed`, `done.*` or `failed.*` task is not open.
-When a plan has no open task, arc collects the review suggestions of the merged tasks that merged under this rule and proposes one follow-up task for the plan, and no more.
+When a plan has no open task, arc collects the review findings of the merged tasks that merged under this rule and proposes one follow-up task for the plan, and no more.
 arc checks after every change that can leave a plan with no open task: a merge, a `cancel`, and every scheduling pass.
 The check is idempotent: running it again adds no task.
 The check and the write are one transaction under `state.lock`: the open-task condition and the set of merged tasks to collect are re-read under the lock that appends the follow-up, so a `confirm` between a scheduling pass's read and its write cannot add a follow-up beside an open task.
@@ -95,13 +106,13 @@ A merged follow-up is never collected.
 A task merged before the field existed (by an older arc), or merged while `propose_followups` was `false`, does not carry it and is never collected, whatever its review verdicts say: turning the switch back on does not bring it back.
 So an old per-task follow-up (the title `Follow-ups from <task id>'s review`, with that task as its only `after` entry) collects nothing, and it is never collected itself.
 
-For each collected task arc reads every `review` verdict of the task, oldest attempt first, and collects every `suggestions` item of every round; the items a rework round moved (marked `pre_existing`) are in `suggestions`.
-Every round is read, not only the newest: a round that failed can carry a demoted item, and a later round can pass with nothing to suggest.
-Nothing from `blocking` is collected: a merged task's blocking items were fixed or the review would not have passed, so a round that only had blocking items contributes nothing.
+For each collected task arc reads every `review` verdict of the task, oldest attempt first, and collects every finding of every round that is below that round's `fix_level` or `pre_existing`; these are the findings the round did not fail on.
+Every round is read, not only the newest: a round that failed can carry a below-threshold or pre-existing finding, and a later round can pass with nothing to carry.
+Nothing from the failing findings is collected: a merged task's failing findings were fixed or the review would not have passed, so a round that only had failing findings contributes nothing.
 
-Two items of the same merged task are the same when their `file`, `line` and `text` are equal after a leading tag that repeats the item's own level is removed and whitespace is collapsed; arc keeps the newest copy.
-An item with the same `file:line` and other text is kept as its own item.
-Items of different tasks are never merged.
+Two findings of the same merged task are the same when their `file`, `line` and `summary` are equal after a leading tag that repeats the finding's own severity is removed and whitespace is collapsed; arc keeps the newest copy.
+A finding with the same `file:line` and another summary is kept as its own finding.
+Findings of different tasks are never merged.
 
 When at least one item is left, and `[gate.review] propose_followups` is `true` (the default), arc adds one task to the plan, and no more:
 
@@ -112,9 +123,9 @@ When at least one item is left, and `[gate.review] propose_followups` is `true` 
 - its phase is `todo.proposed`, so the loop never claims it until you confirm it (see [`confirm`](owner.md#radian-arc-confirm-id));
 - its `allow_noop` is `true`: its brief lets each item be left with a one-line reason, so an attempt that adds no commit may deliver nothing (see [An empty change](gate.md#an-empty-change));
 
-Its brief is fixed: one line saying the items are from the reviews of the plan's merged tasks and that each item is to be fixed or left with a one-line reason in the final answer; then one section per collected task, headed `From <task id>`, holding that task's items grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one item per line as `[level] path:line text`; then the path of every review verdict.
+Its brief is fixed: one line saying the items are from the reviews of the plan's merged tasks and that each item is to be fixed or left with a one-line reason in the final answer; then one section per collected task, headed `From <task id>`, holding that task's findings grouped by the round they came from, each group headed `From review <n> (attempt <n>):`, one finding per line as `[severity] path:line summary — trigger`, with the ` — trigger` part left out when the trigger is empty; then the path of every review verdict.
 The worker gets each verdict as a copy at `.radian/arc-verdicts/<task>/<attempt>/<file>` in its worktree, one copy for every task and attempt the brief names, and the task file keeps the absolute paths; the skip line is the same as for a review rework ([A failed review](#a-failed-review)).
-An item whose `text` starts with a tag that repeats its own level prints the level once, as in the rework reason above.
+A finding whose `summary` starts with a tag that repeats its own severity prints the severity once, as in the rework reason above.
 
 A plan whose merged tasks left no item gets no follow-up.
 A follow-up task gets no follow-up of its own: a merged follow-up is never collected, so the review's unfixed items stay in its verdict and in the task's final report.

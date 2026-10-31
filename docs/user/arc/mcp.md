@@ -72,7 +72,7 @@ One event is sent per task whose `state.phase` differs from the previous read an
 
 A move into `todo.ready` sends one too, from one of these previous phases: `todo.proposed` (your `radian arc confirm <task>`) and `review.*` (the lead's `add_rework`).
 A reject keeps the task in `review.rework_pending`, so its event is that one and its second line is the note (see [`reject`](owner.md#radian-arc-reject-task-note-text)).
-A rework arc writes itself (a conflict with main, or a review that failed with blocking items) is not your action: its rework heading carries a suffix and the move sends nothing.
+A rework arc writes itself (a conflict with main, or a review that failed on a failing finding) is not your action: its rework heading carries a suffix and the move sends nothing.
 
 A task that is new since the previous read counts as a transition from nothing.
 Every other change (`doing.*`, `review.verifying`, `review.integrating`, a `todo.retry_wait` or `todo.paused_budget` task that became `todo.ready`, a title edit) sends nothing: each event costs the lead a model turn.
