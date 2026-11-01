@@ -407,7 +407,9 @@ pub fn execute(
             match confirm(confirmed || yes, prompt) {
                 Some(prompt) => output.needs_confirmation = Some(prompt),
                 None => {
-                    let report = service.split(&ProjectId(from), &ProjectId(to), &names)?;
+                    let report = service
+                        .split(&ProjectId(from), &ProjectId(to), &names)
+                        .map_err(add_error)?;
                     output.text = move_report_text(&report);
                 }
             }
@@ -449,6 +451,7 @@ fn confirm(confirmed: bool, prompt: impl Into<String>) -> Option<String> {
     if confirmed { None } else { Some(prompt.into()) }
 }
 
+/// Maps the name errors `add` and `split` report to a usage error; anything else keeps its code.
 fn add_error(error: MemoryServiceError) -> CommandError {
     match error {
         MemoryServiceError::AlreadyExists { .. }
@@ -885,6 +888,45 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, USAGE_ERROR, "{error}");
         assert_eq!(service.list(ScopeSelection::ProjectOnly).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `split` name outside the record rule is the same usage error `add` reports (exit 2),
+    /// and a valid name earlier in the list does not move.
+    #[test]
+    fn split_with_an_invalid_name_is_a_usage_error_and_moves_nothing() {
+        let (dir, service) = service("split-bad-name");
+        let project = service.create_project().unwrap();
+        service.add(WriteScope::Project, "note", "user").unwrap();
+
+        let error = execute(
+            &service,
+            MemoryCommand::Split {
+                yes: true,
+                from: project.0.clone(),
+                to: "target-project".into(),
+                names: vec!["note".into(), "SESSIONS".into()],
+            },
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, USAGE_ERROR, "{error}");
+        assert!(
+            error.message.contains("invalid memory record name"),
+            "the same error add gives: {error}"
+        );
+        let source = Scope::Project(project);
+        assert!(
+            service.files().exists(&source, "note").unwrap(),
+            "a refused split moves nothing"
+        );
+        assert!(
+            std::fs::read_to_string(service.files().index_path(&source))
+                .unwrap()
+                .contains("note.md"),
+            "the source index line stayed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

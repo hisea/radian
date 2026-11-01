@@ -492,12 +492,15 @@ impl MemoryService {
     ) -> Result<MoveReport, MemoryServiceError> {
         let source = Scope::Project(from.clone());
         let target = Scope::Project(to.clone());
-        let mut report = MoveReport::default();
+        // Every name is checked before the first move, so a refused split moves nothing.
         for name in names {
             validate_record_name(name).map_err(|reason| MemoryError::InvalidName {
                 name: name.clone(),
                 reason,
             })?;
+        }
+        let mut report = MoveReport::default();
+        for name in names {
             let mut from_path = self.files.record_path(&source, name);
             let to_path = self.files.record_path(&target, name);
             if !from_path.is_file() {
@@ -1048,5 +1051,53 @@ mod tests {
     #[test]
     fn split_refuses_a_parent_name() {
         split_refuses_name("split-parent", "..");
+    }
+
+    /// A refused name is found before any earlier name moves, so a list that mixes a valid
+    /// name with an invalid one leaves the source project exactly as it was.
+    #[test]
+    fn split_validates_every_name_before_it_moves_any() {
+        let (dir, _ws, service) = service("split-mixed");
+        let from = ProjectId("from-project".into());
+        let to = ProjectId("to-project".into());
+        let scope = Scope::Project(from.clone());
+        std::fs::create_dir_all(service.files().scope_dir(&scope)).unwrap();
+        let note = service.files().record_path(&scope, "note");
+        std::fs::write(&note, "STAYS\n").unwrap();
+        service
+            .files()
+            .write_index(&scope, "# Memory\n- [note](note.md) — the note\n")
+            .unwrap();
+
+        let error = service
+            .split(&from, &to, &["note".to_owned(), "SESSIONS".to_owned()])
+            .expect_err("the second name is refused");
+        assert!(
+            matches!(
+                &error,
+                MemoryServiceError::Storage(MemoryError::InvalidName { name, .. })
+                    if name == "SESSIONS"
+            ),
+            "expected an InvalidName for SESSIONS, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&note).unwrap(),
+            "STAYS\n",
+            "the valid earlier name did not move"
+        );
+        assert!(
+            !service
+                .files()
+                .record_path(&Scope::Project(to.clone()), "note")
+                .exists(),
+            "the target did not receive the earlier name"
+        );
+        assert!(
+            std::fs::read_to_string(service.files().index_path(&scope))
+                .unwrap()
+                .contains("note.md"),
+            "the source index line stayed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

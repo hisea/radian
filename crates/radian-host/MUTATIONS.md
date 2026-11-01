@@ -2048,3 +2048,5 @@ sandbox --no-fail-fast -E 'test(<name>)'`, and the source restored from `.radian
 |---|---|---|---|
 | TK0293-M1 | `is_memory_write` compares the raw path with the canonical roots (`canonical_spelling` dropped) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_write_spelled_through_a_symlinked_scope_is_refused_while_memory_is_off` (the symlinked spelling was allowed) |
 | TK0293-M2 | `split` joins each given name into a path without `validate_record_name` | ✅ 1 failed (rc=100) | `memory::service::tests::split_refuses_an_absolute_name` (the absolute name reached `record_path`) |
+| TK0293-M3 | `split` validates each name inside the move loop, so the first name is renamed before the second is checked | ✅ 1 failed (rc=100) | `memory::service::tests::split_validates_every_name_before_it_moves_any` (the valid earlier name had moved) |
+| TK0293-M4 | the command path propagates a `split` `InvalidName` with `?` instead of `add_error` (exit 1) | ✅ 1 failed (rc=100) | `memory::commands::tests::split_with_an_invalid_name_is_a_usage_error_and_moves_nothing` (`left: 1, right: 2`) |
