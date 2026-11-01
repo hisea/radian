@@ -736,6 +736,18 @@ impl App {
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
                             card.is_error = result.is_error;
+                            // ADR 0035: a settled call into a memory scope carries the record's
+                            // title, type and path, so the renderer draws the memory card (or
+                            // the read line) instead of the ordinary tool card.
+                            card.memory = if result.is_error {
+                                None
+                            } else {
+                                crate::memory_card::detect(
+                                    self.memory_root.as_deref(),
+                                    &card.name,
+                                    &card.arguments,
+                                )
+                            };
                             // The head's title can only be final now, so the entry's text -
                             // what renders and copies - is regenerated from the same function
                             // the layout uses. The result's own row count is part of the head's
@@ -761,6 +773,15 @@ impl App {
                 let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
                 card.is_error = result.is_error;
+                card.memory = if result.is_error {
+                    None
+                } else {
+                    crate::memory_card::detect(
+                        self.memory_root.as_deref(),
+                        &card.name,
+                        &card.arguments,
+                    )
+                };
                 // The body's text **is** the entry's text (the mapping/search invariant): a
                 // `patch` shows the synthesized diff, a `write` the content written, every
                 // other tool its own result text.

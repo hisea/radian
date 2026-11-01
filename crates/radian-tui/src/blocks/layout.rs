@@ -26,6 +26,11 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize, height: usiz
     if is_ask_entry(entry) {
         return layout(entry, &[], modes, width, height).len();
     }
+    // ADR 0035: the memory card is an open frame, not a card; its result entry is blank when
+    // it closes the call. Count it through the layout so the total equals the drawing.
+    if is_memory_card_entry(entry) {
+        return layout(entry, &[], modes, width, height).len();
+    }
     // An entry with images (ADR 0028 R10) goes through the layout: its placeholder row and
     // the image's run are part of the shape, and one function computes them for the
     // count, the drawing and the text-only paths.
@@ -453,6 +458,14 @@ fn layout_unstripped(
             lines
         }
         (EntryKind::ToolCall, _) => {
+            // ADR 0035: a successful `write`/`patch` into a memory scope is the memory card,
+            // in place of the ordinary tool card.
+            if let Some(card) = entry.tool.as_deref()
+                && let Some(memory) = &card.memory
+                && !memory.read
+            {
+                return memory_card_lines(memory, body_width, modes.glyphs);
+            }
             // ADR 0024 Q7: an `ask_user` call is the question record, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
@@ -501,6 +514,19 @@ fn layout_unstripped(
         }
         (EntryKind::ToolResult, _) => {
             let card = entry.tool.as_deref();
+            // ADR 0035: the call entry draws the whole memory card, so a result that closes it
+            // (a merged `Tail`) draws nothing; a torn result whose call is gone still draws the
+            // card from its own data.
+            if let Some(card) = card
+                && let Some(memory) = &card.memory
+                && !memory.read
+            {
+                return if entry.card == crate::blocks::Card::Tail {
+                    Vec::new()
+                } else {
+                    memory_card_lines(memory, body_width, modes.glyphs)
+                };
+            }
             // ADR 0024 Q7: the result of `ask_user` is the same block, now with the
             // answers (or the declined/cancelled status).
             if let Some(card) = card

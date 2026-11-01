@@ -84,6 +84,27 @@ A file whose frontmatter does not parse, or whose `type` or `source` is outside 
 reported by `list` as unreadable with its path and line. Reading it is an error naming the
 path and the line, and the other files still list.
 
+## In the transcript
+
+When the model writes or patches a file under a memory scope and the call succeeds, the
+transcript draws one card in place of the ordinary `write` or `patch` card:
+
+```
+╭─ memory ──────────────────────────────
+│ deploy-notes · project · projects/8f3c/deploy-notes.md
+╰──
+```
+
+The title is the file's frontmatter `name`, or the file stem when the frontmatter does not
+parse. The type is the frontmatter `type`, or `?` when the frontmatter does not parse. The path
+is relative to the memory root. With the message box empty, `Enter` opens the newest memory
+card's file with `$EDITOR` when set, otherwise the platform opener. A failed call, and a path
+outside the memory scopes, keep the ordinary `write` or `patch` card.
+
+When the model reads a memory record, the read shows one line, `memory used: <title>`, in place
+of the ordinary read head; the record's content stays behind the usual fold (`Ctrl-O`). The two
+index files, `MEMORY.md` and `SESSIONS.md`, keep the ordinary read head.
+
 The body is free Markdown. It keeps its bytes exactly, including trailing newlines, blank
 lines and a line that spells `---`.
 

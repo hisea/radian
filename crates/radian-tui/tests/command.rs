@@ -653,3 +653,37 @@ fn a_ready_level_with_a_prefix_sibling_does_not_arm_on_an_exact_word() {
         other => panic!("expected `Ready`: {other:?}"),
     }
 }
+
+/// ADR 0021 D7: `/memory off` then `/memory on` each answer with one status line, and the
+/// switch reaches the loop as an effect. `/memory search` is a removed command: the usage
+/// error names the current set.
+#[test]
+fn memory_off_and_on_show_a_status_line_and_search_names_the_current_set() {
+    let (dir, mut app, service) = app_with_memory("switch");
+
+    submit(&mut app, &service, &dir, "/memory off");
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|line| line.starts_with("memory off:")),
+        "{:?}",
+        notices(&app)
+    );
+    submit(&mut app, &service, &dir, "/memory on");
+    let lines = notices(&app);
+    assert!(
+        lines.iter().any(|line| line.starts_with("memory on:")),
+        "{lines:?}"
+    );
+
+    submit(&mut app, &service, &dir, "/memory search x");
+    let lines = notices(&app);
+    let usage = lines
+        .iter()
+        .find(|line| line.contains("were removed"))
+        .unwrap_or_else(|| panic!("no removed-command usage line: {lines:?}"));
+    assert!(usage.contains("list"), "{usage}");
+    assert!(usage.contains("merge"), "{usage}");
+    assert!(!usage.contains("search,"), "{usage}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

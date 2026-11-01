@@ -218,6 +218,9 @@ pub enum Effect {
     /// `/memory off|on` (ADR 0021 D7): the loop calls the facade, which flips the live switch
     /// and queues the durable `ConfigChanged` for the next resume. `true` = off.
     SetMemory { off: bool },
+    /// Open a memory file with the host's opener (ADR 0035): `Enter` on the newest memory card.
+    /// The loop calls `radian_host::memory::open_path`; `update` never spawns a process.
+    OpenMemory { path: PathBuf },
     /// Switch the session's permission tier (ADR 0038 slice 2). The loop calls the facade
     /// (`set_access`), which rebuilds the profile and the sandbox through the host's builder;
     /// a failed probe is a refusal. `remember` also writes the per-project record. The answer
@@ -786,6 +789,10 @@ pub struct App {
     /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
     /// service; without one the command is refused with the same notice as before.
     pub memory_enabled: bool,
+    /// The memory root (ADR 0021): what a memory path in the transcript is relative to, and
+    /// where [`crate::memory_card::detect`] looks up a record. `None` when this process has no
+    /// memory root. The service stays on the loop's side (ADR 0023 U3).
+    pub memory_root: Option<PathBuf>,
     /// The sends waiting for their `@` expansion, in submit order (see
     /// [`Effect::ExpandMentions`]): one entry per submitted send, so two rapid submits —
     /// `/queue a` then `/queue b`, or two fast Enters — cannot overwrite each other and drop

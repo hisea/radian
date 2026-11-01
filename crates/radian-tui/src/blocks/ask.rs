@@ -66,7 +66,7 @@ impl AskGlyphs {
 /// styled by `md` pieces. `code` is set so the renderer emits an empty lead and the frame's
 /// `╭`/`│`/`╰` sits in the marker column at column 1 (ADR 0035); the
 /// block draws its own marker column, so the entry's `->` marker is not used.
-fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
+pub(super) fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
     let text: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
     let md: Vec<MdPiece> = pieces
         .into_iter()
@@ -257,7 +257,7 @@ pub(super) fn ask_block(
 /// The open frame's top line (ADR 0028 / ADR 0035):
 /// `╭─ <label> ───…`, with the rule running to the body width and **no** right corner. The whole
 /// line is the `frame` role (ADR 0029's structural level).
-fn ask_top(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
+pub(super) fn ask_top(g: &AskGlyphs, width: usize, label: &str) -> Vec<(String, MdStyle)> {
     let prefix = format!("{}{} ", g.top_left, g.horizontal);
     let mut pieces = vec![
         (prefix.clone(), MdStyle::Frame),
@@ -320,7 +320,7 @@ fn ask_body(
 /// The open frame's tail (ADR 0028 / ADR 0035):
 /// exactly three cells, `╰──` (ascii `+--`), in the frame role. It does not run to the top
 /// line's width.
-fn ask_bottom(g: &AskGlyphs) -> Vec<(String, MdStyle)> {
+pub(super) fn ask_bottom(g: &AskGlyphs) -> Vec<(String, MdStyle)> {
     vec![(
         format!("{}{}{}", g.bottom_left, g.horizontal, g.horizontal),
         MdStyle::Frame,

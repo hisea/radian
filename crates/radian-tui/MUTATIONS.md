@@ -3475,3 +3475,18 @@ sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored from a copy
 | TK0291-M3 | `draw_attempts` draws a severity heading before its `findings.is_empty()` check | `arc_tui::the_attempts_tab_draws_a_heading_only_for_a_severity_that_has_findings` (the screen carried `│   critical` beside the `minor` row) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0279: the memory card and the read line (2026-11-01, branch `work/TK0279-memory-tui`)
+
+A settled `write`/`patch` into a memory scope draws the memory card and a memory `read` draws
+the `memory used:` line (ADR 0035). Each mutation was applied by hand to
+`crates/radian-tui/src/memory_card.rs`, the named test ran with `cargo nextest run -p radian-tui
+--locked --profile sandbox --test card -E 'test(<name>)'`, and the file was restored from a copy
+under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0279-M1 | the memory path test is loosened: the call's path need not sit under the memory root and any `.md`/`.rs` path gets the card | `card::a_workspace_write_keeps_the_ordinary_card` (the memory-root app drew `╭─ memory … main · ? · …/src/main.rs` where the plain app drew `◻ write src/main.rs`) | ✅ 1 failed |
+| TK0279-M2 | `MEMORY.md` (and `SESSIONS.md`) reads are no longer excluded | `card::a_memory_read_draws_one_muted_line_and_the_index_keeps_the_read_head` (the index read drew `• memory used: MEMORY`) | ✅ 1 failed |
+
+2/2 caught.

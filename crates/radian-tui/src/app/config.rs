@@ -36,6 +36,7 @@ impl App {
             last_answered: None,
             layers: vec![Layer::Surface],
             memory_enabled: false,
+            memory_root: None,
             pending_expand: VecDeque::new(),
             slash_completion: None,
             mention_completion: None,
@@ -149,6 +150,12 @@ impl App {
     /// itself stays on the loop's side (ADR 0023 U3).
     pub fn set_memory_enabled(&mut self, enabled: bool) {
         self.memory_enabled = enabled;
+    }
+
+    /// The memory root the transcript resolves a memory card's path against (ADR 0035). Set
+    /// once at startup, beside [`App::set_memory_enabled`].
+    pub fn set_memory_root(&mut self, root: Option<PathBuf>) {
+        self.memory_root = root;
     }
 
     /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved
