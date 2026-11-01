@@ -231,6 +231,61 @@ fn every_field_changes_and_is_recorded() {
     assert_eq!(loaded.item.extra_stages, vec!["mutation".to_owned()]);
 }
 
+/// `update_task` sets the task's own `review_fix_level`, and an explicit `null` clears it so
+/// the reviewer's level applies again; `show` follows each write (ADR 0048 decision 10).
+#[test]
+fn review_fix_level_is_set_and_cleared() {
+    let (_scratch, store, plan) = setup("fix-level");
+    let task = add_task(&store, &plan, "work", &[]);
+    let server = ArcServer::new(store.clone());
+
+    let updated = update_ok(&server, json!({"task": task, "review_fix_level": "minor"}));
+    assert_eq!(updated["review_fix_level"], "minor", "{updated}");
+    assert_eq!(updated["review_fix_level_source"], "task", "{updated}");
+    assert_eq!(
+        last_change_fields(updated["body"].as_str().unwrap()),
+        "review_fix_level"
+    );
+    assert_eq!(
+        store.load_task(&task).expect("reads").item.review_fix_level,
+        Some("minor".to_owned())
+    );
+
+    let updated = update_ok(&server, json!({"task": task, "review_fix_level": null}));
+    assert_eq!(
+        updated["review_fix_level"], "major",
+        "the reviewer's default applies again: {updated}"
+    );
+    assert_eq!(updated["review_fix_level_source"], "reviewer", "{updated}");
+    assert_eq!(
+        store.load_task(&task).expect("reads").item.review_fix_level,
+        None,
+        "the field is cleared"
+    );
+}
+
+/// A `review_fix_level` outside the set is refused, naming every value, and nothing is
+/// written (ADR 0048 decision 10).
+#[test]
+fn a_review_fix_level_outside_the_set_is_refused_by_name() {
+    let (_scratch, store, plan) = setup("fix-level-bad");
+    let task = add_task(&store, &plan, "work", &[]);
+    let server = ArcServer::new(store.clone());
+
+    let error = update_err(
+        &server,
+        json!({"task": task, "review_fix_level": "blocker"}),
+    );
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(error.contains(level), "the error names `{level}`: {error}");
+    }
+    assert_eq!(
+        store.load_task(&task).expect("reads").item.review_fix_level,
+        None,
+        "a refused call writes nothing"
+    );
+}
+
 #[test]
 fn a_call_with_no_optional_field_is_refused() {
     let (_scratch, store, plan) = setup("nothing");

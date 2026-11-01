@@ -19,7 +19,7 @@ use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::config::IntegrationStyle;
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Exit, FollowupTask, Store, plan_ops};
+use radian_arc::store::{Exit, FollowupTask, Store, cli, plan_ops};
 use serde_json::{Value, json};
 
 // ---- store-level fixture -------------------------------------------------------------
@@ -320,6 +320,16 @@ impl Fixture {
                 "fix_level = \"{level}\"           # `critical`, `major` or `minor`; a finding at or above it fails the round"
             ),
         );
+    }
+
+    /// Sets the task file's own `review_fix_level`.
+    fn task_review_fix_level(&self, level: &str) {
+        self.store
+            .change_task(&self.task, |task| {
+                task.review_fix_level = Some(level.to_owned());
+                Ok(())
+            })
+            .expect("the task takes its own review fix level");
     }
 
     fn add_worktree(&self) -> PathBuf {
@@ -8208,6 +8218,117 @@ fn a_minor_finding_at_the_fix_level_fails_with_review_findings() {
         "{}",
         stored.body
     );
+}
+
+/// A task's own `review_fix_level` replaces the reviewer's: the reviewer's `major` would pass
+/// this `minor` finding, and the task's `minor` fails it. The verdict records the effective
+/// value (ADR 0048 decision 10).
+#[test]
+fn a_tasks_review_fix_level_replaces_the_reviewers() {
+    let fixture = Fixture::new("findings-task-fix-level");
+    fixture.add_review_stage();
+    fixture.task_review_fix_level("minor");
+    fixture.set_auto("merge");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-task-fix-level-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[finding_json("minor", "one.txt", 1, "a naming nit", "")],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(
+        verdict
+            .review_settings
+            .as_ref()
+            .expect("the settings")
+            .fix_level,
+        "minor",
+        "the verdict records the effective level"
+    );
+}
+
+/// A task without `review_fix_level` uses its reviewer's: `show` prints that value and names
+/// the reviewer as its source (ADR 0048 decision 10).
+#[test]
+fn a_task_without_review_fix_level_shows_the_reviewers_value() {
+    let fixture = Fixture::new("fix-level-show-reviewer");
+    fixture.add_review_stage();
+    fixture.review_fix_level("critical");
+
+    let shown = cli::show_json(&fixture.store, &fixture.task).expect("show");
+    assert_eq!(shown["review_fix_level"], json!("critical"), "{shown}");
+    assert_eq!(
+        shown["review_fix_level_source"],
+        json!("reviewer"),
+        "{shown}"
+    );
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(text.contains("review_fix_level: critical"), "{text}");
+    assert!(text.contains("review_fix_level_source: reviewer"), "{text}");
+}
+
+/// `show --json` carries the task's own level and `task` as its source (ADR 0048 decision 10).
+#[test]
+fn show_json_carries_the_review_fix_level_and_its_source() {
+    let fixture = Fixture::new("fix-level-show-task");
+    fixture.add_review_stage();
+    fixture.task_review_fix_level("critical");
+
+    let shown = cli::show_json(&fixture.store, &fixture.task).expect("show");
+    assert_eq!(shown["review_fix_level"], json!("critical"), "{shown}");
+    assert_eq!(shown["review_fix_level_source"], json!("task"), "{shown}");
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(text.contains("review_fix_level: critical"), "{text}");
+    assert!(text.contains("review_fix_level_source: task"), "{text}");
+}
+
+/// The manual names the task field, the values it may hold, its fallback and both sources of
+/// the effective level, from the one lists the code reads (ADR 0048 decisions 10 and 15).
+#[test]
+fn the_manual_names_the_review_fix_level_field_and_its_sources() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let files = std::fs::read_to_string(manifest.join("../../docs/user/arc/files.md"))
+        .expect("docs/user/arc/files.md");
+    let task_fields = radian_coding::drift::table_under(&files, "arc/files.md", "### Task fields");
+    let row = task_fields
+        .iter()
+        .find(|row| row.first().is_some_and(|cell| cell == "`review_fix_level`"))
+        .unwrap_or_else(|| {
+            panic!("the task fields table has no `review_fix_level` row: {task_fields:?}")
+        });
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            row.iter().any(|cell| cell.contains(level)),
+            "the task field's row names `{level}`: {row:?}"
+        );
+    }
+    assert!(
+        row.iter().any(|cell| cell.contains("reviewer")),
+        "the task field's row names the reviewer it falls back to: {row:?}"
+    );
+    let planning = std::fs::read_to_string(manifest.join("../../docs/user/arc/planning.md"))
+        .expect("docs/user/arc/planning.md");
+    let source_line = planning
+        .lines()
+        .find(|line| line.contains("`review_fix_level_source` is"))
+        .expect("arc/planning.md explains `review_fix_level_source`");
+    for source in radian_arc::store::model::FIX_LEVEL_SOURCES {
+        assert!(
+            source_line.contains(&format!("`{source}`")),
+            "arc/planning.md names the source `{source}`: {source_line}"
+        );
+    }
 }
 
 /// A `major` finding outside the change's lines in a rework round is marked `pre_existing`,

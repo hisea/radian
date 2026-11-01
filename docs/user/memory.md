@@ -107,6 +107,35 @@ Export the project scope, edit the Markdown, read it back:
 /memory import /tmp/mem.md
 ```
 
+## What the model is told
+
+When memory is on and a memory directory exists, the base prompt carries one memory block
+between the role prose and the context files. `[memory] enabled = false` removes the block
+together with the index section; no memory directory removes both too. The block tells the
+model:
+
+- Write a memory file after you correct the model, at a handoff, or when it learns a fact
+  that helps a later session.
+- Do not write what the repository already records: code structure, git history or
+  `AGENTS.md`. Project facts and project procedures go to `AGENTS.md`; cross-project
+  procedures go to a user skill.
+- Write one file per fact in the memory directory the index section names. Give each file
+  `name`, `description`, `type`, `source`, `created` and `modified` frontmatter fields, and
+  add one `- [title](file) — description` line to the index. Update the file on the same
+  subject instead of writing a new one. Delete a file that is wrong.
+- Content that names this repository's paths, branches, files, decision numbers, task
+  numbers or structure is project. Your preferences, corrections of the model's way of
+  working and pointers that hold across repositories are global. When unsure, the model
+  writes project. `type` is independent of scope.
+- Memory is not proof of current behavior. The model verifies that a file, flag or command
+  still exists before it recommends one. It cites only the memory it used. It consults
+  memory when the request names the repository, an earlier decision or continuity, and not
+  when the request is self-contained.
+- Read the project index before the global index. On the same subject, the project file wins.
+
+A custom system prompt (`--system` or `--system-file`) replaces the role prose. The memory
+block stays, like the index section, because it is host policy.
+
 ## What the model sees
 
 At the first model call of a session, the model receives the two index files

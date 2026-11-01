@@ -478,7 +478,8 @@ pub struct ReviewSettings {
     /// decision 15). Absent on a verdict written before the field existed.
     #[serde(default)]
     pub reviewer: String,
-    /// The reviewer's `fix_level` (ADR 0048 decision 10): a finding at or above it and not
+    /// The effective `fix_level` the round was decided with (ADR 0048 decision 10): the task's
+    /// own when its file carries one, else its reviewer's. A finding at or above it and not
     /// `pre_existing` fails the round. Absent on a verdict written before the field existed.
     #[serde(default)]
     pub fix_level: String,

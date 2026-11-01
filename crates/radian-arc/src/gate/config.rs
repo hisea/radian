@@ -429,7 +429,8 @@ pub struct Reviewer {
     /// Wall-time limit of one review session, in seconds. `0` waits forever.
     pub timeout_secs: u64,
     /// The level a finding must reach to fail the round. The parser checks it against
-    /// [`super::verdict::REVIEW_LEVELS`]; the verdict records it and nothing else reads it.
+    /// [`super::verdict::REVIEW_LEVELS`]; a task's own `review_fix_level` replaces it for that
+    /// task's reviews and the verdict records the effective value (ADR 0048 decision 10).
     pub fix_level: String,
     /// The values a task's first review uses in place of the keys above.
     pub first: FirstReviewConfig,

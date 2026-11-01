@@ -100,6 +100,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     let role = Arc::new(radian_host::RoleHooks::new(
         "<runtime>\n</runtime>",
         "",
+        "",
         None,
     ));
 

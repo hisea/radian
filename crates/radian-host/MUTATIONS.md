@@ -1956,3 +1956,13 @@ one) and ran `cargo nextest run -p radian-exec --test cli ... -E 'test(<name>)'`
 | TK0278-M1 | the same-id replacement is removed (`upsert_session_line` always pushes) | ✅ 2 failed (rc=100) | `memory::sessions::tests::a_second_line_for_the_same_session_replaces_the_first` (two lines) and `cli::a_resumed_session_replaces_its_line` (the resumed session's end left two lines) |
 | TK0278-M2 | the cap is off by one (`max_lines + 1`) | ✅ 1 failed (rc=100) | `memory::sessions::tests::the_cap_drops_the_oldest_lines_and_keeps_the_newest_last` (1001 lines kept) |
 | TK0278-M3 | the `SESSIONS.md` write refusal in `radian-coding` is removed | ✅ 1 failed (rc=100) | `cli::the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers` (the `write` succeeded and the index content changed) |
+## TK0275: the memory role block (2026-10-31)
+
+Branch `work/TK0275-memory-role-rules`. Each mutation was applied in place and the named test
+run with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast
+-E 'test(<name>)'`; each source was restored from `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0275-M1 | the project-versus-global sentence is removed from `prompts/memory.md` | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_pins_one_sentence_from_each_rule` (the project-versus-global sentence is missing) |
+| TK0275-M2 | `memory_rules(false)` returns the block instead of nothing | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_sits_between_the_role_and_the_context_files_and_is_gated` (the disabled prompt carries every memory sentence) |

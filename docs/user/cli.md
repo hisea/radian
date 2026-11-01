@@ -20,7 +20,7 @@ Run it only in a real terminal: it takes over the screen.
 |---|---|---|---|---|---|
 | `--config` | `FILE` | `RADIAN_CONFIG`, else `~/.radian/config/config.toml` | `RADIAN_CONFIG` | — | Read this configuration file. Radian never writes it. |
 | `-w`, `--workspace` | `DIR` | current directory | — | — | Root the built-in file tools here. Without it the current directory is the workspace. |
-| `--system` | `SYSTEM` | — | — | — | System prompt text. |
+| `--system` | `SYSTEM` | — | — | — | System prompt text. Replaces the role prose only. |
 | `-h`, `--help` | — | — | — | — | Print help and exit. |
 | `-V`, `--version` | — | — | — | — | Print the version and exit. |
 
@@ -89,7 +89,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--config` | `FILE` | `RADIAN_CONFIG`, else default file | — | Read this configuration file. Radian never writes it. |
 | `--max-tokens` | `N` | `16384` | — | `max_tokens` for anthropic. Refused for `openai-compatible`. |
 | `--thinking` | `MODE` | `medium` | — | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, clamped per route. Legacy `adaptive` and `enabled:<budget>` warn and still work. |
-| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. |
+| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. Replaces the role prose only. |
 | `--system-file` | `FILE` | — | — | Read the system prompt from this file. |
 | `--mcp-config` | `FILE` | — | — | MCP servers JSON file. |
 | `--workspace` | `DIR` | current directory | — | Root the built-in file tools here. |
