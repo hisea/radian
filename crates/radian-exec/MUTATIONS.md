@@ -800,3 +800,18 @@ record before the request. It was applied to `src/metrics.rs`, the named test wa
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0299-M1 | `usage` reads `previous_ts` as its start, so the anchor is any previous record again | ✅ 1 failed (rc=100) | `metrics::tests::a_first_request_latency_runs_from_the_turn_start` (`left: 50`, `right: 3050`) |
+
+## TK0299 rework: a response without usage, and a request right after a usage record (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 1. Two mutations
+target the anchor state: the first stops a response without a usage record from ending at the
+record after its assistant message, the second keeps the previous response's usage record from
+becoming the next request's anchor. Both were applied to `src/metrics.rs`, the named test was run
+with `cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(metrics::tests)'`, and the source was restored from `.radian/metrics.rs.bak`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M2 | a record after an assistant message with no usage record no longer moves the anchor (`response_open || anchor_ready` becomes `anchor_ready && !response_open`) | ✅ 1 failed (rc=100) | `metrics::tests::a_response_without_usage_ends_at_the_record_after_its_assistant_message` (`left: 15000`, `right: 5000`) |
+| TK0299-M3 | the usage-record branch no longer makes the usage record the next anchor | ✅ 1 failed (rc=100) | `metrics::tests::a_request_right_after_a_usage_record_anchors_on_it` (`left: 5000`, `right: 4000`) |

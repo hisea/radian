@@ -28,14 +28,17 @@
 //!   `ConfigChanged.change.model.provider`/`.model` switches it. An older exec snapshot that
 //!   predates `provider_id` carries only the adapter kind in `provider`, which is then the best
 //!   available answer.
-//! - `request_log`: one entry per request, with `latency_ms` from the anchor the request
-//!   was sent after to the usage record's `ts`, cut at 500 entries
+//! - `request_log`: one entry per request, with `latency_ms` from the last journal record
+//!   written before the request to the usage record's `ts`, cut at 500 entries
 //!   (`request_log_truncated` then says so). The anchor is the turn's `TurnStarted` for its
-//!   first request and, for a later one, the last record written before it that is not part
-//!   of the response being timed: records of a response (its assistant `MessageAppended`,
-//!   its reasoning, its usage) never move it. So the value is the model's whole response
-//!   time, not the gap between two writes of one response; with no anchor in range it is
-//!   null.
+//!   first request. After that every record moves it except a response's own records (its
+//!   assistant `MessageAppended` and its usage record): the assistant message freezes the
+//!   anchor for the request that produced it, and the usage record closes that request and is
+//!   itself the anchor of a request that follows with no record in between (a `PauseTurn`
+//!   continuation). A response that reported no usage ends at the first record written after
+//!   its assistant message, and that record moves the anchor. So the value is the model's
+//!   whole response time, not the gap between two writes of one response; with no anchor in
+//!   range it is null.
 //!
 //! A counter no record reported is `None` ("not reported", never 0, ADR 0007 J1). `retries`
 //! counts the live `ModelRetrying` events of the folded range (ADR 0010: they are not journal
@@ -285,9 +288,14 @@ struct Folder {
     metrics: RunMetrics,
     /// The `ts` of the record immediately before the current one.
     previous_ts: Option<String>,
-    /// Whether the current turn's first request is still unanswered, so its anchor is the
-    /// turn's `TurnStarted` (or none, when the folded range began mid-turn).
-    first_request: bool,
+    /// Whether this folded range has a source for the next request's anchor: its `TurnStarted`
+    /// or a usage record. Until then the records before the first request do not anchor it, so
+    /// a range that began mid-turn reports a null first latency.
+    anchor_ready: bool,
+    /// Whether an assistant `MessageAppended` opened a response whose usage record has not
+    /// been seen. While it is open the response's own records do not move the anchor; the
+    /// first record after them does (the response reported no usage).
+    response_open: bool,
     /// The `ts` of the last record written before the pending request, and not part of the
     /// response being timed. Its event set is named in [`Folder::observe`].
     request_anchor: Option<String>,
@@ -312,7 +320,8 @@ impl Folder {
         Self {
             metrics: empty(retries, context_window),
             previous_ts: None,
-            first_request: true,
+            anchor_ready: false,
+            response_open: false,
             request_anchor: None,
             pending: HashMap::new(),
             denied_calls: HashSet::new(),
@@ -355,12 +364,11 @@ impl Folder {
         let data = record.get("data");
         let ts = record.get("ts").and_then(Value::as_str);
         self.learn_route(record);
-        // The records of the response a request is waiting for: the assistant message the
-        // provider wrote and the usage record that follows it. They never move the anchor,
-        // so the latency of the request that produced them covers the whole response.
-        let response_record = event == "ModelUsageRecorded"
-            || event == "CompactionUsageRecorded"
-            || (event == "MessageAppended" && is_assistant_message(data));
+        // The records a response itself writes: the assistant message the provider returned
+        // and the usage record that follows it (written only when the provider reported
+        // usage). Neither moves the anchor of the request that produced it.
+        let response_message = event == "MessageAppended" && is_assistant_message(data);
+        let usage_record = event == "ModelUsageRecorded" || event == "CompactionUsageRecorded";
         match event {
             "ToolExecutionStarted" => {
                 let call_id = data.and_then(|d| d.get("call_id")).and_then(Value::as_str);
@@ -405,9 +413,7 @@ impl Folder {
                     }
                 }
             }
-            "ModelUsageRecorded" | "CompactionUsageRecorded" => {
-                self.usage(event, data, ts);
-            }
+            "ModelUsageRecorded" | "CompactionUsageRecorded" => {}
             "ContextCompacted" => {
                 self.metrics.compactions += 1;
                 let revision = data.and_then(|d| d.get("revision")).and_then(Value::as_u64);
@@ -432,14 +438,31 @@ impl Folder {
         if event == "TurnStarted" {
             // The turn's start is the anchor of its first request; the input append that
             // follows it belongs to the same moment and does not move it.
-            self.first_request = true;
+            self.anchor_ready = true;
+            self.response_open = false;
             self.request_anchor = ts.map(str::to_owned);
-        } else if !self.first_request && !response_record {
-            // Every other host record written after a response settles the previous one for
-            // the next request: a `ToolExecutionSettled`, the tool-result `MessageAppended`
-            // that follows it, a steer the host injected, a compaction's records
-            // (`CompactionUsageRecorded` excepted above), `TurnFinished`, and so on. The
-            // last one before the request is its anchor.
+        } else if response_message {
+            // The response has begun: its own records do not move the anchor, so the request
+            // that produced it is timed from the anchor this message keeps.
+            self.response_open = true;
+        } else if usage_record {
+            self.usage(event, data, ts);
+            // The usage record is the response's last write. It closes the request being
+            // timed and, after `usage` read the anchor, becomes the anchor itself for a
+            // request that follows with no record in between (a `PauseTurn` continuation).
+            self.anchor_ready = true;
+            self.response_open = false;
+            self.request_anchor = ts.map(str::to_owned);
+        } else if self.response_open || self.anchor_ready {
+            // Every record written between two requests moves the anchor: a
+            // `ToolExecutionStarted`/`ToolExecutionSettled`, the tool-result
+            // `MessageAppended` after a settle, a steer, the max-tokens notice, a
+            // compaction's records, `TurnFinished`, and so on. The last one before the
+            // request is its anchor. `response_open` here means the response reported no
+            // usage record, so its assistant message was its last write and this record is
+            // the first one after it.
+            self.anchor_ready = true;
+            self.response_open = false;
             self.request_anchor = ts.map(str::to_owned);
         }
         self.previous_ts = ts.map(str::to_owned);
@@ -527,9 +550,6 @@ impl Folder {
                 "model": self.route.as_ref().map(|(_, model)| model.clone()),
             }));
         }
-        // The turn's first request is answered (a chat or a compaction one): every later
-        // request of the turn anchors on the record before it, not on the turn start.
-        self.first_request = false;
     }
 
     fn finish(mut self) -> RunMetrics {
@@ -1570,5 +1590,95 @@ mod tests {
             ),
         ]);
         assert_eq!(metrics.request_log[1]["latency_ms"], 15000);
+    }
+
+    /// A response whose provider reported no usage writes no usage record, so it never
+    /// closes the turn's first request by itself. The records after its assistant message
+    /// (its tools' starts, settles and result messages) still anchor the next request.
+    #[test]
+    fn a_response_without_usage_ends_at_the_record_after_its_assistant_message() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:03Z"),
+            record(
+                4,
+                "2026-10-31T00:00:03.100000Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:10Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(6, "2026-10-31T00:00:10Z", "c1"),
+            assistant(2, "2026-10-31T00:00:14.900000Z"),
+            record(
+                8,
+                "2026-10-31T00:00:15Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log.len(), 1);
+        assert_eq!(
+            metrics.request_log[0]["latency_ms"], 5000,
+            "the anchor is the 10 s settle, not the turn start"
+        );
+    }
+
+    /// A `PauseTurn` response is followed by another request with no record in between: the
+    /// last record before that request is the first response's own usage record, so it is
+    /// the anchor even though it belongs to the response.
+    #[test]
+    fn a_request_right_after_a_usage_record_anchors_on_it() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:01Z"),
+            record(
+                4,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            assistant(2, "2026-10-31T00:00:05Z"),
+            record(
+                6,
+                "2026-10-31T00:00:05Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log.len(), 2);
+        assert_eq!(metrics.request_log[0]["latency_ms"], 1000);
+        assert_eq!(
+            metrics.request_log[1]["latency_ms"], 4000,
+            "the anchor is the first usage record, not the turn start"
+        );
     }
 }
