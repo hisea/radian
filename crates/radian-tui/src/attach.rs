@@ -145,6 +145,9 @@ impl AttachView {
     /// shown differently from a crash's).
     fn rebuild(&mut self) {
         self.app = App::new("", self.id.clone());
+        // ADR 0035: a memory card in the observed transcript resolves against this process's
+        // memory root, the same one the recording session used.
+        self.app.set_memory_root(radian_host::memory_dir());
         self.calls.clear();
         self.pending.clear();
         self.working = false;

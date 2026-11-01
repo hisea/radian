@@ -38,7 +38,6 @@
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
-| `memory-files.md` | decided | 0021、0020、0036、0035、0043、0012 | 记忆改成模型可写的 Markdown 文件加 `MEMORY.md` 索引注入（Claude Code / Gemini CLI 的形状）；取消 JSONL 存储、排序注入、`memory_search` |
 | `memory-aging.md` | decided（1、2；自动归档天数未定） | 0021 | 宿主在 `read` 时写 `last_used`，`memory stale` 列久未用的；自动归档等数据 |
 | `memory-shared-tier.md` | idea | 0021、0020、0031、0036 | 随仓库走的共享记忆层与多机私有记忆：是否另开 `.radian/memory/`，倾向共享层由人经 PR 放 |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |

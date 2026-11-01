@@ -31,6 +31,7 @@ pub mod login;
 pub mod logout;
 pub mod markdown;
 pub mod media;
+pub mod memory_card;
 pub mod mention;
 pub mod panel;
 pub mod picker;

@@ -24,6 +24,7 @@ mod ask;
 mod context_grid;
 mod layout;
 pub(crate) mod markdown;
+mod memory;
 mod thinking;
 mod tool_card;
 
@@ -42,6 +43,7 @@ use markdown::{
 };
 #[cfg(test)]
 use markdown::{md_line_count, md_lines};
+use memory::{is_memory_card_entry, memory_card_lines};
 use thinking::{placeholder, reasoning_body_lines, reasoning_header};
 pub use tool_card::{HeadMarker, head_marker};
 use tool_card::{body_plan_lines, diff_line, head_line_count, head_rows};

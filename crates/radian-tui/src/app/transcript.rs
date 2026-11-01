@@ -720,8 +720,15 @@ impl App {
                 // matching card, and the index it found is reused for the insertion below.
                 // (A second front `position` for the index walked the whole transcript per
                 // result — the same O(n^2) family as the `retain` resume-perf A fixed.)
-                let mut paired: Option<(String, serde_json::Value)> = None;
+                let mut paired: Option<(
+                    String,
+                    serde_json::Value,
+                    Option<crate::memory_card::MemoryRef>,
+                )> = None;
                 let mut call_index: Option<usize> = None;
+                // The result's own text, read once: the memory card resolves from it, and the
+                // body's display text and the head both use it.
+                let tool_text = result.text();
                 let len = self.session.entries.len();
                 for (rev, entry) in self.session.entries.iter_mut().rev().enumerate() {
                     #[cfg(test)]
@@ -736,35 +743,58 @@ impl App {
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
                             card.is_error = result.is_error;
+                            // ADR 0035: a settled call into a memory scope carries the record's
+                            // type and path, so the renderer draws the memory card (or the read
+                            // line) instead of the ordinary tool card. The ref comes from the
+                            // recorded call and result alone, never from the file, so a resume
+                            // redraws it exactly (the same fold over the same messages).
+                            card.memory = if result.is_error {
+                                None
+                            } else {
+                                self.memory_records.settle(
+                                    self.memory_root.as_deref(),
+                                    &card.name,
+                                    &card.arguments,
+                                    &tool_text,
+                                )
+                            };
                             // The head's title can only be final now, so the entry's text -
                             // what renders and copies - is regenerated from the same function
                             // the layout uses. The result's own row count is part of the head's
                             // collapsed meta (`· N lines`), and only this entry can see the
                             // result text.
-                            let display = crate::tools::result_display_text(card, &result.text());
+                            let display = crate::tools::result_display_text(card, &tool_text);
                             card.result_lines = Some(crate::tools::body_line_count(&display));
                             // ADR 0024: the call entry draws the whole ask block
                             // (its result entry is blank), so it keeps the result's own text
                             // for the declined/cancelled status line inside the box.
                             entry.text = if card.name == "ask_user" {
-                                result.text()
+                                tool_text.clone()
                             } else {
-                                crate::tools::call_text(card, &result.text())
+                                crate::tools::call_text(card, &tool_text)
                             };
-                            paired = Some((card.name.clone(), card.arguments.clone()));
+                            paired = Some((
+                                card.name.clone(),
+                                card.arguments.clone(),
+                                card.memory.clone(),
+                            ));
                         }
                         call_index = Some(len - 1 - rev);
                         break;
                     }
                 }
-                let (name, arguments) = paired.unwrap_or_default();
+                let (name, arguments, memory) = paired.unwrap_or_default();
                 let mut card = crate::tools::ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
                 card.is_error = result.is_error;
+                // The result entry carries the same ref as its call: it closes a merged card
+                // and draws nothing (the call entry draws the box), and a torn result whose
+                // call is gone has neither name nor arguments, so it carries none.
+                card.memory = memory;
                 // The body's text **is** the entry's text (the mapping/search invariant): a
                 // `patch` shows the synthesized diff, a `write` the content written, every
                 // other tool its own result text.
-                let display = crate::tools::result_display_text(&card, &result.text());
+                let display = crate::tools::result_display_text(&card, &tool_text);
                 let mut entry = Entry::new(EntryKind::ToolResult, display);
                 entry.is_error = result.is_error;
                 entry.error_code = result.error_code.clone();

@@ -99,6 +99,14 @@ pub(super) fn head_rows(
     modes: DisplayModes,
 ) -> Vec<BodyLine> {
     let card = entry.tool.as_deref();
+    // ADR 0035: a `read` of a memory record is one muted line, `memory used: <title>`, in
+    // place of the ordinary read head. The result entry still carries the foldable body.
+    if let Some(memory) = card
+        .and_then(|card| card.memory.as_ref())
+        .filter(|m| m.read)
+    {
+        return memory_read_rows(memory, width);
+    }
     let name = card.map(|card| card.name.as_str()).unwrap_or("");
     let meta = head_meta(entry, modes);
     // The name is the head text's own first word (`call_text` puts it there), so its cells keep
@@ -480,6 +488,15 @@ pub(super) fn head_line_count(
     width: usize,
     modes: DisplayModes,
 ) -> usize {
+    // ADR 0035: the memory read line wraps with the same rows the drawing lays out.
+    if let Some(memory) = entry
+        .tool
+        .as_deref()
+        .and_then(|card| card.memory.as_ref())
+        .filter(|memory| memory.read)
+    {
+        return memory_read_rows(memory, width).len();
+    }
     let meta = head_meta(entry, modes);
     let last = text.lines().count().saturating_sub(1);
     let expanded = call_body_expanded(entry, modes);
@@ -499,6 +516,22 @@ pub(super) fn head_line_count(
         }
     }
     count.max(1)
+}
+
+/// The memory read line (ADR 0035): `memory used: <title>` in the muted role, with the marker
+/// the head carries and no status glyph. It wraps like any head row, and its characters keep
+/// their source offsets so selection and copy take the line.
+fn memory_read_rows(memory: &crate::memory_card::MemoryRef, width: usize) -> Vec<BodyLine> {
+    let text = format!("memory used: {}", memory.title);
+    let cells: Vec<HeadCell> = text
+        .char_indices()
+        .map(|(at, ch)| (ch, MdStyle::Muted, Some(at)))
+        .collect();
+    let end = text.len();
+    wrap_cells(cells, width, width, end)
+        .into_iter()
+        .map(|(chunk, chunk_end)| styled_row(chunk, Vec::new(), chunk_end, width, Frame::Head))
+        .collect()
 }
 
 /// The head's meta (ADR 0028): weak, ` · `-separated, only the data that

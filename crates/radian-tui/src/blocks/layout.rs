@@ -26,6 +26,11 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize, height: usiz
     if is_ask_entry(entry) {
         return layout(entry, &[], modes, width, height).len();
     }
+    // ADR 0035: the memory card is an open frame, not a card; its result entry is blank when
+    // it closes the call. Count it through the layout so the total equals the drawing.
+    if is_memory_card_entry(entry) {
+        return layout(entry, &[], modes, width, height).len();
+    }
     // An entry with images (ADR 0028 R10) goes through the layout: its placeholder row and
     // the image's run are part of the shape, and one function computes them for the
     // count, the drawing and the text-only paths.
@@ -176,7 +181,15 @@ pub fn line_count_cached(
     height: usize,
 ) -> usize {
     let text_len = entry.text.len();
-    let key = (width, height, text_len, modes, entry.fold_override);
+    // ADR 0035: a settled memory card changes the shape (a one-row head becomes the open box)
+    // while the entry's text length can stay the same, so the key carries the card's kind and
+    // line. `None` for every other entry.
+    let memory = entry
+        .tool
+        .as_ref()
+        .and_then(|card| card.memory.as_ref())
+        .map(|memory| (memory.read, memory.line()));
+    let key = (width, height, text_len, modes, entry.fold_override, memory);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -453,6 +466,14 @@ fn layout_unstripped(
             lines
         }
         (EntryKind::ToolCall, _) => {
+            // ADR 0035: a successful `write`/`patch` into a memory scope is the memory card,
+            // in place of the ordinary tool card.
+            if let Some(card) = entry.tool.as_deref()
+                && let Some(memory) = &card.memory
+                && !memory.read
+            {
+                return memory_card_lines(memory, body_width, modes.glyphs);
+            }
             // ADR 0024 Q7: an `ask_user` call is the question record, with no
             // answers yet (the result entry carries them).
             match entry.tool.as_deref() {
@@ -501,6 +522,19 @@ fn layout_unstripped(
         }
         (EntryKind::ToolResult, _) => {
             let card = entry.tool.as_deref();
+            // ADR 0035: the call entry draws the whole memory card, so a result that closes it
+            // (a merged `Tail`) draws nothing; a torn result whose call is gone still draws the
+            // card from its own data.
+            if let Some(card) = card
+                && let Some(memory) = &card.memory
+                && !memory.read
+            {
+                return if entry.card == crate::blocks::Card::Tail {
+                    Vec::new()
+                } else {
+                    memory_card_lines(memory, body_width, modes.glyphs)
+                };
+            }
             // ADR 0024 Q7: the result of `ask_user` is the same block, now with the
             // answers (or the declined/cancelled status).
             if let Some(card) = card
@@ -1381,5 +1415,35 @@ pub(crate) mod tests {
                 "{source:?}: {pieces:?}"
             );
         }
+    }
+
+    /// ADR 0035: a settled call turns a one-row tool head into the memory card without
+    /// necessarily changing the entry's text length. The cached line count must follow the
+    /// shape, or the frame measures the card as one row and the transcript's window and
+    /// scroll position drift.
+    #[test]
+    fn a_settled_memory_card_invalidates_the_cached_line_count() {
+        let mut entry = Entry::new(EntryKind::ToolCall, "write /memory/global/abcde.md");
+        entry.tool = Some(Box::new(crate::tools::ToolCard::new(
+            "c1",
+            "write",
+            serde_json::json!({"path": "/memory/global/abcde.md", "content": "no frontmatter\n"}),
+        )));
+        let width = 80;
+        let height = 20;
+        assert_eq!(line_count_cached(&mut entry, EXPANDED, width, height), 1);
+        // The result settles: the card gains its memory ref and the entry's text is
+        // regenerated. The two texts have the same length, so only the shape tells them apart.
+        let memory = crate::memory_card::MemoryRef {
+            title: "abcde".to_owned(),
+            record_type: None,
+            path: "/memory/global/abcde.md".into(),
+            relative: "global/abcde.md".into(),
+            read: false,
+        };
+        entry.text = memory.line();
+        entry.tool.as_mut().expect("one card").memory = Some(memory);
+        assert_eq!(entry.text.len(), "write /memory/global/abcde.md".len());
+        assert_eq!(line_count_cached(&mut entry, EXPANDED, width, height), 3);
     }
 }

@@ -335,6 +335,17 @@ impl LoopContext<'_> {
                 .session
                 .set_memory_off(off)
                 .map_err(|refused| format!("cannot switch memory: {}", refused.reason)),
+            // ADR 0035: `Enter` on the newest memory card. The opener is the host's one helper
+            // (`$EDITOR`, else the platform opener); the TUI starts it detached and keeps drawing.
+            Effect::OpenMemory { path } => {
+                if let Err(error) = radian_host::memory::open_path(&path, false) {
+                    self.send(AppInput::MemoryCommandDone(MemoryResult::Failed(format!(
+                        "cannot open {}: {error}",
+                        path.display()
+                    ))));
+                }
+                Ok(())
+            }
             // ADR 0038 slice 2: the run-time tier switch. The facade rebuilds the profile and
             // the sandbox (a failed probe is a refusal that changes nothing) and queues the
             // durable `ConfigChanged`; when the user chose "remember", the loop also writes the
