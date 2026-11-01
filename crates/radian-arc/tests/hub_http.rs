@@ -354,7 +354,7 @@ fn a_rotated_token_takes_effect_on_the_next_request() {
 fn the_report_is_the_newest_attempts_last_assistant_message() {
     let a = Repo::new("hub-http-report");
     let store = arc_store(&a);
-    let (_plan, task) = add_task(&store, "report", "the report task");
+    let (plan, task) = add_task(&store, "report", "the report task");
     for (attempt, text) in [(1, "the first report"), (2, "the newest report")] {
         let dir = a.run_dir(&task, attempt);
         fs::create_dir_all(&dir).expect("the run directory is creatable");
@@ -385,6 +385,21 @@ fn the_report_is_the_newest_attempts_last_assistant_message() {
     let none = hub.authorized("GET", &format!("/v1/repos/a/items/{empty}/report"));
     assert_eq!(none.status, 204);
     assert!(none.body.is_empty());
+
+    // An id that names no task is the CLI's 404, not a task without an attempt; a plan's id
+    // is not a task either.
+    let unknown = hub.authorized("GET", "/v1/repos/a/items/TK9999-missing/report");
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        unknown.json(),
+        serde_json::json!({"error": "no task `TK9999-missing`"})
+    );
+    let plan_only = hub.authorized("GET", &format!("/v1/repos/a/items/{plan}/report"));
+    assert_eq!(plan_only.status, 404, "a plan id names no task");
+    assert_eq!(
+        plan_only.json(),
+        serde_json::json!({"error": format!("no task `{plan}`")})
+    );
 }
 
 // ---- edge case 5 -------------------------------------------------------------------------
@@ -527,7 +542,7 @@ fn a_second_hub_is_refused_by_the_lock_and_a_port_in_use_names_the_port() {
 fn the_verdicts_route_reads_the_newest_attempts_verdicts() {
     let a = Repo::new("hub-http-verdicts");
     let store = arc_store(&a);
-    let (_plan, task) = add_task(&store, "verdict", "the verdict task");
+    let (plan, task) = add_task(&store, "verdict", "the verdict task");
     let dir = a.run_dir(&task, 1).join("verdicts");
     fs::create_dir_all(&dir).expect("the verdict directory is creatable");
     let path = dir.join("human.json");
@@ -549,4 +564,19 @@ fn the_verdicts_route_reads_the_newest_attempts_verdicts() {
     assert_eq!(list[0]["path"], path.display().to_string());
     assert_eq!(list[0]["verdict"]["stage"], "human");
     assert_eq!(list[0]["verdict"]["result"], "pass");
+
+    // An id that names no task is the CLI's 404, not an empty list; a plan's id is not a task
+    // either.
+    let unknown = hub.authorized("GET", "/v1/repos/a/items/TK9999-missing/verdicts");
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        unknown.json(),
+        serde_json::json!({"error": "no task `TK9999-missing`"})
+    );
+    let plan_only = hub.authorized("GET", &format!("/v1/repos/a/items/{plan}/verdicts"));
+    assert_eq!(plan_only.status, 404, "a plan id names no task");
+    assert_eq!(
+        plan_only.json(),
+        serde_json::json!({"error": format!("no task `{plan}`")})
+    );
 }

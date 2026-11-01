@@ -425,6 +425,11 @@ fn report(registry: &Registry, name: &str, task: &str) -> Response<ResponseBody>
         Ok(store) => store,
         Err(error) => return not_found(error),
     };
+    // The id must name a stored task before the run directories are looked at: an unknown id
+    // (or a plan's) is the CLI's 404, not a task with no attempt.
+    if let Err(error) = store.load_task(task) {
+        return not_found(error);
+    }
     let attempts = match read::task_attempts(&store, task) {
         Ok(attempts) => attempts,
         Err(error) => return failed(error),
@@ -473,6 +478,11 @@ fn verdicts(registry: &Registry, name: &str, task: &str) -> Response<ResponseBod
         Ok(store) => store,
         Err(error) => return not_found(error),
     };
+    // The id must name a stored task, so an unknown id (or a plan's) is the CLI's 404 rather
+    // than an empty list.
+    if let Err(error) = store.load_task(task) {
+        return not_found(error);
+    }
     let attempts = match read::task_attempts(&store, task) {
         Ok(attempts) => attempts,
         Err(error) => return failed(error),
@@ -537,11 +547,13 @@ fn diff(registry: &Registry, name: &str, task: &str) -> Response<ResponseBody> {
         Ok(store) => store,
         Err(error) => return not_found(error),
     };
-    match read::task_diff(&store, task, None) {
-        Ok(diff) => json_response(
+    // Only `--numstat` is read: the list never holds a file's diff text (a huge changed file
+    // costs one line), and the per-file route below reads at most `DIFF_TEXT_LIMIT` bytes.
+    match read::task_diff_counts(&store, task) {
+        Ok(files) => json_response(
             StatusCode::OK,
             Value::Array(
-                diff.files
+                files
                     .iter()
                     .map(|file| {
                         json!({
@@ -562,22 +574,24 @@ fn diff_file(registry: &Registry, name: &str, task: &str, path: &str) -> Respons
         Ok(store) => store,
         Err(error) => return not_found(error),
     };
-    let diff = match read::task_diff(&store, task, None) {
-        Ok(diff) => diff,
+    // The requested file only: git's output is read up to the limit and the process stopped
+    // there, so a multi-GB change never reaches memory whole.
+    let diff = match read::task_diff_file(&store, task, path, DIFF_TEXT_LIMIT) {
+        Ok(Some(diff)) => diff,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("no file `{path}` in the task's diff"),
+            );
+        }
         Err(error) => return not_found(error),
     };
-    let Some(file) = diff.files.iter().find(|file| file.path == path) else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            &format!("no file `{path}` in the task's diff"),
-        );
-    };
-    let (text, truncated) = cap(&file.text, DIFF_TEXT_LIMIT);
+    let (text, cut) = cap(&diff.text, DIFF_TEXT_LIMIT);
     json_response(
         StatusCode::OK,
         json!({
-            "path": file.path,
-            "truncated": truncated,
+            "path": path,
+            "truncated": diff.truncated || cut,
             "text": text,
         }),
     )
