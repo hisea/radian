@@ -1943,6 +1943,20 @@ test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 | TK0271-M2 | the rewrite notice is returned on every call (the `notices_sent` guard is removed) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (the third call got a second notice) |
 | TK0271-M3 | global is selected before project (`selected` push order swapped) | ✅ 1 failed (rc=100) | `memory::injection::tests::two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte` (the global section came first) |
 
+## TK0276: memory write guards and index neutralization (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place, the `radian`
+binary rebuilt where the CLI test needed it (`cargo build -p radian-tui --bin radian`, the CLI
+tests refuse a stale one), and the named tests run with `cargo nextest run -p radian-host
+-p radian-exec --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`. Each source was
+restored from `.radian/tools.rs.bak`, `.radian/guard.rs.bak` or `.radian/injection.rs.bak` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M1 | the input guard's flag is never set (the `guard.note_mcp_result()` call removed from the MCP branch) | ✅ 1 failed (rc=100) | `cli::a_memory_write_is_refused_after_an_mcp_result_and_allowed_before` (the write after the MCP result changed the file to `after\n`) |
+| TK0276-M2 | the secret guard covers `write` only (the `patch` branch skips its content and inserted text) | ✅ 1 failed (rc=100) | `cli::a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged` (the file gained `sk-abcdefghijklmnopqrst`) |
+| TK0276-M3 | U+FEFF stays in place (`0xFEFF` removed from `is_default_ignorable`) | ✅ 1 failed (rc=100) | `memory::injection::tests::invisible_characters_and_a_fake_marker_are_neutralized_before_injection` (the injected line kept the byte-order mark) |
 ## TK0278: the project session index file (2026-10-31)
 
 Branch `work/TK0278-session-index-file`. Each mutation was applied in place and the source restored
@@ -1966,3 +1980,30 @@ run with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no
 |---|---|---|---|
 | TK0275-M1 | the project-versus-global sentence is removed from `prompts/memory.md` | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_pins_one_sentence_from_each_rule` (the project-versus-global sentence is missing) |
 | TK0275-M2 | `memory_rules(false)` returns the block instead of nothing | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_sits_between_the_role_and_the_context_files_and_is_gated` (the disabled prompt carries every memory sentence) |
+
+## TK0276 rework: an invented name and a normalising patch match (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place, the host unit
+tests run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and M6 with the rebuilt `radian` and
+`cargo nextest run -p radian-exec --test cli --locked --profile sandbox --no-fail-fast
+-E 'test(<name>)'`. Each source was restored from `.radian/rework/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M4 | an invented tool name arms the input guard (`routed` dropped from the `note_mcp_result` condition) | ✅ 1 failed (rc=100) | `tools::tests::an_invented_tool_call_does_not_arm_the_memory_input_guard` (the write was refused with the input-guard text) |
+| TK0276-M5 | any settled journaled name containing `__` counts as an MCP result (the `unknown_tool` check removed) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` |
+| TK0276-M6 | the patch result is not modelled (the guard's exact-only `None` path stands in for the tool's locators) | ✅ 1 failed (rc=100) | `cli::a_patch_matched_through_a_normalising_locator_still_catches_a_secret` (the file became `sk-abcdefghijklmnopqrst`) |
+
+## TK0276 rework 3: the resume guard counts only a routed tool's result (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place and the named
+test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`. The source was restored from `.radian/rework3/guard.rs.bak`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M7 | a settled call arms the resume guard whatever its result (the `delivered` check reduced to `true`) | ✅ 1 failed (rc=100) | `memory::guard::tests::a_call_settled_by_the_runtime_without_reaching_a_server_is_not_an_mcp_result` (`Some("cancelled") fx__echo` counted) |
+| TK0276-M8 | the routed name list is ignored on resume (the predicate uses `name.contains("__")`) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` (the forged `fx__nope` success counted) |
+

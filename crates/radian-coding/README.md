@@ -69,6 +69,11 @@ layer located. A CRLF file is matched on an LF view, offsets map back, and the f
 replacement) stays CRLF. When no layer matches, the `patch_not_found` error names the closest
 region of the file with line numbers, so the model can correct `old` without another `read`.
 
+`patched_content(content, edits)` returns the exact text those layers would write, or `None`
+when the call would fail. It is read-only and exists for the host's memory write guard (ADR
+0021 invariant 4), which must judge the content the edit would produce rather than a plain
+substring match.
+
 ### Argument errors
 
 Every tool parses its arguments through `src/args.rs` against its own published

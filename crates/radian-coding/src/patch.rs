@@ -777,6 +777,57 @@ fn line_ending_new(new: &str, crlf: bool) -> String {
     if crlf { lf.replace('\n', "\r\n") } else { lf }
 }
 
+/// The text a `patch` call would leave in `content`, given its `(old, new, replace_all)` edits,
+/// or `None` when the call would fail (no edit, a missing or ambiguous `old`, or a conflict).
+///
+/// Read-only: nothing is written. The host's memory write guard (ADR 0021 invariant 4) runs the
+/// secret heuristic over the result before the tool touches the file, so this models every
+/// locator the tool uses — the LF view, typographic normalisation and trailing whitespace —
+/// rather than an exact substring match.
+pub fn patched_content(content: &str, edits: &[(String, String, bool)]) -> Option<String> {
+    if edits.is_empty() {
+        return None;
+    }
+    let crlf = content.contains("\r\n");
+    let view = LfView::new(content);
+    let mut resolved = Vec::with_capacity(edits.len());
+    for (index, (old, new, replace_all)) in edits.iter().enumerate() {
+        // The tool refuses an empty `old` before it locates anything.
+        if old.is_empty() {
+            return None;
+        }
+        let (layer, ranges) = match locate(&view, old) {
+            Located::Found(layer, ranges) => (layer, ranges),
+            Located::None => return None,
+        };
+        if ranges.len() > 1 && !*replace_all {
+            return None;
+        }
+        resolved.push(ResolvedEdit {
+            index,
+            layer,
+            ranges,
+            replacement: line_ending_new(new, crlf),
+        });
+    }
+    check_conflicts("", &resolved).ok()?;
+    let mut replacements: Vec<(Range<usize>, String, usize)> = resolved
+        .iter()
+        .flat_map(|edit| {
+            edit.ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, edit.replacement.clone(), edit.index))
+        })
+        .collect();
+    replacements.sort_by_key(|(range, _, _)| range.start);
+    let mut updated = content.to_owned();
+    for (range, replacement, _) in replacements.iter().rev() {
+        updated.replace_range(range.clone(), replacement);
+    }
+    Some(updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,5 +848,46 @@ mod tests {
         assert_eq!(view.text, "a\nb\n");
         assert_eq!(view.content_range(0..3), 0..4); // "a\r\nb"
         assert_eq!(view.content_range(2..4), 3..6); // "\nb\r\n"
+    }
+
+    /// The guard's model of a patch result must use the tool's own locators, not a plain
+    /// substring check: a CRLF needle matches the LF view.
+    #[test]
+    fn a_crlf_needle_reaches_the_lf_view_in_the_result() {
+        let result = patched_content(
+            "sk-\nX",
+            &[("\r\nX".into(), "abcdefghijklmnopqrst".into(), false)],
+        );
+        assert_eq!(result.as_deref(), Some("sk-abcdefghijklmnopqrst"));
+    }
+
+    #[test]
+    fn the_result_uses_typographic_and_line_trimmed_matching() {
+        let typographic = patched_content(
+            "a \u{2018}b\u{2019} c",
+            &[("a 'b' c".into(), "X".into(), false)],
+        );
+        assert_eq!(typographic.as_deref(), Some("X"));
+        let trimmed = patched_content("one   \ntwo\n", &[("one\ntwo".into(), "X".into(), false)]);
+        assert_eq!(trimmed.as_deref(), Some("X\n"));
+    }
+
+    #[test]
+    fn a_missing_ambiguous_or_conflicting_edit_has_no_result() {
+        assert!(patched_content("a", &[("b".into(), "X".into(), false)]).is_none());
+        assert!(patched_content("a\n\n", &[("".into(), "X".into(), false)]).is_none());
+        assert!(patched_content("a a", &[("a".into(), "X".into(), false)]).is_none());
+        assert!(patched_content("a a", &[("a".into(), "X".into(), true)]).is_some());
+        assert!(
+            patched_content(
+                "ab",
+                &[
+                    ("ab".into(), "X".into(), false),
+                    ("a".into(), "Y".into(), false),
+                ]
+            )
+            .is_none(),
+            "two edits selecting overlapping text are refused"
+        );
     }
 }

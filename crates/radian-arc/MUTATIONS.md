@@ -1989,6 +1989,20 @@ under `.radian/mut/`, which `cmp` found identical.
 | TK0282-M7 | `machine_room` counts every registered repository with `?` again, so one unreadable store fails another repository's pass | `hub_loop::a_broken_task_file_in_one_repository_does_not_stop_another` (`the healthy repository schedules its task did not happen in 10s`) | ✅ 1 failed |
 | TK0282-M8 | the hub's interval wait ignores the shared stop flag (`&|| false`) | `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (`the hub waited out an idle interval before the exec (after 6.01s)`) | ✅ 1 failed |
 | TK0282-M9 | every loop that sees the changed binary prints the restart line (unconditional `restart.store`) | `hub_loop::a_binary_replacement_prints_one_restart_line_for_the_hub` (2 stdout lines, expected 1) | ✅ 1 failed |
+## TK0284: the hub's owner write routes (2026-10-31, branch `work/TK0284-hub-http-owner-actions`)
+
+The write routes call the same library functions the TUI calls, map the CLI's outcome to a
+status, and answer a held `state.lock` before they act. Each mutation was applied by hand to
+`crates/radian-arc/src/hub/http.rs`, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test hub_http`, after
+`cargo build -p radian-tui --bin radian -p agent-extensions --bin mcp-fixture`, and the file was
+restored from `.radian/mut/http.rs`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0284-M1 | the empty-note `400` row is dropped from `action_status` (the `Error::Usage(EMPTY_REJECT_NOTE)` arm removed) | `hub_http::a_reject_with_an_empty_note_is_400_and_changes_nothing` (an empty note answered `422`) | ✅ 1 failed |
+| TK0284-M2 | `Error::Locked` maps to `200` in `action_status` | `hub_http::every_action_on_a_held_state_lock_is_409_with_no_file_change` (`confirm` on a held lock answered `200`) | ✅ 1 failed |
+| TK0284-M3 | `OwnerAction::parse` admits `start` as a route (it maps to `confirm`) | `hub_http::start_reset_budget_and_other_actions_are_404_and_get_confirm_is_405` (`POST …/start` answered `200` with `PL0001-hub confirmed`) | ✅ 1 failed |
 ## TK0285: the hub's event stream (2026-10-31, branch `work/TK0285-hub-sse-and-notifications`)
 
 `GET /v1/events` streams the shared poller's transitions for every registered repository: one

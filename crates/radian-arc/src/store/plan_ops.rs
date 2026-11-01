@@ -223,17 +223,29 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
 /// value outside [`model::PLAN_PRIORITIES`] is refused with exit 3, the same class as a state
 /// refusal, and the message lists every value.
 pub fn set_priority(store: &Store, plan: &str, priority: &str) -> Result<(), Error> {
-    if !model::PLAN_PRIORITIES.contains(&priority) {
-        return Err(Error::Refused(format!(
-            "`{priority}` is not a plan priority; priorities are {}",
-            model::PLAN_PRIORITIES.join(", ")
-        )));
-    }
+    check_priority(priority)?;
     store.change_open_plan(plan, |plan| {
         plan.priority = Some(priority.to_owned());
         Ok(())
     })?;
     Ok(())
+}
+
+/// The refusal for a priority outside [`model::PLAN_PRIORITIES`], shared by `set_priority` and
+/// the hub's write route so both answer with the same message.
+///
+/// # Errors
+///
+/// `priority` is not one of the closed set.
+pub fn check_priority(priority: &str) -> Result<(), Error> {
+    if model::PLAN_PRIORITIES.contains(&priority) {
+        Ok(())
+    } else {
+        Err(Error::Refused(format!(
+            "`{priority}` is not a plan priority; priorities are {}",
+            model::PLAN_PRIORITIES.join(", ")
+        )))
+    }
 }
 
 /// `radian arc pause <plan>`: the auto level back to `off` (decision 12).

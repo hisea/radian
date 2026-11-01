@@ -121,12 +121,15 @@ They change on their own: a route can be added without touching a plan or task f
 
 ## Routes
 
-Every route takes `GET`; every body is `application/json` except [the event stream](#the-event-stream), which is `text/event-stream`. A `204` has no body.
+The read routes and the event stream take `GET`; the owner actions take `POST` (see [Owner actions](#owner-actions)).
+Every body is `application/json` except [the event stream](#the-event-stream), which is `text/event-stream`; a `204` has no body.
 The list and show bodies are exactly the bytes `radian arc list --json` and `radian arc show --json` print in that repository, so a field the CLI gains appears on the route too.
 
 A request without a valid bearer token is `401` with `{}` before any route runs.
-An unknown repository or id is `404` with the CLI's own message as `{"error": "<message>"}`.
-Any other path is `404` with `{"error": "no such route"}`, and a method a route does not take is `405`.
+The token is checked before the request body is read, so a request without one is answered without the hub buffering the body it sends.
+An unknown repository or id on a read route is `404` with the CLI's own message as `{"error": "<message>"}`.
+Any other read path is `404` with `{"error": "no such route"}`, and a method a read route does not take is `405`.
+A write route's failure body and status codes are in [Owner actions](#owner-actions).
 
 | Route | Method | Fields | Status codes |
 |---|---|---|---|
@@ -139,8 +142,50 @@ Any other path is `404` with `{"error": "no such route"}`, and a method a route 
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`. | `200`, `401`, `404` |
 | `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
+| `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
-`<path>` in the last route is percent-encoded, so a file whose name contains `/` stays one path.
+`<path>` in the last read route is percent-encoded, so a file whose name contains `/` stays one path.
+
+## Owner actions
+
+`POST /v1/repos/<name>/items/<id>/<action>` is an owner's action in the API: it calls the same library function the arc TUI calls, in the hub's process, and changes the store. It uses only that repository's `state.lock`, never `runner.lock`.
+
+| Action | Body | What it does |
+|---|---|---|
+| `confirm` | `{}` | Confirms a draft plan or a `todo.proposed` task, as `radian arc confirm`. |
+| `merge` | `{}` | Approves and finishes a `review.awaiting_human` task, as `radian arc merge`. |
+| `cancel` | `{}` | Cancels a task, or a plan and its open tasks, as `radian arc cancel`. |
+| `pause` | `{}` | Sets the plan's `auto` level to `off`, as `radian arc pause`. |
+| `reverify` | `{}` | Re-runs the gate without a worker, as `radian arc reverify`. |
+| `reject` | `{"note": "<text>"}` | Sends a `review.awaiting_human` task back to rework with the note, as `radian arc reject`. The note must not be empty or whitespace. |
+| `auto` | `{"level": "off" \| "run" \| "merge"}` | Sets the plan's `auto` level, as `radian arc auto`. |
+| `priority` | `{"priority": "P0" \| "P1" \| "P2" \| "P3" \| "P4" \| "P5"}` | Sets the plan's priority, as `radian arc priority`. `P0` is the highest and `P3` the default. |
+
+A body with no field is enough for `confirm`, `merge`, `cancel`, `pause` and `reverify`; an empty body is the same as `{}`.
+A missing or empty `note`, `level` or `priority` is refused, not defaulted.
+A request body may be at most 64 KiB (65,536 bytes). A larger body is drained, not buffered, and answered `413`; nothing changes.
+
+A successful action answers `200` with `{"ok": true, "text": "<the CLI's stdout text>"}`.
+A failed action answers `{"ok": false, "text": "<the CLI's message>"}` and one of these status codes:
+
+| Status | When |
+|---|---|
+| `400` | `reject` without a note: the CLI's empty-note message, and nothing changes. |
+| `404` | The repository is not registered, or the id names no plan or task. |
+| `405` | A write route was called with a method other than `POST`. |
+| `409` | Another process holds `state.lock`, or the state does not allow the action (for example a merge on a task that is not `review.awaiting_human`). A `reverify` whose claim succeeded and whose verification then refused also answers `409`, with the claim's line and the verification's own error after it. |
+| `413` | The request body is larger than 64 KiB (65,536 bytes): the body is not kept and nothing changes. |
+| `422` | A usage or validation error: a value outside the action's closed set, or another check the CLI refuses with exit `2` or with exit `3` for a value outside a set. |
+| `500` | Any other error, such as a git or file failure. |
+
+The route checks `state.lock` before it acts, so a held lock answers `409` with `state.lock is locked by another process` and changes no file.
+It waits no longer than the CLI's own lock wait.
+
+There is no second confirmation in the API: `merge`, `reject`, `auto` at level `merge` and `cancel` act at once.
+**The client asks before it calls them.**
+
+`start` and `reset-budget` are not routes.
+Any other action name is `404` with `{"error": "no such route"}`, and `GET` on a write route is `405`.
 
 ## The event stream
 

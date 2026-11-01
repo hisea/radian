@@ -104,6 +104,7 @@ pub use jobs::{
     RunningTask, SweepSummary,
 };
 pub use memory_roots::MemoryRoots;
+pub use patch::patched_content;
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits, ToolPresence};
 pub use read_roots::ReadRoots;
 pub use shell::{
