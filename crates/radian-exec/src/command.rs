@@ -370,7 +370,7 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> 
     }
     radian_host::write_stdout(&output.text)?;
     if let Some(path) = &output.open {
-        if std::io::stdin().is_terminal() {
+        if edits && std::io::stdin().is_terminal() {
             radian_host::memory::open_path(path, true).map_err(|error| {
                 CommandError::failure(format!("cannot open {}: {error}", path.display()))
             })?;
