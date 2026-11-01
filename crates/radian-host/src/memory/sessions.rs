@@ -177,7 +177,7 @@ pub fn record_ended_session(
         workspace: workspace_column(workspace),
         first_message: first.text(),
     };
-    append_session(&service.files(), &project, &entry, max_lines)?;
+    append_session(service.files(), &project, &entry, max_lines)?;
     Ok(true)
 }
 

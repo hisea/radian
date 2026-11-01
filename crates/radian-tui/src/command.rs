@@ -43,8 +43,8 @@ pub const HELP: &str = "\
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
-/memory <command>     durable memory: list, search, show, stale, add, edit, archive, restore,
-                      forget, purge, confirm, export, import, project, relink, split, merge
+/memory <command>     durable memory: list, show, stale, add, edit, forget, open, project,
+                      relink, split, merge; `/memory off|on` switches this session
 /skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
 /jobs                 open the inspector's jobs page (list) or stop one/all
@@ -165,6 +165,9 @@ pub enum Outcome {
     Copy { code_only: bool },
     /// A `/memory` command to run through the shared executor.
     Memory(MemoryCommand),
+    /// `/memory off|on`: `true` turns this session's memory writes off. The switch is live
+    /// at once and recorded in the session for a resume; the configuration file is untouched.
+    MemorySwitch(bool),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
     /// shows the outcome as a notice. `Some(instructions)` is the optional note.
     Compact(Option<String>),
@@ -508,44 +511,35 @@ fn logout_level(typed: &[&str], partial: &str) -> Level {
 }
 
 /// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
-const MEMORY_DESCRIPTION: &str = "durable memory: list, search, show, stale, add, edit, \
-                                  archive, restore, forget, purge, confirm, export, import, \
-                                  project, relink, split, merge";
+const MEMORY_DESCRIPTION: &str = "durable memory: list, show, stale, add, edit, forget, \
+                                  open, project, relink, split, merge; `/memory off|on` \
+                                  switches this session";
 
 /// The `/memory` subcommands and a one-line description each. The list is the authority for
 /// completion; `the_memory_subcommand_table_matches_the_grammar` fails if it drifts from the
 /// clap grammar in `radian_host::memory::commands`.
 const MEMORY_SUBCOMMANDS: &[(&str, &str)] = &[
-    ("list", "list records (Project then Global)"),
-    ("search", "search records by keyword"),
-    ("show", "show one record by id"),
+    ("list", "list files (Project then Global)"),
+    ("show", "show one file's frontmatter and body"),
     ("stale", "list files not read for a while"),
-    ("add", "add a record"),
-    ("edit", "change a record's content"),
-    ("archive", "archive a record"),
-    ("restore", "restore an archived record"),
-    ("forget", "forget a record (needs confirmation)"),
+    ("add", "create a file and open it in the editor"),
+    ("edit", "open an existing file in the editor"),
     (
-        "purge",
-        "rewrite the log, removing forgotten content (needs confirmation)",
+        "forget",
+        "delete a file and its index line (needs confirmation)",
     ),
-    ("confirm", "confirm a record"),
-    ("export", "print one scope as editable Markdown"),
-    ("import", "import an edited Markdown export"),
+    ("open", "open the scope directory"),
     ("project", "show the project identity, or `project new`"),
     ("relink", "attach this workspace to an existing project"),
-    (
-        "split",
-        "move records between projects (needs confirmation)",
-    ),
+    ("split", "move files between projects (needs confirmation)"),
     (
         "merge",
         "merge one project into another (needs confirmation)",
     ),
 ];
 
-/// The `/memory` subcommands whose first argument is a record id.
-const MEMORY_ID_COMMANDS: &[&str] = &["show", "edit", "archive", "restore", "forget", "confirm"];
+/// The `/memory` subcommands whose first argument is an existing file name.
+const MEMORY_ID_COMMANDS: &[&str] = &["show", "edit", "forget"];
 
 /// `/memory`: the subcommand, then the record id for the commands that take one.
 fn memory_level(typed: &[&str], partial: &str) -> Level {
@@ -1710,62 +1704,16 @@ fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
             "memory is disabled (no RADIAN_HOME or HOME)".to_owned(),
         ]);
     }
+    match args {
+        [one] if one == "off" => return Outcome::MemorySwitch(true),
+        [one] if one == "on" => return Outcome::MemorySwitch(false),
+        _ => {}
+    }
     match commands::parse_args(args) {
         Ok(command) => Outcome::Memory(command),
         // clap's own error/help text is shown as a notice; the program does not exit.
         Err(error) => Outcome::Notices(vec![error.to_string().trim_end().to_owned()]),
     }
-}
-
-/// The full-screen interface has no stdin, so a `-` text argument can never be
-/// resolved the way `radian memory` resolves it (the CLI reads stdin or the
-/// file before it calls `execute`). `Some` is the one notice to show instead
-/// of running the command; nothing is written. A `-` among other words is
-/// ordinary text and returns `None`.
-pub fn stdin_dash_notice(command: &MemoryCommand) -> Option<&'static str> {
-    match command {
-        MemoryCommand::Add { content, .. } | MemoryCommand::Edit { content, .. }
-            if content == "-" =>
-        {
-            Some("`-` reads stdin only in `radian memory`; type the text here")
-        }
-        MemoryCommand::Import { source, .. } if source == "-" => {
-            Some("`-` reads stdin only in `radian memory`; give a file path here")
-        }
-        _ => None,
-    }
-}
-
-/// Reads a `/memory import` source the way `radian memory import` reads it, but against the
-/// session workspace: a relative path resolves against `workspace`, an absolute path may point
-/// anywhere. `Ok` is the file text; `Err` is already the one notice to show
-/// (`cannot read <path>: <error>`, the CLI's wording), and the caller writes nothing. Runs in
-/// the event loop (ADR 0023 U3), never in `update`, so the draw loop never blocks on disk.
-///
-/// ADR 0039: a workspace-relative read opens through the workspace root's directory fd
-/// (`openat(O_NOFOLLOW)` per component, never following a symlink); an absolute read uses the
-/// weaker leaf-only guard (`O_NOFOLLOW` on the file itself, the same guard host context and
-/// skill reads use). `..` never resolves through `RootDir`, and a symlink anywhere in a
-/// workspace-relative path is refused instead of followed.
-pub fn read_memory_import(workspace: &std::path::Path, source: &str) -> Result<String, String> {
-    let failed = |error: &dyn std::fmt::Display| format!("cannot read {source}: {error}");
-    let bytes = if std::path::Path::new(source).is_absolute() {
-        radian_coding::safe_fs::read_nofollow(std::path::Path::new(source))
-            .map_err(|error| failed(&error))?
-    } else {
-        let root = std::fs::canonicalize(workspace).map_err(|error| failed(&error))?;
-        let dir = radian_coding::safe_fs::RootDir::open(&root).map_err(|error| failed(&error))?;
-        let file = dir
-            .file(
-                std::path::Path::new(source),
-                radian_coding::safe_fs::OpenMode::Read,
-            )
-            .map_err(|error| failed(&error))?;
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut &file, &mut bytes).map_err(|error| failed(&error))?;
-        bytes
-    };
-    String::from_utf8(bytes).map_err(|error| failed(&error))
 }
 
 /// The lines one command output becomes: the diagnostics note, then the text's lines. An
@@ -2209,6 +2157,7 @@ mod tests {
         let grammar: Vec<String> =
             <MemoryCommand as clap::Subcommand>::augment_subcommands(clap::Command::new("memory"))
                 .get_subcommands()
+                .filter(|sub| !sub.is_hide_set())
                 .map(|sub| sub.get_name().to_owned())
                 .collect();
         for (name, _) in MEMORY_SUBCOMMANDS {

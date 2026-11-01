@@ -162,9 +162,10 @@ common dir itself; a `.git` **file** is resolved through its `gitdir:` pointer a
 `<gitdir>/commondir` (falling back to the documented `<common>/worktrees/<name>` layout), and
 the result is canonicalized. A pointer that cannot be resolved falls back to the workspace.
 
-`MemoryService::open(workspace, root)` owns the `MemoryStore`, the `ProjectRegistry` and the
-workspace's project resolution. Its API is **synchronous** (the store is a single-writer JSONL
-log; every operation is short, and both hosts call it where blocking on an fsync is fine).
+`MemoryService::open(workspace, root)` is a thin layer over the `FileStore` (one Markdown
+file per record, one `MEMORY.md` per scope), the `ProjectRegistry` and the workspace's
+project resolution. Its API is **synchronous** (every operation is local files and short,
+and both hosts call it where blocking on an fsync is fine).
 `state()` returns `ProjectState::{Known, Unlinked { identity_key, candidates }}` and **never
 registers**. `project_for_write()` is the **write** path that may register (ADR 0021):
 a git workspace whose identity key is not in the registry is registered now and returned as
@@ -174,8 +175,10 @@ not a git common dir is the `NotAProjectWorkspace` error ("not a project workspa
 was not saved", pointing at `radian memory project new` and at no other scope). **Reads and
 injection never call it**, so they only ever read Global on an unregistered workspace.
 `create_project()` and `relink()` stay the explicit routes. Reads default to Project then Global
-(`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). Every user
-command is `Source::User`.
+(`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). `add` writes a
+`source: user` skeleton and its index line; `remove` deletes the file and its index line;
+`split`/`merge` move record files and their index lines (a merge collision renames `<name>-2`, or
+the first suffix free in both projects; `MEMORY.md` and `SESSIONS.md` stay put).
 
 `file_tool_roots()` names the two scope directories the file tools may read and write in both
 tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,
@@ -200,11 +203,12 @@ so a moved repository still matches its old project.
 | A write outside a repository is refused and creates nothing | `a_write_outside_a_repository_is_refused_and_creates_nothing` | `src/memory/service.rs` |
 | A write still creates when a candidate previous project exists | `a_write_still_creates_when_a_candidate_previous_project_exists` | `src/memory/service.rs` |
 | Only a git identity is a project workspace | `only_a_git_identity_is_a_project_workspace` | `src/memory/identity.rs` |
-| A signed-off project write reads back and is `Source::User` | `a_project_write_reads_back_after_creating_the_project` | `src/memory/service.rs` |
+| A project write reads back with `source: user` | `a_project_write_reads_back_after_creating_the_project` | `src/memory/service.rs` |
 | A worktree resolves to the main repository's project | `a_worktree_resolves_to_the_main_repositories_project` | `src/memory/service.rs` |
-| Relinking after a move finds the old records | `relinking_after_a_move_finds_the_original_records` | `src/memory/service.rs` |
-| A Project record overrides a Global one with the same key | `a_project_record_overrides_a_global_one_with_the_same_key` | `src/memory/service.rs` |
-| User commands check the revision and keep `Source::User` | `user_commands_set_the_user_source_and_check_the_revision` | `src/memory/service.rs` |
+| Relinking after a move finds the old files | `relinking_after_a_move_finds_the_original_records` | `src/memory/service.rs` |
+| `add` writes the skeleton and the index line | `add_then_list_shows_the_skeleton_and_the_index_line` | `src/memory/service.rs` |
+| `forget` deletes the file and its index line | `forget_deletes_the_file_and_its_index_line` | `src/memory/service.rs` |
+| A merge collision renames the moved file | `merge_renames_a_collision_instead_of_overwriting` | `src/memory/service.rs` |
 
 End to end through the CLI: `radian-exec/tests/cli.rs` (`memory_…`), including a real
 `git worktree` sharing a project.
@@ -246,7 +250,7 @@ naming it and the index caps, and is otherwise ignored.
 | A retired `[memory.injection]` key warns and the session starts | `the_retired_injection_keys_warn_and_are_ignored`, `a_retired_memory_injection_key_warns_and_the_session_starts` | `tests/config_fixtures.rs`, `radian-exec/tests/cli.rs` |
 | `memory_save` and `memory_search` are unknown tools and the turn still succeeds | `a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
 | `[memory]` carries `enabled`/`scopes`/`index_max_lines`/`index_max_bytes` | `the_memory_keys_are_read` | `tests/config_fixtures.rs` |
-| `write`/`patch` are `allow` in the memory scope directories in both tiers; `..`, a symlink out, the registry, a sibling directory and a file directly in `projects/` are not; the inert `memory_search` allow rule stays; no memory root adds no rule | `write_to_a_global_memory_file_is_allowed_in_every_tier`, `write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier`, `a_memory_write_outside_the_scope_directories_is_not_matched`, `a_memory_write_that_escapes_with_dotdot_is_not_matched`, `a_symlink_out_of_the_memory_store_is_not_matched`, `a_memory_write_directly_in_the_projects_directory_is_not_matched`, `memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks`, `a_profile_without_a_memory_root_has_no_memory_rule` | `radian-permissions/src/profile.rs` |
+| `write`/`patch` are `allow` in the memory scope directories in both tiers; `..`, a symlink out, the registry, a sibling directory and a file directly in `projects/` are not; no memory root adds no rule; `memory_search` gets the unknown-tool default | `write_to_a_global_memory_file_is_allowed_in_every_tier`, `write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier`, `a_memory_write_outside_the_scope_directories_is_not_matched`, `a_memory_write_that_escapes_with_dotdot_is_not_matched`, `a_symlink_out_of_the_memory_store_is_not_matched`, `a_memory_write_directly_in_the_projects_directory_is_not_matched`, `memory_search_gets_the_default_for_an_unknown_tool`, `a_profile_without_a_memory_root_has_no_memory_rule` | `radian-permissions/src/profile.rs` |
 
 ## The startup description
 

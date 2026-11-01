@@ -365,6 +365,39 @@ fn a_write_keeps_the_source_of_an_existing_record() {
     assert_eq!(read.body, "new body\n");
 }
 
+#[test]
+fn rename_rewrites_only_the_name_line_and_keeps_the_rest() {
+    let dir = TempDir::new("files-rename");
+    let store = FileStore::open(dir.path());
+    let written = store.write(&global(), new_record("style")).unwrap();
+    let before = store.read(&global(), "style").unwrap();
+    store.rename(&global(), "style", "style-2").unwrap();
+    assert!(!store.record_path(&global(), "style").exists());
+    let after = store.read(&global(), "style-2").unwrap();
+    assert_eq!(after.frontmatter.name, "style-2");
+    assert_eq!(
+        after.frontmatter.description,
+        before.frontmatter.description
+    );
+    assert_eq!(
+        after.frontmatter.record_type,
+        written.frontmatter.record_type
+    );
+    assert_eq!(after.frontmatter.source, written.frontmatter.source);
+    assert_eq!(after.frontmatter.created, written.frontmatter.created);
+    assert_eq!(after.frontmatter.modified, written.frontmatter.modified);
+    assert_eq!(after.body, "body\nmore\n");
+    assert!(
+        store.rename(&global(), "style-2", "style-3").is_ok(),
+        "a free target name is accepted"
+    );
+    store
+        .write(&global(), new_record("style"))
+        .expect("occupy the old name");
+    let error = store.rename(&global(), "style-3", "style").unwrap_err();
+    assert!(error.to_string().contains("already exists"), "{error}");
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }

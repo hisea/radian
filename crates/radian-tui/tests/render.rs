@@ -2260,48 +2260,33 @@ fn a_tab_wraps_as_four_columns() {
     assert_eq!(radian_tui::render::wrap_line_count("abcdef\t", 9), 2);
 }
 
-/// The ask and memory renderers' heads.
+/// The ask renderer's head.
 #[test]
-fn the_ask_and_memory_cards_have_their_own_heads() {
-    for (name, arguments, structured, expected) in [
-        (
-            "ask_user",
-            serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
-            serde_json::json!({"request_id": "r", "answers": []}),
-            // ADR 0028: the record is an open frame, not the plain head.
-            "╭─ ask",
-        ),
-        (
-            "memory_search",
-            serde_json::json!({"ids": ["mem-7"]}),
-            serde_json::json!({}),
-            "◻ memory_search mem-7 ✓",
-        ),
-    ] {
-        let mut app = App::new("m", "s");
-        app.push_message(&assistant_with(
-            "",
-            "",
-            false,
-            vec![ToolCall {
-                id: "c1".into(),
-                name: name.into(),
-                arguments,
-            }],
-        ));
-        app.push_message(&Message::Tool {
-            result: ToolResult {
-                call_id: "c1".into(),
-                content: vec![ContentPart::text("body line")],
-                structured: Some(structured),
-                is_error: false,
-                error_code: None,
-            },
-            meta: Default::default(),
-        });
-        let text = screen(&render(&mut app, 70, 12));
-        assert!(text.contains(expected), "{name}: {text}");
-    }
+fn the_ask_card_has_its_own_head() {
+    let mut app = App::new("m", "s");
+    app.push_message(&assistant_with(
+        "",
+        "",
+        false,
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
+        }],
+    ));
+    app.push_message(&Message::Tool {
+        result: ToolResult {
+            call_id: "c1".into(),
+            content: vec![ContentPart::text("body line")],
+            structured: Some(serde_json::json!({"request_id": "r", "answers": []})),
+            is_error: false,
+            error_code: None,
+        },
+        meta: Default::default(),
+    });
+    let text = screen(&render(&mut app, 70, 12));
+    // ADR 0028: the record is an open frame, not the plain head.
+    assert!(text.contains("╭─ ask"), "{text}");
 }
 
 /// A compaction summary (ADR 0028 R5): one line, expandable to the summary and the user's

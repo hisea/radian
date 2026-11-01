@@ -129,7 +129,7 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" | "skill" => "read",
         "write" | "patch" => "edit",
-        "glob" | "grep" | "memory_search" => "search",
+        "glob" | "grep" => "search",
         "shell" | "job" => "execute",
         _ => "other",
     }

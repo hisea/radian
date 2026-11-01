@@ -4,7 +4,7 @@
 //!
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
-use std::io::Read;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use radian_host::memory::MemoryService;
@@ -351,7 +351,10 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> 
         .ok_or_else(|| CommandError::usage("no RADIAN_HOME or HOME to place memory under"))?;
     let service = MemoryService::open(&workspace, root);
 
-    let command = resolve_input(command)?;
+    let edits = matches!(
+        command,
+        MemoryCommand::Add { .. } | MemoryCommand::Edit { .. }
+    );
     let json = command.json();
     let confirmed = command.yes();
     let first = commands::execute(&service, command.clone(), confirmed, json)?;
@@ -366,61 +369,17 @@ fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> 
         eprintln!("{note}");
     }
     radian_host::write_stdout(&output.text)?;
-    Ok(())
-}
-
-/// Resolves the arguments that name external input: `add`/`edit` read `-` from stdin, and
-/// `import` reads `-` or a file. The shared executor only ever sees literal text.
-fn resolve_input(command: MemoryCommand) -> Result<MemoryCommand, CommandError> {
-    Ok(match command {
-        MemoryCommand::Add {
-            global,
-            kind,
-            key,
-            content,
-        } if content == "-" => MemoryCommand::Add {
-            global,
-            kind,
-            key,
-            content: read_stdin()?,
-        },
-        MemoryCommand::Edit {
-            global,
-            revision,
-            id,
-            content,
-        } if content == "-" => MemoryCommand::Edit {
-            global,
-            revision,
-            id,
-            content: read_stdin()?,
-        },
-        MemoryCommand::Import {
-            global,
-            project,
-            source,
-        } => MemoryCommand::Import {
-            global,
-            project,
-            source: read_import(&source)?,
-        },
-        other => other,
-    })
-}
-
-fn read_stdin() -> Result<String, CommandError> {
-    let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .map_err(|e| CommandError::failure(format!("cannot read stdin: {e}")))?;
-    Ok(text)
-}
-
-fn read_import(source: &str) -> Result<String, CommandError> {
-    if source == "-" {
-        read_stdin()
-    } else {
-        std::fs::read_to_string(source)
-            .map_err(|e| CommandError::failure(format!("cannot read {source}: {e}")))
+    if let Some(path) = &output.open {
+        if edits && std::io::stdin().is_terminal() {
+            radian_host::memory::open_path(path, true).map_err(|error| {
+                CommandError::failure(format!("cannot open {}: {error}", path.display()))
+            })?;
+        } else if edits {
+            radian_host::write_stdout(&format!(
+                "not a terminal: no editor was opened; the file is {}\n",
+                path.display()
+            ))?;
+        }
     }
+    Ok(())
 }

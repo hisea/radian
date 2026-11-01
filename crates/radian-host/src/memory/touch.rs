@@ -38,7 +38,7 @@ impl MemoryTouch {
     /// Builds the hook for this session. The scope directories are the same ones the coding
     /// tools receive, so a read the tools allow is a read this hook can account for.
     pub fn new(service: &MemoryService, warn: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
-        let files = service.files();
+        let files = service.files().clone();
         let roots = service
             .file_scope_roots()
             .into_iter()
