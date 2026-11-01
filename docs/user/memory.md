@@ -26,7 +26,9 @@ decides which paths they may reach.
 - Once the session has taken in a result from an MCP tool, every later memory
   write is refused with `memory write refused: this session has taken in MCP
   tool results (input guard)`. A resumed session counts a result its journal
-  recorded, even when the new process never calls an MCP tool.
+  recorded, even when the new process never calls an MCP tool. A call to a name
+  no configured MCP server provides is not a result: it fails without reaching
+  a server and does not arm the guard.
 - Content that looks like a secret is refused with `memory write refused: the
   content looks like a secret (<prefix>)`. `<prefix>` is the matched prefix
   (`sk-`, `sk_`, `xoxb-`, `ghp_`, `AKIA` or `Bearer `), and the value is never

@@ -6,7 +6,9 @@
 //! - **Input guard**: once this session has taken in a result from an MCP tool, every `write`
 //!   or `patch` whose canonical target is a memory scope directory is refused. The flag is
 //!   per process; a resumed session starts with it set when its committed journal holds a
-//!   settled MCP tool call ([`journal_has_mcp_result`]).
+//!   settled call to a tool an MCP server provided ([`journal_has_mcp_result`]). A name no
+//!   server provides settles `unknown_tool` without any server seeing it, so it does not
+//!   count.
 //! - **Secret guard**: the content (for `patch`, the content the edit would produce and each
 //!   inserted replacement) runs through the ADR 0008 §3.2 rule-2 heuristic in
 //!   [`crate::config`]. A hit refuses the write and names the matched prefix, never the value.
@@ -64,9 +66,9 @@ impl MemoryWriteGuard {
         }
     }
 
-    /// Records that an MCP tool call settled. The input guard refuses memory writes from this
-    /// point on; an error result counts too, because the session has still heard from an
-    /// outside tool.
+    /// Records that a call to a tool an MCP server provided settled. The input guard refuses
+    /// memory writes from this point on; an error result counts too, because the session has
+    /// still heard from an outside tool.
     pub fn note_mcp_result(&self) {
         self.polluted.store(true, Ordering::SeqCst);
     }
@@ -142,9 +144,11 @@ impl MemoryWriteGuard {
     }
 }
 
-/// Whether a settled tool call in `events` went to an MCP server (the resume half of the
+/// Whether a settled tool call in `events` reached an MCP server (the resume half of the
 /// input guard). MCP aliases are `server__tool` (ADR: `agent_extensions::tool_alias`), and no
-/// built-in name contains `__`.
+/// built-in name contains `__`. A name no MCP server provides settles `unknown_tool` without
+/// any server seeing it, so that result is not outside content: an invented `foo__bar` call
+/// must not poison the session on resume.
 pub fn journal_has_mcp_result(events: &[SessionEvent]) -> bool {
     let mut names: HashMap<&str, &str> = HashMap::new();
     for event in events {
@@ -152,10 +156,11 @@ pub fn journal_has_mcp_result(events: &[SessionEvent]) -> bool {
             EventData::ToolExecutionStarted { call_id, name, .. } => {
                 names.insert(call_id.as_str(), name.as_str());
             }
-            EventData::ToolExecutionSettled { call_id, .. }
-                if names
-                    .get(call_id.as_str())
-                    .is_some_and(|name| is_mcp_tool_name(name)) =>
+            EventData::ToolExecutionSettled { call_id, result }
+                if result.error_code.as_deref() != Some("unknown_tool")
+                    && names
+                        .get(call_id.as_str())
+                        .is_some_and(|name| is_mcp_tool_name(name)) =>
             {
                 return true;
             }
@@ -218,7 +223,15 @@ fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
     {
         return None;
     }
-    let mut text = std::fs::read_to_string(path).ok()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    // `edits` and the legacy pair are mutually exclusive, as in the tool's own parser.
+    if arguments.get("edits").is_some()
+        && (arguments.get("old").is_some()
+            || arguments.get("new").is_some()
+            || arguments.get("replace_all").is_some())
+    {
+        return None;
+    }
     let mut edits: Vec<(String, String, bool)> = Vec::new();
     if let (Some(old), Some(new)) = (
         arguments.get("old").and_then(Value::as_str),
@@ -234,6 +247,9 @@ fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
         ));
     }
     if let Some(array) = arguments.get("edits").and_then(Value::as_array) {
+        if array.is_empty() {
+            return None;
+        }
         for edit in array {
             let (Some(old), Some(new)) = (
                 edit.get("old").and_then(Value::as_str),
@@ -253,17 +269,10 @@ fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
     if edits.is_empty() {
         return None;
     }
-    for (old, new, replace_all) in edits {
-        if old.is_empty() || !text.contains(&old) {
-            return None;
-        }
-        text = if replace_all {
-            text.replace(&old, &new)
-        } else {
-            text.replacen(&old, &new, 1)
-        };
-    }
-    Some(text)
+    // The real tool's locators: LF view, typographic normalisation, trailing whitespace. A
+    // plain `contains` would miss the result a CRLF or normalised needle produces (ADR 0021
+    // invariant 4's guard must judge the content the edit would actually write).
+    radian_coding::patched_content(&text, &edits)
 }
 
 /// `std::fs::canonicalize` as far as the path exists, with the missing tail normalized
@@ -299,6 +308,7 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use radian_core::{ContentPart, ToolResult};
     use serde_json::json;
 
     use crate::test_support::TempDir;
@@ -374,5 +384,74 @@ mod tests {
         assert!(is_mcp_tool_name("fx__echo"));
         assert!(!is_mcp_tool_name("read"));
         assert!(!is_mcp_tool_name("ask_user"));
+    }
+
+    fn event(seq: u64, data: EventData) -> SessionEvent {
+        SessionEvent {
+            seq,
+            ts: String::new(),
+            event: String::new(),
+            critical: true,
+            byte_offset: 0,
+            line_len: 0,
+            data,
+        }
+    }
+
+    fn started(call_id: &str, name: &str) -> SessionEvent {
+        event(
+            1,
+            EventData::ToolExecutionStarted {
+                call_id: call_id.into(),
+                name: name.into(),
+                arguments: json!({}),
+            },
+        )
+    }
+
+    fn settled(call_id: &str, result: ToolResult) -> SessionEvent {
+        event(
+            2,
+            EventData::ToolExecutionSettled {
+                call_id: call_id.into(),
+                result,
+            },
+        )
+    }
+
+    /// A double underscore alone is not proof: a name no MCP server provides settles
+    /// `unknown_tool` without any server seeing it, so a resume must not count it.
+    #[test]
+    fn an_invented_double_underscore_call_is_not_an_mcp_result() {
+        let journal = [
+            started("c1", "foo__bar"),
+            settled(
+                "c1",
+                ToolResult::error("c1", "unknown_tool", "There is no tool named `foo__bar`."),
+            ),
+        ];
+        assert!(!journal_has_mcp_result(&journal));
+    }
+
+    /// The positive control: a settled call to a routed MCP alias counts, and so does a
+    /// failure the server or its transport produced (only `unknown_tool` is excluded).
+    #[test]
+    fn a_settled_call_to_an_mcp_alias_is_an_mcp_result() {
+        let success = [
+            started("c1", "fx__echo"),
+            settled(
+                "c1",
+                ToolResult::success("c1", vec![ContentPart::text("{}")]),
+            ),
+        ];
+        assert!(journal_has_mcp_result(&success));
+        let failed = [
+            started("c2", "fx__echo"),
+            settled(
+                "c2",
+                ToolResult::error("c2", "extension_error", "the server answered with an error"),
+            ),
+        ];
+        assert!(journal_has_mcp_result(&failed));
     }
 }

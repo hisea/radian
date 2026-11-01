@@ -146,7 +146,8 @@ passes the root), never touches the network and never starts a process.
 `MemoryWriteGuard` (ADR 0021 invariant 4) is the host decision in front of `write` and
 `patch`, mounted by `open_session` whenever memory is on. It refuses a call whose canonical
 target is a scope directory in two cases: this session has taken in an MCP tool result (the
-input guard; a resumed session counts a settled MCP call from its committed journal), or the
+input guard; a resumed session counts a settled call to a tool an MCP server provided in its
+committed journal — a name no server provides settles `unknown_tool` and does not count), or the
 content — for `patch`, the content the edit would produce and each inserted replacement —
 matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value.
 The permission profile's memory rule is separate and unchanged: these guards can only refuse

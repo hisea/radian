@@ -318,10 +318,19 @@ impl ToolSession for HostSession {
                 )),
             }
         } else {
+            // Only a name the MCP session actually routes reaches a server. A call to an
+            // unmounted or invented name is settled `unknown_tool` by `McpSession::execute`
+            // without any server seeing it, so it is not outside content and must not trigger
+            // the memory input guard.
+            let routed = self
+                .mcp
+                .tool_specs()
+                .iter()
+                .any(|spec| spec.name == call.name);
             let result = self.mcp.execute(call, cx).await;
-            // Any settled MCP call puts outside content in the session: the input guard
-            // refuses memory writes from now on, whether the call succeeded or failed.
-            if let Some(guard) = &self.memory_guard {
+            // A settled MCP call puts outside content in the session: the input guard refuses
+            // memory writes from now on, whether the call succeeded or failed.
+            if routed && let Some(guard) = &self.memory_guard {
                 guard.note_mcp_result();
             }
             result
@@ -414,5 +423,53 @@ mod tests {
         let merged = merge_tool_specs(vec![spec("read")], vec![spec("fx__echo")]).unwrap();
         let names: Vec<&str> = merged.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["read", "fx__echo"]);
+    }
+
+    /// An invented or unmounted name falls through to `McpSession::execute`, which settles
+    /// `unknown_tool` without any server seeing it. That result is not outside content, so the
+    /// memory input guard must not be armed by it.
+    #[tokio::test]
+    async fn an_invented_tool_call_does_not_arm_the_memory_input_guard() {
+        let dir = crate::test_support::TempDir::with_label("radian-tools-guard", "invented");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = dir.join("memory");
+        let service = crate::memory::MemoryService::open(&ws, &root);
+        let guard = MemoryWriteGuard::new(&service, false);
+        let tools = HostTools::new(None, McpToolProvider::new(Vec::new())).with_memory_guard(guard);
+        let session = tools.open_session().await.unwrap();
+
+        let sink = radian_core::NoopSink;
+        let cancellation = radian_core::CancellationToken::new();
+        let cx = || ToolContext {
+            cancellation: cancellation.clone(),
+            events: &sink,
+            index: 0,
+        };
+
+        let invented = ToolCall {
+            id: "c1".into(),
+            name: "typo_tool".into(),
+            arguments: json!({}),
+        };
+        let failure = session.execute(&invented, cx()).await.unwrap_err();
+        assert_eq!(failure.code, "unknown_tool", "{}", failure.message);
+
+        let write = ToolCall {
+            id: "c2".into(),
+            name: "write".into(),
+            arguments: json!({
+                "path": root.join("global/x.md").to_str().unwrap(),
+                "content": "note\n",
+            }),
+        };
+        let failure = session.execute(&write, cx()).await.unwrap_err();
+        assert_ne!(
+            failure.message,
+            crate::memory::INPUT_GUARD,
+            "an invented tool is not an MCP result"
+        );
+        assert_eq!(failure.code, "unknown_tool", "{}", failure.message);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

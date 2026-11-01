@@ -1967,3 +1967,17 @@ run with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no
 |---|---|---|---|
 | TK0275-M1 | the project-versus-global sentence is removed from `prompts/memory.md` | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_pins_one_sentence_from_each_rule` (the project-versus-global sentence is missing) |
 | TK0275-M2 | `memory_rules(false)` returns the block instead of nothing | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_sits_between_the_role_and_the_context_files_and_is_gated` (the disabled prompt carries every memory sentence) |
+
+## TK0276 rework: an invented name and a normalising patch match (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place, the host unit
+tests run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and M6 with the rebuilt `radian` and
+`cargo nextest run -p radian-exec --test cli --locked --profile sandbox --no-fail-fast
+-E 'test(<name>)'`. Each source was restored from `.radian/rework/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M4 | an invented tool name arms the input guard (`routed` dropped from the `note_mcp_result` condition) | ✅ 1 failed (rc=100) | `tools::tests::an_invented_tool_call_does_not_arm_the_memory_input_guard` (the write was refused with the input-guard text) |
+| TK0276-M5 | any settled journaled name containing `__` counts as an MCP result (the `unknown_tool` check removed) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` |
+| TK0276-M6 | the patch result is not modelled (the guard's exact-only `None` path stands in for the tool's locators) | ✅ 1 failed (rc=100) | `cli::a_patch_matched_through_a_normalising_locator_still_catches_a_secret` (the file became `sk-abcdefghijklmnopqrst`) |

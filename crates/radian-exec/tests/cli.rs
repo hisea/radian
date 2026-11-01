@@ -8673,6 +8673,45 @@ async fn a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged
     );
 }
 
+/// A patch needle is located by the tool's normalising layers (here the LF view matching a
+/// CRLF needle), so the guard must judge the content the edit would actually write. The
+/// inserted text alone is clean; the result is not.
+#[tokio::test]
+async fn a_patch_matched_through_a_normalising_locator_still_catches_a_secret() {
+    let env = MemoryEnv::sandboxed("guard-patch-crlf");
+    let file = env.home.join("memory/global/crlf.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let before = "sk-\nX";
+    std::fs::write(&file, before).unwrap();
+
+    let patch = serde_json::json!({
+        "path": &file,
+        "old": "\r\nX",
+        "new": "abcdefghijklmnopqrst",
+    })
+    .to_string();
+    let server =
+        MockServer::start(vec![tool_reply("c1", "patch", &patch), text_reply("done")]).await;
+    let (code, stdout, stderr) =
+        run_memory_session(&env, &server, "guard-patch-crlf", "remember", None).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        before,
+        "the refused patch left every byte alone"
+    );
+    let refused = tool_result_for(&server, 1, "c1");
+    assert!(
+        refused.contains("memory write refused: the content looks like a secret (sk-)"),
+        "the result of the normalising match is judged: {refused}"
+    );
+    assert!(
+        !refused.contains("abcdefghijklmnopqrst"),
+        "the refusal never repeats the value: {refused}"
+    );
+}
+
 #[tokio::test]
 async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;
