@@ -23,6 +23,7 @@ pub mod actions;
 pub mod board;
 pub mod loop_log;
 pub mod looping;
+pub mod metrics;
 pub mod render;
 pub mod stdout;
 
@@ -217,6 +218,8 @@ pub enum TaskTab {
     Conversation,
     Diff,
     Attempts,
+    /// What each attempt spent: one row per run, the gate times, and a total (ADR 0048 §13).
+    Metrics,
 }
 
 impl TaskTab {
@@ -226,6 +229,7 @@ impl TaskTab {
             TaskTab::Conversation => "conversation",
             TaskTab::Diff => "diff",
             TaskTab::Attempts => "attempts",
+            TaskTab::Metrics => "metrics",
         }
     }
 
@@ -234,16 +238,18 @@ impl TaskTab {
             TaskTab::Brief => TaskTab::Conversation,
             TaskTab::Conversation => TaskTab::Diff,
             TaskTab::Diff => TaskTab::Attempts,
-            TaskTab::Attempts => TaskTab::Brief,
+            TaskTab::Attempts => TaskTab::Metrics,
+            TaskTab::Metrics => TaskTab::Brief,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            TaskTab::Brief => TaskTab::Attempts,
+            TaskTab::Brief => TaskTab::Metrics,
             TaskTab::Conversation => TaskTab::Brief,
             TaskTab::Diff => TaskTab::Conversation,
             TaskTab::Attempts => TaskTab::Diff,
+            TaskTab::Metrics => TaskTab::Attempts,
         }
     }
 }
@@ -581,6 +587,23 @@ pub struct TaskPage {
     pub diff_error: Option<String>,
     pub file_sel: usize,
     pub diff_scroll: usize,
+    /// The task's metrics, read on open and on the 2-second refresh while a run is active.
+    /// `None` before the read lands; `metrics_error` says why it could not be read.
+    pub metrics: Option<radian_arc::read::TaskMetrics>,
+    pub metrics_error: Option<String>,
+    /// The selected run of the metrics tab, in the tab's order: the newest attempt first, its
+    /// worker run and then its review runs.
+    pub metric_sel: usize,
+    /// The first row the metrics tab draws, its open detail included.
+    pub metric_scroll: usize,
+    /// The runner pins the metrics tab to its end (`f`) at the next frame.
+    pub metric_follow: bool,
+    /// The selected run's detail is open (`Enter`).
+    pub metric_open: bool,
+    /// The open detail's first frame: it anchors the list on the selected run.
+    metric_open_shown: bool,
+    /// The run the selection last pointed at, so a moved selection is revealed.
+    metric_shown: Option<usize>,
     /// A scroll the runner applies to the conversation view (`j`/`k`), in lines.
     pub pending_scroll: i32,
     /// The runner pins the conversation to its end (`f`).
@@ -631,6 +654,14 @@ impl TaskPage {
             diff_error: None,
             file_sel: 0,
             diff_scroll: 0,
+            metrics: None,
+            metrics_error: None,
+            metric_sel: 0,
+            metric_scroll: 0,
+            metric_follow: false,
+            metric_open: false,
+            metric_open_shown: false,
+            metric_shown: None,
             pending_scroll: 0,
             pending_follow: false,
             head: task.head_sha.clone(),
@@ -644,6 +675,28 @@ impl TaskPage {
         self.attempts
             .iter()
             .position(|view| view.attempt == attempt)
+    }
+
+    /// How many run rows the metrics tab offers: one worker run per attempt and one per review
+    /// run, the newest attempt first.
+    pub fn metric_run_count(&self) -> usize {
+        self.metrics.as_ref().map_or(0, metrics::run_count)
+    }
+
+    /// Keeps the metrics selection inside the run rows the current read offers.
+    fn clamp_metric_sel(&mut self) {
+        self.metric_sel = self
+            .metric_sel
+            .min(self.metric_run_count().saturating_sub(1));
+    }
+
+    /// Whether a run of the task is active, so the metrics tab re-reads on the 2-second
+    /// refresh: the worker runs in `doing.*`, the gate's review in `review.verifying`, and its
+    /// integration in `review.integrating`.
+    pub fn has_active_run(&self) -> bool {
+        self.phase.starts_with("doing.")
+            || self.phase == "review.verifying"
+            || self.phase == "review.integrating"
     }
 
     /// The selected file of the diff, if any.
@@ -1211,7 +1264,31 @@ impl ArcApp {
                 view.set_theme(theme);
             }
         }
+        if self.task.as_ref().is_some_and(|page| page.has_active_run()) {
+            self.refresh_metrics();
+        }
         self.refresh_journal();
+    }
+
+    /// Reads the open task's metrics (ADR 0048 §13). The page opens with them and re-reads
+    /// them on the 2-second refresh while a run of the task is active; a read that fails is
+    /// one line on the tab, never a page error.
+    fn refresh_metrics(&mut self) {
+        let Some(id) = self.task.as_ref().map(|page| page.id.clone()) else {
+            return;
+        };
+        let read = radian_arc::read::task_metrics(&self.store, &id);
+        let Some(page) = self.task.as_mut() else {
+            return;
+        };
+        match read {
+            Ok(metrics) => {
+                page.metrics = Some(metrics);
+                page.metrics_error = None;
+                page.clamp_metric_sel();
+            }
+            Err(error) => page.metrics_error = Some(error.message()),
+        }
     }
 
     /// Opens, or polls, the selected attempt's conversation.
@@ -1498,6 +1575,7 @@ impl ArcApp {
         self.task = Some(TaskPage::new(&loaded.item, attempts));
         self.task_return = from;
         self.page = Page::Task;
+        self.refresh_metrics();
         self.refresh_journal();
         true
     }
@@ -2030,6 +2108,13 @@ impl ArcApp {
         }
         if self.page == Page::Board && self.board.finished {
             self.board.show_columns();
+            return ArcKey::Redraw;
+        }
+        // A metrics run's open detail closes before the task page itself.
+        if self.page == Page::Task && self.task.as_ref().is_some_and(|page| page.metric_open) {
+            if let Some(page) = self.task.as_mut() {
+                page.metric_open = false;
+            }
             return ArcKey::Redraw;
         }
         // An action in flight takes no page key: its result lands on the footer when it ends.
@@ -2635,6 +2720,18 @@ impl ArcApp {
                     page.attempt_scroll = page.attempt_scroll.saturating_add(1);
                     ArcKey::Redraw
                 }
+                TaskTab::Metrics => {
+                    page.metric_follow = false;
+                    if page.metric_open {
+                        page.metric_scroll = page.metric_scroll.saturating_add(1);
+                    } else {
+                        page.metric_sel = page
+                            .metric_sel
+                            .saturating_add(1)
+                            .min(page.metric_run_count().saturating_sub(1));
+                    }
+                    ArcKey::Redraw
+                }
             },
             KeyCode::Char('k') | KeyCode::Up => match page.tab {
                 TaskTab::Brief => {
@@ -2655,6 +2752,15 @@ impl ArcApp {
                     page.attempt_scroll = page.attempt_scroll.saturating_sub(1);
                     ArcKey::Redraw
                 }
+                TaskTab::Metrics => {
+                    page.metric_follow = false;
+                    if page.metric_open {
+                        page.metric_scroll = page.metric_scroll.saturating_sub(1);
+                    } else {
+                        page.metric_sel = page.metric_sel.saturating_sub(1);
+                    }
+                    ArcKey::Redraw
+                }
             },
             KeyCode::Char('f') => {
                 match page.tab {
@@ -2666,8 +2772,20 @@ impl ArcApp {
                     TaskTab::Diff => page.diff_scroll = page.diff_body_len().saturating_sub(1),
                     TaskTab::Conversation => page.pending_follow = true,
                     TaskTab::Attempts => page.attempt_follow = true,
+                    TaskTab::Metrics => page.metric_follow = true,
                 }
                 ArcKey::Redraw
+            }
+            KeyCode::Enter => {
+                // A run's detail opens below its row and closes again on `Enter`; `Esc` closes
+                // it first, then leaves the page (ADR 0048 §13).
+                if page.tab == TaskTab::Metrics && page.metric_run_count() > 0 {
+                    page.metric_open = !page.metric_open;
+                    page.metric_follow = false;
+                    ArcKey::Redraw
+                } else {
+                    ArcKey::Ignored
+                }
             }
             KeyCode::Char('n') => {
                 if page.tab == TaskTab::Diff {

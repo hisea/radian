@@ -968,6 +968,18 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
                 &theme,
             );
         }
+        TaskTab::Metrics => {
+            let Some(page) = app.task.as_mut() else {
+                return;
+            };
+            super::metrics::draw(
+                &mut lines,
+                page,
+                width as usize,
+                area.height as usize,
+                &theme,
+            );
+        }
     }
     lines.push(frame_bottom(&theme));
     // The last row is always the frame's tail: a body longer than the page loses its last
@@ -1148,7 +1160,7 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &mut ArcApp, lines: Vec
     );
 }
 
-/// The tab row: the four tabs on the left, the attempt selector on the right.
+/// The tab row: the five tabs on the left, the attempt selector on the right.
 fn tab_row(page: &TaskPage, width: usize, theme: &Theme) -> Line<'static> {
     let mut left = Vec::new();
     for (index, tab) in [
@@ -1156,6 +1168,7 @@ fn tab_row(page: &TaskPage, width: usize, theme: &Theme) -> Line<'static> {
         TaskTab::Conversation,
         TaskTab::Diff,
         TaskTab::Attempts,
+        TaskTab::Metrics,
     ]
     .into_iter()
     .enumerate()
@@ -2144,7 +2157,7 @@ fn frame_top_spans(width: usize, label: Vec<Span<'static>>, theme: &Theme) -> Li
 
 /// Cuts styled spans to `width` cells, ending in `…` when they were longer. The style of each
 /// retained character stays its own; the ellipsis takes the last retained span's style.
-fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+pub(super) fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     if spans.iter().map(span_width).sum::<usize>() <= width {
         return spans;
     }
@@ -2197,7 +2210,7 @@ pub(super) fn frame_bottom(theme: &Theme) -> Line<'static> {
     Line::from(vec![Span::raw("  "), Span::styled("╰──", theme.frame)])
 }
 
-fn rail(theme: &Theme, line: Line<'static>) -> Line<'static> {
+pub(super) fn rail(theme: &Theme, line: Line<'static>) -> Line<'static> {
     rail_with(theme, Span::raw("  "), line)
 }
 

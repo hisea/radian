@@ -762,6 +762,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
   sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
   network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
+- **the arc task page's metrics tab**: open a task with a finished attempt and press `Tab`
+  until `metrics` is the bold tab. Does a run's row read at your width, does `j`/`k` move
+  the `❯` over the run rows, does `Enter` open the tool table and request log under the
+  selected run, and does a narrow terminal cut a row with `…` rather than wrap it past the
+  rail? pty automation asserts the text, not the feel (ADR 0009).
 - **the input area's two styles**: the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
   top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
