@@ -48,6 +48,8 @@ struct LedgerInner {
     /// Turn id -> the masked `TurnFailed` message that failed it, so a prompt reads its own
     /// turn's error and not a later turn's.
     errors: HashMap<String, String>,
+    /// Turn id -> the live retries it saw, so a clean turn never inherits an earlier one's.
+    retries: HashMap<String, u64>,
     /// The turns whose end the driver has journaled (`TurnFinished`), newest last.
     journaled: HashSet<String>,
     /// The same turn ids in the order they finished, so the oldest can be forgotten.
@@ -82,6 +84,20 @@ impl TurnLedger {
     /// task runs.
     fn turn_failed(&self, turn: &str, message: String) {
         self.lock().errors.insert(turn.to_owned(), message);
+    }
+
+    /// One live `ModelRetrying` event during the driver's turn in flight (ADR 0010),
+    /// counted against **that** turn so a later clean prompt does not inherit it.
+    fn retry(&self) {
+        let mut inner = self.lock();
+        if let Some(turn) = inner.current.clone() {
+            *inner.retries.entry(turn).or_insert(0) += 1;
+        }
+    }
+
+    /// The live retries `turn` saw.
+    pub(crate) fn retries(&self, turn: &str) -> u64 {
+        self.lock().retries.get(turn).copied().unwrap_or(0)
     }
 
     /// The runtime events a host receives, in the order the driver writes them (ADR 0049).
@@ -157,6 +173,7 @@ impl LedgerInner {
             self.journaled.remove(&turn);
             self.live.remove(&turn);
             self.errors.remove(&turn);
+            self.retries.remove(&turn);
             self.claimed.retain(|_, claimed| claimed != &turn);
         }
     }
@@ -198,6 +215,11 @@ impl AcpEvents {
 
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
+    }
+
+    /// The context window this process resolved, when known.
+    pub(crate) fn window(&self) -> Option<u64> {
+        self.window
     }
 
     fn notify(&self, update: serde_json::Value) {
@@ -293,6 +315,9 @@ impl EventSink for AcpEvents {
             AgentEvent::ModelResponseReceived {
                 usage: Some(usage), ..
             } => self.usage(&usage),
+            AgentEvent::ModelRetrying { .. } => {
+                self.ledger.retry();
+            }
             AgentEvent::CompactionUsage { usage, .. } => self.usage(&usage),
             AgentEvent::RunFinished { status } => {
                 self.busy.store(false, Ordering::Release);
@@ -381,5 +406,25 @@ mod tests {
         );
         assert_eq!(ledger.error("t-2").as_deref(), Some("the wake turn failed"));
         assert_eq!(ledger.error("t-3"), None);
+    }
+
+    /// Rework: retries belong to the turn that saw them, so a later clean turn starts at 0
+    /// even after an earlier turn retried twice.
+    #[test]
+    fn retries_belong_to_the_turn_that_saw_them() {
+        use radian_session::RuntimeEvent;
+
+        let ledger = TurnLedger::new();
+        ledger.on_runtime(&RuntimeEvent::TurnStarted {
+            turn_id: "t-1".to_owned(),
+        });
+        ledger.retry();
+        ledger.retry();
+        ledger.on_runtime(&RuntimeEvent::TurnStarted {
+            turn_id: "t-2".to_owned(),
+        });
+        assert_eq!(ledger.retries("t-1"), 2);
+        assert_eq!(ledger.retries("t-2"), 0);
+        assert_eq!(ledger.retries("t-3"), 0);
     }
 }
