@@ -191,7 +191,7 @@ pub enum ProjectCommand {
 }
 
 impl MemoryCommand {
-    /// The command's own `--json` flag (list/search/show/project). `execute` takes `json`
+    /// The command's own `--json` flag (list/search/show/stale/project). `execute` takes `json`
     /// explicitly so a host can force text; both hosts pass this value.
     pub fn json(&self) -> bool {
         match self {
