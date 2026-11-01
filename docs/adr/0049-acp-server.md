@@ -136,10 +136,11 @@ The `session/prompt` response carries `_meta.radian`:
 - `metrics`: the answering turn's run metrics, in the object `radian exec`'s
   `Result.run_metrics` carries: request and compaction counts, token and fee totals, peak
   context and the context window, compactions and their summed summary time, max-token
-  responses, model errors, this process's retries, per-tool calls and result bytes, the models
+  responses, model errors, the answering turn's retries, per-tool calls and result bytes, the models
   used with their request counts, and the per-request log. The fold covers only that turn's
   records, exactly as `cost` and `text` do; a counter no record reported is `null`, never 0
-  (ADR 0007 J1). `retries` counts this process's live `ModelRetrying` events (ADR 0010).
+  (ADR 0007 J1). `retries` counts the answering turn's live `ModelRetrying` events (ADR 0010):
+  a retry from an earlier turn is never carried into a later answer.
 - `error`: present only on a `refusal` that a model or hook error of that turn caused; the
   masked error text.
 
