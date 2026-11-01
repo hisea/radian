@@ -7,10 +7,10 @@ description: The arc manual: the overview, the page map, the subcommand list, an
 arc is a plan and task orchestrator built into the same `radian` binary.
 It keeps a plan and its tasks as files in the repository, runs each task as a separate headless `radian` worker, and merges only what passes a fixed gate.
 
-This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, `run`, and `serve`.
+This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, `run`, and `mcp`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
-`radian hub add`, `remove` and `list` manage the repositories one hub process reads; a bare `radian hub` serves that hub's HTTP API on loopback, and `pair` and `token rotate` handle the bearer token (see [`hub`](hub.md)).
-`radian arc serve` is the scheduling loop and `radian arc run` is one pass of it; a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
+`radian hub add`, `remove` and `list` manage the repositories one hub process schedules and reads; a bare `radian hub` serves that hub's HTTP API on loopback and runs the scheduling loop, and `pair` and `token rotate` handle the bearer token (see [`hub`](hub.md)).
+`radian hub` is the scheduling loop and `radian arc run` is one pass of it; `radian arc serve` no longer exists. A bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
 The commands are in [`plans and tasks`](planning.md), [`running`](running.md), [`the owner's commands`](owner.md) and [`hooks`](hooks.md); the merge is in [`integration`](integration.md), the loop in [`loop`](loop.md), the gate in [`gate`](gate.md), [`gate-review`](gate-review.md) and [`gate-failures`](gate-failures.md), the MCP server in [`mcp`](mcp.md), the TUI in [`tui`](tui.md), the flows in [`flows`](flows.md), the worker in [`worker`](worker.md), and the files in [`files`](files.md) and [`config`](config.md).
 
@@ -24,12 +24,12 @@ Each line names one page and what it covers.
 - `arc/running`: the task-running commands.
 - `arc/owner`: the owner's commands.
 - `arc/hooks`: the `[hooks]` points, rules and environment.
-- `arc/hub`: the hub's HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` keys.
+- `arc/hub`: the hub's HTTP API on loopback, pairing and the bearer token, every route, the repository registry, its scheduling loop and the `[hub]` keys.
 - `arc/gate`: the gate run, a gate for this repository, and reconcile.
 - `arc/gate-review`: the review stage.
 - `arc/gate-failures`: the failure classes, retries and the budget.
 - `arc/integration`: how the merge builds and pushes the integration candidate: the styles, the key commands and the after-push check.
-- `arc/loop`: the scheduling loop: one pass, `loop.log`, `serve`, and its signals.
+- `arc/loop`: the scheduling loop: one pass, `loop.log`, the hub's loop, and its signals.
 - `arc/files`: the plan and task files and the `.radian/arc/` layout.
 - `arc/config`: the `config.toml` keys.
 - `arc/flows`: what a flow is, a two-flow example, how a task picks one, the two concurrency limits, and binary deliverables.
@@ -44,15 +44,17 @@ Without setup, `radian arc` and every subcommand except `init` refuse with a lin
 
 ## The subcommands
 
-`radian arc init`, `radian arc add plan` and `radian arc add task`, `radian arc list`, `radian arc show` and `radian arc adopt` are in [plans and tasks](planning.md); `radian arc start`, `radian arc cancel`, `radian arc reset-budget` and `radian arc reverify` in [running](running.md); `radian arc confirm`, `radian arc auto`, `radian arc priority`, `radian arc pause`, `radian arc merge` and `radian arc reject` in [the owner's commands](owner.md); `radian arc run` and `radian arc serve` in [the loop](loop.md); `radian arc mcp` in [mcp](mcp.md); the `[hooks]` table in [hooks](hooks.md#hooks); and the `radian hub` subcommands and routes in [hub](hub.md).
+`radian arc init`, `radian arc add plan` and `radian arc add task`, `radian arc list`, `radian arc show` and `radian arc adopt` are in [plans and tasks](planning.md); `radian arc start`, `radian arc cancel`, `radian arc reset-budget` and `radian arc reverify` in [running](running.md); `radian arc confirm`, `radian arc auto`, `radian arc priority`, `radian arc pause`, `radian arc merge` and `radian arc reject` in [the owner's commands](owner.md); `radian arc run` in [the loop](loop.md); `radian arc mcp` in [mcp](mcp.md); the `[hooks]` table in [hooks](hooks.md#hooks); and `radian hub` and its `add`, `remove`, `list`, `pair` and `token rotate` in [hub](hub.md).
 
 ## `radian arc run`
 
 `run` is one pass of the scheduling loop: what a pass does, its output, its exit codes and `loop.log` are in [`arc/loop`](loop.md#radian-arc-run).
 
-## `radian arc serve`
+## `radian hub`
 
-`serve` is the scheduling loop: `--interval`, its output, the signal handling and the repeated-error stop are in [`arc/loop`](loop.md#radian-arc-serve).
+`radian hub` is the scheduling loop: with no subcommand it serves the HTTP API on loopback and schedules every registered repository, and `radian hub add`, `remove` and `list` manage the registry.
+Its loop, `hub.lock`, the machine-wide cap, the status lines and the signal handling are in [`arc/hub`](hub.md#the-loop).
+The old `radian arc serve` (with or without `--interval`) is refused: exit `2`, one stderr line, ``radian arc: `serve` is now `radian hub` ``.
 
 ## `radian arc mcp [--claude-experimental]`
 
@@ -79,7 +81,7 @@ A closed output pipe (`radian arc list | head`) is a normal stop: exit `0`.
 
 ## The TUI
 
-The TUI never holds `runner.lock` and runs no pass; when it opens it starts `radian arc serve` if no loop holds the lock, and quitting it stops nothing.
+The TUI never holds `runner.lock` and runs no pass; when it opens it starts `radian hub` if no loop holds the repository's lock (and registers the repository when it is missing), and quitting it stops nothing.
 The header and ticker, the log view, the plans, board, task and merge pages, every mark and key, and the owner's actions are in [`arc/tui`](tui.md).
 
 ## Not built yet

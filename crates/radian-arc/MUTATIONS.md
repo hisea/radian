@@ -1916,6 +1916,22 @@ gate_profile`, and the file was restored from a copy under `.radian/`.
 
 3/3 caught.
 
+## TK0282: the hub's scheduling loop (2026-10-31, branch `work/TK0282-hub-loop`)
+
+The hub keeps one loop per registered repository, re-reads the registry every interval, holds
+`hub.lock` and applies the machine-wide `[hub] concurrency` cap. Each mutation was applied by
+hand to the working file, the `radian` binary was rebuilt with `cargo build -p radian-tui --bin
+radian` because every test drives the CLI, the named test ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --test hub_loop`, and the file was restored from a copy
+under `.radian/backup/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0282-M1 | `start_ready` no longer asks the machine-wide cap before a claim | `hub_loop::the_machine_cap_holds_one_task_at_a_time` (`the machine-wide cap let a second task start`) | ✅ 1 failed |
+| TK0282-M2 | a repository's first failed pass is returned instead of retried, and `repo_loop` sets the hub-wide stop flag on that error | `hub_loop::a_failed_pass_does_not_stop_the_other_repository` (`B's second task in doing did not happen in 20s`) | ✅ 1 failed |
+| TK0282-M3 | `reconcile` returns once it has any repository, so the registry is read only at start | `hub_loop::add_and_remove_reach_a_running_hub` (`B's lock and task did not happen in 10s`) | ✅ 1 failed |
+| TK0282-M4 | the repository loop runs inline on the hub's own thread instead of a spawned OS thread | `hub_loop::a_slow_pass_does_not_delay_another_repository` (`the quick repository's second task did not happen in 4s`) | ✅ 1 failed |
+| TK0282-M5 | `HubLock::try_take` unlocks the file before returning the guard, so `hub.lock` is not held | `hub_loop::a_second_hub_exits_one_and_names_the_holder` (`the second hub exits instead of running`) | ✅ 1 failed |
 ## TK0283: the hub's HTTP read routes and bearer token (2026-10-31, branch `work/TK0283-hub-http-read-and-token`)
 
 Every route requires the bearer token, a rotation is picked up without a restart, and a file's
@@ -1959,6 +1975,20 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
 second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.
 
+## TK0282 rework: review findings (2026-10-31, branch `work/TK0282-hub-loop`)
+
+A review of the hub's loop found that a broken repository could fail another repository's pass,
+that an idle loop held a rebuilt-binary restart for a whole interval, and that two loops could
+each print the restart line. Each mutation was applied by hand to `src/hub/loop.rs`, the
+`radian` binary was rebuilt, the named test ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test hub_loop -E 'test(<name>)'`, and the file was restored from a copy
+under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0282-M7 | `machine_room` counts every registered repository with `?` again, so one unreadable store fails another repository's pass | `hub_loop::a_broken_task_file_in_one_repository_does_not_stop_another` (`the healthy repository schedules its task did not happen in 10s`) | ✅ 1 failed |
+| TK0282-M8 | the hub's interval wait ignores the shared stop flag (`&|| false`) | `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (`the hub waited out an idle interval before the exec (after 6.01s)`) | ✅ 1 failed |
+| TK0282-M9 | every loop that sees the changed binary prints the restart line (unconditional `restart.store`) | `hub_loop::a_binary_replacement_prints_one_restart_line_for_the_hub` (2 stdout lines, expected 1) | ✅ 1 failed |
 ## TK0284: the hub's owner write routes (2026-10-31, branch `work/TK0284-hub-http-owner-actions`)
 
 The write routes call the same library functions the TUI calls, map the CLI's outcome to a
@@ -2035,3 +2065,19 @@ and the file was restored from a copy under `.radian/tmp/`, which `cmp` found id
 | TK0291-M1 | `review_failing` / `review_rest` dispatch on `self.reason == Some(REVIEW_BLOCKING)` again, so a passing old verdict's `major` suggestion is decided by `fix_level` | `gate::review::tests::a_passing_old_verdicts_major_suggestion_stays_in_the_rest` (the `major` suggestion was returned as failing) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0282 rework 9: the stop handler's order and the port a rebuilt hub re-binds (2026-11-01, branch `work/TK0282-hub-loop`)
+
+The hub installs its SIGINT/SIGTERM handler before it takes `hub.lock`, prints its first line or
+binds a port, and `http::serve` is what arms the process that starts after an `exec`; the listener
+sets `SO_REUSEADDR` before `bind`, so a rebuilt hub binds a port its predecessor's last connection
+left in `TIME_WAIT`. Each mutation was applied by hand to the named file, the `radian` binary was
+rebuilt with `cargo build -p radian-tui --bin radian` because every test drives the real binary,
+the named test ran with `cargo nextest run -p radian-arc -p radian-tui --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`, and the file was restored from a copy under `.radian/mut/`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0282-M10 | `bind_listener` drops `set_reuse_address(true)`, so the bind has no `SO_REUSEADDR` | `hub_http::a_hub_binds_its_port_again_while_the_last_connection_is_in_time_wait` (the replacement hub wrote no first line: `the first stdout line names the listener: ""`, its stderr `Address already in use`) | ✅ 1 failed |
+| TK0282-M11 | neither `http::serve` nor `hub::run` installs the stop handler (both calls removed), so SIGTERM takes its default action | `hub::hub_without_an_argument_serves_http_and_runs_the_loop` (`SIGTERM is not an error`, left `None`, right `Some(0)`) and `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (left `None`, right `Some(0)`) | ✅ 2 failed |

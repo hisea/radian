@@ -213,9 +213,9 @@ radian arc reset-budget TK0001-first-work
 
 ## `radian hub`
 
-`radian hub` manages the repository registry one hub process reads (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `127.0.0.1`, and prints or rotates the bearer token every request carries.
-A bare `radian hub` serves the HTTP API until it is stopped; its first stdout line is `hub: listening on 127.0.0.1:<port>`, and it says that the scheduling loop is not built yet.
-The registry file, every subcommand, the pairing and token rules, and every route are on [`arc/hub`](arc/hub.md).
+`radian hub` manages the repository registry one hub process schedules (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `127.0.0.1`, runs the scheduling loop, and prints or rotates the bearer token every request carries.
+A bare `radian hub` serves the HTTP API and schedules every registered repository until it is stopped; its first stdout line is `hub: listening on 127.0.0.1:<port>`.
+The registry file, every subcommand, the pairing and token rules, every route and the loop are on [`arc/hub`](arc/hub.md).
 
 | Subcommand | Arguments | What it does |
 |---|---|---|
@@ -413,10 +413,10 @@ arc/gate-failures: The gate's failure classes, the retry rules, the budget, and 
 arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
 arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
 arc/hooks: The `[hooks]` points, their rules and their environment.
-arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` configuration keys.
+arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
-arc/loop: The arc scheduling loop: one pass, its output and loop.log, serve, and its signals.
+arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.
 arc/mcp: The lead's MCP server: registering it, its tools and its tool errors.
 arc/owner: The owner's commands: confirm, auto, priority, pause, merge and reject.
 arc/planning: The commands that write plans and tasks: init, add, list, show and adopt.

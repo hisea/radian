@@ -13,19 +13,30 @@
 //!   characters. [`token::ensure`] creates it on the first `radian hub` start or for `radian
 //!   hub pair`; [`token::rotate`] replaces it atomically.
 //! - `hub.lock`: the flock a running hub holds for its lifetime, with its pid inside, the
-//!   same shape as a repository's `runner.lock` (ADR 0048 decision 13). [`http::serve`] takes
-//!   it before it binds.
+//!   same shape as a repository's `runner.lock` (ADR 0048 decisions 13 and 16). [`http::serve`]
+//!   takes it before it binds or schedules anything. The TUI probes it take-and-release and
+//!   never creates it.
 //!
 //! The directory is on the sandbox deny list beside `credentials/` (ADR 0020): the model
 //! never reads the registry or the token.
+//!
+//! The scheduling loop itself is [`r#loop`](crate::hub::r#loop): one loop per registered
+//! repository on its own OS thread, the registry re-read every interval, and the machine-wide
+//! cap.
 //!
 //! [`http`] is the loopback HTTP API: every request carries the bearer token, and the read
 //! routes return the same bytes `radian arc list --json` and `radian arc show --json` print.
 
 pub mod http;
+pub mod lock;
+pub mod r#loop;
 pub mod registry;
+pub mod status;
 pub mod token;
 
+pub use lock::HubLock;
+pub use r#loop::run;
 pub use registry::{
     HUB_LOCK, NAME_MAX_CHARS, REGISTRY_FILE, Registry, RepoEntry, TOKEN_FILE, valid_name,
 };
+pub use status::{HubStatus, RepoState, RepoStatus};

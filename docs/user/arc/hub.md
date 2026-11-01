@@ -1,12 +1,11 @@
 ---
-description: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` configuration keys.
+description: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 ---
 
 # hub
 
 A hub is one process that manages every repository registered on this machine.
-[`radian hub`](#radian-hub) serves the HTTP API on loopback; `radian hub add`, `remove` and `list` manage the registry; [`radian hub pair`](#radian-hub-pair) and [`radian hub token rotate`](#radian-hub-token-rotate) handle the bearer token every request carries.
-The scheduling loop is not built in this build: `radian hub` says so and serves HTTP.
+[`radian hub`](#radian-hub) serves the HTTP API on loopback and runs the scheduling loop for every registered repository; `radian hub add`, `remove` and `list` manage the registry; [`radian hub pair`](#radian-hub-pair) and [`radian hub token rotate`](#radian-hub-token-rotate) handle the bearer token every request carries.
 
 ## The registry file
 
@@ -35,13 +34,13 @@ A file that does not parse, a name outside its rule, a path that is not an arc r
 
 ## `radian hub`
 
-`radian hub` with no subcommand starts the HTTP API and serves it until the process is stopped.
+`radian hub` with no subcommand starts the hub and runs until the process is stopped.
 It binds `127.0.0.1:<hub.port>` and only that address; there is no key for another address and no key that turns the listener off.
-The bind happens after it takes `$RADIAN_HOME/hub/hub.lock`, a lock that holds the process's pid and lives as long as the process: a second `radian hub` exits `1` with a line that names `hub.lock` and the holder's pid, before it binds anything.
+The bind happens after it takes `$RADIAN_HOME/hub/hub.lock`, a lock that holds the process's pid and lives as long as the process: a second `radian hub` exits `1` with a line that names `hub.lock` and the holder's pid, before it binds anything or touches any repository.
 A port another program holds exits `1` with a line that names the port.
 
 Its first stdout line is `hub: listening on 127.0.0.1:<port>`.
-Until the scheduling loop is built, it prints one stderr line, `hub: the scheduling loop is not built yet`, and serves HTTP.
+The scheduling loop then runs in the same process; [the loop](#the-loop) describes it.
 
 ### `radian hub add <PATH> [--name <NAME>]`
 
@@ -135,7 +134,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | Route | Method | Fields | Status codes |
 |---|---|---|---|
 | `/v1/version` | `GET` | `api_version` (integer), `schema_version` (integer). | `200`, `401` |
-| `/v1/repos` | `GET` | One array in registry order; each entry has `name` (string), `path` (string), `scheduled` (boolean), and `lock_holder`. `scheduled` is `false` until the scheduling loop is built. `lock_holder` is `"hub"` when this hub holds the repository's scheduling lock, the pid written in its `runner.lock` when another process does, or `null`. | `200`, `401` |
+| `/v1/repos` | `GET` | One array in registry order; each entry has `name` (string), `path` (string), `scheduled` (boolean), and `lock_holder`. `scheduled` is `true` when this hub holds the repository's `runner.lock`. `lock_holder` is the pid written in that `runner.lock` (the hub's own when it schedules the repository, another process's when it only reads it), or `null` when no process holds it. | `200`, `401` |
 | `/v1/repos/<name>/items` | `GET` | The `radian arc list --json` bytes of that repository. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<id>` | `GET` | The `radian arc show --json` bytes of that plan or task. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/report` | `GET` | `attempt` (string, `<task>-<n>`), `text` (string): the last assistant message of the newest attempt's `result.jsonl`. | `200`, `204` when there is no attempt or no message, `401`, `404` |
@@ -247,7 +246,45 @@ The client opens the task over the hub for the title, the brief and the diff.
 
 ## The loop
 
-The scheduling loop is not built in this build: `radian hub` prints `hub: the scheduling loop is not built yet` and serves the HTTP API only.
+Each registered repository gets one loop.
+The loop takes that repository's `runner.lock` and holds it for its life, runs the same pass `radian arc run` runs, waits `hub.interval_secs`, and runs another, until SIGINT or SIGTERM.
+It is the same loop for every repository: `radian arc serve` no longer exists, and `radian arc run` is still the one-shot pass.
+At start, and every `hub.interval_secs` afterwards, the hub re-reads the registry; a repository added since the last read gets its lock and a pass in the next round, and a removed one releases its lock after its pass in flight.
+
+The loops are OS threads, one per repository, not async tasks on one runtime: a pass is synchronous and blocking (it starts and waits for git and gate processes, and it sleeps between passes), so one slow pass does not delay another repository's pass or an HTTP request.
+The hub never writes the registry.
+
+A repository whose `runner.lock` another process holds is not scheduled.
+The hub's status line names it `read-only` with the holder's pid (or `read-only (holder unknown)` when the lock file carries none), and probes the lock again every interval.
+When the holder lets go, the next probe schedules the repository.
+
+The machine-wide [`hub.concurrency`](#the-hub-configuration) cap applies on top of each repository's own [`limits.concurrency`](config.md#configtoml) and flow concurrency.
+Before it starts a task, a pass reads the number of tasks in `doing` in every registered repository at that moment and starts the task only when that number is below the cap.
+A repository whose store cannot be read is left out of that count, so a broken task file there cannot stop another repository's pass; that repository's own loop reports the error.
+The count is read, not cached: two passes in different repositories can each see a free slot and both start one task, so the cap bounds the steady state, not a lock; the next passes see the new count.
+
+A pass error in one repository is written to that repository's [`loop.log`](files.md), and its loop continues at the next interval; the other repositories are unaffected.
+As with the old loop, three passes in a row with the same error text stop that repository's loop: it stops the gates it started the way a signal does (workers are left alone), releases its `runner.lock`, and the hub keeps running and scheduling every other repository.
+Restart the hub to schedule that repository again.
+
+The status is one line per repository, printed on start and whenever it changes:
+
+```text
+hub: 0 in doing, cap 4
+radian  /home/me/Code/radian  scheduled
+work-tools  /home/me/Code/work-tools  read-only (pid 4242)
+```
+
+A running hub follows a rebuilt binary as the old loop did: when a pass sees that the file at its recorded executable path changed and is stable, the hub prints `radian arc: the radian binary changed on disk; restarting the loop with it` once, in the `loop.log` of the repository whose pass saw it, finishes the passes in flight, releases every `runner.lock` and then `hub.lock`, and replaces itself with `exec` of the recorded path.
+A loop that sees the same replacement after the first one stops without printing a second line.
+The pid does not change, and a running gate and a running worker are left alone.
+When `exec` fails, the hub prints one line, takes `hub.lock` again and goes on with the old code.
+
+On SIGINT or SIGTERM every loop starts no new worker and no new gate.
+A Ctrl-C in the terminal reaches the hub only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.
+A running worker is left alone: it is a separate process with its own limits and record, and the next pass (or the next `radian arc run`) collects it.
+A running gate is signalled and gets `[limits] cancel_grace_secs` before SIGKILL, and so is one whose record is still `started` while it holds the gate lock; the gate forwards the signal to the stage it is running, waits for it, and exits without a record; once it is gone its record becomes `interrupted`, so a gate that did not finish is started again by the next loop as unverified and counts no death, and the verdicts it already wrote are reused, unless it exited before writing any record at all: then the next pass reports it and starts no gate while its inputs are unchanged (see [the gate run](gate.md#the-gate-run)).
+Each loop then prints its summary, releases its `runner.lock`, and the hub releases `hub.lock` last and exits `0`.
 
 ## The `[hub]` configuration
 
@@ -257,8 +294,8 @@ A change takes effect at the hub's next start.
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. The API binds `127.0.0.1` only. |
-| `hub.concurrency` | integer | `4` | `1` or more | Tasks in `doing` across every registered repository. The scheduling loop, which is not built in this build, uses it. |
-| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two scheduling passes. The scheduling loop, which is not built in this build, uses it. |
+| `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
+| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.

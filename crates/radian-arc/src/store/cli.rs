@@ -30,7 +30,6 @@ pub const SUBCOMMANDS: &[&str] = &[
     "merge",
     "reject",
     "run",
-    "serve",
     "mcp",
 ];
 
@@ -95,9 +94,6 @@ pub enum Command {
     /// `radian arc run`: one pass, then exit. A pass only schedules: a worker and a gate run
     /// outside it and a later pass collects them.
     Run,
-    /// `radian arc serve [--interval <seconds>]`: the scheduling loop, a pass repeated until
-    /// SIGINT or SIGTERM.
-    Serve { interval: u64 },
     /// `radian arc mcp [--claude-experimental]`: the lead's MCP server on standard input and
     /// output. The flag pushes task transitions to the lead over Claude Code's channel
     /// extension (ADR 0048 decision 11).
@@ -143,7 +139,6 @@ pub fn run(command: &Command) -> u8 {
         Command::Merge { task } => merge(task),
         Command::Reject { task, note } => reject(task, note),
         Command::Run => run_loop(),
-        Command::Serve { interval } => serve_loop(*interval),
         Command::Mcp {
             claude_experimental,
         } => mcp(*claude_experimental),
@@ -1302,31 +1297,6 @@ fn run_loop() -> Result<u8, Error> {
         }
     };
     crate::run::run(&store, &mut emit)?;
-    Ok(if failed.get() {
-        Exit::Error.code()
-    } else {
-        Exit::Ok.code()
-    })
-}
-
-/// `radian arc serve [--interval <seconds>]`: the scheduling loop, until SIGINT or SIGTERM
-/// (ADR 0048 §13). A transition line is written and flushed when the loop makes it; the
-/// summary only when it changed. A closed stdout stops the printing and is a normal stop
-/// (exit `0`), as every other print-and-exit command of this binary treats it.
-fn serve_loop(interval: u64) -> Result<u8, Error> {
-    let store = open()?;
-    let failed = std::cell::Cell::new(false);
-    let mut emit = |text: &str| match radian_host::write_stdout(text) {
-        Ok(()) => {}
-        // The reader of a foreground loop is gone (`... | head`): stop now, as a closed pipe
-        // stops every other print-and-exit command with exit `0`.
-        Err(radian_host::StdoutError::BrokenPipe) => std::process::exit(Exit::Ok.code().into()),
-        Err(error) => {
-            eprintln!("radian arc: cannot write to stdout: {error}");
-            failed.set(true);
-        }
-    };
-    crate::run::serve(&store, interval, &mut emit)?;
     Ok(if failed.get() {
         Exit::Error.code()
     } else {
