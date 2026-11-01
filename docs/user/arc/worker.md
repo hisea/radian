@@ -147,7 +147,7 @@ The last line whose `type` is `Result` decides the attempt, exactly as it does f
 - `outcome` `"completed"` passes, and any other value fails the attempt with that outcome;
 - no `Result` line at all fails it as `terminated`;
 - `text` (a string) is the attempt's final report; the next fresh attempt's hand-off section reads it;
-- `cost` is optional and has the shape `radian exec` writes (`{"micros": <integer>, "incomplete": <boolean>, "estimated": <boolean>}`). Without it the attempt's cost is unknown: it adds nothing to the task's or the plan's cost total, a budget never stops on it, and `show`, `list` and the arc TUI show it as unknown — and it stays unknown for the task after a later attempt reports a cost, because a number would leave this attempt out (see [`cost_unknown`](files.md#task-fields)). A `cost` that is `null`, or that carries no `micros`, is a reported zero, the shape `radian exec` writes when it recorded no fee. When a claim starts a command worker for a task or plan that has a cost limit, `start`, `run` and `serve` print one line for the attempt: `<task>: worker.command reports no cost; the cost limit does not apply`.
+- `cost` is optional and has the shape `radian exec` writes (`{"micros": <integer>, "incomplete": <boolean>, "estimated": <boolean>}`). Without it the attempt's cost is unknown: it adds nothing to the task's or the plan's cost total, a budget never stops on it, and `show`, `list` and the arc TUI show it as unknown — and it stays unknown for the task after a later attempt reports a cost, because a number would leave this attempt out (see [`cost_unknown`](files.md#task-fields)). A `cost` that is `null`, or that carries no `micros`, is a reported zero, the shape `radian exec` writes when it recorded no fee. When a claim starts a command worker for a task or plan that has a cost limit, `start`, `run` and the hub's loops print one line for the attempt: `<task>: worker.command reports no cost; the cost limit does not apply`.
 
 The command writes no `Result` line on a crash, and the attempt then fails as `terminated`, as a crashed radian worker does.
 
@@ -254,7 +254,7 @@ Nothing after it changes: the git control-file check, the delivery check, the pu
 
 The protocol has no fee, only `usage_update` token counts, which stay in `result.jsonl`.
 A flow's agent's attempt cost is therefore unknown, exactly as a command worker's that reports none: it adds nothing to a task's or plan's totals, a budget never stops on it, and the task records [`cost_unknown`](files.md#task-fields).
-When a claim starts a flow's ACP agent for a task or plan with a cost limit, `start`, `run` and `serve` print one line: `<task>: worker.acp reports no cost; the cost limit does not apply`. The radian worker reports `_meta.radian.cost` instead (see [the radian worker](#the-radian-worker)).
+When a claim starts a flow's ACP agent for a task or plan with a cost limit, `start`, `run` and the hub's loops print one line: `<task>: worker.acp reports no cost; the cost limit does not apply`. The radian worker reports `_meta.radian.cost` instead (see [the radian worker](#the-radian-worker)).
 
 `radian arc cancel`, a stall and the wall clock stop an ACP worker the same way: the wrapper first sends `session/cancel` and answers a pending permission request `cancelled`, gives the agent a moment to end its turn, and then sends SIGTERM to its process group, waits `[limits] cancel_grace_secs` and sends SIGKILL.
 An agent that ends its turn with `stopReason: cancelled` after an arc cancel is recorded as cancelled, not terminated.

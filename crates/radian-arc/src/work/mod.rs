@@ -727,6 +727,9 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
             // Which worker ran this attempt, so `show` and the arc TUI can tell a command
             // worker from `radian acp` (ADR 0048 decision 7).
             "worker": worker,
+            // The flow's `exec_args` this run was started with, so a reader can name the
+            // model route when the run's metrics report no `models` (ADR 0048 decision 7).
+            "exec_args": o.extra_args,
             // A line such as `worker-brief.md skipped: not UTF-8`; `show` prints it
             // (ADR 0048 decision 7). Nothing to report leaves an empty list.
             "notes": notes,
@@ -2833,9 +2836,11 @@ fn result_line(o: &Options, end: &acp::PromptEnd) -> Value {
     result
 }
 
-/// `_meta.radian` on the attempt's `Result`: `text` is the last assistant message in full, and
-/// `cost` is the answering turn's fee (ADR 0049), null included. A `_meta` without `radian`
-/// leaves the line as the protocol's own stop reason gave it.
+/// `_meta.radian` on the attempt's `Result`: `text` is the last assistant message in full,
+/// `cost` is the answering turn's fee (ADR 0049), null included, and `metrics` is that run's
+/// metrics object (ADR 0049 §6) when the answer carries one. A `_meta` without `radian` leaves
+/// the line as the protocol's own stop reason gave it, so a flow's `acp` agent and a `command`
+/// worker have no `metrics`.
 fn apply_radian_meta(result: &mut Value, meta: &Value) {
     let Some(radian) = meta.get("radian") else {
         return;
@@ -2845,6 +2850,9 @@ fn apply_radian_meta(result: &mut Value, meta: &Value) {
     }
     if let Some(cost) = radian.get("cost") {
         result["cost"] = cost.clone();
+    }
+    if let Some(metrics) = radian.get("metrics").filter(|metrics| !metrics.is_null()) {
+        result["metrics"] = metrics.clone();
     }
 }
 
@@ -4207,11 +4215,11 @@ mod tests {
     }
 
     /// The `radian` worker's `Result` reads `_meta.radian`: `text` is the last assistant
-    /// message in full, `cost` is the object `radian exec` wrote (null included), and a missing
-    /// `radian` keeps the protocol's own text. Mutation: drop the `cost` line and the attempt's
-    /// cost becomes unknown.
+    /// message in full, `cost` is the object `radian exec` wrote (null included), `metrics` is
+    /// the run's metrics object, and a missing `radian` keeps the protocol's own text.
+    /// Mutation: drop the `metrics` line and the attempt's `Result` has none.
     #[test]
-    fn the_radian_meta_is_the_results_text_and_cost() {
+    fn the_radian_meta_is_the_results_text_cost_and_metrics() {
         let mut result = json!({
             "type": "Result",
             "outcome": "completed",
@@ -4222,6 +4230,9 @@ mod tests {
             &json!({"radian": {
                 "cost": {"micros": 12_345, "incomplete": false, "estimated": false},
                 "text": "the last message in full",
+                "metrics": {"requests": 3, "input_uncached": 100, "models": [
+                    {"provider": "p", "model": "m", "requests": 3}
+                ]},
             }}),
         );
         assert_eq!(result["text"], json!("the last message in full"));
@@ -4229,6 +4240,9 @@ mod tests {
             result["cost"],
             json!({"micros": 12_345, "incomplete": false, "estimated": false})
         );
+        assert_eq!(result["metrics"]["requests"], json!(3));
+        assert_eq!(result["metrics"]["input_uncached"], json!(100));
+        assert_eq!(result["metrics"]["models"][0]["model"], json!("m"));
 
         // `radian acp` writes `cost: null` when no call had a price: a reported zero, not an
         // unknown cost (ADR 0048 decision 12).
@@ -4239,6 +4253,10 @@ mod tests {
         );
         assert_eq!(unpriced["cost"], Value::Null);
         assert!(unpriced.get("cost").is_some());
+        assert!(
+            unpriced.get("metrics").is_none(),
+            "a run without metrics reports none"
+        );
 
         let mut plain = json!({"type": "Result", "outcome": "completed", "text": "x"});
         apply_radian_meta(&mut plain, &Value::Null);
@@ -4246,6 +4264,10 @@ mod tests {
         assert!(
             plain.get("cost").is_none(),
             "a flow's ACP agent reports no cost"
+        );
+        assert!(
+            plain.get("metrics").is_none(),
+            "a flow's ACP agent reports no metrics"
         );
     }
 

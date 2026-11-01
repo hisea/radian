@@ -233,6 +233,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "read in radian-tui/src/cli/arc.rs: makes the arc TUI's owner-action worker panic, so the pty suite checks that a panicked worker still replies and leaves the TUI responsive",
     ),
     (
+        "RADIAN_HUB_INTERVAL_SECS",
+        "read in radian-arc/src/hub/loop.rs: a hub test's interval below the documented five-second minimum, so one repository's slow pass can be shown not to gate another",
+    ),
+    (
         "RADIAN_HUB_EVENTS_POLL_SECS",
         "read in radian-arc/src/hub/http.rs: seconds between two reads of the hub's event stream, so a test does not wait the channel's five seconds per transition; unset uses the channel's interval",
     ),

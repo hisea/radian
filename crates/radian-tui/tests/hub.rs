@@ -1,11 +1,12 @@
 //! `radian hub` through the real binary: `add`, `list`, `--json`, `remove`, the exit codes,
-//! and the bare command that says the loop and the API are not built yet.
+//! and the bare command that serves the HTTP API and runs the scheduling loop.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// A temp directory that removes itself.
 struct Scratch {
@@ -153,7 +154,7 @@ fn remove_refuses_an_unknown_name_and_removes_only_the_named_entry() {
 }
 
 #[test]
-fn hub_without_an_argument_serves_http_on_loopback_and_says_the_loop_is_not_built() {
+fn hub_without_an_argument_serves_http_and_runs_the_loop() {
     let scratch = Scratch::new("bare");
     let mut child = Command::new(env!("CARGO_BIN_EXE_radian"))
         .current_dir(&scratch.dir)
@@ -161,7 +162,7 @@ fn hub_without_an_argument_serves_http_on_loopback_and_says_the_loop_is_not_buil
         .args(["hub", "--port", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .expect("radian hub starts");
     let mut stdout = BufReader::new(child.stdout.take().expect("the hub has stdout"));
@@ -173,18 +174,22 @@ fn hub_without_an_argument_serves_http_on_loopback_and_says_the_loop_is_not_buil
         line.starts_with("hub: listening on 127.0.0.1:"),
         "the first stdout line names the loopback listener: {line:?}"
     );
-    // The loop line is written right after the address, before the first accept.
-    let mut stderr = BufReader::new(child.stderr.take().expect("the hub has stderr"));
-    let mut err = String::new();
-    stderr
-        .read_line(&mut err)
-        .expect("the hub's one stderr line reads");
-    assert!(
-        err.contains("the scheduling loop is not built yet"),
-        "{err:?}"
-    );
-    let _ = child.kill();
-    let _ = child.wait();
+
+    // The same process runs the scheduling loop and holds `hub.lock` for its life.
+    let lock = scratch.home().join("hub/hub.lock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lock.is_file() {
+        assert!(Instant::now() < deadline, "the hub never wrote hub.lock");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let sent = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success(), "SIGTERM reaches the hub");
+    let status = child.wait().expect("the hub exits");
+    assert_eq!(status.code(), Some(0), "SIGTERM is not an error");
 }
 
 /// Runs `radian hub pair` under a real pty, so `is_terminal` is true, and returns what the

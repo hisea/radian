@@ -5,10 +5,14 @@
 //! has its own log file and its own timeout; a timeout kills the command's whole process
 //! group.
 
+use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use serde::Serialize;
 
 use crate::process;
 
@@ -16,7 +20,7 @@ use super::checkout::GateCheckout;
 use super::config::Stage;
 use super::error::GateError;
 use super::exclusive::ExclusiveLock;
-use super::integration::candidate_for;
+use super::integration::{Candidate, candidate_for};
 use super::verdict::{
     CommandRecord, VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir, now_utc,
     verdict_path,
@@ -46,6 +50,10 @@ pub struct CommandRun<'a> {
     pub commands: &'a [String],
     /// The gate profile the stage runs under, for the verdict (ADR 0048 decisions 10 and 15).
     pub profile: &'a str,
+    /// The sha of the newest earlier `review` verdict, when the task has one: the previous
+    /// review of a rework round, whose increment the attempt's `diffstat.json` records
+    /// (ADR 0048 decision 10).
+    pub previous_sha: Option<String>,
     /// Per-command timeout.
     pub timeout: Duration,
 }
@@ -68,6 +76,17 @@ impl CommandRun<'_> {
             self.sha,
             self.task,
             &checkout,
+        )?;
+        // The attempt's change, in this checkout that already holds the head (ADR 0048
+        // decision 10). Its own range is the review's, and a rework round's increment is the
+        // rework's own change.
+        write_diffstat(
+            self.repository,
+            self.task,
+            self.attempt,
+            &checkout.path(),
+            &candidate,
+            self.previous_sha.as_deref(),
         )?;
         let log_dir = attempt_dir(self.repository, self.task, self.attempt)?.join("logs");
         // A candidate that could not be built is a failed stage; the commands never run on a
@@ -104,6 +123,7 @@ impl CommandRun<'_> {
             review_model_error: None,
             review_pre_existing: None,
             review_settings: None,
+            runs: Vec::new(),
             profile: Some(self.profile.to_owned()),
             integration_style: None,
         };
@@ -115,6 +135,114 @@ impl CommandRun<'_> {
         )?)?;
         Ok(verdict)
     }
+}
+
+/// The size of one attempt's change: a count of changed files and of added and removed lines.
+/// A binary file counts as a changed file with no line counts (ADR 0048 decision 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct DiffStat {
+    pub files: u64,
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// The `diffstat.json` an attempt's `commands` stage writes: the task's own change and, for a
+/// rework round, the increment the review reads (ADR 0048 decision 10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AttemptDiffStat {
+    diff: DiffStat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    increment: Option<DiffStat>,
+}
+
+/// Records the attempt's diff and increment under
+/// `runs/<task>/attempts/<attempt>/diffstat.json`. The diff is the merge base of the remote
+/// target branch and the head to the head, the review's own range; the increment is a rework
+/// round's change, the same lines the review's prompt holds. A previous sha this checkout does
+/// not have leaves the increment out, like a first review.
+fn write_diffstat(
+    repository: &Path,
+    task: &str,
+    attempt: &str,
+    checkout: &Path,
+    candidate: &Candidate,
+    previous_sha: Option<&str>,
+) -> Result<(), GateError> {
+    let base = super::git::ok(
+        checkout,
+        &["merge-base", &candidate.main_sha, &candidate.sha],
+    )?;
+    let diff = numstat_stat(checkout, &base, &candidate.sha)?;
+    let increment = match previous_sha {
+        Some(previous)
+            if previous != candidate.sha
+                && super::git::resolve_commit(checkout, previous).is_ok() =>
+        {
+            let own = super::git::ok(
+                checkout,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    &format!("{base}..{}", candidate.sha),
+                ],
+            )?;
+            let rework = super::git::ok(
+                checkout,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    &format!("{previous}..{}", candidate.sha),
+                ],
+            )?;
+            let (files, added, removed) = super::review::increment_stat(&own, &rework);
+            Some(DiffStat {
+                files,
+                added,
+                removed,
+            })
+        }
+        _ => None,
+    };
+    let dir = attempt_dir(repository, task, attempt)?;
+    fs::create_dir_all(&dir).map_err(|source| GateError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("diffstat.json");
+    let mut body =
+        serde_json::to_string_pretty(&AttemptDiffStat { diff, increment }).map_err(|source| {
+            GateError::Io {
+                path: path.clone(),
+                source: std::io::Error::other(source),
+            }
+        })?;
+    body.push('\n');
+    let mut file = File::create(&path).map_err(|source| GateError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    file.write_all(body.as_bytes())
+        .map_err(|source| GateError::Io { path, source })
+}
+
+/// One range's counts from `git diff --numstat -z`, through the crate's one git helper. Rename
+/// detection is forced so the counts do not follow the repository's `diff.renames` setting. A
+/// rename is one file; a binary file's `-` counts read as `0`.
+fn numstat_stat(checkout: &Path, base: &str, head: &str) -> Result<DiffStat, GateError> {
+    let text = super::git::ok(
+        checkout,
+        &["diff", "--numstat", "-z", "-M", &format!("{base}..{head}")],
+    )?;
+    let entries = crate::read::numstat_entries(&text);
+    Ok(DiffStat {
+        files: entries.len() as u64,
+        added: entries.iter().map(|(_, added, _)| *added as u64).sum(),
+        removed: entries.iter().map(|(_, _, removed)| *removed as u64).sum(),
+    })
 }
 
 /// How a command series ended.

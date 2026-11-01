@@ -18,6 +18,9 @@ not a separate program. This crate is its control plane, in these modules:
   owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
+- `read` — the read-only views `radian arc show` and the arc TUI use: a task's attempts and
+  verdicts, its change, and its attempts' runs, times and costs (`attempt_metrics`,
+  `task_metrics`).
 
 Every git call of these modules is built in the private `git` module.
 
@@ -223,19 +226,36 @@ At quiet, the report lists each open plan and task with what it waits on (a pers
 line it prints (each transition, then the summary) to its sink, and every line also goes to
 `.radian/arc/loop.log` through `run::LoopLog`.
 
-`run::serve` repeats the pass every `--interval` seconds (default 30, 5 to 3600) until SIGINT
-or SIGTERM; it holds `runner.lock` for the whole loop, prints the summary only when it changed,
-prints a pass error as one `radian arc: <message>` line and runs the next pass, starts no new
-worker or gate once the signal arrived, leaves a running worker alone, and signals a running
-gate (`gate::background::stop`) before it returns.
+`run::LoopState` is one repository's loop, driven by the hub: it holds `runner.lock` for the
+loop's life, runs the pass every `[hub] interval_secs` (default 30, 5 to 3600), prints the
+summary only when it changed, prints a pass error as one `radian arc: <message>` line and runs
+the next pass, starts no new worker or gate once a signal arrived, leaves a running worker
+alone, and signals a running gate (`gate::background::stop`) before it returns. Three identical
+pass errors stop that repository's loop. A stable, changed executable at the recorded path
+makes it return `Passed::Restart`; the first loop to see it prints the one restart line and
+the hub releases every lock and `exec`s.
 
-`run::LoopLog` is the one writer of `loop.log`, used by `run` and `serve`: each line gets an
+`run::LoopLog` is the one writer of `loop.log`, used by `run` and every hub loop: each line gets an
 RFC 3339 UTC timestamp and a space, is appended and flushed at once, and a log at or above
 1 MiB is renamed to `loop.log.1` before the next line (one old file is kept). A write error
 prints one `radian arc:` line for the whole process and the loop goes on. The arc TUI reads
 the file for its ticker and log view; it never holds `runner.lock`. `Store::try_runner_lock`
 writes the holder's pid into `runner.lock` (the flock is the lock) so a viewer's header can
 name the loop it is watching.
+
+`hub` owns `$RADIAN_HOME/hub/`: `repos.toml` (the registry `radian hub add`/`remove`/`list`
+read and write), `token` (the bearer token every HTTP request carries), `hub.lock` (the flock
+one hub holds for its life, with its pid inside) and the scheduler (`hub::run`).
+`hub::http::serve` is what `radian hub` with no subcommand calls: it takes `hub.lock`, binds
+`127.0.0.1:<[hub] port>`, prints `hub: listening on <addr>` as its first stdout line, serves
+the HTTP API on a thread of its own, and runs the scheduler on the calling thread. The
+scheduler keeps one `run::LoopState` per registered repository on
+its own OS thread, because a pass blocks; it re-reads the registry every `[hub] interval_secs`,
+records a repository whose `runner.lock` another process holds as read-only (with the holder's
+pid), and never writes the registry. The machine-wide `[hub] concurrency` cap is read from every
+registered repository's store before each claim, not cached, so it bounds steady state rather
+than acting as a lock; a repository whose store cannot be read is left out of that count, so its
+broken task file cannot fail another repository's pass.
 
 ## Gate checkout
 
@@ -428,7 +448,7 @@ One run:
    brief. The worker runs in its own process group, so a SIGTERM reaches it and every child
    that stays in the group. Its stdout is the protocol; every `session/update` is written to
    `runs/<task>/attempts/<task>-<n>/result.jsonl` as a `{"type":"acp",…}` envelope,
-   followed by the wrapper's one `Result` line from `_meta.radian` (`text`, `cost`); its
+   followed by the wrapper's one `Result` line from `_meta.radian` (`text`, `cost`, `metrics`); its
    stderr is `stderr.log`; the attempt fields, the session id included, go to
    `execution.json`. A fresh attempt after the first gets a hand-off section in front of the
    brief (`## Where the previous attempt left off`): the newest earlier attempt's
@@ -493,7 +513,7 @@ task, start)` opens `gates/<task>.gate.lock`, locks it, clears the descriptor's 
 and writes the digest of what the gate will read, and how many times a gate already died for
 it, to `runs/<task>/gate.json` (`started`), then spawns `radian arc gate --task <task>
 --lock-fd <fd>`: the child inherits the lock, so no second gate can start for that task until
-it exits. The pass keeps no child handle it waits on; a thread reaps the child so a `serve`
+it exits. The pass keeps no child handle it waits on; a thread reaps the child so a hub loop
 loop collects no zombies, and the child's pid goes into the `started` record so a stop that
 finds only that record has a process to signal. Both sides write the record under
 `runs/<task>/gate.json.lock`, and a pass removes it under the same lock; the pass re-reads the
@@ -576,8 +596,10 @@ re-serialized verdict. Unusable output (no block, a missing field, a `severity` 
 `REVIEW_LEVELS`, a timeout, a session error) runs the session once more; two unusable runs
 fail with `review_output`, or `review_timeout` when the last run timed out.
 The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
-(`round`, `reviewer`, the effective `fix_level`, the `exec_args` source key, `timeout_secs` and
-its source key) and, in a rework round, `review_pre_existing`.
+(`round`, `reviewer`, the effective `fix_level`, the `exec_args` source key and the session's
+own arguments as `exec_args_values`, `timeout_secs` and its source key), `runs` (one
+`{run, session_id, started_at, ended_at, metrics}` per `radian exec` run) and, in a rework
+round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)

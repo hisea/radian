@@ -22,8 +22,9 @@
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
 //! - [`transitions`]: the poller behind the MCP channel and the hub's event stream: which
 //!   task and plan changes are sent, read every five seconds.
-//! - [`hub`]: the hub's repository registry (`~/.radian/hub/repos.toml`), its bearer token,
-//!   and its HTTP API on loopback (ADR 0048 decision 16).
+//! - [`hub`]: the hub's repository registry (`~/.radian/hub/repos.toml`), its `hub.lock`, its
+//!   bearer token, its HTTP API on loopback (ADR 0048 decision 16), and the scheduling loop
+//!   that runs one pass per registered repository.
 //! - [`read`]: the read-only views the arc TUI draws (the remote main, attempts and their
 //!   verdicts, a task's diff, and the merge page's stage rows, review and commits). Nothing
 //!   in it writes or fetches.

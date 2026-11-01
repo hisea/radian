@@ -86,7 +86,8 @@ See `mcp` and `configuration` for those rules.
 |---|---|
 | `~/.radian/config/config.toml` (or `$RADIAN_HOME`, `--config`, `RADIAN_CONFIG`) | Every configuration key. See `configuration`. A missing file is an empty configuration. |
 | `~/.radian/credentials/auth.json` | Every stored key, including every `keys[]` item. A missing entry refuses the run and points at `radian login`. The file is `0600`; wide permissions warn. |
-| `~/.radian/hub/repos.toml` | The hub's repository registry, read and written by `radian hub add`, `remove` and `list`. A missing file is an empty registry. See `arc/hub`. |
+| `~/.radian/hub/repos.toml` | The hub's repository registry: a running `radian hub` re-reads it every `[hub] interval_secs`, `radian hub list` reads it, and `radian hub add` and `remove` write it. A missing file is an empty registry. See `arc/hub`. |
+| `~/.radian/hub/hub.lock` | The flock a running `radian hub` holds with its pid inside. Its presence and holder make a second `radian hub` exit `1` and make the arc TUI start no hub. `radian hub` creates it; nothing else writes it. See `arc/hub`. |
 | `~/.radian/hub/token` | The hub's bearer token, `0600`, created by `radian hub` on its first start or by `radian hub pair`. Every HTTP request must carry it; `radian hub token rotate` replaces it and the old token fails on the next request. See `arc/hub`. |
 | `~/.radian/trust/trust.json` | Your remembered per-project trust choices. Confirming the trust prompt writes it. |
 | `~/.radian/sessions/` (or `--session-dir`, `RADIAN_SESSION_DIR`) | The session files `--resume`, `--list`, `--search`, `--export`, `--fork`, and `attach` read. |

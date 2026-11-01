@@ -55,6 +55,16 @@ impl Hub {
     /// [`Hub::start`] with extra environment variables, which is how the event-stream tests
     /// shorten the poll and keep-alive intervals.
     fn start_with(home: &Path, envs: &[(&str, &str)]) -> Self {
+        Self::start_on_with(home, 0, envs)
+    }
+
+    /// Starts a hub on `port` (`0` asks the OS for one) and reads the bound port from the
+    /// first stdout line.
+    fn start_on(home: &Path, port: u16) -> Self {
+        Self::start_on_with(home, port, &[])
+    }
+
+    fn start_on_with(home: &Path, port: u16, envs: &[(&str, &str)]) -> Self {
         fs::create_dir_all(home).expect("the hub home is creatable");
         let stderr_path = home.join("hub.stderr.log");
         let stderr = fs::File::create(&stderr_path).expect("the hub stderr file is creatable");
@@ -64,7 +74,7 @@ impl Hub {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
             .env("RADIAN_HOME", home)
-            .args(["hub", "--port", "0"])
+            .args(["hub", "--port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr));
@@ -308,9 +318,9 @@ fn setup(repo: &Repo) -> (Store, String, String) {
 /// Every regular file under `.radian/arc`, by its path relative to that directory.
 ///
 /// `runner.lock` is left out: it is not a state file, it carries the pid of whichever process
-/// last took it, and the CLI's wrapper takes it to run pending hooks. The hub, like the TUI,
-/// takes only `state.lock`, so its absence in the hub's copy is the rule, not a difference in
-/// what the action wrote.
+/// last took it, and the CLI's wrapper takes it to run pending hooks. The hub's scheduling loop
+/// holds it for its whole life, and a route action takes only `state.lock`, so its absence in
+/// either copy is the rule, not a difference in what the action wrote.
 fn arc_files(repo: &Repo) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -432,9 +442,11 @@ fn compare_files(left: &BTreeMap<String, Vec<u8>>, right: &BTreeMap<String, Vec<
     }
 }
 
-/// Takes `runner.lock` for a repository from the test process, so the CLI's owner command
-/// (which runs its pending hooks only when it can take the lock without waiting) leaves them
-/// for a loop, exactly as the hub route does. The lock is released when the file drops.
+/// Takes `runner.lock` for a repository from the test process. Held before a `radian hub`
+/// starts, it makes the hub only read that repository instead of running its pass, so a route
+/// test meets a store nothing else moves. For the CLI it means the owner command (which runs its
+/// pending hooks only when it can take the lock without waiting) leaves them for a loop, exactly
+/// as the hub route does. The lock is released when the file drops.
 fn hold_runner_lock(repo: &Repo) -> std::fs::File {
     let path = repo.arc().join("runner.lock");
     let file = std::fs::OpenOptions::new()
@@ -485,6 +497,24 @@ fn the_list_and_show_routes_are_the_cli_json_bytes() {
     assert_eq!(cli.code, 0, "{}", cli.stderr);
     assert_eq!(shown.body, cli.stdout.as_bytes());
 
+    // The scheduling loop takes each repository's `runner.lock`; wait for both, then the
+    // route reports them as scheduled by this hub.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let repos = hub.authorized("GET", "/v1/repos").json();
+        let scheduled = repos.as_array().is_some_and(|list| {
+            list.iter()
+                .all(|repo| repo["scheduled"] == serde_json::json!(true))
+        });
+        if scheduled {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub never scheduled both repositories: {repos}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let repos = hub.authorized("GET", "/v1/repos");
     assert_eq!(repos.status, 200);
     assert_eq!(
@@ -493,14 +523,14 @@ fn the_list_and_show_routes_are_the_cli_json_bytes() {
             {
                 "name": "a",
                 "path": fs::canonicalize(&a.clone).unwrap().display().to_string(),
-                "scheduled": false,
-                "lock_holder": null,
+                "scheduled": true,
+                "lock_holder": hub.pid().to_string(),
             },
             {
                 "name": "b",
                 "path": fs::canonicalize(&b.clone).unwrap().display().to_string(),
-                "scheduled": false,
-                "lock_holder": null,
+                "scheduled": true,
+                "lock_holder": hub.pid().to_string(),
             }
         ])
     );
@@ -722,6 +752,7 @@ fn a_confirm_through_the_route_writes_the_cli_bytes_and_returns_its_text() {
     assert_eq!((&plan, &task), (&plan_b, &task_b), "the fixtures match");
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &plan, "confirm", "{}");
@@ -745,6 +776,7 @@ fn a_reject_with_an_empty_note_is_400_and_changes_nothing() {
     set_review(&store, &task);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -770,6 +802,7 @@ fn a_reject_with_a_note_writes_the_cli_rework_section() {
     set_review(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let note = "the tests do not cover the retry";
@@ -799,6 +832,7 @@ fn an_auto_level_outside_the_set_is_422_and_merge_is_200() {
     plan_ops::confirm(&sb, &plan_b).expect("the plan confirms");
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -839,6 +873,7 @@ fn a_merge_through_the_route_reaches_done_merged_and_a_doing_task_is_409() {
     );
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "merge", "{}");
@@ -880,6 +915,7 @@ fn a_merge_on_a_doing_task_is_409_with_the_cli_sentence_and_changes_nothing() {
     set_doing(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -907,6 +943,7 @@ fn every_action_on_a_held_state_lock_is_409_with_no_file_change() {
     let (_store, plan, task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     // Hold the repository's `state.lock` from this process, exactly as a test process does.
@@ -1030,6 +1067,7 @@ fn a_priority_through_the_route_is_the_cli_priority() {
     let (_sb, plan_b, _task_b) = setup(&b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &plan, "priority", r#"{"priority": "P1"}"#);
@@ -1051,6 +1089,7 @@ fn a_priority_outside_the_set_is_422_and_changes_nothing() {
     let (_store, plan, _task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -1079,6 +1118,7 @@ fn a_cancel_through_the_route_is_the_cli_cancel() {
     set_doing(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "cancel", "{}");
@@ -1122,6 +1162,7 @@ fn a_reverify_whose_verification_refuses_returns_the_claims_line_and_its_error()
     set_attempt(&sb, &task_b, &base_b, &base_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "reverify", "{}");
@@ -1168,6 +1209,7 @@ fn a_write_route_without_a_token_is_401_and_changes_nothing() {
     let (_store, plan, _task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -1208,6 +1250,7 @@ fn a_body_over_the_limit_is_413_and_changes_nothing() {
     set_review(&store, &task);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -1278,6 +1321,46 @@ fn a_second_hub_is_refused_by_the_lock_and_a_port_in_use_names_the_port() {
     assert!(
         stderr.contains(&port.to_string()),
         "the startup error names the port: {stderr}"
+    );
+}
+
+/// A hub binds its port again after its predecessor's last connection left the port in
+/// `TIME_WAIT`. The `std::net` bind this replaced did not set `SO_REUSEADDR`, so the hub a
+/// rebuilt binary `exec`s exited `1` with `Address already in use` (review).
+#[test]
+fn a_hub_binds_its_port_again_while_the_last_connection_is_in_time_wait() {
+    let a = Repo::new("hub-http-rebind");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    // The OS picks a free port; the test releases it before the hub binds it.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("the test finds a free port")
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let mut first = Hub::start_on(&home, port);
+    let response = first.authorized("GET", "/v1/version");
+    assert_eq!(response.status, 200, "the first hub serves the port");
+    // The request sent `Connection: close`, so the server closed first and `port` now has a
+    // connection in `TIME_WAIT`.
+    assert_eq!(
+        first.terminate().code(),
+        Some(0),
+        "the first hub stops cleanly"
+    );
+
+    let mut second = Hub::start_on(&home, port);
+    let response = second.authorized("GET", "/v1/version");
+    assert_eq!(
+        response.status, 200,
+        "the replacement hub binds and serves the same port"
+    );
+    assert_eq!(
+        second.terminate().code(),
+        Some(0),
+        "the replacement hub stops cleanly"
     );
 }
 

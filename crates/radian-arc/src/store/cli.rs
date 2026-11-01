@@ -30,7 +30,6 @@ pub const SUBCOMMANDS: &[&str] = &[
     "merge",
     "reject",
     "run",
-    "serve",
     "mcp",
 ];
 
@@ -95,9 +94,6 @@ pub enum Command {
     /// `radian arc run`: one pass, then exit. A pass only schedules: a worker and a gate run
     /// outside it and a later pass collects them.
     Run,
-    /// `radian arc serve [--interval <seconds>]`: the scheduling loop, a pass repeated until
-    /// SIGINT or SIGTERM.
-    Serve { interval: u64 },
     /// `radian arc mcp [--claude-experimental]`: the lead's MCP server on standard input and
     /// output. The flag pushes task transitions to the lead over Claude Code's channel
     /// extension (ADR 0048 decision 11).
@@ -143,7 +139,6 @@ pub fn run(command: &Command) -> u8 {
         Command::Merge { task } => merge(task),
         Command::Reject { task, note } => reject(task, note),
         Command::Run => run_loop(),
-        Command::Serve { interval } => serve_loop(*interval),
         Command::Mcp {
             claude_experimental,
         } => mcp(*claude_experimental),
@@ -788,6 +783,10 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                     field(&mut out, "review_timeout", &settings.timeout);
                 }
             }
+            // Every attempt's runs and times (ADR 0048 decisions 7, 10 and 12): one line per
+            // worker and review run, then the gate command times and the change's size.
+            let metrics = crate::read::task_metrics(store, &item.id)?;
+            metrics_text(&mut out, &metrics);
             field(
                 &mut out,
                 "changed outside arc",
@@ -852,6 +851,119 @@ fn joined_findings(review: &crate::gate::ReviewReport) -> String {
     } else {
         findings.join("; ")
     }
+}
+
+/// The task's metrics block: one line per attempt's worker and review runs, then the gate
+/// command times and the change's size (ADR 0048 decisions 7, 10 and 12). A value the run did
+/// not report prints `-`. Nothing runs leaves no block.
+fn metrics_text(out: &mut String, metrics: &crate::read::TaskMetrics) {
+    if metrics.attempts.is_empty() {
+        return;
+    }
+    out.push('\n');
+    out.push_str("metrics:\n");
+    for attempt in &metrics.attempts {
+        let id = &attempt.attempt_id;
+        out.push_str(&run_line(id, "worker", &attempt.worker));
+        for run in &attempt.reviews {
+            let label = run
+                .run
+                .map_or_else(|| "review".to_owned(), |run| format!("review {run}"));
+            out.push_str(&run_line(id, &label, run));
+        }
+        for command in &attempt.commands {
+            out.push_str(&format!(
+                "attempt {id} command: duration_ms={} {}\n",
+                command.duration_ms, command.line
+            ));
+        }
+        out.push_str(&format!(
+            "attempt {id} integration: wall={}\n",
+            attempt
+                .integration_wall_secs
+                .map_or_else(|| "-".to_owned(), seconds_text)
+        ));
+        let stat_text = |stat: Option<&crate::read::DiffStatView>| {
+            stat.map_or_else(
+                || "-".to_owned(),
+                |stat| {
+                    format!(
+                        "files={} added={} removed={}",
+                        stat.files, stat.added, stat.removed
+                    )
+                },
+            )
+        };
+        out.push_str(&format!(
+            "attempt {id} diff: {}\n",
+            stat_text(attempt.diff.as_ref())
+        ));
+        out.push_str(&format!(
+            "attempt {id} increment: {}\n",
+            stat_text(attempt.increment.as_ref())
+        ));
+    }
+}
+
+/// One run's line: the model route, requests, token counts, hit rate, cost and wall time.
+fn run_line(id: &str, label: &str, run: &crate::read::RunMetrics) -> String {
+    let metrics = run.metrics.as_ref();
+    let counter = |name: &str| {
+        metrics
+            .and_then(|metrics| metrics.get(name))
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "-".to_owned(), |value| value.to_string())
+    };
+    format!(
+        "attempt {id} {label}: model={} requests={} input_uncached={} cache_read={} \
+         cache_hit={} output={} reasoning={} cost={} wall={}\n",
+        model_text(run),
+        counter("requests"),
+        counter("input_uncached"),
+        counter("cache_read"),
+        hit_rate(metrics),
+        counter("output"),
+        counter("reasoning"),
+        metrics
+            .and_then(|metrics| metrics.get("fee_micros"))
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "-".to_owned(), |micros| cost_text(micros as f64 / 1e6)),
+        run.wall_secs.map_or_else(|| "-".to_owned(), seconds_text),
+    )
+}
+
+/// A run's model route: `provider/model` when both are known, the one that is when only one
+/// is, and `-` when neither is.
+fn model_text(run: &crate::read::RunMetrics) -> String {
+    match (&run.provider, &run.model) {
+        (Some(provider), Some(model)) => format!("{provider}/{model}"),
+        (Some(provider), None) => provider.clone(),
+        (None, Some(model)) => model.clone(),
+        (None, None) => "-".to_owned(),
+    }
+}
+
+/// The share of the input and cache-read tokens that came from the cache, one decimal place,
+/// or `-` when no run reported both counts or they sum to zero.
+fn hit_rate(metrics: Option<&serde_json::Value>) -> String {
+    let count = |name: &str| {
+        metrics
+            .and_then(|metrics| metrics.get(name))
+            .and_then(serde_json::Value::as_u64)
+    };
+    let (Some(input), Some(cache)) = (count("input_uncached"), count("cache_read")) else {
+        return "-".to_owned();
+    };
+    let total = input.saturating_add(cache);
+    if total == 0 {
+        return "-".to_owned();
+    }
+    format!("{:.1}%", cache as f64 / total as f64 * 100.0)
+}
+
+/// A wall time in seconds, with milliseconds: `1.250s`.
+fn seconds_text(seconds: f64) -> String {
+    format!("{seconds:.3}s")
 }
 
 fn optional_text(value: Option<&str>) -> String {
@@ -1309,31 +1421,6 @@ fn run_loop() -> Result<u8, Error> {
     })
 }
 
-/// `radian arc serve [--interval <seconds>]`: the scheduling loop, until SIGINT or SIGTERM
-/// (ADR 0048 §13). A transition line is written and flushed when the loop makes it; the
-/// summary only when it changed. A closed stdout stops the printing and is a normal stop
-/// (exit `0`), as every other print-and-exit command of this binary treats it.
-fn serve_loop(interval: u64) -> Result<u8, Error> {
-    let store = open()?;
-    let failed = std::cell::Cell::new(false);
-    let mut emit = |text: &str| match radian_host::write_stdout(text) {
-        Ok(()) => {}
-        // The reader of a foreground loop is gone (`... | head`): stop now, as a closed pipe
-        // stops every other print-and-exit command with exit `0`.
-        Err(radian_host::StdoutError::BrokenPipe) => std::process::exit(Exit::Ok.code().into()),
-        Err(error) => {
-            eprintln!("radian arc: cannot write to stdout: {error}");
-            failed.set(true);
-        }
-    };
-    crate::run::serve(&store, interval, &mut emit)?;
-    Ok(if failed.get() {
-        Exit::Error.code()
-    } else {
-        Exit::Ok.code()
-    })
-}
-
 /// `radian arc mcp`: the lead's MCP server, until its client closes the connection. Without
 /// setup `open` refuses with the same line and exit code as every other subcommand.
 fn mcp(claude_experimental: bool) -> Result<u8, Error> {
@@ -1502,6 +1589,12 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
                         &task.item.id,
                         task.item.attempt
                     )),
+                );
+                // Every attempt's runs, times, report and costs (ADR 0048 decisions 7, 10 and
+                // 12). The same object the text block prints.
+                object.insert(
+                    "metrics".to_owned(),
+                    json!(crate::read::task_metrics(store, &task.item.id)?),
                 );
             }
             value

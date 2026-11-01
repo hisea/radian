@@ -257,15 +257,15 @@ sessions_index_max_lines = 1000
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
-| `hub.concurrency` | integer | `4` | `1` or more | Tasks in `doing` across every registered repository. |
-| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two scheduling passes. |
+| `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
+| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
 `radian hub` reads `hub.port` at start and binds the HTTP API there, on `127.0.0.1` only.
-`hub.concurrency` and `hub.interval_secs` belong to the scheduling loop, which this build does not have, so they have no effect yet; the reader validates them.
+`hub.concurrency` and `hub.interval_secs` drive the hub's scheduling loop.
 A change takes effect at the hub's next start.
-See `arc/hub` for the registry, the routes and the subcommands.
+See `arc/hub` for the registry, the routes, the loop and the subcommands.
 
 ```toml
 [hub]

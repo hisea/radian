@@ -8,6 +8,9 @@
 //! re-read whenever its mtime changed, one `stat` per request, so `radian hub token rotate`
 //! takes effect on the next request without a restart.
 //!
+//! The HTTP accept loop runs on a thread of its own; the scheduling loop (ADR 0048 decision 13)
+//! runs on this thread, holding `hub.lock` for its life, so one slow pass delays no request.
+//!
 //! The read routes are `GET` and answer JSON, except `GET /v1/events`, which is a
 //! server-sent-event stream; the owner actions are
 //! `POST /v1/repos/<name>/items/<id>/<action>`. The router is hand-written. The list and show
@@ -20,7 +23,7 @@
 //! blocked by a request.
 
 use std::convert::Infallible;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::future::poll_fn;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -30,7 +33,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
-use fs2::FileExt;
 use hyper::body::{Body, Bytes, Frame, SizeHint};
 use hyper::header::{
     AUTHORIZATION, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue,
@@ -41,12 +43,14 @@ use hyper::service::service_fn;
 use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::gate::Stage;
 use crate::gate::Verdict;
-use crate::hub::registry::{HUB_LOCK, Registry};
+use crate::hub::lock::HubLock;
+use crate::hub::registry::Registry;
 use crate::hub::token;
 use crate::read;
 use crate::store::attempt_ops;
@@ -70,93 +74,144 @@ pub fn bind_address(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-/// Runs the hub's HTTP server until the process ends. It creates the token when it is missing,
-/// takes `hub.lock`, binds [`bind_address`], prints `hub: listening on <addr>` as its first
-/// stdout line, and says that the scheduling loop (ADR 0048 decision 13) is not built yet.
+/// Runs the hub until the process ends: it installs the stop-signal handler, creates the
+/// token when it is missing, takes `hub.lock`, binds [`bind_address`], prints
+/// `hub: listening on <addr>` as its first stdout line, and then serves the HTTP API while the
+/// scheduling loop (ADR 0048 decision 13) runs every registered repository on this thread.
+///
+/// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
+/// a test or a person stops the hub as soon as it announces itself, and the default action
+/// would kill the process instead of letting every loop release its lock. The `exec` after a
+/// rebuilt binary resets caught signals, so this is also what arms the process that starts
+/// after the restart.
 ///
 /// # Errors
 ///
 /// The hub directory or the token cannot be prepared, `hub.lock` is held by another hub, or the
 /// port cannot be bound.
 pub fn serve(port: u16) -> Result<(), Error> {
+    crate::run::catch_stop_signals();
     let registry = Registry::open()?;
     let dir = registry.dir().to_path_buf();
     radian_host::ensure_private_dir(&dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
     let value = token::ensure(&dir)?;
-    // Before any bind: two hubs are refused by the lock, never by the port (ADR 0048 §16).
-    let _lock = acquire_lock(&dir)?;
-    let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
+    // Before any bind or any repository: two hubs are refused by the lock, never by the port
+    // (ADR 0048 §16).
+    let lock = HubLock::take(&dir)?;
+    let address = bind_address(port);
+    let listener = bind_listener(address)?;
+    let bound = listener
+        .local_addr()
+        .map_err(|error| Error::Failed(format!("cannot read the hub address: {error}")))?;
+    radian_host::write_line(&format!("hub: listening on {bound}"))
+        .map_err(|error| Error::Failed(format!("cannot print the hub address: {error}")))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
-    runtime.block_on(async move {
-        let address = bind_address(port);
-        let listener = TcpListener::bind(address)
-            .await
-            .map_err(|error| Error::Failed(format!("cannot bind {address}: {error}")))?;
-        let bound = listener
-            .local_addr()
-            .map_err(|error| Error::Failed(format!("cannot read the hub address: {error}")))?;
-        if let Err(error) = radian_host::write_line(&format!("hub: listening on {bound}")) {
-            return Err(Error::Failed(format!(
-                "cannot print the hub address: {error}"
-            )));
+    let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
+    let http_registry = registry.clone();
+    // The accept loop has a thread and a runtime of its own; no request waits on a pass.
+    std::thread::spawn(move || {
+        runtime.block_on(serve_http(listener, http_registry, tokens));
+    });
+    let emit = Arc::new(|text: &str| {
+        let _ = radian_host::write_stdout(text);
+    });
+    super::r#loop::run(&registry, emit, lock)
+}
+
+/// Binds `address` with `SO_REUSEADDR`, so a rebuilt binary that `exec`s the hub binds the
+/// same port while the previous process's last connections are still in `TIME_WAIT`. Without
+/// it the new hub fails with `Address already in use` and exits `1` (ADR 0048 decision 16).
+fn bind_listener(address: SocketAddr) -> Result<std::net::TcpListener, Error> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|error| Error::Failed(format!("cannot open a socket for {address}: {error}")))?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|error| Error::Failed(format!("cannot reuse {address}: {error}")))?;
+    socket
+        .bind(&address.into())
+        .map_err(|error| Error::Failed(format!("cannot bind {address}: {error}")))?;
+    socket
+        .listen(1024)
+        .map_err(|error| Error::Failed(format!("cannot listen on {address}: {error}")))?;
+    let listener: std::net::TcpListener = socket.into();
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| Error::Failed(format!("cannot prepare {address}: {error}")))?;
+    Ok(listener)
+}
+
+/// Serves the hub's HTTP API on `listener` until the process ends.
+async fn serve_http(
+    listener: std::net::TcpListener,
+    registry: Registry,
+    tokens: Arc<Mutex<TokenState>>,
+) {
+    let listener = match TcpListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("hub: cannot use the hub listener: {error}");
+            return;
         }
-        eprintln!("hub: the scheduling loop is not built yet");
-        loop {
-            let (stream, _) = listener.accept().await.map_err(|error| {
-                Error::Failed(format!("cannot accept a hub connection: {error}"))
-            })?;
-            let registry = registry.clone();
-            let tokens = Arc::clone(&tokens);
-            tokio::spawn(async move {
-                let service = service_fn(move |request| {
-                    let registry = registry.clone();
-                    let tokens = Arc::clone(&tokens);
-                    async move {
-                        let method = request.method().clone();
-                        let path = request.uri().path().to_owned();
-                        let header = request
-                            .headers()
-                            .get(AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_owned);
-                        // Authorization is decided before the body is read: an unauthenticated
-                        // request never makes the hub buffer the body it sends.
-                        if !authorized(&tokens, header).await {
-                            return Ok::<_, Infallible>(unauthorized_response());
-                        }
-                        let body = match request_body(request.into_body()).await {
-                            RequestBody::Bytes(body) => body,
-                            RequestBody::TooLarge => {
-                                return Ok::<_, Infallible>(error_response(
-                                    StatusCode::PAYLOAD_TOO_LARGE,
-                                    "request body too large",
-                                ));
-                            }
-                        };
-                        let response = tokio::task::spawn_blocking(move || {
-                            handle(method, &path, &body, &registry)
-                        })
-                        .await
-                        .unwrap_or_else(|_| {
-                            error_response(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "the request handler panicked",
-                            )
-                        });
-                        Ok::<_, Infallible>(response)
+    };
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("hub: cannot accept a hub connection: {error}");
+                return;
+            }
+        };
+        let registry = registry.clone();
+        let tokens = Arc::clone(&tokens);
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let registry = registry.clone();
+                let tokens = Arc::clone(&tokens);
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_owned();
+                    let header = request
+                        .headers()
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    // Authorization is decided before the body is read: an unauthenticated
+                    // request never makes the hub buffer the body it sends.
+                    if !authorized(&tokens, header).await {
+                        return Ok::<_, Infallible>(unauthorized_response());
                     }
-                });
-                let _ = http1::Builder::new()
-                    .keep_alive(false)
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await;
+                    let body = match request_body(request.into_body()).await {
+                        RequestBody::Bytes(body) => body,
+                        RequestBody::TooLarge => {
+                            return Ok::<_, Infallible>(error_response(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "request body too large",
+                            ));
+                        }
+                    };
+                    let response = tokio::task::spawn_blocking(move || {
+                        handle(method, &path, &body, &registry)
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "the request handler panicked",
+                        )
+                    });
+                    Ok::<_, Infallible>(response)
+                }
             });
-        }
-    })
+            let _ = http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+    }
 }
 
 /// Prints what `radian hub pair` prints: the URL, the token, and (on a terminal, unless
@@ -199,55 +254,6 @@ pub fn rotate() -> Result<(), Error> {
 }
 
 // ---- startup -----------------------------------------------------------------------------
-
-/// The `hub.lock` guard: the flock is released when this drops.
-struct HubLock {
-    file: File,
-}
-
-impl Drop for HubLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-    }
-}
-
-/// Takes `hub.lock` without waiting and records this process's pid in it, the same shape as a
-/// repository's `runner.lock` (ADR 0048 decision 13). A held lock is a startup error naming the
-/// holder's pid.
-fn acquire_lock(dir: &Path) -> Result<HubLock, Error> {
-    let path = dir.join(HUB_LOCK);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|error| Error::Failed(format!("cannot open {}: {error}", path.display())))?;
-    match file.try_lock_exclusive() {
-        Ok(()) => {
-            use std::io::{Seek, SeekFrom, Write};
-            if file.set_len(0).is_ok() && file.seek(SeekFrom::Start(0)).is_ok() {
-                let _ = file.write_all(std::process::id().to_string().as_bytes());
-                let _ = file.sync_data();
-            }
-            Ok(HubLock { file })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let pid = fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| text.trim().parse::<u32>().ok());
-            let message = match pid {
-                Some(pid) => format!("{HUB_LOCK} is held by pid {pid}"),
-                None => format!("{HUB_LOCK} is held by another process"),
-            };
-            Err(Error::Failed(message))
-        }
-        Err(error) => Err(Error::Failed(format!(
-            "cannot lock {}: {error}",
-            path.display()
-        ))),
-    }
-}
 
 /// The token the server accepts. [`TokenState::authorized`] is the one `stat` per request; the
 /// file is read only when its mtime differs from the recorded one, so a rotation is picked up
@@ -659,13 +665,14 @@ fn repos(registry: &Registry) -> Response<ResponseBody> {
             let list: Vec<Value> = entries
                 .iter()
                 .map(|entry| {
-                    // The loop (ADR 0048 decision 13) is not built yet, so nothing is
-                    // scheduled and the lock is whoever wrote its pid in `runner.lock`.
+                    // The scheduling loop holds `runner.lock` for every repository it schedules
+                    // (ADR 0048 decision 13). Another process's pid means the hub only reads
+                    // that repository; no pid means it is not locked at this moment.
                     let holder = Store::at(entry.path.clone()).runner_lock_pid();
                     json!({
                         "name": entry.name,
                         "path": entry.path.display().to_string(),
-                        "scheduled": false,
+                        "scheduled": holder == Some(std::process::id()),
                         "lock_holder": holder.map(|pid| pid.to_string()),
                     })
                 })

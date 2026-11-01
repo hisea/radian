@@ -64,6 +64,10 @@ qrcode = { version = "0.14.1", default-features = false }
 # The token's 32 random bytes (ADR 0048 decision 16), from the OS. Already in `Cargo.lock`
 # through radian-host, which uses it for the PKCE verifier.
 getrandom = "0.3"
+# The hub's listener sets `SO_REUSEADDR` before `bind`, so the hub a rebuilt binary `exec`s
+# can bind the port its predecessor's connections left in `TIME_WAIT` (ADR 0048 decision 16).
+# Already in `Cargo.lock` through `hyper-util`; no new transitive entry.
+socket2 = "0.6"
 
 [dev-dependencies]
 # The manual's drift reader: the flow keys and the task `flow` row are checked against the page.

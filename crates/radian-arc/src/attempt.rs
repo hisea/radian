@@ -210,6 +210,9 @@ fn spawn_claim_with(
     let stderr_path = run_dir.join("wrapper.stderr.log");
 
     let mut command = Command::new(executable);
+    // The wrapper finds its repository from the current directory. A scheduling pass may run
+    // from another directory (the hub's own), so name the repository explicitly.
+    command.current_dir(store.repo());
     command
         .arg("arc")
         .arg("work")

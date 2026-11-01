@@ -52,7 +52,7 @@ pub use review::{
     REVIEW_TOOLS, REVIEW_UNAVAILABLE, ReviewRun, owned_name, parse_report,
 };
 pub use verdict::{
-    CommandRecord, Finding, REVIEW_LEVELS, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION,
-    Verdict, VerdictResult, attempt_dir, level_rank, now_utc, required_passed, valid_verdicts,
-    verdict_path, verdict_set_digest,
+    CommandRecord, Finding, REVIEW_LEVELS, ReviewReport, ReviewRunRecord, ReviewSettings,
+    VERDICT_SCHEMA_VERSION, Verdict, VerdictResult, attempt_dir, level_rank, now_utc,
+    required_passed, valid_verdicts, verdict_path, verdict_set_digest,
 };

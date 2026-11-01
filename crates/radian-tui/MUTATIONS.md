@@ -3442,6 +3442,18 @@ the source was restored from the backup.
 |---|---|---|---|
 | TK0286-M5 | the early per-route reserved-key check is removed (the window's `C <= R` check runs first again) | ✅ 1 failed (rc=100) | `pty_a_reserved_extra_body_key_is_refused_before_the_window_check` (the output reported `--context-window ... is not larger than the output reservation 32000`, not the reserved-key line) |
 
+## TK0282: the TUI starts the hub and registers the repository (2026-10-31, branch `work/TK0282-hub-loop`)
+
+The TUI adds an unregistered repository to `~/.radian/hub/repos.toml` and starts `radian hub`
+when no process holds the repository's `runner.lock`. The mutation was applied to
+`src/arc/looping.rs`, the `radian` binary was rebuilt, the named test ran with `cargo nextest
+run -p radian-tui --test pty --locked --profile sandbox --no-fail-fast -E
+'test(pty_arc_registers_the_repository_and_starts_the_hub)'`, and the file was restored from a
+copy under `.radian/backup/`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0282-M6 | `LoopStarter::start` skips adding an unregistered repository to the hub registry | ✅ 1 failed (rc=100) | `pty_arc_registers_the_repository_and_starts_the_hub` (`the registry entry did not happen in 10s`) |
 ## TK0266: the TUI lists a review verdict's findings by severity (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
 The attempts tab draws a review verdict's findings grouped by severity, highest first, a
