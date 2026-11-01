@@ -815,3 +815,19 @@ found identical.
 |---|---|---|---|
 | TK0299-M2 | a record after an assistant message with no usage record no longer moves the anchor (`response_open || anchor_ready` becomes `anchor_ready && !response_open`) | ✅ 1 failed (rc=100) | `metrics::tests::a_response_without_usage_ends_at_the_record_after_its_assistant_message` (`left: 15000`, `right: 5000`) |
 | TK0299-M3 | the usage-record branch no longer makes the usage record the next anchor | ✅ 1 failed (rc=100) | `metrics::tests::a_request_right_after_a_usage_record_anchors_on_it` (`left: 5000`, `right: 4000`) |
+
+## TK0299 rework 3: records written while a request is in flight (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 2. The first
+mutation makes every record move the anchor again (the generic `_` arm), which lets an
+`InboxEnqueued` or `BackgroundJobSettled` written while a response streams become that
+response's anchor. The second drops the turn's opening exemption, so the input message the
+turn writes after `TurnStarted` becomes the first request's anchor. Both were applied to
+`src/metrics.rs`, the named test was run with `cargo nextest run -p radian-exec --lib --locked
+--profile sandbox --no-fail-fast -E 'test(<name>)'`, and the source was restored from
+`.radian/metrics-r3.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M4 | the anchor match's `_` arm moves the anchor, so an in-flight `InboxEnqueued`/`BackgroundJobSettled` becomes the anchor again (`_ => {}` becomes `_ => self.move_anchor(ts)`) | ✅ 1 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) |
+| TK0299-M5 | `move_anchor` drops the turn's opening exemption (`anchor_ready && !opening` becomes `anchor_ready`), so the input `MessageAppended` moves the first anchor | ✅ 1 failed (rc=100) | `metrics::tests::the_turns_opening_input_keeps_the_turn_start_anchor` (`left: 2050`, `right: 3050`) |
