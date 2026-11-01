@@ -51,7 +51,8 @@ keeps the `shell` tool out of the memory directories: a read is refused, macOS r
 write, and Linux sends a write into a throw-away temporary directory instead of the real
 one. Under `full` no sandbox runs, so the shell can read and write them as you can.
 This rule only decides whether the call asks; the file tools' own root still decides
-whether it reaches the file.
+whether it reaches the file. The host's memory write guards may also refuse an allowed call,
+after an MCP tool result or for content that looks like a secret; see `memory`.
 
 Trust controls project resources.
 A new repository starts untrusted.

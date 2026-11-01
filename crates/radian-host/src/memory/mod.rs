@@ -10,6 +10,7 @@
 //! memory tool (ADR 0021 D7).
 
 pub mod commands;
+mod guard;
 mod identity;
 pub mod injection;
 mod service;
@@ -18,6 +19,10 @@ mod touch;
 
 pub use commands::{
     CommandError, CommandOutput, MemoryCommand, ProjectCommand, USAGE_ERROR, execute, parse_args,
+};
+pub use guard::{
+    INPUT_GUARD, LONG_TOKEN, MemoryWriteGuard, SECRET_GUARD, SettledCall, journal_has_mcp_result,
+    settled_calls,
 };
 pub use identity::{candidate_name, project_identity_key, repository_root};
 pub use injection::{

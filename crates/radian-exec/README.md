@@ -157,7 +157,9 @@ model reads a record with `read`.
 A model has no memory write tool: memory records are written with the ordinary `write` and
 `patch`, which reach the two memory scope directories in both tiers (ADR 0039 decision 4) and
 which the permission profile allows in both tiers (ADR 0012; ADR 0021 invariant 5); whether a
-call reaches the file is the file tools' root boundary. Old `source: agent` records in existing
+call reaches the file is the file tools' root boundary and the host's write guards, which may
+refuse an allowed call after an MCP tool result or for content that looks like a secret (ADR
+0021 invariant 4). Old `source: agent` records in existing
 logs stay readable. When the user asks the model to remember something, the model routes it by
 content (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
 `AGENTS.md`, a procedure useful across projects becomes a user-level skill at
@@ -167,8 +169,10 @@ record under `global/`.
 The section is computed **once per process**, so every request of a session carries the same
 system-prompt bytes and a provider's prefix cache stays valid; a change to an index file takes
 effect in the next session or on resume. The host writes one `MemoryInjected` audit record
-naming each injected index (path, sha256 of the capped text, lines, bytes); it never copies the
-text. A memory read failure is a `[memory]` warning, never a failed turn. Startup prints
+naming each injected index (path, sha256 of the capped neutralized text, lines, bytes); it
+never copies the text. The injected copy has default-ignorable code points removed and fake
+prompt markers escaped; the file on disk is unchanged. A memory read failure is a `[memory]`
+warning, never a failed turn. Startup prints
 `[memory]` with the project state and the caps.
 
 ## Input

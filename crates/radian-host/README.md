@@ -143,6 +143,18 @@ configured in the config file instead.
 `radian_host::memory` is the host side of the memory system. It never reads `HOME` (the caller
 passes the root), never touches the network and never starts a process.
 
+`MemoryWriteGuard` (ADR 0021 invariant 4) is the host decision in front of `write` and
+`patch`, mounted by `open_session` whenever memory is on. It refuses a call whose canonical
+target is a scope directory in two cases: this session has taken in an MCP tool result (the
+input guard; a resumed session counts a settled call in its committed journal only when the
+opened MCP session routes that name and the result came from the tool — a name no server
+provides, and a result the runtime produced without running it (`cancelled`,
+`skipped_by_steering`, `hook_error`, `denied`), do not count), or the
+content — for `patch`, the content the edit would produce and each inserted replacement —
+matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value.
+The permission profile's memory rule is separate and unchanged: these guards can only refuse
+a write the tools would otherwise allow, never grant one.
+
 `project_identity_key(workspace)` is pure Rust and returns the **git common dir** of the
 repository containing the workspace, so all worktrees of one repository share a `ProjectId`;
 outside a repository it returns the workspace's canonical path. A `.git` **directory** is the
@@ -210,8 +222,12 @@ and `index_max_bytes` (default 25600) cap each index, keeping whole lines; a dro
 sends one `System`-source rewrite notice on the inbox's inject lane before the next call,
 once per session per scope. `MemoryInjection` computes the section once per process and
 reuses it byte for byte (ADR 0036): an index change reaches the prompt at the next session or
-resume. When the section is built, the hook writes one `critical: false` `MemoryInjected`
-record naming each injected index (path, sha256 of the capped text, lines, bytes).
+resume. Before an index is capped it is neutralized: every Unicode default-ignorable code
+point is removed, and a line that begins with `<system`, `</system`, `<project_instructions`,
+`</project_instructions`, `<memory` or `</memory` (case-insensitive, leading whitespace
+allowed) gains a leading `\`. The file on disk is never changed. When the section is built,
+the hook writes one `critical: false` `MemoryInjected` record naming each injected index
+(path, sha256 of the capped neutralized text, lines, bytes).
 `[memory] enabled` (default true) and `[memory] scopes` (default both, in project-then-global
 order) select it. Every `[memory.injection]` key is retired: it gets one migration warning
 naming it and the index caps, and is otherwise ignored.
