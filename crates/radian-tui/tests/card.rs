@@ -1054,7 +1054,9 @@ fn a_copy_of_a_multiline_command_has_no_marker_rail_or_note() {
 // ---------- the memory card and the read line (ADR 0035) ----------
 
 /// A unique scratch memory root. The directory is not removed: the test process owns a fresh
-/// `/tmp` name, and the files are tiny.
+/// `/tmp` name, and the files are tiny. The root is canonicalized first: the app canonicalizes
+/// the memory root and the record's parent directory, and on macOS the temp dir is reached
+/// through a symlink.
 fn memory_root(label: &str) -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1064,7 +1066,7 @@ fn memory_root(label: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(root.join("projects/P")).unwrap();
     std::fs::create_dir_all(root.join("global")).unwrap();
-    root
+    std::fs::canonicalize(root).expect("canonicalize the memory root")
 }
 
 /// One tool call and its result, on an app whose memory root is `root`.
