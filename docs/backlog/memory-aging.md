@@ -14,8 +14,8 @@
 
 ## 设计（第一步已定，可与 memory-files 一起做）
 
-1. 宿主在模型 `read` 一个记忆文件时把它的 frontmatter `last_used` 更新为当前时间（不计 `list`/`show` 这类用户命令）。
-2. `radian memory stale [--days N]`（默认 30）列出 `last_used` 早于 N 天、或从未被读过且 `created` 早于 N 天的文件。
+1. 宿主在模型 `read` 一个记忆文件时把它的 frontmatter `last_used` 更新为当前时间（不计 `list`/`show` 这类用户命令）。（已落地）
+2. `radian memory stale [--days N]`（默认 30）列出 `last_used` 早于 N 天、或从未被读过且 `created` 早于 N 天的文件。（已落地）
 3. 自动归档留到第二步：有数据后定 N，宿主在会话启动时把到期的文件移到 `archive/`，索引行一并移走。
 
 ## 验收

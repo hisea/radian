@@ -17,6 +17,15 @@ workspace maps to a project, that project's directory. Every other path
 under the memory directory stays denied, and the shell cannot read any of
 it. See `permissions` for the exact rule.
 
+## Memory files and `last_used`
+
+A memory file holds one record. Its frontmatter carries `name`, `description`,
+`type`, `source`, `created`, `modified`, `last_used` and an optional
+`provenance`. When the model `read`s a memory file other than `MEMORY.md`, the
+host sets `last_used` to the time of the read and changes no other byte. A
+user command (`list`, `show`, `stale`) never changes it. An absent `last_used`
+means the file was never read.
+
 ## Kinds
 
 A record is one kind: `preference`, `decision`, `fact` or `lesson`. The
@@ -34,6 +43,7 @@ the project against another directory.
 | `list [--global\|--project] [--all] [--json]` | List records, project first then global. `--all` includes archived records. |
 | `search [--global\|--project] [--json] <words>...` | Search by keyword. Every word must match, in the content or the key. Matching ignores case. |
 | `show [--global\|--project] [--json] <id>` | Read one record in full. |
+| `stale [--days N] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than N days, or it has no `last_used` and its `created` is older than N days. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`. `--json` gives an array of objects with the frontmatter fields, with `last_used` null when never read. A file whose frontmatter cannot be read is listed as unreadable and the other files still list. |
 | `add [--global] [--kind preference\|decision\|fact\|lesson] [--key <key>] <text>` | Add a project record by default, a global one with `--global`. In the interface the text is literal: a bare `-` writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. On the command line, `-` reads the text from stdin instead. |
 | `edit [--global] --revision <N> <id> <text>` | Change content. Pass the current revision, shown by `show` and `list`. A bare `-` as the text writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. |
 | `archive [--global] --revision <N> <id>` | Archive a record. It stays stored but is no longer injected or searched by default. |
@@ -51,7 +61,7 @@ the project against another directory.
 A usage or refusal error exits 2 on the command line; a conflict or a
 missing record exits 1. In the interface, `forget`, `purge`, `split` and
 `merge` ask first: `y` runs, `n` or `esc` cancels. A read command
-(`list`, `search`, `show`, `export`, `project`) runs while a turn runs and
+(`list`, `search`, `show`, `stale`, `export`, `project`) runs while a turn runs and
 does not interrupt it. A write takes effect at the next model request. In the interface, `add` and `edit` take
 their text literally: `-` reads stdin only on the command line. A bare `-` in the interface writes nothing and shows the stdin notice:
 `` `-` reads stdin only in `radian memory`; type the text here`` for `add` and
