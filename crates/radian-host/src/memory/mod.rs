@@ -11,6 +11,7 @@ mod identity;
 pub mod injection;
 mod service;
 pub mod tools;
+mod touch;
 
 pub use commands::{
     CommandError, CommandOutput, MemoryCommand, ProjectCommand, USAGE_ERROR, execute, parse_args,
@@ -27,3 +28,4 @@ pub use service::{
 pub use tools::{
     DEFAULT_SEARCH_LIMIT, LOW_TRUST_NOTE, MAX_SEARCH_LIMIT, MemorySession, MemoryTools,
 };
+pub use touch::MemoryTouch;

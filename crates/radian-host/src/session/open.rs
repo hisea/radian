@@ -19,7 +19,8 @@ use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal,
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
 use crate::memory::{
-    MemoryHooks, MemoryInjection, MemoryService, MemoryTools, ScopeSelection, exceeds_budget,
+    MemoryHooks, MemoryInjection, MemoryService, MemoryTools, MemoryTouch, ScopeSelection,
+    exceeds_budget,
 };
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
@@ -180,6 +181,11 @@ pub async fn open_session(
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
+    // ADR 0021 D3/D4: the memory aging hook. It is independent of `memory_search`, so it is
+    // built whenever memory is on, from the same scope directories the file tools receive.
+    let memory_touch = memory
+        .as_ref()
+        .map(|service| MemoryTouch::new(service, Arc::clone(&memory_warning)));
     // ADR 0021 D7: `memory_search` mounts only when the Active records' estimated total
     // exceeds the injection budget — what fits in the fixed block needs no search. The view
     // is the fixed block's (Project when linked, then Global); the decision is once per
@@ -469,6 +475,9 @@ pub async fn open_session(
     let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
         .with_tool_allow(tools_allow)
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
+    if let Some(touch) = memory_touch {
+        tools = tools.with_memory_touch(touch);
+    }
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the
     // result, and every change is journaled first so the fold always rebuilds it.
