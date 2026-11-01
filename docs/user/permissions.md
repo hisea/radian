@@ -34,7 +34,7 @@ Name any other absolute or `~` path only under `full`.
 The file tools never read the sandbox's deny set, in either tier.
 The deny set is, under `$HOME`: `.ssh`, `.aws`, `.gnupg`, `.netrc`, `.npmrc`, `.config/gcloud`, `.docker/config.json`, `Library/Application Support/Google/Chrome`, `Library/Application Support/Firefox`, `Library/Safari`, and `Library/Cookies`.
 Under `~/.radian` (or `$RADIAN_HOME`) it is the sessions directory (or the one `--session-dir` names), `memory/`, `credentials/`, `trust/`, and `access/`.
-The two memory scopes are the one exception to the `memory/` entry; the shell has no exception and cannot read any of it.
+The two memory scopes are the one exception to the `memory/` entry; under the `workspace` tier the shell has no exception and cannot read any of it.
 The check follows symbolic links, so a link that points into the deny set is refused too.
 A refused read says the path is in the sandbox's deny set.
 Under `full` the shell is not limited by the deny set; use `workspace` to keep it from the shell too.

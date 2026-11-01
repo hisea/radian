@@ -17,7 +17,7 @@ KNOWN_EVENTS = {
     "TurnFinished", "ConfigChanged", "ContextCompacted",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
-    "ProjectTrustChanged", "UserBash",
+    "ProjectTrustChanged", "UserBash", "ContextFileAppended",
     "BackgroundJobStarted", "BackgroundJobSettled",
     "GoalSet", "GoalBudgetSet", "GoalProgress", "GoalDone",
     "GoalPaused", "GoalResumed", "GoalDropped", "GoalWait",
@@ -298,6 +298,7 @@ EXPECT = {
         usage_present=True,
         repair={"call-9": "outcome_unknown_after_crash"},
     ),
+    "context-file-appended.jsonl": dict(outcome="accept", events=5, skips=[], repair={}),
     "context-files-imports.jsonl": dict(
         outcome="accept",
         events=1,

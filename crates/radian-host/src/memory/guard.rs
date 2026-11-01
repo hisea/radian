@@ -112,18 +112,25 @@ impl MemoryWriteGuard {
             }
             return Ok(());
         }
-        // The result content is the rule (ADR 0021 invariant 4). The file may not exist or the
-        // tool may refuse the edit, so the inserted text is checked on its own as well: either
-        // way, a secret cannot be written.
-        for content in patch_new_texts(&call.arguments) {
-            if let Some(prefix) = secret_hit(&content) {
-                return Err(refuse(prefix));
+        // The result content is the rule (ADR 0021 invariant 4). When the tool's own locators
+        // can model the result, that content is what gets checked; a patch that puts a
+        // secret-shaped string inside an existing word is judged by the result, as the tool
+        // would write it. Only when the result cannot be computed (the file does not exist,
+        // the tool would refuse the edit, or the arguments are malformed) is each inserted
+        // text checked on its own, so a secret cannot be written either way.
+        match patch_result_content(&target, &call.arguments) {
+            Some(result) => {
+                if let Some(prefix) = secret_hit(&result) {
+                    return Err(refuse(prefix));
+                }
             }
-        }
-        if let Some(result) = patch_result_content(&target, &call.arguments)
-            && let Some(prefix) = secret_hit(&result)
-        {
-            return Err(refuse(prefix));
+            None => {
+                for content in patch_new_texts(&call.arguments) {
+                    if let Some(prefix) = secret_hit(&content) {
+                        return Err(refuse(prefix));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -257,8 +264,8 @@ fn patch_new_texts(arguments: &Value) -> Vec<String> {
 /// The content a `patch` call would produce, computed with the tool's own locators (the LF
 /// view, typographic normalisation, trailing whitespace) and its own rejections. `None` means
 /// the tool itself would write nothing or the file cannot be read here (it does not exist, is
-/// not a regular file, or is over the tool's byte cap); the inserted text is still checked on
-/// its own in that case.
+/// not a regular file, or is over the tool's byte cap), or the arguments do not form a patch;
+/// the inserted text is checked on its own only in that case.
 fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
     // The patch tool refuses a non-regular file and a file over its byte cap; do not read
     // either here (a fifo would block, a huge file would allocate before the tool's own
@@ -421,6 +428,31 @@ mod tests {
                 ))
                 .is_ok(),
             "the heuristic matches at the start of a token only"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge case 4's patch half: with a computed result, the result is what is judged. Burying
+    /// a secret-shaped string inside an existing word stays allowed, because the written text
+    /// has no token that starts with the prefix.
+    #[test]
+    fn a_patch_that_buries_a_secret_shape_inside_a_word_is_judged_by_the_result() {
+        let (dir, guard, root) = guard("patch-in-word");
+        let memory = root.join("global/x.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, "musk-abc\n").unwrap();
+        let patch = ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": memory.to_str().unwrap(),
+                "old": "abc",
+                "new": "sk-abcdefghijklmnopqrst",
+            }),
+        };
+        assert!(
+            guard.check(&patch).is_ok(),
+            "the resulting `musk-sk-...` carries no token starting with `sk-`"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

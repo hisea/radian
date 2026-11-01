@@ -477,6 +477,13 @@ fn scalar_tail_ok(tail: &str) -> bool {
     tail.is_empty() || tail.starts_with('#')
 }
 
+/// Whether the raw spelling starts with a quote, so the parsed value is a string even when its
+/// text is `null` or `~`.
+fn is_quoted(value: &str) -> bool {
+    let value = value.trim_start();
+    value.starts_with('"') || value.starts_with('\'')
+}
+
 #[derive(Default)]
 struct Builder {
     name: Option<String>,
@@ -617,8 +624,11 @@ fn parse_record(text: &str, expected_name: Option<&str>) -> Result<Record, Parse
                 builder.modified = Some(value);
             }
             "last_used" => {
+                let quoted = is_quoted(value);
                 let value = parse_scalar(value, line_number)?;
-                if value.is_empty() || value == "null" || value == "~" {
+                // Only a plain null or `~` means never read. A quoted "null" is the string
+                // YAML says it is, so it must be a timestamp like any other value.
+                if !quoted && (value.is_empty() || value == "null" || value == "~") {
                     builder.last_used = None;
                 } else {
                     validate_timestamp("last_used", &value)
@@ -745,15 +755,10 @@ fn write_new(dir: &Path, new: NewRecord) -> Result<Record, MemoryError> {
             new.record_type
         )));
     }
-    if !RECORD_SOURCES.contains(&new.source.as_str()) {
-        return Err(invalid(format!(
-            "source {:?} is not one of {RECORD_SOURCES:?}",
-            new.source
-        )));
-    }
     let path = record_path_in(dir, &new.name);
     // `created` and `last_used` are kept across a replacement, and so is `source`: a record's
-    // source is fixed at its first write (ADR 0021 D4).
+    // source is fixed at its first write (ADR 0021 D4). The caller's `source` is only judged
+    // when the file is new; on a replacement the stored value is used and the caller's ignored.
     let (created, last_used, source) = if path.exists() {
         let existing = read_named(dir, &new.name)?;
         (
@@ -762,6 +767,12 @@ fn write_new(dir: &Path, new: NewRecord) -> Result<Record, MemoryError> {
             existing.frontmatter.source,
         )
     } else {
+        if !RECORD_SOURCES.contains(&new.source.as_str()) {
+            return Err(invalid(format!(
+                "source {:?} is not one of {RECORD_SOURCES:?}",
+                new.source
+            )));
+        }
         (now_utc(), None, new.source)
     };
     let frontmatter = Frontmatter {

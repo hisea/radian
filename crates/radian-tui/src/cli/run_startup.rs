@@ -138,8 +138,9 @@ pub(super) fn startup_preamble(
     let mut app = App::new(String::new(), String::new());
     // `Tab` (the `complete` action) completes `@` file references against the workspace.
     app.set_workspace(workspace_path.clone());
-    // ADR 0035: the transcript resolves a memory card's path against this root and reads a
-    // settled call's record. It is the same root the host's memory service uses.
+    // ADR 0035: the transcript resolves a memory card's path against this root and folds its
+    // type from the recorded call and result; it never reads the record. It is the same root
+    // the host's memory service uses.
     app.set_memory_root(radian_host::memory_dir());
     let mut config_warnings = app
         .apply_config(&config, radian_tui::theme::Theme::no_color_env())

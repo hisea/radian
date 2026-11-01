@@ -151,40 +151,19 @@ pub(crate) async fn run(
         ));
     }
     let content = crate::safe_fs::read_to_string(&file).map_err(|e| io_failure(&args.path, e))?;
-    let crlf = content.contains("\r\n");
 
     // Every edit is located against the **original** contents before anything is written, so a
     // later edit can never match text an earlier one inserted, and a failure in any edit leaves
     // the file untouched.
-    let view = LfView::new(&content);
-    let mut resolved = Vec::with_capacity(specs.len());
-    for (index, spec) in specs.iter().enumerate() {
-        resolved.push(resolve_edit(
-            &view, &content, &args.path, spec, index, multiple, crlf,
-        )?);
-    }
-    check_conflicts(&args.path, &resolved)?;
+    let resolved = resolve_all(&content, &specs, &args.path, multiple)?;
 
     // All ranges are offsets into the original file. Sorting by start and applying from the end
     // keeps every earlier offset valid; the conflict check above guarantees they do not overlap.
-    let mut replacements: Vec<(Range<usize>, String, usize)> = resolved
-        .iter()
-        .flat_map(|edit| {
-            edit.ranges
-                .iter()
-                .cloned()
-                .map(|range| (range, edit.replacement.clone(), edit.index))
-        })
-        .collect();
-    replacements.sort_by_key(|(range, _, _)| range.start);
+    let (updated, replacements) = apply_all(&content, &resolved);
     // Where each replaced range sits in the old file and in the new one (ADR 0028
     // decision 5). The TUI draws one hunk block per range, with each row's line number; the
     // result **text** does not change.
     let hunks = replacement_hunks(&content, &replacements);
-    let mut updated = content;
-    for (range, replacement, _) in replacements.iter().rev() {
-        updated.replace_range(range.clone(), replacement);
-    }
     if updated.len() > limits.max_write_bytes {
         return Err(fail(
             "write_limit_exceeded",
@@ -293,6 +272,49 @@ struct ResolvedEdit {
 
 /// Locates one edit in the unchanged file and builds its replacement. A failure names the edit
 /// by its 1-based number when the call carries more than one.
+/// Locates every edit against `content` and rejects a conflict, all before anything is written.
+/// [`run`] and [`patched_content`] share this so the guard judges exactly what the tool writes.
+fn resolve_all(
+    content: &str,
+    specs: &[PatchEdit],
+    path: &str,
+    multiple: bool,
+) -> Result<Vec<ResolvedEdit>, ToolFailure> {
+    let crlf = content.contains("\r\n");
+    let view = LfView::new(content);
+    let mut resolved = Vec::with_capacity(specs.len());
+    for (index, spec) in specs.iter().enumerate() {
+        resolved.push(resolve_edit(
+            &view, content, path, spec, index, multiple, crlf,
+        )?);
+    }
+    check_conflicts(path, &resolved)?;
+    Ok(resolved)
+}
+
+/// Applies resolved edits from the end so every original offset stays valid. Returns the new
+/// text and the sorted replacement list the TUI's hunks are drawn from.
+fn apply_all(
+    content: &str,
+    resolved: &[ResolvedEdit],
+) -> (String, Vec<(Range<usize>, String, usize)>) {
+    let mut replacements: Vec<(Range<usize>, String, usize)> = resolved
+        .iter()
+        .flat_map(|edit| {
+            edit.ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, edit.replacement.clone(), edit.index))
+        })
+        .collect();
+    replacements.sort_by_key(|(range, _, _)| range.start);
+    let mut updated = content.to_owned();
+    for (range, replacement, _) in replacements.iter().rev() {
+        updated.replace_range(range.clone(), replacement);
+    }
+    (updated, replacements)
+}
+
 fn resolve_edit(
     view: &LfView,
     content: &str,
@@ -788,44 +810,20 @@ pub fn patched_content(content: &str, edits: &[(String, String, bool)]) -> Optio
     if edits.is_empty() {
         return None;
     }
-    let crlf = content.contains("\r\n");
-    let view = LfView::new(content);
-    let mut resolved = Vec::with_capacity(edits.len());
-    for (index, (old, new, replace_all)) in edits.iter().enumerate() {
-        // The tool refuses an empty `old` before it locates anything.
-        if old.is_empty() {
-            return None;
-        }
-        let (layer, ranges) = match locate(&view, old) {
-            Located::Found(layer, ranges) => (layer, ranges),
-            Located::None => return None,
-        };
-        if ranges.len() > 1 && !*replace_all {
-            return None;
-        }
-        resolved.push(ResolvedEdit {
-            index,
-            layer,
-            ranges,
-            replacement: line_ending_new(new, crlf),
-        });
+    // The tool refuses an empty `old` before it locates anything.
+    if edits.iter().any(|(old, _, _)| old.is_empty()) {
+        return None;
     }
-    check_conflicts("", &resolved).ok()?;
-    let mut replacements: Vec<(Range<usize>, String, usize)> = resolved
+    let specs: Vec<PatchEdit> = edits
         .iter()
-        .flat_map(|edit| {
-            edit.ranges
-                .iter()
-                .cloned()
-                .map(|range| (range, edit.replacement.clone(), edit.index))
+        .map(|(old, new, replace_all)| PatchEdit {
+            old: old.clone(),
+            new: new.clone(),
+            replace_all: *replace_all,
         })
         .collect();
-    replacements.sort_by_key(|(range, _, _)| range.start);
-    let mut updated = content.to_owned();
-    for (range, replacement, _) in replacements.iter().rev() {
-        updated.replace_range(range.clone(), replacement);
-    }
-    Some(updated)
+    let resolved = resolve_all(content, &specs, "", false).ok()?;
+    Some(apply_all(content, &resolved).0)
 }
 
 #[cfg(test)]

@@ -8341,12 +8341,13 @@ async fn an_unlinked_workspace_writes_no_session_index_and_creates_no_project() 
     // The unlinked run had a message to index; only the missing link explains the missing line.
     let unlinked_session =
         radian_session::Session::open(env.sessions.join("unlinked-session.jsonl")).unwrap();
+    let history = unlinked_session.history().unwrap();
     assert!(
-        unlinked_session
-            .events()
-            .iter()
-            .any(|event| event.event == "MessageAppended"),
-        "the unlinked session committed a user message"
+        history.iter().any(|message| {
+            message.text() == "unlinked work"
+                && message.meta().source == Some(radian_core::InputSource::User)
+        }),
+        "the unlinked session committed its user message, not just any message: {history:?}"
     );
 
     let lines = session_index_lines(&env, &project);

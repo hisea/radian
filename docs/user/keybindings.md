@@ -145,7 +145,7 @@ do not reach the message box.
 
 | Key | What it does |
 |---|---|
-| `y` (or `Y`) | Confirm: run the `/memory` write (`forget`, `purge`, `split`, `merge`), remove the `/logout` credential. |
+| `y` (or `Y`) | Confirm: run the `/memory` write (`forget`, `split`, `merge`), remove the `/logout` credential. |
 | `n` (or `N`), `esc` | Cancel it. |
 
 ### Trust prompt

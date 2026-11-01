@@ -36,9 +36,11 @@ sensitive_read   fake_ssh_key_unreadable        fail   denied       ok  PASS
 sensitive_read   normal_file_still_readable       ok       ok       ok  PASS
 radian_home      sessions_unreadable            fail   denied       ok  PASS
 radian_home      memory_unreadable              fail   denied       ok  PASS
+radian_home      memory_scope_unreadable        fail   denied       ok  PASS
 radian_home      memory_write_does_not_reach_store     fail   denied       ok  PASS
 radian_home      memory_write_tool_is_not_a_sandbox_matter       ok       ok       ok  SKIP
 radian_home      credentials_unreadable         fail   denied       ok  PASS
+radian_home      hub_unreadable                 fail   denied       ok  PASS
 radian_home      trust_unreadable               fail   denied       ok  PASS
 radian_home      skills_readable                  ok       ok       ok  PASS
 radian_home      config_readable                  ok       ok       ok  PASS
@@ -53,7 +55,7 @@ signals          signal_own_grandchild_ok         ok       ok       ok  PASS
 signals          signal_outside_process         fail   denied       ok  PASS
 skipped: radian_home / memory_write_tool_is_not_a_sandbox_matter: the file tools never enter the sandbox
 
-49 cases, 0 failed, 1 skipped
+51 cases, 0 failed, 1 skipped
 
 orphan check:
 (no orphan processes)

@@ -141,7 +141,8 @@ configured in the config file instead.
 ## Memory (ADR 0021 D1/D2/D8)
 
 `radian_host::memory` is the host side of the memory system. It never reads `HOME` (the caller
-passes the root), never touches the network and never starts a process.
+passes the root) and never touches the network. It starts no process except `open_path`, which
+`add`, `edit` and `open` use to launch `$EDITOR` or the platform opener.
 
 `MemoryWriteGuard` (ADR 0021 invariant 4) is the host decision in front of `write` and
 `patch`, mounted by `open_session` whenever memory is on. It refuses a call whose canonical
@@ -149,8 +150,10 @@ target is a scope directory in two cases: this session has taken in an MCP tool 
 input guard; a resumed session counts a settled call in its committed journal only when the
 opened MCP session routes that name and the result came from the tool — a name no server
 provides, and a result the runtime produced without running it (`cancelled`,
-`skipped_by_steering`, `hook_error`, `denied`), do not count), or the
-content — for `patch`, the content the edit would produce and each inserted replacement —
+`skipped_by_steering`, `hook_error`, `denied`, `interrupted`, or an error record with no
+`error_code`), do not count), or the
+content — for `patch`, the content the edit would produce (the inserted replacement only when
+the tool itself would write nothing) —
 matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value.
 The permission profile's memory rule is separate and unchanged: these guards can only refuse
 a write the tools would otherwise allow, never grant one.
@@ -176,9 +179,10 @@ was not saved", pointing at `radian memory project new` and at no other scope). 
 injection never call it**, so they only ever read Global on an unregistered workspace.
 `create_project()` and `relink()` stay the explicit routes. Reads default to Project then Global
 (`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). `add` writes a
-`source: user` skeleton and its index line; `remove` deletes the file and its index line;
+`source: user` skeleton and its index line; `forget` deletes the file and its index line;
 `split`/`merge` move record files and their index lines (a merge collision renames `<name>-2`, or
-the first suffix free in both projects; `MEMORY.md` and `SESSIONS.md` stay put).
+the first suffix free in both projects; `MEMORY.md` and `SESSIONS.md` stay put). `split`
+refuses a name outside the record rule before it joins it into a path.
 
 `file_tool_roots()` names the two scope directories the file tools may read and write in both
 tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,
@@ -229,9 +233,10 @@ reuses it byte for byte (ADR 0036): an index change reaches the prompt at the ne
 resume. Before an index is capped it is neutralized: every Unicode default-ignorable code
 point is removed, and a line that begins with `<system`, `</system`, `<project_instructions`,
 `</project_instructions`, `<memory` or `</memory` (case-insensitive, leading whitespace
-allowed) gains a leading `\`. The file on disk is never changed. When the section is built,
-the hook writes one `critical: false` `MemoryInjected` record naming each injected index
-(path, sha256 of the capped neutralized text, lines, bytes).
+allowed) gains a leading `\`. The file on disk is never changed. When at least one index was
+injected, the hook writes one `critical: false` `MemoryInjected` record naming each injected
+index (path, sha256 of the capped neutralized text, lines, bytes); with both indexes missing it
+writes nothing.
 `[memory] enabled` (default true) and `[memory] scopes` (default both, in project-then-global
 order) select it. Every `[memory.injection]` key is retired: it gets one migration warning
 naming it and the index caps, and is otherwise ignored.

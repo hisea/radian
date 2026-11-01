@@ -481,7 +481,9 @@ impl MemoryService {
 
     /// `split`: move each named file and its index line from one project to another. A missing
     /// source name is reported; a name already present in the target is reported and left in
-    /// place (never overwritten).
+    /// place (never overwritten). Every given name is checked against the record name rule before
+    /// it is joined into a path, so `SESSIONS`, `MEMORY`, an absolute name or a `..` name is
+    /// refused exactly as `add` refuses it.
     pub fn split(
         &self,
         from: &ProjectId,
@@ -492,6 +494,10 @@ impl MemoryService {
         let target = Scope::Project(to.clone());
         let mut report = MoveReport::default();
         for name in names {
+            validate_record_name(name).map_err(|reason| MemoryError::InvalidName {
+                name: name.clone(),
+                reason,
+            })?;
             let mut from_path = self.files.record_path(&source, name);
             let to_path = self.files.record_path(&target, name);
             if !from_path.is_file() {
@@ -989,5 +995,58 @@ mod tests {
             "both files are in the merged project"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `split` applies the record name rule before it joins a name into a path, so every name
+    /// class `add` refuses is refused with the same error. A sentinel file in the source project
+    /// stays where it is.
+    fn split_refuses_name(label: &str, name: &str) {
+        let (dir, _ws, service) = service(label);
+        let from = ProjectId("from-project".into());
+        let to = ProjectId("to-project".into());
+        let scope = Scope::Project(from.clone());
+        std::fs::create_dir_all(service.files().scope_dir(&scope)).unwrap();
+        let sentinel = service.files().record_path(&scope, "note");
+        std::fs::write(&sentinel, "STAYS\n").unwrap();
+
+        let error = service
+            .split(&from, &to, &[name.to_owned()])
+            .expect_err("the name is refused");
+        let text = error.to_string();
+        match &error {
+            MemoryServiceError::Storage(MemoryError::InvalidName { name: got, .. })
+                if got == name => {}
+            other => panic!("expected an InvalidName for {name:?}, got {other:?}"),
+        }
+        assert!(
+            text.contains("invalid memory record name"),
+            "the same error add gives: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "STAYS\n",
+            "a refused split moves nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_refuses_the_session_index_name() {
+        split_refuses_name("split-sessions", "SESSIONS");
+    }
+
+    #[test]
+    fn split_refuses_the_memory_index_name() {
+        split_refuses_name("split-memory", "MEMORY");
+    }
+
+    #[test]
+    fn split_refuses_an_absolute_name() {
+        split_refuses_name("split-absolute", "/tmp/x");
+    }
+
+    #[test]
+    fn split_refuses_a_parent_name() {
+        split_refuses_name("split-parent", "..");
     }
 }

@@ -107,9 +107,10 @@ pub async fn open_session(
     let queue: Arc<SessionQueue> = shared_queue.unwrap_or_else(|| Arc::new(PendingQueue::new()));
     let origin = session_id.as_str().to_string();
 
-    // ADR 0036: read the project context files once, here. They are workspace input, so
-    // they never enter the journal; only the loaded paths and sizes go into the snapshot. The
-    // section is appended after the host's base prompt (layer 1) and before the skills/memory
+    // ADR 0036: read the startup project context files once, here. They are workspace input, so
+    // they never enter the journal; only the loaded paths and sizes go into the snapshot. A
+    // subtree file discovered later is read on first use and appended as an ordinary message.
+    // The section is appended after the host's base prompt (layer 1) and before the skills/memory
     // hooks (layer 3).
     let context = crate::context::load(&workspace, radian_home().as_deref());
     for warning in &context.warnings {

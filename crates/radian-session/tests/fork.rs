@@ -108,6 +108,66 @@ async fn a_fork_materializes_the_effective_history_at_the_last_boundary() {
     );
 }
 
+/// A parent's context-file append rides into the child as the same audit record, so opening
+/// the child as a resume seeds its subtree set and appends no file a second time (ADR 0036).
+#[tokio::test]
+async fn a_fork_copies_the_parent_context_file_appends() {
+    let dir = TempDir::new("fork-context");
+    let (parent, child) = ids("context");
+    let parent_path = dir.file("parent.jsonl");
+    let journal = SessionJournal::create(&parent_path, &parent, created()).unwrap();
+    let (_, index) = add_turn(&journal, "t-1", 0, "first user", "first assistant").await;
+    journal
+        .append_runtime_event(RuntimeEvent::TurnStarted {
+            turn_id: "t-2".into(),
+        })
+        .await
+        .unwrap();
+    append_message(&journal, index, Message::user("second user")).await;
+    journal
+        .append_runtime_event(RuntimeEvent::ContextFileAppended {
+            path: "crates/x/AGENTS.md".into(),
+            bytes: 7,
+            truncated: false,
+        })
+        .await
+        .unwrap();
+    append_message(&journal, index + 1, Message::assistant("second assistant")).await;
+    journal
+        .append_runtime_event(RuntimeEvent::TurnFinished {
+            turn_id: "t-2".into(),
+            outcome: TurnOutcome::Completed,
+            reason: None,
+            stop_reason: None,
+        })
+        .await
+        .unwrap();
+    drop(journal);
+
+    let child_path = dir.file("child.jsonl");
+    fork(request(&parent_path, &parent, None, &child_path, &child))
+        .await
+        .unwrap();
+    let opened = Session::open(&child_path).unwrap();
+    let appended: Vec<_> = opened
+        .events()
+        .iter()
+        .filter_map(|event| match &event.data {
+            EventData::ContextFileAppended {
+                path,
+                bytes,
+                truncated,
+            } => Some((path.as_str(), *bytes, *truncated)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        appended,
+        vec![("crates/x/AGENTS.md", 7, false)],
+        "the child carries the parent's append audit"
+    );
+}
+
 #[tokio::test]
 async fn the_materialized_history_equals_recover_at_the_same_point() {
     let dir = TempDir::new("fork-equal");
