@@ -178,6 +178,9 @@ pub async fn open_session(
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
+    // ADR 0021 D5/D6, ADR 0036 1m: the rules block is gated like the index section. Without a
+    // memory root there is no directory to name, so the block stays out too.
+    let memory_rules = crate::prompt::memory_rules(injection_config.enabled && memory.is_some());
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
     let mcp_server_configs = servers.clone();
@@ -519,17 +522,20 @@ pub async fn open_session(
     let system_prompt = Some(crate::prompt::assemble(
         &runtime_layer,
         &role_layer,
+        memory_rules,
         &context.section,
     ));
     let role_hooks = Arc::new(crate::prompt::RoleHooks::new(
         &runtime_layer,
+        memory_rules,
         &context.section,
         role_override,
     ));
     let goal_hooks = Arc::new(crate::goal::GoalHooks::new(Arc::clone(&goal_share)));
     // The exact base the hook chain writes (layers 0a, 1 and 2): the side-question
     // shape rebuilds the prompt from it, so the bytes match the formal request.
-    let role_base = crate::prompt::assemble(&runtime_layer, &role_layer, &context.section);
+    let role_base =
+        crate::prompt::assemble(&runtime_layer, &role_layer, memory_rules, &context.section);
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
@@ -752,10 +758,10 @@ pub async fn open_session(
     };
     // The `/context` estimate inputs: the system layers split so the categories
     // add up (base is everything except the context section and the memory
-    // block, which are counted separately), the per-file blocks, the skills
+    // index section, which are counted separately), the per-file blocks, the skills
     // listing, and the session facts. Read-only; the loop reads them while a
     // turn runs.
-    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, "");
+    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, memory_rules, "");
     let skills_section = skills_hooks.section().to_owned();
     let skills_count = shared_skills
         .iter()
