@@ -1,9 +1,9 @@
 //! The hub's status: what it schedules, what it only reads, and the machine-wide count of
 //! tasks in `doing` (ADR 0048 decision 16).
 //!
-//! The HTTP task serves this structure; `radian hub` prints it as one line per repository when
-//! it starts and on every change. The rendering is here, in one place, so both see the same
-//! text.
+//! `radian hub` prints this structure as one line per repository when it starts and on every
+//! change. The HTTP API's `/v1/repos` route reports the same scheduling state from each
+//! repository's `runner.lock`. The rendering is here, in one place, so both see the same text.
 
 use std::path::PathBuf;
 

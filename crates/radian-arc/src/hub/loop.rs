@@ -4,9 +4,9 @@
 //! one loop per registered repository. Every repository's loop runs on its own OS thread,
 //! because a pass is synchronous and blocking: it spawns and waits for git and gate processes,
 //! and it waits the interval in a sleep. The hub's own thread re-reads `repos.toml` every
-//! `[hub] interval_secs`, composes the status the HTTP task will serve, and stops every loop
-//! on SIGINT or SIGTERM (releasing `hub.lock` last) or after a rebuilt binary (then `exec` of
-//! the recorded path).
+//! `[hub] interval_secs`, composes the status the HTTP API and the status lines share, and
+//! stops every loop on SIGINT or SIGTERM (releasing `hub.lock` last) or after a rebuilt
+//! binary (then `exec` of the recorded path).
 //!
 //! A repository whose `runner.lock` another process holds is not scheduled: its status line
 //! names the holder, and the loop probes the lock again every interval. The hub never writes

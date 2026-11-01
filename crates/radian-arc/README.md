@@ -241,8 +241,12 @@ writes the holder's pid into `runner.lock` (the flock is the lock) so a viewer's
 name the loop it is watching.
 
 `hub` owns `$RADIAN_HOME/hub/`: `repos.toml` (the registry `radian hub add`/`remove`/`list`
-read and write), `hub.lock` (the flock one hub holds for its life, with its pid inside) and the
-scheduler (`hub::run`). The scheduler keeps one `run::LoopState` per registered repository on
+read and write), `token` (the bearer token every HTTP request carries), `hub.lock` (the flock
+one hub holds for its life, with its pid inside) and the scheduler (`hub::run`).
+`hub::http::serve` is what `radian hub` with no subcommand calls: it takes `hub.lock`, binds
+`127.0.0.1:<[hub] port>`, prints `hub: listening on <addr>` as its first stdout line, serves
+the HTTP API on a thread of its own, and runs the scheduler on the calling thread. The
+scheduler keeps one `run::LoopState` per registered repository on
 its own OS thread, because a pass blocks; it re-reads the registry every `[hub] interval_secs`,
 records a repository whose `runner.lock` another process holds as read-only (with the holder's
 pid), and never writes the registry. The machine-wide `[hub] concurrency` cap is read from every

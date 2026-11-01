@@ -392,7 +392,7 @@ arc/gate-failures: The gate's failure classes, the retry rules, the budget, and 
 arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
 arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
 arc/hooks: The `[hooks]` points, their rules and their environment.
-arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` configuration keys.
+arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
 arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.

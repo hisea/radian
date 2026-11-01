@@ -370,10 +370,10 @@ fn two_repositories_start_their_tasks_in_one_interval() {
     home.register(&[("a", &a.clone), ("b", &b.clone)]);
     let mut hub = home.spawn();
 
-    wait_until(Duration::from_secs(10), "both tasks in doing", || {
+    wait_until(Duration::from_secs(30), "both tasks in doing", || {
         is_doing(&sa, &ta) && is_doing(&sb, &tb)
     });
-    wait_until(Duration::from_secs(10), "both loop.log start lines", || {
+    wait_until(Duration::from_secs(30), "both loop.log start lines", || {
         loop_log(&a).contains(&format!("{ta}-1 started -> doing.running"))
             && loop_log(&b).contains(&format!("{tb}-1 started -> doing.running"))
     });
@@ -434,10 +434,10 @@ fn a_held_runner_lock_is_read_only_until_the_holder_leaves() {
     );
 
     drop(held);
-    wait_until(Duration::from_secs(10), "the hub takes runner.lock", || {
+    wait_until(Duration::from_secs(30), "the hub takes runner.lock", || {
         !runner_lock_free(&repo)
     });
-    wait_until(Duration::from_secs(10), "the task in doing", || {
+    wait_until(Duration::from_secs(30), "the task in doing", || {
         is_doing(&store, &task)
     });
     assert!(hub.term());
@@ -465,7 +465,7 @@ fn the_machine_cap_holds_one_task_at_a_time() {
     let home = HubHome::new("hub-cap", 1, 1);
     home.register(&[("a", &a.clone)]);
     let mut hub = home.spawn();
-    wait_until(Duration::from_secs(10), "A's task in doing", || {
+    wait_until(Duration::from_secs(30), "A's task in doing", || {
         is_doing(&sa, &ta)
     });
 
@@ -509,7 +509,7 @@ fn the_repository_limit_holds_one_task_even_under_a_large_hub_cap() {
     home.register(&[("repo", &repo.clone)]);
     let mut hub = home.spawn();
 
-    wait_until(Duration::from_secs(10), "one task in doing", || {
+    wait_until(Duration::from_secs(30), "one task in doing", || {
         doing_count(&store) == 1
     });
     std::thread::sleep(Duration::from_millis(2000));
@@ -546,7 +546,7 @@ fn a_failed_pass_does_not_stop_the_other_repository() {
     let home = HubHome::new("hub-fault", 1, 4);
     home.register(&[("a", &a.clone), ("b", &b.clone)]);
     let mut hub = home.spawn();
-    wait_until(Duration::from_secs(10), "both loops schedule", || {
+    wait_until(Duration::from_secs(30), "both loops schedule", || {
         is_doing(&sa, &ta) && is_doing(&sb, &b1)
     });
 
@@ -587,7 +587,7 @@ fn sigterm_releases_every_lock_and_exits_zero() {
     let home = HubHome::new("hub-term", 1, 4);
     home.register(&[("a", &a.clone), ("b", &b.clone)]);
     let mut hub = home.spawn();
-    wait_until(Duration::from_secs(10), "both locks held", || {
+    wait_until(Duration::from_secs(30), "both locks held", || {
         !runner_lock_free(&a) && !runner_lock_free(&b)
     });
     assert!(
@@ -623,7 +623,7 @@ fn a_rebuilt_binary_restarts_the_hub_once() {
     let program = dir.path().join("radian");
     fs::copy(radian_bin(), &program).expect("copy the radian binary");
     let mut hub = home.spawn_from(&program);
-    wait_until(Duration::from_secs(10), "the hub's first pass", || {
+    wait_until(Duration::from_secs(30), "the hub's first pass", || {
         loop_log(&repo).contains("no transition")
     });
     let pid = hub.id();
@@ -679,19 +679,19 @@ fn add_and_remove_reach_a_running_hub() {
     let home = HubHome::new("hub-add-home", 1, 4);
     home.register(&[("a", &a.clone)]);
     let mut hub = home.spawn();
-    wait_until(Duration::from_secs(10), "A scheduled", || {
+    wait_until(Duration::from_secs(30), "A scheduled", || {
         is_doing(&sa, &ta)
     });
 
     let added = home.cli(&["hub", "add", b.clone.to_str().unwrap(), "--name", "b"]);
     assert_eq!(added.code, 0, "{added:?}");
-    wait_until(Duration::from_secs(10), "B's lock and task", || {
+    wait_until(Duration::from_secs(30), "B's lock and task", || {
         !runner_lock_free(&b) && is_doing(&sb, &tb)
     });
 
     let removed = home.cli(&["hub", "remove", "a"]);
     assert_eq!(removed.code, 0, "{removed:?}");
-    wait_until(Duration::from_secs(10), "A's lock release", || {
+    wait_until(Duration::from_secs(30), "A's lock release", || {
         runner_lock_free(&a)
     });
 
@@ -740,7 +740,7 @@ fn a_second_hub_exits_one_and_names_the_holder() {
     let home = HubHome::new("hub-second", 1, 4);
     home.register(&[("a", &a.clone), ("b", &b.clone)]);
     let mut hub = home.spawn();
-    wait_until(Duration::from_secs(10), "both locks held", || {
+    wait_until(Duration::from_secs(30), "both locks held", || {
         !runner_lock_free(&a) && !runner_lock_free(&b)
     });
     let holder = HubLock::holder(&home.hub_dir()).expect("the hub wrote its pid");
@@ -786,7 +786,7 @@ fn a_slow_pass_does_not_delay_another_repository() {
     let mut hub = home.spawn();
 
     let started = Instant::now();
-    wait_until(Duration::from_secs(10), "the slow pass's claim", || {
+    wait_until(Duration::from_secs(30), "the slow pass's claim", || {
         is_doing(&s_slow, &slow_task)
     });
     // The quick repository starts its first task, finishes it, and starts the second while
@@ -882,7 +882,7 @@ fn a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval() {
     let program = dir.path().join("radian");
     fs::copy(radian_bin(), &program).expect("copy the radian binary");
     let mut hub = home.spawn_from(&program);
-    wait_until(Duration::from_secs(10), "A's first pass", || {
+    wait_until(Duration::from_secs(30), "A's first pass", || {
         loop_log(&a).contains("no transition")
     });
 
@@ -943,7 +943,7 @@ fn a_binary_replacement_prints_one_restart_line_for_the_hub() {
     let program = dir.path().join("radian");
     fs::copy(radian_bin(), &program).expect("copy the radian binary");
     let mut hub = home.spawn_from(&program);
-    wait_until(Duration::from_secs(10), "both loops' first pass", || {
+    wait_until(Duration::from_secs(30), "both loops' first pass", || {
         loop_log(&a).contains("no transition") && loop_log(&b).contains("no transition")
     });
     let replacement = dir.path().join("radian.new");

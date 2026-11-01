@@ -967,7 +967,7 @@ impl Repo {
         if interval < radian_arc::run::MIN_INTERVAL_SECS {
             all.push(("RADIAN_HUB_INTERVAL_SECS", interval.to_string()));
         }
-        self.spawn_with_env(&["hub"], &all)
+        self.spawn_with_env(&["hub", "--port", "0"], &all)
     }
 
     /// [`Repo::spawn_hub`] in a process group of its own.
@@ -987,7 +987,7 @@ impl Repo {
         if interval < radian_arc::run::MIN_INTERVAL_SECS {
             all.push(("RADIAN_HUB_INTERVAL_SECS", interval.to_string()));
         }
-        self.spawn_in_own_group_with_env(&["hub"], &all)
+        self.spawn_in_own_group_with_env(&["hub", "--port", "0"], &all)
     }
 
     /// Like [`Repo::spawn`], in a process group of its own: a test can signal that group the
