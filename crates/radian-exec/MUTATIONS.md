@@ -788,3 +788,15 @@ and the page was restored from `.radian/cli.md.bak`, which `cmp` found identical
 |---|---|---|---|
 | TK0297-M2 | the `--type` row drops `reference` from its value list | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing value reference`) |
 | TK0297-M3 | the `--type` row's `(default `user`)` becomes `(default `feedback`)` | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing default user`) |
+
+## TK0299: the request latency anchor (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`. The mutation anchors a usage record
+on the record immediately before it again (`previous_ts`, the old rule) instead of on the
+record before the request. It was applied to `src/metrics.rs`, the named test was run with
+`cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'`, and the source was restored from `.radian/metrics.rs.bak`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M1 | `usage` reads `previous_ts` as its start, so the anchor is any previous record again | ✅ 1 failed (rc=100) | `metrics::tests::a_first_request_latency_runs_from_the_turn_start` (`left: 50`, `right: 3050`) |

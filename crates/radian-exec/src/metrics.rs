@@ -28,9 +28,14 @@
 //!   `ConfigChanged.change.model.provider`/`.model` switches it. An older exec snapshot that
 //!   predates `provider_id` carries only the adapter kind in `provider`, which is then the best
 //!   available answer.
-//! - `request_log`: one entry per request, with `latency_ms` from the previous journal
-//!   record's `ts` to the usage record's `ts`, cut at 500 entries
-//!   (`request_log_truncated` then says so).
+//! - `request_log`: one entry per request, with `latency_ms` from the anchor the request
+//!   was sent after to the usage record's `ts`, cut at 500 entries
+//!   (`request_log_truncated` then says so). The anchor is the turn's `TurnStarted` for its
+//!   first request and, for a later one, the last record written before it that is not part
+//!   of the response being timed: records of a response (its assistant `MessageAppended`,
+//!   its reasoning, its usage) never move it. So the value is the model's whole response
+//!   time, not the gap between two writes of one response; with no anchor in range it is
+//!   null.
 //!
 //! A counter no record reported is `None` ("not reported", never 0, ADR 0007 J1). `retries`
 //! counts the live `ModelRetrying` events of the folded range (ADR 0010: they are not journal
@@ -268,10 +273,24 @@ fn turn_of(data: Option<&Value>) -> Option<&str> {
     data.and_then(|d| d.get("turn_id")).and_then(|t| t.as_str())
 }
 
+/// Whether a `MessageAppended` body carries the assistant message a request produced
+/// (`{"assistant": ...}`), as opposed to a user input, a steer or a tool result.
+fn is_assistant_message(data: Option<&Value>) -> bool {
+    data.and_then(|d| d.get("message"))
+        .and_then(Value::as_object)
+        .is_some_and(|message| message.contains_key("assistant"))
+}
+
 struct Folder {
     metrics: RunMetrics,
     /// The `ts` of the record immediately before the current one.
     previous_ts: Option<String>,
+    /// Whether the current turn's first request is still unanswered, so its anchor is the
+    /// turn's `TurnStarted` (or none, when the folded range began mid-turn).
+    first_request: bool,
+    /// The `ts` of the last record written before the pending request, and not part of the
+    /// response being timed. Its event set is named in [`Folder::observe`].
+    request_anchor: Option<String>,
     /// `call_id -> tool name` from `ToolExecutionStarted`, so a settle is attributed.
     pending: HashMap<String, String>,
     /// Every call a `PermissionResolved` denied.
@@ -293,6 +312,8 @@ impl Folder {
         Self {
             metrics: empty(retries, context_window),
             previous_ts: None,
+            first_request: true,
+            request_anchor: None,
             pending: HashMap::new(),
             denied_calls: HashSet::new(),
             denied_counted: HashSet::new(),
@@ -334,6 +355,12 @@ impl Folder {
         let data = record.get("data");
         let ts = record.get("ts").and_then(Value::as_str);
         self.learn_route(record);
+        // The records of the response a request is waiting for: the assistant message the
+        // provider wrote and the usage record that follows it. They never move the anchor,
+        // so the latency of the request that produced them covers the whole response.
+        let response_record = event == "ModelUsageRecorded"
+            || event == "CompactionUsageRecorded"
+            || (event == "MessageAppended" && is_assistant_message(data));
         match event {
             "ToolExecutionStarted" => {
                 let call_id = data.and_then(|d| d.get("call_id")).and_then(Value::as_str);
@@ -402,6 +429,19 @@ impl Folder {
             "TurnFailed" => self.metrics.model_errors += 1,
             _ => {}
         }
+        if event == "TurnStarted" {
+            // The turn's start is the anchor of its first request; the input append that
+            // follows it belongs to the same moment and does not move it.
+            self.first_request = true;
+            self.request_anchor = ts.map(str::to_owned);
+        } else if !self.first_request && !response_record {
+            // Every other host record written after a response settles the previous one for
+            // the next request: a `ToolExecutionSettled`, the tool-result `MessageAppended`
+            // that follows it, a steer the host injected, a compaction's records
+            // (`CompactionUsageRecorded` excepted above), `TurnFinished`, and so on. The
+            // last one before the request is its anchor.
+            self.request_anchor = ts.map(str::to_owned);
+        }
         self.previous_ts = ts.map(str::to_owned);
     }
 
@@ -466,7 +506,7 @@ impl Folder {
             }
         }
         let latency_ms = match (
-            self.previous_ts.as_deref().and_then(parse_ts),
+            self.request_anchor.as_deref().and_then(parse_ts),
             ts.and_then(parse_ts),
         ) {
             (Some(start), Some(end)) => Some(((end - start).max(0) / 1_000) as u64),
@@ -487,6 +527,9 @@ impl Folder {
                 "model": self.route.as_ref().map(|(_, model)| model.clone()),
             }));
         }
+        // The turn's first request is answered (a chat or a compaction one): every later
+        // request of the turn anchors on the record before it, not on the turn start.
+        self.first_request = false;
     }
 
     fn finish(mut self) -> RunMetrics {
@@ -1179,5 +1222,353 @@ mod tests {
         ] {
             assert!(keys.contains(&key), "{key} is missing");
         }
+    }
+
+    /// An assistant `MessageAppended` body; the response's own records.
+    fn assistant(index: u64, ts: &str) -> Value {
+        record(
+            100 + index,
+            ts,
+            "MessageAppended",
+            json!({"index": index, "message": {"assistant": {"content": []}}}),
+        )
+    }
+
+    /// A tool-result `MessageAppended` body, written after its `ToolExecutionSettled`.
+    fn tool_message(seq: u64, ts: &str, call_id: &str) -> Value {
+        record(
+            seq,
+            ts,
+            "MessageAppended",
+            json!({"index": 9, "message": {"tool": {
+                "result": {"call_id": call_id, "content": []},
+            }}}),
+        )
+    }
+
+    /// Edge 1: the first request of a turn anchors on its `TurnStarted`, not on the
+    /// assistant message the same response wrote just before its usage record.
+    #[test]
+    fn a_first_request_latency_runs_from_the_turn_start() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            assistant(0, "2026-10-31T00:00:03Z"),
+            record(
+                3,
+                "2026-10-31T00:00:03.050000Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10, "output": 1}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log[0]["latency_ms"], 3050);
+    }
+
+    /// Edge 2: a later request anchors on the record that settled the previous response's
+    /// tool call, so the latency is the model's whole response time and not the 100 ms gap
+    /// between the assistant message and its usage record.
+    #[test]
+    fn a_later_request_latency_runs_from_the_last_tool_settle() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            record(
+                3,
+                "2026-10-31T00:00:01Z",
+                "MessageAppended",
+                json!({"index": 1, "message": {"assistant": {
+                    "content": [],
+                    "tool_calls": [{"id": "c1", "name": "shell", "arguments": {}}],
+                }}}),
+            ),
+            record(
+                4,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:02Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:00:10Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(7, "2026-10-31T00:00:10Z", "c1"),
+            assistant(2, "2026-10-31T00:00:14.900000Z"),
+            record(
+                9,
+                "2026-10-31T00:00:15Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log.len(), 2);
+        assert_eq!(metrics.request_log[1]["latency_ms"], 5000);
+    }
+
+    /// Edge 3: a response with several tool calls anchors on the last settle of the batch.
+    #[test]
+    fn a_batchs_anchor_is_its_last_tool_settle() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:01Z"),
+            record(
+                4,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:02Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:00:02Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c2", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                7,
+                "2026-10-31T00:00:02Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c3", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                8,
+                "2026-10-31T00:00:10Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(9, "2026-10-31T00:00:10Z", "c1"),
+            record(
+                10,
+                "2026-10-31T00:00:11Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c2", "result": {"call_id": "c2", "content": []}}),
+            ),
+            tool_message(11, "2026-10-31T00:00:11Z", "c2"),
+            record(
+                12,
+                "2026-10-31T00:00:12Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c3", "result": {"call_id": "c3", "content": []}}),
+            ),
+            tool_message(13, "2026-10-31T00:00:12Z", "c3"),
+            assistant(2, "2026-10-31T00:00:19.900000Z"),
+            record(
+                15,
+                "2026-10-31T00:00:20Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(
+            metrics.request_log[1]["latency_ms"], 8000,
+            "the anchor is the 12 s settle, not the 10 s one"
+        );
+    }
+
+    /// Edge 4: a compaction request between two chat requests anchors on the last record
+    /// written before it, and the chat request after the compaction anchors on the
+    /// compaction's own records rather than on the assistant message it produced.
+    #[test]
+    fn a_compaction_request_anchors_on_the_record_before_it() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:01Z"),
+            record(
+                4,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:01.100000Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:00:02Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(7, "2026-10-31T00:00:02Z", "c1"),
+            record(
+                8,
+                "2026-10-31T00:00:05Z",
+                "CompactionUsageRecorded",
+                json!({"revision": 1, "usage": {"input": 50}}),
+            ),
+            record(
+                9,
+                "2026-10-31T00:00:06Z",
+                "ContextCompacted",
+                json!({"revision": 1}),
+            ),
+            assistant(2, "2026-10-31T00:00:10Z"),
+            record(
+                11,
+                "2026-10-31T00:00:10.200000Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 60}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log[1]["kind"], "compaction");
+        assert_eq!(
+            metrics.request_log[1]["latency_ms"], 3000,
+            "the compaction request anchors on the 2 s tool settle"
+        );
+        assert_eq!(metrics.request_log[2]["kind"], "chat");
+        assert_eq!(
+            metrics.request_log[2]["latency_ms"], 4200,
+            "the chat request after the compaction anchors on its 6 s commit"
+        );
+    }
+
+    /// Edge 5: a range with no `TurnStarted` has no anchor for its first request, so its
+    /// latency is null; later requests are measured from the records after it.
+    #[test]
+    fn a_journal_without_a_turn_start_measures_only_later_requests() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:01Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:03Z"),
+            record(
+                3,
+                "2026-10-31T00:00:03.050000Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                4,
+                "2026-10-31T00:00:03.100000Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:10Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(6, "2026-10-31T00:00:10Z", "c1"),
+            assistant(2, "2026-10-31T00:00:14.900000Z"),
+            record(
+                8,
+                "2026-10-31T00:00:15Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log[0]["latency_ms"], Value::Null);
+        assert_eq!(metrics.request_log[1]["latency_ms"], 5000);
+    }
+
+    /// Edge 6: a retried request writes nothing for its failed attempts (ADR 0010: the
+    /// `ModelRetrying` notices are live events), so its latency runs from the record before
+    /// the first attempt through the backoff and the failed attempts to the successful
+    /// response's usage record. The wrong (old) anchor would report 0 ms here.
+    #[test]
+    fn a_retried_request_spans_the_retries_and_the_failed_attempts() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            record(
+                2,
+                "2026-10-31T00:00:00Z",
+                "MessageAppended",
+                json!({"index": 0, "message": {"user": {"content": []}}}),
+            ),
+            assistant(1, "2026-10-31T00:00:01Z"),
+            record(
+                4,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:01.100000Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:00:10Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(7, "2026-10-31T00:00:10Z", "c1"),
+            // The next request fails twice before it succeeds; only its success is written.
+            assistant(2, "2026-10-31T00:00:25Z"),
+            record(
+                9,
+                "2026-10-31T00:00:25Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 20}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log[1]["latency_ms"], 15000);
     }
 }
