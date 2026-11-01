@@ -582,9 +582,9 @@ fn plan_verification_with(
 }
 
 /// A digest of what a verification depends on: `config.toml`, the task's `head_sha`,
-/// `base_sha`, extra stages and `allow_noop`, and the remote `work/<task>` sha. Two runs with
-/// the same digest would refuse for the same reason, so a pass does not start their gate
-/// again (ADR 0048 decision 10).
+/// `base_sha`, extra stages, `allow_noop` and `review_fix_level`, and the remote `work/<task>`
+/// sha. Two runs with the same digest would refuse for the same reason, so a pass does not
+/// start their gate again (ADR 0048 decision 10).
 fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) -> String {
     let config = fs::read(store.root().join(crate::store::CONFIG_FILE)).unwrap_or_default();
     let fields = json!({
@@ -592,6 +592,7 @@ fn verification_inputs(store: &Store, task: &model::TaskFile, remote_sha: &str) 
         "base": task.base_sha,
         "extra": task.extra_stages,
         "allow_noop": task.allow_noop,
+        "review_fix_level": task.review_fix_level,
     });
     let mut hasher = sha2::Sha256::new();
     hasher.update(&config);
@@ -868,7 +869,12 @@ fn run_stage(
             let settings = ReviewSettings {
                 round: if first { "first" } else { "rework" }.to_owned(),
                 reviewer: reviewer_name.to_owned(),
-                fix_level: reviewer.fix_level.clone(),
+                // The task's own level replaces the reviewer's, so one task can ask for
+                // `minor` and another be held to `critical` (ADR 0048 decision 10).
+                fix_level: task
+                    .review_fix_level
+                    .clone()
+                    .unwrap_or_else(|| reviewer.fix_level.clone()),
                 exec_args: choice.exec_args_key.clone(),
                 timeout_secs: choice.timeout_secs,
                 timeout: choice.timeout_key.clone(),

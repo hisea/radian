@@ -857,6 +857,10 @@ enum ArcAddCommand {
         /// of config.toml. Default: default.
         #[arg(long, value_name = "NAME")]
         flow: Option<String>,
+        /// The task's own level a finding must reach to fail its review rounds, in place of
+        /// the fix_level of the reviewer its gate profile names: critical, major or minor.
+        #[arg(long = "review-fix-level", value_name = "LEVEL")]
+        review_fix_level: Option<String>,
     },
 }
 
@@ -880,6 +884,7 @@ impl ArcCommand {
                         allow_noop,
                         stages,
                         flow,
+                        review_fix_level,
                     },
             } => ArcRun::AddTask {
                 plan,
@@ -889,6 +894,7 @@ impl ArcCommand {
                 allow_noop,
                 stages,
                 flow,
+                review_fix_level,
             },
             ArcCommand::List { plan, all, json } => ArcRun::List { plan, all, json },
             ArcCommand::Show { id, json } => ArcRun::Show { id, json },
@@ -3513,6 +3519,7 @@ mod tests {
             auto_rework: 2,
             retry_count: 1,
             allow_noop: Some(false),
+            review_fix_level: Some("minor".to_owned()),
             followup_pending: true,
             pending_hooks: vec!["after_merge".to_owned()],
             pending_hook_states: vec!["after_merge=done.merged".to_owned()],

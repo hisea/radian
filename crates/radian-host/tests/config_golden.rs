@@ -323,34 +323,58 @@ fn edge_cases() -> Vec<(String, String)> {
             "skills.disabled.not_array",
             "schema_version = 1\n[skills]\ndisabled = \"a\"\n",
         ),
-        // ---- memory ----
+        // ---- memory (ADR 0021 D6) ----
         (
             "memory.section_not_a_table",
             "schema_version = 1\nmemory = 3\n",
         ),
         (
-            "memory.injection.not_a_table",
-            "schema_version = 1\n[memory]\ninjection = 3\n",
+            "memory.enabled.false",
+            "schema_version = 1\n[memory]\nenabled = false\n",
         ),
         (
-            "memory.injection.additions.false",
-            "schema_version = 1\n[memory.injection]\nadditions = false\n",
+            "memory.enabled.wrong_type",
+            "schema_version = 1\n[memory]\nenabled = 3\n",
         ),
         (
-            "memory.injection.additions.wrong_type",
-            "schema_version = 1\n[memory.injection]\nadditions = 3\n",
+            "memory.scopes.ok",
+            "schema_version = 1\n[memory]\nscopes = [\"global\"]\n",
         ),
         (
-            "memory.injection.addition_budget.ok",
-            "schema_version = 1\n[memory.injection]\naddition_budget = 750\n",
+            "memory.scopes.unknown",
+            "schema_version = 1\n[memory]\nscopes = [\"session\"]\n",
         ),
         (
-            "memory.injection.addition_budget.zero",
-            "schema_version = 1\n[memory.injection]\naddition_budget = 0\n",
+            "memory.scopes.wrong_type",
+            "schema_version = 1\n[memory]\nscopes = \"project\"\n",
         ),
         (
-            "memory.injection.addition_budget.wrong_type",
-            "schema_version = 1\n[memory.injection]\naddition_budget = \"x\"\n",
+            "memory.index_max_lines.ok",
+            "schema_version = 1\n[memory]\nindex_max_lines = 10\n",
+        ),
+        (
+            "memory.index_max_lines.zero",
+            "schema_version = 1\n[memory]\nindex_max_lines = 0\n",
+        ),
+        (
+            "memory.index_max_lines.wrong_type",
+            "schema_version = 1\n[memory]\nindex_max_lines = \"x\"\n",
+        ),
+        (
+            "memory.index_max_bytes.ok",
+            "schema_version = 1\n[memory]\nindex_max_bytes = 1024\n",
+        ),
+        (
+            "memory.index_max_bytes.zero",
+            "schema_version = 1\n[memory]\nindex_max_bytes = 0\n",
+        ),
+        (
+            "memory.index_max_bytes.wrong_type",
+            "schema_version = 1\n[memory]\nindex_max_bytes = \"x\"\n",
+        ),
+        (
+            "memory.retired_injection",
+            "schema_version = 1\n[memory.injection]\nmax_tokens = 1000\nglobal_budget = 500\n",
         ),
         // ---- hooks (ADR 0045 slice A) ----
         (

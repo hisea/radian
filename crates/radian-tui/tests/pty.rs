@@ -5391,7 +5391,7 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
             let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
             notice.contains("[memory]")
                 && notice.contains("no project linked")
-                && notice.contains("injection on, up to 2000 tokens")
+                && notice.contains("index caps 200 lines / 25600 bytes")
         }),
         "the memory startup notice is missing:\n{}",
         pty.screen()
@@ -5463,13 +5463,20 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0021 D7: `/memory` commands run in the TUI without a model request, and the record
-/// they create is injected into the next request's system prompt.
+/// ADR 0021 D6/D7: `/memory` commands run in the TUI without a model request, and the
+/// file store's global index is injected into the next request's system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_memory_commands_run_without_a_model_request() {
     let dir = TempDir::new("memory-commands");
+    let home = dir.path().join("radian");
+    std::fs::create_dir_all(home.join("memory/global")).unwrap();
+    std::fs::write(
+        home.join("memory/global/MEMORY.md"),
+        "- [hello](hello.md) — hello world from the index\n",
+    )
+    .unwrap();
     let server = MockServer::start(vec![text_reply("REPLY-AFTER-MEMORY")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -5480,6 +5487,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
             "--session-id",
             "memcmd",
         ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
         30,
         110,
     );
@@ -5524,7 +5532,10 @@ async fn pty_memory_commands_run_without_a_model_request() {
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    assert!(system.contains("hello world"), "system prompt: {system}");
+    assert!(
+        system.contains("hello world from the index"),
+        "system prompt: {system}"
+    );
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));

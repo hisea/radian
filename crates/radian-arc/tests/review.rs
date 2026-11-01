@@ -19,7 +19,7 @@ use radian_arc::review;
 use radian_arc::store::attempt_ops::{self, Class, Finish};
 use radian_arc::store::config::IntegrationStyle;
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Exit, FollowupTask, Store, plan_ops};
+use radian_arc::store::{Exit, FollowupTask, Store, cli, plan_ops};
 use serde_json::{Value, json};
 
 // ---- store-level fixture -------------------------------------------------------------
@@ -320,6 +320,16 @@ impl Fixture {
                 "fix_level = \"{level}\"           # `critical`, `major` or `minor`; a finding at or above it fails the round"
             ),
         );
+    }
+
+    /// Sets the task file's own `review_fix_level`.
+    fn task_review_fix_level(&self, level: &str) {
+        self.store
+            .change_task(&self.task, |task| {
+                task.review_fix_level = Some(level.to_owned());
+                Ok(())
+            })
+            .expect("the task takes its own review fix level");
     }
 
     fn add_worktree(&self) -> PathBuf {
@@ -4501,8 +4511,33 @@ fn write_passing_review_at(
     head: &str,
     report: ReviewReport,
 ) {
+    write_passing_review_with_at(fixture, task, attempt, head, report, None);
+}
+
+/// [`write_passing_review_at`] with the `review_settings` the round recorded.
+fn write_passing_review_with_at(
+    fixture: &Fixture,
+    task: &str,
+    attempt: &str,
+    head: &str,
+    report: ReviewReport,
+    settings: Option<ReviewSettings>,
+) {
     let path =
         verdict_path(fixture.store.repo(), task, attempt, Stage::Review).expect("the verdict path");
+    review_verdict_at(fixture, head, Some(report), settings)
+        .write_new(&path)
+        .expect("the review verdict is written once");
+}
+
+/// A passing review verdict for `head`, with the report and settings the test gives it, not
+/// yet written.
+fn review_verdict_at(
+    fixture: &Fixture,
+    head: &str,
+    report: Option<ReviewReport>,
+    settings: Option<ReviewSettings>,
+) -> Verdict {
     let at = "2026-01-01T00:00:00.000000Z".to_owned();
     Verdict {
         schema_version: VERDICT_SCHEMA_VERSION,
@@ -4518,17 +4553,34 @@ fn write_passing_review_at(
         candidate_sha: Some(head.to_owned()),
         conflict_paths: Vec::new(),
         approver: None,
-        review: Some(report),
+        review: report,
         review_session_ids: vec!["hand-written".to_owned()],
         review_cost_micros: None,
         review_model_error: None,
         review_pre_existing: None,
-        review_settings: None,
+        review_settings: settings,
         profile: Some("default".to_owned()),
         integration_style: None,
     }
-    .write_new(&path)
-    .expect("the review verdict is written once");
+}
+
+/// Writes an old-shape review verdict for one attempt: `review` is the verdict's
+/// `blocking` / `suggestions` / `verified` object, exactly as a build before findings wrote it.
+fn write_old_shape_review_at(fixture: &Fixture, attempt: &str, head: &str, review: Value) {
+    let path = verdict_path(fixture.store.repo(), &fixture.task, attempt, Stage::Review)
+        .expect("the verdict path");
+    let mut value = serde_json::to_value(review_verdict_at(fixture, head, None, None))
+        .expect("the verdict serializes");
+    value["review"] = review;
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the verdict directory");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("the verdict serializes")
+        ),
+    )
+    .expect("the old-shape verdict is written");
 }
 
 /// The `review.json` path of one attempt of a task.
@@ -6522,6 +6574,295 @@ fn a_followup_holds_every_round_grouped_and_drops_a_repeat() {
     }
 }
 
+/// An old-shape round and a new-shape round become one list: a finding both rounds reported is
+/// kept once, as the newest copy, and a different summary at the same `file:line` stays its own
+/// item. Mutation: `followup_item_key` ignores `summary` → the two same-place items collapse
+/// and the count and the round-2 position assertions fail.
+#[test]
+fn an_old_shape_round_and_a_new_round_merge_into_one_list() {
+    let fixture = Fixture::new("followup-old-and-new");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.set_verifying(&first);
+    write_old_shape_review_at(
+        &fixture,
+        &format!("{}-1", fixture.task),
+        &first,
+        json!({
+            "summary": "the change adds feature.txt",
+            "blocking": [],
+            "suggestions": [
+                {"level": "minor", "file": "feature.txt", "line": 1, "text": "the repeated nit"},
+                {"level": "minor", "file": "feature.txt", "line": 1, "text": "a note only round one reported"}
+            ],
+            "verified": []
+        }),
+    );
+    assert_eq!(
+        review::verify(&fixture.store, &fixture.task)
+            .expect("the first round runs")
+            .phase,
+        "awaiting_human"
+    );
+
+    fixture.rework(&first, "two.txt", "two\n");
+    let fake = FakeReview::new(
+        "followup-old-and-new-second",
+        &[findings_message(
+            "the rework adds two.txt",
+            &[
+                finding_json("minor", "feature.txt", 1, "the repeated nit", ""),
+                finding_json("minor", "two.txt", 1, "a new item", ""),
+            ],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with("- ")).count(),
+        3,
+        "the same-place items are not one:\n{body}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| **line == "- [minor] feature.txt:1 the repeated nit")
+            .count(),
+        1,
+        "the repeated item is carried once:\n{body}"
+    );
+    assert!(
+        body.contains("- [minor] feature.txt:1 a note only round one reported"),
+        "{body}"
+    );
+    assert!(body.contains("- [minor] two.txt:1 a new item"), "{body}");
+    let header = lines
+        .iter()
+        .position(|line| *line == "From review 2 (attempt 2):")
+        .expect("round 2's header");
+    let repeated = lines
+        .iter()
+        .position(|line| *line == "- [minor] feature.txt:1 the repeated nit")
+        .expect("the repeated item");
+    assert!(
+        header < repeated,
+        "the newest copy is not under round 2:\n{body}"
+    );
+}
+
+/// A `major` that failed a round was fixed before the merge, so it is not collected. Mutation:
+/// `ReviewReport::rest_with` drops the `below fix_level` test → this finding is collected and
+/// the merge proposes a follow-up.
+#[test]
+fn a_major_that_failed_a_round_and_was_fixed_is_not_collected() {
+    let fixture = Fixture::new("followup-fixed-major");
+    fixture.add_review_stage();
+    let first = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    let first_fake = FakeReview::new(
+        "followup-fixed-major-first",
+        &[findings_message(
+            "the change adds feature.txt",
+            &[finding_json(
+                "major",
+                "feature.txt",
+                1,
+                "the first line is wrong",
+                "",
+            )],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    fixture.rework(&first, "two.txt", "two\n");
+    let second_fake = FakeReview::new(
+        "followup-fixed-major-second",
+        &[findings_message(
+            "the rework adds two.txt and fixes the first line",
+            &[],
+        )],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(second_fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    assert!(
+        merged.followup.is_none(),
+        "a fixed finding was carried: {merged:?}"
+    );
+}
+
+/// A `major` demoted to `pre_existing` is collected at `major`, not lowered to `minor`.
+#[test]
+fn a_demoted_major_is_collected_at_major() {
+    let fixture = Fixture::new("followup-demoted-major");
+    fixture.add_review_stage();
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "feature.txt",
+        vec![Finding {
+            pre_existing: true,
+            ..graded("major", "old.txt", 30, "this line is still wrong")
+        }],
+    );
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [major] old.txt:30 this line is still wrong"),
+        "{body}"
+    );
+}
+
+/// A round recorded with `fix_level = minor` has nothing below it: only its `pre_existing`
+/// findings are collected, not a `minor` at the level that would have failed it.
+#[test]
+fn a_minor_fix_level_collects_only_pre_existing_findings() {
+    let fixture = Fixture::new("followup-fix-level-minor");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.set_verifying(&head);
+    let report = ReviewReport {
+        summary: "the change adds feature.txt".to_owned(),
+        findings: vec![
+            graded("minor", "one.txt", 1, "a minor at the level"),
+            Finding {
+                pre_existing: true,
+                ..graded("minor", "two.txt", 2, "a minor that was always there")
+            },
+        ],
+        verified: Vec::new(),
+        old_blocking: None,
+    };
+    write_passing_review_with_at(
+        &fixture,
+        &fixture.task,
+        &fixture.attempt_label(),
+        &head,
+        report,
+        Some(ReviewSettings {
+            round: "first".to_owned(),
+            reviewer: "default".to_owned(),
+            fix_level: "minor".to_owned(),
+            exec_args: "worker.exec_args".to_owned(),
+            timeout_secs: 900,
+            timeout: "gate.reviewers.default.timeout_secs".to_owned(),
+        }),
+    );
+    assert_eq!(
+        review::verify(&fixture.store, &fixture.task)
+            .expect("the review runs")
+            .phase,
+        "awaiting_human"
+    );
+
+    let merged = review::merge(&fixture.store, &fixture.task).expect("the merge runs");
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [minor] two.txt:2 a minor that was always there"),
+        "the pre-existing minor is not carried:\n{body}"
+    );
+    assert!(
+        !body.contains("a minor at the level"),
+        "a finding at `fix_level = minor` was collected:\n{body}"
+    );
+}
+
+/// A verdict that recorded no `fix_level` reads `major`: its `minor` findings are collected and
+/// a `major` that is not `pre_existing` is not.
+#[test]
+fn a_round_without_a_fix_level_reads_major() {
+    let fixture = Fixture::new("followup-default-major");
+    fixture.add_review_stage();
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "feature.txt",
+        vec![
+            graded("minor", "one.txt", 1, "a small nit"),
+            graded("major", "two.txt", 2, "a large thing"),
+        ],
+    );
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(body.contains("- [minor] one.txt:1 a small nit"), "{body}");
+    assert!(
+        !body.contains("a large thing"),
+        "a finding at the default major threshold was collected:\n{body}"
+    );
+}
+
+/// The follow-up's line carries the trigger only when the finding has one. Mutation: the line
+/// always writes ` — {trigger}` → the plain item ends in a bare ` — `.
+#[test]
+fn the_followup_line_carries_the_trigger_only_when_it_is_set() {
+    let fixture = Fixture::new("followup-trigger");
+    fixture.add_review_stage();
+    let merged = merge_with_suggestions(
+        &fixture,
+        &fixture.task,
+        "feature.txt",
+        vec![
+            Finding {
+                trigger: "the input that shows it".to_owned(),
+                ..graded("minor", "one.txt", 1, "a triggered item")
+            },
+            graded("minor", "one.txt", 2, "a plain item"),
+        ],
+    );
+    let followup = merged.followup.expect("a follow-up task").task;
+    let body = fixture
+        .store
+        .load_task(&followup)
+        .expect("the task")
+        .item
+        .body;
+    assert!(
+        body.contains("- [minor] one.txt:1 a triggered item — the input that shows it"),
+        "{body}"
+    );
+    assert!(body.contains("- [minor] one.txt:2 a plain item"), "{body}");
+    assert!(
+        !body.contains("a plain item —"),
+        "the empty trigger left a ` — ` part:\n{body}"
+    );
+}
+
 /// A round that only had blocking items carries nothing, and an earlier round's suggestion is
 /// still carried when that blocking-only round is the newest.
 ///
@@ -7877,6 +8218,117 @@ fn a_minor_finding_at_the_fix_level_fails_with_review_findings() {
         "{}",
         stored.body
     );
+}
+
+/// A task's own `review_fix_level` replaces the reviewer's: the reviewer's `major` would pass
+/// this `minor` finding, and the task's `minor` fails it. The verdict records the effective
+/// value (ADR 0048 decision 10).
+#[test]
+fn a_tasks_review_fix_level_replaces_the_reviewers() {
+    let fixture = Fixture::new("findings-task-fix-level");
+    fixture.add_review_stage();
+    fixture.task_review_fix_level("minor");
+    fixture.set_auto("merge");
+    let head = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let fake = FakeReview::new(
+        "findings-task-fix-level-fake",
+        &[findings_message(
+            "the change adds one.txt",
+            &[finding_json("minor", "one.txt", 1, "a naming nit", "")],
+        )],
+        0,
+    );
+
+    let verified = fixture.verifying_with_review(&head, fake.program());
+    assert_eq!(
+        (verified.state, verified.phase.as_str()),
+        ("todo", "ready"),
+        "{verified:?}"
+    );
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.reason.as_deref(), Some("review_findings"));
+    assert_eq!(
+        verdict
+            .review_settings
+            .as_ref()
+            .expect("the settings")
+            .fix_level,
+        "minor",
+        "the verdict records the effective level"
+    );
+}
+
+/// A task without `review_fix_level` uses its reviewer's: `show` prints that value and names
+/// the reviewer as its source (ADR 0048 decision 10).
+#[test]
+fn a_task_without_review_fix_level_shows_the_reviewers_value() {
+    let fixture = Fixture::new("fix-level-show-reviewer");
+    fixture.add_review_stage();
+    fixture.review_fix_level("critical");
+
+    let shown = cli::show_json(&fixture.store, &fixture.task).expect("show");
+    assert_eq!(shown["review_fix_level"], json!("critical"), "{shown}");
+    assert_eq!(
+        shown["review_fix_level_source"],
+        json!("reviewer"),
+        "{shown}"
+    );
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(text.contains("review_fix_level: critical"), "{text}");
+    assert!(text.contains("review_fix_level_source: reviewer"), "{text}");
+}
+
+/// `show --json` carries the task's own level and `task` as its source (ADR 0048 decision 10).
+#[test]
+fn show_json_carries_the_review_fix_level_and_its_source() {
+    let fixture = Fixture::new("fix-level-show-task");
+    fixture.add_review_stage();
+    fixture.task_review_fix_level("critical");
+
+    let shown = cli::show_json(&fixture.store, &fixture.task).expect("show");
+    assert_eq!(shown["review_fix_level"], json!("critical"), "{shown}");
+    assert_eq!(shown["review_fix_level_source"], json!("task"), "{shown}");
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(text.contains("review_fix_level: critical"), "{text}");
+    assert!(text.contains("review_fix_level_source: task"), "{text}");
+}
+
+/// The manual names the task field, the values it may hold, its fallback and both sources of
+/// the effective level, from the one lists the code reads (ADR 0048 decisions 10 and 15).
+#[test]
+fn the_manual_names_the_review_fix_level_field_and_its_sources() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let files = std::fs::read_to_string(manifest.join("../../docs/user/arc/files.md"))
+        .expect("docs/user/arc/files.md");
+    let task_fields = radian_coding::drift::table_under(&files, "arc/files.md", "### Task fields");
+    let row = task_fields
+        .iter()
+        .find(|row| row.first().is_some_and(|cell| cell == "`review_fix_level`"))
+        .unwrap_or_else(|| {
+            panic!("the task fields table has no `review_fix_level` row: {task_fields:?}")
+        });
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            row.iter().any(|cell| cell.contains(level)),
+            "the task field's row names `{level}`: {row:?}"
+        );
+    }
+    assert!(
+        row.iter().any(|cell| cell.contains("reviewer")),
+        "the task field's row names the reviewer it falls back to: {row:?}"
+    );
+    let planning = std::fs::read_to_string(manifest.join("../../docs/user/arc/planning.md"))
+        .expect("docs/user/arc/planning.md");
+    let source_line = planning
+        .lines()
+        .find(|line| line.contains("`review_fix_level_source` is"))
+        .expect("arc/planning.md explains `review_fix_level_source`");
+    for source in radian_arc::store::model::FIX_LEVEL_SOURCES {
+        assert!(
+            source_line.contains(&format!("`{source}`")),
+            "arc/planning.md names the source `{source}`: {source_line}"
+        );
+    }
 }
 
 /// A `major` finding outside the change's lines in a rework round is marked `pre_existing`,

@@ -68,9 +68,8 @@ follows on demand, not for always-on directions.
 ## Memory in one example
 
 Type `/memory add The deploy needs the vpn profile "office".` The record
-persists across sessions. Later turns find it with `/memory search vpn`
-or through the `memory_search` tool. Use memory for facts, use context files
-for directions.
+persists across sessions. Later turns find it with `/memory search vpn`.
+Use memory for facts, use context files for directions.
 
 ## MCP server in one example
 

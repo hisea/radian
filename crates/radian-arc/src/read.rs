@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{Stage, Verdict};
+use super::gate::{Finding, Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -99,6 +99,9 @@ pub struct AttemptVerdict {
     pub passed: bool,
     /// The failure reason: `command_failed`, `timeout`, `conflict`, an owner's note.
     pub reason: Option<String>,
+    /// A `review` verdict's findings, highest severity first; empty for another stage or a
+    /// verdict without a report. An old-shape verdict reads through the same mapping.
+    pub findings: Vec<Finding>,
 }
 
 /// How one stage of the merge page stands (ADR 0048 §6, §10).
@@ -351,6 +354,11 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
                 stage: verdict.stage.as_str(),
                 passed: verdict.is_pass(),
                 reason: verdict.reason.clone(),
+                findings: verdict
+                    .review
+                    .as_ref()
+                    .map(|report| report.sorted_by_severity().into_iter().cloned().collect())
+                    .unwrap_or_default(),
             });
         }
         verdicts.sort_by_key(|verdict| {

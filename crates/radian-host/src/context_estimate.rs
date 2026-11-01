@@ -54,7 +54,7 @@ pub struct Details {
     pub mcp_servers: usize,
     pub mcp_tools_count: usize,
     pub mcp_tools_tokens: u64,
-    /// Memory records in the fixed block and the block's tokens.
+    /// Memory index files in the injected section and the section's tokens.
     pub memory_records: usize,
     pub memory_tokens: u64,
 }
@@ -206,7 +206,7 @@ pub struct SystemSplit {
     pub base: String,
     /// The `<project_instructions>` section (ADR 0036).
     pub context_files: String,
-    /// The fixed memory block (ADR 0021).
+    /// The injected memory index section (ADR 0021 D6).
     pub memory: String,
 }
 
@@ -232,7 +232,7 @@ pub struct EstimateInput<'a> {
     /// MCP server ids, to tell MCP tools (`<server>__<tool>`) apart from
     /// built-in ones (the inspector's rule).
     pub mcp_server_ids: &'a [String],
-    /// How many memory records the fixed block carries.
+    /// How many memory index files the section carries.
     pub memory_records: usize,
     pub bytes_per_token: u32,
     pub count_reasoning: bool,

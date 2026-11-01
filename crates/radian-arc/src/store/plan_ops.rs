@@ -16,8 +16,8 @@
 //!   record to a confirmed one. A change record returns the plan to `draft` with `auto`
 //!   `off`, and the tasks keep their state.
 //! - `update_task` replaces a `todo` task's title or original brief, its `after` list,
-//!   `allow_noop` or `extra_stages`, keeps the phase, and appends one line to the task's
-//!   `## Changes` section (ADR 0048 decision 11).
+//!   `allow_noop`, `extra_stages` or `review_fix_level`, keeps the phase, and appends one line
+//!   to the task's `## Changes` section (ADR 0048 decisions 10 and 11).
 //! - `add_rework` appends a rework brief to a task in `review` and returns it to
 //!   `todo.ready`.
 
@@ -356,11 +356,15 @@ pub fn update_task(
         allow_noop,
         extra_stages,
         None,
+        None,
     )
 }
 
-/// [`update_task`] with the task's `flow` (ADR 0048 decision 15). A flow changes only while
-/// the task has had no attempt; after that, a new task is the way to run a different worker.
+/// [`update_task`] with the task's `flow` and its own `review_fix_level` (ADR 0048 decisions
+/// 10 and 15). A flow changes only while the task has had no attempt; after that, a new task is
+/// the way to run a different worker. `review_fix_level` is `None` to keep the stored value,
+/// `Some(None)` to clear the field so the reviewer's level applies again, and `Some(Some(level))`
+/// to set it.
 #[allow(clippy::too_many_arguments)]
 pub fn update_task_with_flow(
     store: &Store,
@@ -371,6 +375,7 @@ pub fn update_task_with_flow(
     allow_noop: Option<bool>,
     extra_stages: Option<Vec<String>>,
     flow: Option<&str>,
+    review_fix_level: Option<Option<&str>>,
 ) -> Result<(), Error> {
     if title.is_none()
         && brief.is_none()
@@ -378,10 +383,11 @@ pub fn update_task_with_flow(
         && allow_noop.is_none()
         && extra_stages.is_none()
         && flow.is_none()
+        && review_fix_level.is_none()
     {
         return Err(Error::Usage(
             "nothing to update: give a title, a brief, an after list, allow_noop, \
-             extra_stages or flow"
+             extra_stages, flow or review_fix_level"
                 .to_owned(),
         ));
     }
@@ -395,6 +401,9 @@ pub fn update_task_with_flow(
     }
     if let Some(stages) = &extra_stages {
         check_stages(stages)?;
+    }
+    if let Some(Some(level)) = review_fix_level {
+        super::check_fix_level(level)?;
     }
     check_flow(store, flow)?;
     // A cancelled plan is final: its tasks take no change either. The one question every
@@ -456,6 +465,10 @@ pub fn update_task_with_flow(
                 task_file.flow = Some(flow.to_owned());
                 changed.push("flow");
             }
+        }
+        if let Some(level) = review_fix_level {
+            task_file.review_fix_level = level.map(str::to_owned);
+            changed.push("review_fix_level");
         }
         append_task_change(&mut task_file.body, &now, &changed);
         Ok(())

@@ -324,7 +324,7 @@ counted in `unhandled_stop_notices` (see [`cli`](cli.md)).
 ## The matcher
 
 The matcher filters by Radian tool name: `shell`, `write`, `patch`,
-`read`, `grep`, `glob`, `job`, `memory_search`, `ask_user`, `skill`,
+`read`, `grep`, `glob`, `job`, `ask_user`, `skill`,
 `subagent`, and the MCP tools as `server__tool`. The pattern is
 case-sensitive. `*`, a blank string, or a missing matcher matches every
 tool. Any other value is a regular expression anchored to the whole tool

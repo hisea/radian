@@ -43,7 +43,7 @@ pub const HELP: &str = "\
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
-/memory <command>     durable memory: list, search, show, add, edit, archive, restore,
+/memory <command>     durable memory: list, search, show, stale, add, edit, archive, restore,
                       forget, purge, confirm, export, import, project, relink, split, merge
 /skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
@@ -508,9 +508,9 @@ fn logout_level(typed: &[&str], partial: &str) -> Level {
 }
 
 /// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
-const MEMORY_DESCRIPTION: &str = "durable memory: list, search, show, add, edit, archive, \
-                                  restore, forget, purge, confirm, export, import, project, \
-                                  relink, split, merge";
+const MEMORY_DESCRIPTION: &str = "durable memory: list, search, show, stale, add, edit, \
+                                  archive, restore, forget, purge, confirm, export, import, \
+                                  project, relink, split, merge";
 
 /// The `/memory` subcommands and a one-line description each. The list is the authority for
 /// completion; `the_memory_subcommand_table_matches_the_grammar` fails if it drifts from the
@@ -519,6 +519,7 @@ const MEMORY_SUBCOMMANDS: &[(&str, &str)] = &[
     ("list", "list records (Project then Global)"),
     ("search", "search records by keyword"),
     ("show", "show one record by id"),
+    ("stale", "list files not read for a while"),
     ("add", "add a record"),
     ("edit", "change a record's content"),
     ("archive", "archive a record"),
