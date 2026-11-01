@@ -306,3 +306,65 @@ fn every_other_tool_answers_with_an_object() {
         "add_rework",
     );
 }
+
+/// `add_task` refuses a `review_fix_level` outside the set, naming every value, and both tools'
+/// schemas list the set (ADR 0048 decision 10).
+#[test]
+fn add_task_refuses_a_review_fix_level_outside_the_set_and_the_schemas_list_it() {
+    let scratch = fixture("bad-fix-level");
+    let store = Store::at(scratch.repo());
+    let server = ArcServer::new(store.clone());
+    let plan = structured(
+        &call(
+            &server,
+            "add_plan",
+            json!({"slug": "plan", "title": "Plan", "request": "the request"}),
+        ),
+        "add_plan",
+    );
+    let plan = plan["id"].as_str().expect("a plan id").to_owned();
+
+    let refused = call(
+        &server,
+        "add_task",
+        json!({
+            "plan": plan,
+            "slug": "work",
+            "title": "Task",
+            "brief": "the brief",
+            "review_fix_level": "blocker",
+        }),
+    );
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+    let message = text_of(&refused);
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            message.contains(level),
+            "the refusal names `{level}`: {message}"
+        );
+    }
+    assert!(
+        store
+            .load_plan(&plan)
+            .expect("the plan reads")
+            .item
+            .tasks
+            .is_empty(),
+        "a refused call adds no task"
+    );
+
+    for name in ["add_task", "update_task"] {
+        let tool = radian_arc::mcp::TOOLS
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let schema = tool.schema();
+        let values: Vec<&str> = schema["properties"]["review_fix_level"]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}'s review_fix_level enum is a list"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(values, radian_arc::gate::REVIEW_LEVELS, "{name}");
+    }
+}

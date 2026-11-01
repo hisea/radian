@@ -119,6 +119,11 @@ pub const TOOLS: &[ToolDef] = &[
     "flow": {
       "type": "string",
       "description": "The [flows.<name>] section whose worker every attempt starts. It must name a flow in config.toml. Default: default."
+    },
+    "review_fix_level": {
+      "type": "string",
+      "enum": ["critical", "major", "minor"],
+      "description": "The level a finding must reach to fail this task's review rounds. Absent: the fix_level of the reviewer its gate profile names."
     }
   },
   "required": ["plan", "slug", "title", "brief"],
@@ -154,7 +159,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "update_task",
-        description: "Change a task in todo. Replaces its title or its original brief (the rework sections and the change records are kept), its after list, allow_noop or extra_stages; the phase does not change. Returns the task.",
+        description: "Change a task in todo. Replaces its title or its original brief (the rework sections and the change records are kept), its after list, allow_noop, extra_stages, flow or review_fix_level; the phase does not change. Returns the task.",
         input_schema: r#"{
   "type": "object",
   "properties": {
@@ -190,6 +195,11 @@ pub const TOOLS: &[ToolDef] = &[
     "flow": {
       "type": "string",
       "description": "The [flows.<name>] section whose worker every attempt starts. It must name a flow in config.toml, and it can change only while the task has had no attempt."
+    },
+    "review_fix_level": {
+      "type": "string",
+      "enum": ["critical", "major", "minor"],
+      "description": "The task's own level a finding must reach to fail its review rounds. An explicit null clears it, so the reviewer's fix_level applies."
     }
   },
   "required": ["task"],
@@ -309,7 +319,13 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(required, vec!["brief", "plan", "slug", "title"]);
-        for optional in ["after", "allow_noop", "extra_stages", "flow"] {
+        for optional in [
+            "after",
+            "allow_noop",
+            "extra_stages",
+            "flow",
+            "review_fix_level",
+        ] {
             assert!(
                 parameters
                     .iter()
@@ -332,6 +348,7 @@ mod tests {
                 ("brief".to_owned(), false),
                 ("extra_stages".to_owned(), false),
                 ("flow".to_owned(), false),
+                ("review_fix_level".to_owned(), false),
                 ("task".to_owned(), true),
                 ("title".to_owned(), false),
             ]
