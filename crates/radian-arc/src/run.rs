@@ -27,13 +27,14 @@
 //!
 //! Waiting for a person, a future `retry_at`, a worker, or a gate does not keep it running:
 //! the loop ends at the first pass that changes nothing. A one-shot `run` therefore exits
-//! after starting work; `radian arc serve` is how the loop keeps collecting it. A task of a
-//! plan at `auto` `off` is never started or merged by `run`; its verification still advances.
+//! after starting work; the hub repeats the pass for every registered repository and keeps
+//! collecting it (ADR 0048 decision 16). A task of a plan at `auto` `off` is never started or
+//! merged by `run`; its verification still advances.
 //!
 //! Every transition line is written through the caller's sink and flushed when the loop makes
-//! it; the summary of what waits on whom prints when the pass ends. `serve` repeats a pass
-//! after its interval seconds until SIGINT or SIGTERM, holds `runner.lock` the whole time, and
-//! prints the summary only when it changed.
+//! it; the summary of what waits on whom prints when the pass ends. [`LoopState`] is one
+//! repository's loop: the hub holds its `runner.lock` and calls `pass` every
+//! `[hub] interval_secs`, and a pass prints the summary only when it changed.
 //!
 //! Every line a loop prints also goes to `.radian/arc/loop.log`, each prefixed with an RFC 3339
 //! UTC timestamp, flushed per line ([`LoopLog`]). The arc TUI reads that file for its ticker

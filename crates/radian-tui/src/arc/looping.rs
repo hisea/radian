@@ -42,7 +42,7 @@ pub enum LoopStatus {
     Elsewhere(Option<u32>),
 }
 
-/// Starts and watches the detached `radian arc serve` of one repository. It holds no
+/// Starts and watches the detached `radian hub` of one repository. It holds no
 /// lock itself and never signals the child.
 pub struct LoopStarter {
     store: Store,
