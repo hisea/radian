@@ -7388,6 +7388,8 @@ async fn memory_add_list_show_edit_round_trip() {
     assert!(text.contains("type: feedback"), "{text}");
     assert!(text.contains("created:"), "{text}");
     assert!(text.contains("modified:"), "{text}");
+    let index = std::fs::read_to_string(path.with_file_name("MEMORY.md")).unwrap();
+    assert!(index.contains("[style](style.md)"), "{index}");
 
     let (code, stdout, stderr) = env.run(&["list"]).await;
     assert_eq!(code, 0, "{stderr}");
