@@ -452,7 +452,7 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 1 条 SKIP（文件工具不进沙箱，由权限档与 `radian-coding` 的文件根决定，与沙箱无关）。
 
 **2026-11-01 重跑（memory scope 与 hub 禁读）**：`radian_home` 组新增
-`memory_scope_unreadable`（scope 目录内的文件读失败，ADR 0039 decision 4）与 `hub_unreadable`
+`memory_scope_unreadable`（scope 目录内的文件读失败）与 `hub_unreadable`
 （`~/.radian/hub/` 读失败）。macOS 本机重跑 **51 cases, 0 failed, 1 skipped**（50 PASS + 1
 SKIP），`escape-macos.{txt,json}` 已更新。重跑时须给进程一个排在 `PWD` 前的未白名单变量
 （如 `AAA_MATRIX_SECRET=...`），否则 harness 会挑到 `PWD`，其值随 cwd 改变而让 control 失败；
