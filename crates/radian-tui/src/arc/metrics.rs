@@ -1,14 +1,18 @@
 //! The task page's metrics tab (ADR 0048 §11 and §13): what each attempt spent.
 //!
-//! One attempt header per attempt, newest first, then one row per run (`worker`, `review 1`,
-//! `review 2`), then the attempt's gate times, diff and review findings; one total row over
-//! every attempt ends the list. `j`/`k` move the `❯` over the run rows, `Enter` opens the
-//! selected run's tool table and request log below it, and `Esc` closes that detail before it
-//! leaves the page. A value no record reported draws `-` in the weak style.
+//! The total row over every attempt opens the list, then one attempt header per attempt, newest
+//! first, with one row per run (`worker`, `review 1`, `review 2`) and the attempt's gate rows and
+//! review findings. Every stage row shares one layout: a label column, a right-aligned duration
+//! column and the detail. A run that reported metrics takes two rows: the route and cost, then its
+//! labelled counters. A value a record did not report is left out rather than drawn as `-`; the
+//! one exception is the context window (`ctx 83K/-`), whose missing window is a weak `-`.
+//! `j`/`k` move the `❯` over the run rows, `Enter` opens the selected run's tool table and request
+//! log below its last row, and `Esc` closes that detail before it leaves the page.
 //!
 //! Numbers use [`crate::timing`]'s compact forms, the same the footer's `tokens` item draws.
 //! Nothing here reads a file: the page state loaded the metrics through `radian_arc::read`.
 
+use std::path::Path;
 use std::time::Duration;
 
 use radian_arc::gate::Finding;
@@ -16,11 +20,19 @@ use radian_arc::read::{AttemptMetrics, AttemptView, MetricsTotal, RunMetrics, Ta
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::TaskPage;
 use super::render::{fit_spans, rail};
 use crate::theme::Theme;
 use crate::timing::{format_cost, format_seconds, format_tokens};
+
+/// The duration column's width: `13m08s`, `50m48s`, `1h18m` right-aligned.
+const DURATION_WIDTH: usize = 7;
+/// The label column never grows past this many columns, however long a command label is.
+const MAX_LABEL_WIDTH: usize = 16;
+/// The spaces between the duration column and the detail column.
+const DETAIL_GAP: usize = 3;
 
 /// How many run rows the tab offers: one worker run per attempt and one per review run, the
 /// newest attempt first.
@@ -83,41 +95,58 @@ pub fn draw(
             ));
             return;
         }
+        let layout = Layout {
+            label_width: label_width(metrics),
+            content,
+        };
         let mut rows: Vec<Line<'static>> = Vec::new();
         let mut run_rows: Vec<usize> = Vec::with_capacity(run_count(metrics));
+        let mut run_last: Vec<usize> = Vec::with_capacity(run_count(metrics));
         let mut index = 0;
-        for attempt in metrics.attempts.iter().rev() {
+        rows.push(rail(
+            theme,
+            total_line(&metrics.total, metrics.attempts.len(), content, theme),
+        ));
+        rows.push(rail(theme, Line::default()));
+        let attempts = metrics.attempts.len();
+        for (position, attempt) in metrics.attempts.iter().rev().enumerate() {
             rows.push(rail(theme, attempt_header(attempt, content, theme)));
-            run_rows.push(rows.len());
-            rows.push(rail(
+            let (first, last) = push_run(
+                &mut rows,
+                &attempt.worker,
+                "worker",
+                index == page.metric_sel,
+                &layout,
                 theme,
-                run_line(
-                    &attempt.worker,
-                    "worker",
-                    index == page.metric_sel,
-                    content,
-                    theme,
-                ),
-            ));
+            );
+            run_rows.push(first);
+            run_last.push(last);
             index += 1;
             for run in &attempt.reviews {
                 let label = run
                     .run
                     .map_or_else(|| "review".to_owned(), |number| format!("review {number}"));
-                run_rows.push(rows.len());
-                rows.push(rail(
+                let (first, last) = push_run(
+                    &mut rows,
+                    run,
+                    &label,
+                    index == page.metric_sel,
+                    &layout,
                     theme,
-                    run_line(run, &label, index == page.metric_sel, content, theme),
-                ));
+                );
+                run_rows.push(first);
+                run_last.push(last);
                 index += 1;
             }
-            push_attempt_rows(&mut rows, attempt, &page.attempts, content, theme);
+            push_attempt_rows(&mut rows, attempt, &page.attempts, &layout, theme);
+            if position + 1 < attempts {
+                rows.push(rail(theme, plain("─────", theme.hint, content)));
+            }
         }
-        rows.push(rail(theme, total_line(&metrics.total, content, theme)));
-        // The selected run's detail sits directly below its row.
+        // The selected run's detail sits directly below the run's last row.
         if page.metric_open
             && let Some((attempt, run)) = run_at(metrics, page.metric_sel)
-            && let Some(position) = run_rows.get(page.metric_sel)
+            && let Some(&position) = run_last.get(page.metric_sel)
         {
             let run = run.unwrap_or(&attempt.worker);
             let detail = detail_rows(run, content, theme);
@@ -164,9 +193,8 @@ pub fn draw(
     }
 }
 
-/// One styled piece of a metrics row. A `weak` piece is a value no record reported, and a
-/// `missing_tail` draws a weak `-` after reported text: `ctx 83K/-` reports the peak and not
-/// the window.
+/// One styled piece of the detail's tables. A `weak` piece is a value the record did not report,
+/// and a `missing_tail` draws a weak `-` after reported text.
 struct Cell {
     text: String,
     weak: bool,
@@ -179,15 +207,6 @@ impl Cell {
             text: text.into(),
             weak: false,
             missing_tail: false,
-        }
-    }
-
-    /// A reported value followed by one the record did not report: `ctx 83K/-`.
-    fn reported_with_missing_tail(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            weak: false,
-            missing_tail: true,
         }
     }
 
@@ -212,87 +231,302 @@ impl Cell {
     }
 }
 
-/// `attempt 2 · queue 3s`.
-fn attempt_header(attempt: &AttemptMetrics, content: usize, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("attempt {}", attempt.attempt),
-            theme.notice_label.add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let mut parts = vec![cell_part(
-        "queue",
-        attempt.queue_wait_secs.map(|secs| seconds(secs as f64)),
-    )];
-    push_parts(&mut spans, &mut parts, theme);
-    Line::from(fit_spans(spans, content))
+/// One counter of a run's second row. `missing_tail` is the one value the tab still marks with a
+/// weak `-`: `ctx 83K/-` reports the peak and not the window.
+struct Item {
+    text: String,
+    missing_tail: bool,
 }
 
-/// One run's row: the route, the token counts and hit rate, the cost, wall time, peak context,
-/// compactions and the anomaly counts that are above zero.
-fn run_line(
+impl Item {
+    fn reported(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            missing_tail: false,
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.text.width() + usize::from(self.missing_tail)
+    }
+}
+
+/// The stage rows' shared columns: the label column's width and the frame's text width.
+struct Layout {
+    label_width: usize,
+    content: usize,
+}
+
+impl Layout {
+    /// The column the detail starts at: the two-cell indent, the label column, the duration
+    /// column and the gap between them.
+    fn detail_col(&self) -> usize {
+        2 + self.label_width + DURATION_WIDTH + DETAIL_GAP
+    }
+}
+
+/// The longest label on the page, capped at [`MAX_LABEL_WIDTH`].
+fn label_width(metrics: &TaskMetrics) -> usize {
+    metrics
+        .attempts
+        .iter()
+        .flat_map(attempt_labels)
+        .map(|label| label.width())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_LABEL_WIDTH)
+}
+
+/// Every stage label the page draws for one attempt, in row order.
+fn attempt_labels(attempt: &AttemptMetrics) -> Vec<String> {
+    let mut labels = vec!["worker".to_owned()];
+    for run in &attempt.reviews {
+        labels.push(
+            run.run
+                .map_or_else(|| "review".to_owned(), |number| format!("review {number}")),
+        );
+    }
+    for command in &attempt.commands {
+        labels.push(cut_label(&command_label(&command.line), MAX_LABEL_WIDTH));
+    }
+    if attempt.integration_wall_secs.is_some() {
+        labels.push("integration".to_owned());
+    }
+    if attempt.review_wall_secs.is_some() {
+        labels.push("review".to_owned());
+    }
+    if attempt.diff.is_some() {
+        labels.push("diff".to_owned());
+    }
+    if attempt.increment.is_some() {
+        labels.push("increment".to_owned());
+    }
+    labels
+}
+
+/// `attempt 2` with `queue 3s` at the frame's right edge.
+fn attempt_header(attempt: &AttemptMetrics, content: usize, theme: &Theme) -> Line<'static> {
+    let title = format!("attempt {}", attempt.attempt);
+    let (queue, weak) = match attempt.queue_wait_secs {
+        Some(secs) => (format!("queue {}", seconds(secs as f64)), false),
+        None => ("queue -".to_owned(), true),
+    };
+    let padding = content.saturating_sub(2 + title.width() + queue.width());
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(title, theme.notice_label.add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(queue, cell_style(weak, theme)),
+    ])
+}
+
+/// Draws one run: two rows when it reported metrics, one when it did not. Returns the rows its
+/// first and last line take, so the selection and its detail land on the right lines.
+fn push_run(
+    rows: &mut Vec<Line<'static>>,
     run: &RunMetrics,
     label: &str,
     selected: bool,
-    content: usize,
+    layout: &Layout,
+    theme: &Theme,
+) -> (usize, usize) {
+    let first = rows.len();
+    let Some(metrics) = run.metrics.as_ref().filter(|metrics| reported_any(metrics)) else {
+        rows.push(rail(
+            theme,
+            run_plain_line(run, label, selected, layout, theme),
+        ));
+        return (first, first);
+    };
+    rows.push(rail(
+        theme,
+        run_first_line(run, metrics, label, selected, layout, theme),
+    ));
+    let mut last = first;
+    let items = counter_items(metrics, run.wall_secs);
+    if !items.is_empty() {
+        for line in counter_lines(&items, layout, theme) {
+            rows.push(rail(theme, line));
+            last = rows.len() - 1;
+        }
+    }
+    (first, last)
+}
+
+/// A run that reported metrics, row one: the label, the wall time, the route and the cost.
+fn run_first_line(
+    run: &RunMetrics,
+    metrics: &Value,
+    label: &str,
+    selected: bool,
+    layout: &Layout,
     theme: &Theme,
 ) -> Line<'static> {
-    let metrics = run.metrics.as_ref();
     let mut spans = vec![
-        if selected {
-            Span::styled("❯ ", theme.model)
-        } else {
-            Span::raw("  ")
-        },
+        marker(selected, theme),
         Span::styled(
-            label.to_owned(),
+            pad_label(label, layout.label_width),
             if selected {
                 theme.notice_label.add_modifier(Modifier::BOLD)
             } else {
                 theme.notice_label
             },
         ),
+        Span::styled(duration_cell(run.wall_secs.map(seconds)), theme.text),
     ];
-    let mut parts = vec![
-        cell_part("model", model_text(run)),
-        cell_part(
-            "req",
-            counter(metrics, "requests").map(|value| value.to_string()),
-        ),
-        cell_part("in", counter(metrics, "input_uncached").map(format_tokens)),
-        cache_part(metrics),
-        cell_part("out", counter(metrics, "output").map(format_tokens)),
-        cell_part("think", counter(metrics, "reasoning").map(format_tokens)),
-        cell_part("cost", counter(metrics, "fee_micros").map(format_cost)),
-        cell_part("wall", run.wall_secs.map(seconds)),
-        context_part(metrics),
-        compaction_part(metrics, run.wall_secs),
-    ];
-    if let Some(count) = counter(metrics, "max_tokens_responses").filter(|count| *count > 0) {
-        parts.push(Cell::reported(format!("truncated {count}")));
+    let mut detail: Vec<Span<'static>> = Vec::new();
+    if let Some(model) = model_text(run) {
+        detail.push(Span::styled(model, theme.text));
     }
-    if let Some(count) = counter(metrics, "model_errors").filter(|count| *count > 0) {
-        parts.push(Cell::reported(format!("errors {count}")));
+    if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_cost) {
+        if !detail.is_empty() {
+            detail.push(Span::styled(" · ", theme.hint));
+        }
+        detail.push(Span::styled(cost, theme.text));
     }
-    if let Some(count) = counter(metrics, "retries").filter(|count| *count > 0) {
-        parts.push(Cell::reported(format!("retries {count}")));
+    if !detail.is_empty() {
+        spans.push(Span::raw(" ".repeat(DETAIL_GAP)));
+        spans.extend(detail);
     }
-    push_parts(&mut spans, &mut parts, theme);
-    Line::from(fit_spans(spans, content))
+    Line::from(fit_spans(spans, layout.content))
 }
 
-/// `cache 4K 29%`: the cache-read tokens and their share of the whole prompt, a whole percent.
-fn cache_part(metrics: Option<&Value>) -> Cell {
-    let Some(read) = counter(metrics, "cache_read") else {
-        return Cell::missing();
-    };
-    let mut text = format_tokens(read);
-    if let Some(rate) = hit_rate(metrics) {
-        text.push(' ');
-        text.push_str(&rate);
+/// A run that reported nothing: the label, the wall time when known and one weak detail.
+fn run_plain_line(
+    run: &RunMetrics,
+    label: &str,
+    selected: bool,
+    layout: &Layout,
+    theme: &Theme,
+) -> Line<'static> {
+    let spans = vec![
+        marker(selected, theme),
+        Span::styled(
+            pad_label(label, layout.label_width),
+            if selected {
+                theme.notice_label.add_modifier(Modifier::BOLD)
+            } else {
+                theme.notice_label
+            },
+        ),
+        Span::styled(duration_cell(run.wall_secs.map(seconds)), theme.text),
+        Span::raw(" ".repeat(DETAIL_GAP)),
+        Span::styled("no token metrics recorded", theme.hint),
+    ];
+    Line::from(fit_spans(spans, layout.content))
+}
+
+fn marker(selected: bool, theme: &Theme) -> Span<'static> {
+    if selected {
+        Span::styled("❯ ", theme.model)
+    } else {
+        Span::raw("  ")
     }
-    Cell::reported(format!("cache {text}"))
+}
+
+/// A duration right-aligned in the duration column, or the column's blanks when unreported.
+fn duration_cell(duration: Option<String>) -> String {
+    duration.map_or_else(
+        || " ".repeat(DURATION_WIDTH),
+        |text| format!("{text:>width$}", width = DURATION_WIDTH),
+    )
+}
+
+/// Whether the run reported anything the tab draws. A run whose `Result` carried no `metrics` has
+/// none; an empty object has none either.
+fn reported_any(metrics: &Value) -> bool {
+    [
+        "requests",
+        "input_uncached",
+        "cache_read",
+        "cache_write",
+        "output",
+        "reasoning",
+        "fee_micros",
+        "peak_context",
+        "context_window",
+        "compactions",
+        "max_tokens_responses",
+        "model_errors",
+        "retries",
+    ]
+    .iter()
+    .any(|name| counter(Some(metrics), name).is_some())
+}
+
+/// The run's second row: every counter it reported, each with its label. A counter the run did
+/// not report is left out; the unresolved context window keeps a weak `-`.
+fn counter_items(metrics: &Value, wall_secs: Option<f64>) -> Vec<Item> {
+    let metrics = Some(metrics);
+    let mut items = Vec::new();
+    if let Some(requests) = counter(metrics, "requests") {
+        items.push(Item::reported(format!("{requests} req")));
+    }
+    if let Some(input) = counter(metrics, "input_uncached") {
+        items.push(Item::reported(format!("in {}", format_tokens(input))));
+    }
+    if let Some(read) = counter(metrics, "cache_read") {
+        let mut text = format!("cache {}", format_tokens(read));
+        if let Some(rate) = hit_rate(metrics) {
+            text.push(' ');
+            text.push_str(&rate);
+        }
+        items.push(Item::reported(text));
+    }
+    if let Some(output) = counter(metrics, "output") {
+        items.push(Item::reported(format!("out {}", format_tokens(output))));
+    }
+    if let Some(reasoning) = counter(metrics, "reasoning") {
+        items.push(Item::reported(format!(
+            "think {}",
+            format_tokens(reasoning)
+        )));
+    }
+    if let Some(peak) = counter(metrics, "peak_context") {
+        match counter(metrics, "context_window") {
+            Some(window) => items.push(Item::reported(format!(
+                "ctx {}/{}",
+                format_tokens(peak),
+                format_tokens(window)
+            ))),
+            None => items.push(Item {
+                text: format!("ctx {}/", format_tokens(peak)),
+                missing_tail: true,
+            }),
+        }
+    }
+    if let Some(count) = counter(metrics, "compactions") {
+        items.push(compaction_item(count, metrics, wall_secs));
+    }
+    for (name, label) in [
+        ("max_tokens_responses", "truncated"),
+        ("model_errors", "errors"),
+        ("retries", "retries"),
+    ] {
+        if let Some(count) = counter(metrics, name).filter(|count| *count > 0) {
+            items.push(Item::reported(format!("{label} {count}")));
+        }
+    }
+    items
+}
+
+/// `compactions 1 (15s, 25%)`: the count, the summed summary time and its share of the run's wall
+/// time. A run with no compaction draws its count and no time.
+fn compaction_item(count: u64, metrics: Option<&Value>, wall_secs: Option<f64>) -> Item {
+    let mut text = format!("compactions {count}");
+    if count > 0
+        && let Some(millis) = counter(metrics, "compaction_ms")
+    {
+        let secs = millis as f64 / 1_000.0;
+        text.push_str(" (");
+        text.push_str(&seconds(secs));
+        if let Some(wall) = wall_secs.filter(|wall| *wall > 0.0) {
+            text.push_str(", ");
+            text.push_str(&percent(secs, wall));
+        }
+        text.push(')');
+    }
+    Item::reported(text)
 }
 
 /// The cache-read share of the prompt: `cache_read / (input_uncached + cache_read +
@@ -305,130 +539,287 @@ fn hit_rate(metrics: Option<&Value>) -> Option<String> {
     (total > 0).then(|| percent(read as f64, total as f64))
 }
 
-/// `ctx 83K/1.0M`: the peak context against the window the run resolved.
-fn context_part(metrics: Option<&Value>) -> Cell {
-    let Some(peak) = counter(metrics, "peak_context") else {
-        return Cell::missing();
-    };
-    match counter(metrics, "context_window") {
-        Some(window) => Cell::reported(format!(
-            "ctx {}/{}",
-            format_tokens(peak),
-            format_tokens(window)
-        )),
-        None => Cell::reported_with_missing_tail(format!("ctx {}/", format_tokens(peak))),
-    }
-}
-
-/// `compactions 1 15s 25%`: the count, the summed summary time and its share of the run's wall
-/// time. A run with no compaction draws its count and no time.
-fn compaction_part(metrics: Option<&Value>, wall_secs: Option<f64>) -> Cell {
-    let Some(count) = counter(metrics, "compactions") else {
-        return Cell::missing();
-    };
-    let mut text = count.to_string();
-    if count > 0
-        && let Some(millis) = counter(metrics, "compaction_ms")
-    {
-        let secs = millis as f64 / 1_000.0;
-        text.push(' ');
-        text.push_str(&seconds(secs));
-        if let Some(wall) = wall_secs
-            && wall > 0.0
-        {
-            text.push(' ');
-            text.push_str(&percent(secs, wall));
+/// Packs the counters into rows at the detail column, wrapping at the frame's width rather than
+/// cutting the second row with `…`.
+fn counter_lines(items: &[Item], layout: &Layout, theme: &Theme) -> Vec<Line<'static>> {
+    let indent = layout.detail_col();
+    let available = layout.content.saturating_sub(indent);
+    let mut rows: Vec<Vec<&Item>> = Vec::new();
+    let mut row: Vec<&Item> = Vec::new();
+    let mut used = 0;
+    for item in items {
+        let width = item.width();
+        let added = if row.is_empty() { width } else { 3 + width };
+        if !row.is_empty() && used + added > available {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
         }
+        used += if row.is_empty() { width } else { 3 + width };
+        row.push(item);
     }
-    Cell::reported(format!("compactions {text}"))
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            for (index, item) in row.iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled(" · ", theme.hint));
+                }
+                spans.push(Span::styled(item.text.clone(), theme.text));
+                if item.missing_tail {
+                    spans.push(Span::styled("-", theme.hint));
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
-/// The total row over every attempt: the reported requests, the token sums, `total_cost_usd`
-/// (rework included), the wall time, the queue wait, and the runs that reported nothing.
-fn total_line(total: &MetricsTotal, content: usize, theme: &Theme) -> Line<'static> {
+/// The total row over every attempt: `N attempts`, the cost (`total_cost_usd`, rework included),
+/// the wall time, the queue wait, the request and token sums, then the runs that reported nothing.
+/// A part no record reported is left out.
+fn total_line(
+    total: &MetricsTotal,
+    attempts: usize,
+    content: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut parts = vec![if attempts == 1 {
+        "1 attempt".to_owned()
+    } else {
+        format!("{attempts} attempts")
+    }];
+    if let Some(cost) = total.total_cost_usd {
+        parts.push(cost_usd(cost));
+    }
+    if let Some(wall) = total.wall_secs {
+        parts.push(format!("wall {}", seconds(wall)));
+    }
+    if let Some(queue) = total.queue_wait_secs {
+        parts.push(format!("queue {}", seconds(queue as f64)));
+    }
+    if let Some(requests) = total.requests {
+        parts.push(format!("{requests} req"));
+    }
+    if let Some(input) = total.input_uncached {
+        parts.push(format!("in {}", format_tokens(input)));
+    }
+    if let Some(cache) = total.cache_read {
+        parts.push(format!("cache {}", format_tokens(cache)));
+    }
+    if let Some(output) = total.output {
+        parts.push(format!("out {}", format_tokens(output)));
+    }
+    if let Some(reasoning) = total.reasoning {
+        parts.push(format!("think {}", format_tokens(reasoning)));
+    }
     let mut spans = vec![
         Span::raw("  "),
         Span::styled("total", theme.notice_label.add_modifier(Modifier::BOLD)),
     ];
-    let mut parts = vec![
-        cell_part("requests", total.requests.map(|value| value.to_string())),
-        cell_part("in", total.input_uncached.map(format_tokens)),
-        cell_part("cache", total.cache_read.map(format_tokens)),
-        cell_part("out", total.output.map(format_tokens)),
-        cell_part("think", total.reasoning.map(format_tokens)),
-        cell_part("cost", total.total_cost_usd.map(cost_usd)),
-        cell_part("wall", total.wall_secs.map(seconds)),
-        cell_part(
-            "queue",
-            total.queue_wait_secs.map(|secs| seconds(secs as f64)),
-        ),
-    ];
-    if total.unreported_runs > 0 {
-        parts.push(Cell::reported(format!(
-            "{} runs not reported",
-            total.unreported_runs
-        )));
+    for (index, part) in parts.into_iter().enumerate() {
+        if index == 0 {
+            spans.push(Span::raw("  "));
+        } else {
+            spans.push(Span::styled(" · ", theme.hint));
+        }
+        spans.push(Span::styled(part, theme.text));
     }
-    push_parts(&mut spans, &mut parts, theme);
+    if total.unreported_runs > 0 {
+        spans.push(Span::styled(" · ", theme.hint));
+        spans.push(Span::styled(
+            format!("{} runs predate metrics", total.unreported_runs),
+            theme.hint,
+        ));
+    }
     Line::from(fit_spans(spans, content))
 }
 
-/// The attempt's gate rows: every command's time with its line, the integration and review
-/// stage times, the diff and increment, and the review's findings by severity.
+/// The attempt's gate rows, in order: every command with its label and line, `integration` and
+/// `review` when they recorded a duration (the review's detail is its findings), then `diff` and
+/// `increment` when reported.
 fn push_attempt_rows(
     rows: &mut Vec<Line<'static>>,
     attempt: &AttemptMetrics,
     attempts: &[AttemptView],
-    content: usize,
+    layout: &Layout,
     theme: &Theme,
 ) {
     for command in &attempt.commands {
-        let text = format!(
-            "  command {} {}",
-            seconds(command.duration_ms as f64 / 1_000.0),
-            command.line
-        );
+        let label = command_label(&command.line);
+        let detail = strip_assignments(&command.line);
         rows.push(rail(
             theme,
-            Line::from(fit_spans(vec![Span::styled(text, theme.text)], content)),
+            stage_line(
+                &label,
+                Some(seconds(command.duration_ms as f64 / 1_000.0)),
+                detail,
+                layout,
+                theme,
+            ),
         ));
     }
-    rows.push(rail(
-        theme,
-        labeled_line(
-            "integration",
-            attempt.integration_wall_secs.map(seconds),
-            content,
+    if let Some(wall) = attempt.integration_wall_secs {
+        rows.push(rail(
             theme,
-        ),
-    ));
-    rows.push(rail(
-        theme,
-        labeled_line(
-            "review",
-            attempt.review_wall_secs.map(seconds),
-            content,
+            stage_line("integration", Some(seconds(wall)), "", layout, theme),
+        ));
+    }
+    if let Some(wall) = attempt.review_wall_secs {
+        let detail = review_findings(attempts, attempt.attempt)
+            .map(findings_text)
+            .unwrap_or_default();
+        rows.push(rail(
             theme,
-        ),
-    ));
-    rows.push(rail(
-        theme,
-        labeled_line("diff", attempt.diff.map(diff_text), content, theme),
-    ));
-    rows.push(rail(
-        theme,
-        labeled_line(
-            "increment",
-            attempt.increment.map(diff_text),
-            content,
+            stage_line("review", Some(seconds(wall)), &detail, layout, theme),
+        ));
+    }
+    if let Some(diff) = attempt.diff {
+        rows.push(rail(
             theme,
-        ),
-    ));
-    let findings = review_findings(attempts, attempt.attempt);
-    rows.push(rail(
-        theme,
-        labeled_line("findings", findings.map(findings_text), content, theme),
-    ));
+            stage_line("diff", None, &diff_text(diff), layout, theme),
+        ));
+    }
+    if let Some(increment) = attempt.increment {
+        rows.push(rail(
+            theme,
+            stage_line("increment", None, &diff_text(increment), layout, theme),
+        ));
+    }
+}
+
+/// One stage row: the label column, the duration column and the detail, cut to the frame.
+fn stage_line(
+    label: &str,
+    duration: Option<String>,
+    detail: &str,
+    layout: &Layout,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(pad_label(label, layout.label_width), theme.notice_label),
+        Span::styled(duration_cell(duration), theme.text),
+    ];
+    if !detail.is_empty() {
+        spans.push(Span::raw(" ".repeat(DETAIL_GAP)));
+        spans.push(Span::styled(detail.to_owned(), theme.text));
+    }
+    Line::from(fit_spans(spans, layout.content))
+}
+
+/// A label cut to the label column and padded to it.
+fn pad_label(label: &str, width: usize) -> String {
+    let label = cut_label(label, width);
+    let padding = width.saturating_sub(label.width());
+    format!("{label}{}", " ".repeat(padding))
+}
+
+/// Cuts `label` to `width` columns. A label made of words drops whole words from its end before
+/// it cuts a single word hard with `…`.
+fn cut_label(label: &str, width: usize) -> String {
+    if label.width() <= width {
+        return label.to_owned();
+    }
+    let mut end = label.len();
+    while let Some(space) = label[..end].rfind(' ') {
+        end = space;
+        let candidate = &label[..end];
+        if candidate.width() <= width {
+            return candidate.to_owned();
+        }
+    }
+    cut(label, width)
+}
+
+/// Cuts `text` to `width` cells, ending in `…` when it was longer.
+fn cut(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cell = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cell > width - 1 {
+            break;
+        }
+        out.push(ch);
+        used += cell;
+    }
+    out.push('…');
+    out
+}
+
+/// A command's label: its line's first word (the basename) plus its first argument when that does
+/// not start with `-`, after leading `NAME=value` assignments are stripped. A line built from a
+/// shell construct is labelled `sh`. The label is not made unique: two commands with the same
+/// label keep both rows.
+fn command_label(line: &str) -> String {
+    let rest = strip_assignments(line);
+    if is_shell(rest) {
+        return "sh".to_owned();
+    }
+    let mut words = rest.split_whitespace();
+    let Some(first) = words.next() else {
+        return "sh".to_owned();
+    };
+    let base = Path::new(first)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first);
+    let mut label = base.to_owned();
+    if let Some(argument) = words.next()
+        && !argument.starts_with('-')
+    {
+        label.push(' ');
+        label.push_str(argument);
+    }
+    label
+}
+
+/// The line without its leading `NAME=value` environment assignments.
+fn strip_assignments(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    while let Some(equals) = rest.find('=') {
+        let name = &rest[..equals];
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+        if !valid {
+            break;
+        }
+        let value_end = rest[equals..]
+            .find(char::is_whitespace)
+            .map_or(rest.len(), |offset| equals + offset);
+        rest = rest[value_end..].trim_start();
+    }
+    rest
+}
+
+/// Whether the line is a shell construct: a `set`/`if`/`for` statement, a subshell, or a first
+/// word that carries `;`, `&&` or `|`.
+fn is_shell(rest: &str) -> bool {
+    if rest.starts_with("set ")
+        || rest.starts_with("if ")
+        || rest.starts_with("for ")
+        || rest.starts_with('(')
+    {
+        return true;
+    }
+    rest.split_whitespace()
+        .next()
+        .is_some_and(|word| word.contains(';') || word.contains("&&") || word.contains('|'))
 }
 
 /// The selected run's detail: the tool table (by calls) and the request log.
@@ -565,45 +956,12 @@ fn cells_line(indent: &str, cells: Vec<Cell>, content: usize, theme: &Theme) -> 
     Line::from(fit_spans(spans, content))
 }
 
-/// `label value` after the row's two-cell indent; a missing value is weak.
-fn labeled_line(
-    label: &str,
-    value: Option<String>,
-    content: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let weak = value.is_none();
-    let text = format!("  {label} {}", value.unwrap_or_else(|| "-".to_owned()));
-    plain(text, cell_style(weak, theme), content)
-}
-
 fn plain(text: impl Into<String>, style: Style, content: usize) -> Line<'static> {
     Line::from(fit_spans(vec![Span::styled(text.into(), style)], content))
 }
 
 fn cell_style(weak: bool, theme: &Theme) -> Style {
     if weak { theme.hint } else { theme.text }
-}
-
-fn push_parts(spans: &mut Vec<Span<'static>>, parts: &mut Vec<Cell>, theme: &Theme) {
-    for cell in parts.drain(..) {
-        spans.push(Span::styled(" · ", theme.hint));
-        spans.push(Span::styled(cell.text, cell_style(cell.weak, theme)));
-        if cell.missing_tail {
-            spans.push(Span::styled("-", theme.hint));
-        }
-    }
-}
-
-fn cell_part(label: &str, value: Option<String>) -> Cell {
-    match value {
-        Some(value) => Cell::reported(format!("{label} {value}")),
-        None => Cell {
-            text: format!("{label} -"),
-            weak: true,
-            missing_tail: false,
-        },
-    }
 }
 
 /// A run's route: `provider/model`, the one that is when only one is known, else `-`.
@@ -668,7 +1026,8 @@ fn review_findings(attempts: &[AttemptView], attempt: u32) -> Option<&[Finding]>
     Some(&review.findings)
 }
 
-/// `critical 1 · major 2 · minor 0 · pre-existing 1`.
+/// `1 major · 1 minor · 2 pre-existing`: the severities above zero, highest first, then the
+/// demoted findings. `no findings` when the review recorded findings and every count is zero.
 fn findings_text(findings: &[Finding]) -> String {
     let count = |severity: &str| {
         findings
@@ -680,12 +1039,35 @@ fn findings_text(findings: &[Finding]) -> String {
         .iter()
         .filter(|finding| finding.pre_existing)
         .count();
-    format!(
-        "critical {} · major {} · minor {} · pre-existing {pre_existing}",
+    findings_counts_text(
         count("critical"),
         count("major"),
-        count("minor")
+        count("minor"),
+        pre_existing,
     )
+}
+
+/// [`findings_text`] from the four counts: only the ones above zero, highest severity first.
+fn findings_counts_text(
+    critical: usize,
+    major: usize,
+    minor: usize,
+    pre_existing: usize,
+) -> String {
+    let mut parts = Vec::new();
+    for (severity, count) in [("critical", critical), ("major", major), ("minor", minor)] {
+        if count > 0 {
+            parts.push(format!("{count} {severity}"));
+        }
+    }
+    if pre_existing > 0 {
+        parts.push(format!("{pre_existing} pre-existing"));
+    }
+    if parts.is_empty() {
+        "no findings".to_owned()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 #[cfg(test)]
@@ -711,42 +1093,134 @@ mod tests {
     fn a_compaction_draws_its_share_only_with_a_wall_time() {
         let one = json!({"compactions": 1, "compaction_ms": 15_000});
         assert_eq!(
-            compaction_part(Some(&one), Some(60.0)).text,
-            "compactions 1 15s 25%"
+            compaction_item(1, Some(&one), Some(60.0)).text,
+            "compactions 1 (15s, 25%)"
         );
-        assert_eq!(compaction_part(Some(&one), None).text, "compactions 1 15s");
+        assert_eq!(
+            compaction_item(1, Some(&one), None).text,
+            "compactions 1 (15s)"
+        );
         let none = json!({"compactions": 0});
         assert_eq!(
-            compaction_part(Some(&none), Some(60.0)).text,
+            compaction_item(0, Some(&none), Some(60.0)).text,
             "compactions 0"
         );
-        assert!(compaction_part(None, None).weak);
     }
 
     #[test]
-    fn an_unreported_metric_is_weak() {
-        let line = run_line(
-            &RunMetrics {
-                run: None,
-                session_id: None,
-                started_at: None,
-                ended_at: None,
-                wall_secs: Some(61.0),
-                provider: None,
-                model: None,
-                metrics: None,
-            },
-            "worker",
-            false,
-            200,
-            &Theme::default(),
-        );
+    fn a_run_without_metrics_draws_one_weak_line() {
+        let run = RunMetrics {
+            run: None,
+            session_id: None,
+            started_at: None,
+            ended_at: None,
+            wall_secs: Some(61.0),
+            provider: None,
+            model: None,
+            metrics: None,
+        };
+        let layout = Layout {
+            label_width: 6,
+            content: 200,
+        };
+        let line = run_plain_line(&run, "worker", false, &layout, &Theme::default());
         let text: String = line
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert!(text.contains("model -"), "{text}");
-        assert!(text.contains("wall 1m01s"), "{text}");
+        assert!(text.contains("worker"), "{text}");
+        assert!(text.contains("1m01s"), "{text}");
+        assert!(text.contains("no token metrics recorded"), "{text}");
+        assert!(!text.contains("model -"), "{text}");
+        assert_eq!(
+            line.spans.last().map(|span| span.style.fg),
+            Some(Theme::default().hint.fg),
+            "the detail is weak: {text}"
+        );
+    }
+
+    #[test]
+    fn a_command_label_follows_the_first_word_and_its_argument() {
+        assert_eq!(command_label("cargo fmt --all -- --check"), "cargo fmt");
+        assert_eq!(
+            command_label("CARGO_TARGET_DIR=/x cargo clippy --workspace"),
+            "cargo clippy"
+        );
+        assert_eq!(
+            command_label("set -e; base=$(git merge-base HEAD origin/main); if …"),
+            "sh"
+        );
+        assert_eq!(
+            command_label("/Users/x/.local/bin/arc-gate-lxc crates"),
+            "arc-gate-lxc crates"
+        );
+        assert_eq!(command_label("make"), "make");
+        assert_eq!(command_label("A=1 B=2 ./run.sh -v"), "run.sh");
+    }
+
+    #[test]
+    fn findings_text_names_only_the_counts_above_zero() {
+        assert_eq!(findings_counts_text(0, 1, 1, 0), "1 major · 1 minor");
+        assert_eq!(
+            findings_counts_text(1, 2, 3, 4),
+            "1 critical · 2 major · 3 minor · 4 pre-existing"
+        );
+        assert_eq!(findings_counts_text(0, 0, 0, 2), "2 pre-existing");
+        assert_eq!(findings_counts_text(0, 0, 0, 0), "no findings");
+    }
+
+    #[test]
+    fn a_long_label_is_cut_to_the_label_column() {
+        assert_eq!(
+            cut_label("arc-gate-lxc crates", MAX_LABEL_WIDTH),
+            "arc-gate-lxc"
+        );
+        assert_eq!(
+            cut_label("command-name-here arg", MAX_LABEL_WIDTH),
+            "command-name-he…"
+        );
+        assert_eq!(cut_label("cargo clippy", MAX_LABEL_WIDTH), "cargo clippy");
+    }
+
+    #[test]
+    fn a_review_row_without_a_verdict_has_no_findings_detail() {
+        let attempt = AttemptMetrics {
+            attempt: 1,
+            attempt_id: "t-1".to_owned(),
+            worker: RunMetrics {
+                run: None,
+                session_id: None,
+                started_at: None,
+                ended_at: None,
+                wall_secs: None,
+                provider: None,
+                model: None,
+                metrics: None,
+            },
+            reviews: Vec::new(),
+            review_wall_secs: Some(60.0),
+            commands: Vec::new(),
+            integration_wall_secs: None,
+            diff: None,
+            increment: None,
+            cost_usd: None,
+            review_cost_usd: None,
+            queue_wait_secs: None,
+        };
+        let layout = Layout {
+            label_width: 6,
+            content: 200,
+        };
+        let mut rows = Vec::new();
+        push_attempt_rows(&mut rows, &attempt, &[], &layout, &Theme::default());
+        assert_eq!(rows.len(), 1, "only the review stage recorded a duration");
+        let text: String = rows[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("review"), "{text}");
+        assert!(!text.contains("no findings"), "{text}");
     }
 }

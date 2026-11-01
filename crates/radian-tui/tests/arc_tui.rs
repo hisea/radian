@@ -5212,7 +5212,7 @@ fn the_metrics_tab_lists_both_attempts_and_sums_them() {
         .lines()
         .find(|line| line.contains("total"))
         .unwrap_or_else(|| panic!("no total row:\n{text}"));
-    for needle in ["requests 7", "in 40", "out 13", "cost $0.120", "queue 5s"] {
+    for needle in ["7 req", "in 40", "out 13", "$0.120", "queue 5s"] {
         assert!(
             total.contains(needle),
             "the total misses `{needle}`: {total}"
@@ -5250,16 +5250,17 @@ fn an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times() {
     open_metrics(&mut app, &fixture, "e");
     let text = screen(&mut app, 140, 40);
     assert!(
-        text.contains("model -"),
-        "the route is not reported:\n{text}"
+        text.contains("no token metrics recorded"),
+        "the run reported no token metrics:\n{text}"
+    );
+    assert!(text.contains("1m01s"), "the wall time still draws:\n{text}");
+    assert!(
+        text.contains("cargo nextest") && text.contains("5s"),
+        "the command label and time still draw:\n{text}"
     );
     assert!(
-        text.contains("wall 1m01s"),
-        "the wall time still draws:\n{text}"
-    );
-    assert!(
-        text.contains("command 5s cargo nextest run --locked"),
-        "the command time still draws:\n{text}"
+        text.contains("cargo nextest run --locked"),
+        "the command line still draws:\n{text}"
     );
 }
 
@@ -5436,7 +5437,7 @@ fn the_metrics_tab_counts_an_old_verdicts_findings() {
     open_metrics(&mut app, &fixture, "e");
     let text = screen(&mut app, 120, 40);
     assert!(
-        text.contains("findings critical 1 · major 0 · minor 1 · pre-existing 0"),
+        text.contains("1 critical · 1 minor"),
         "the old shape is counted through the mapping:\n{text}"
     );
 }
@@ -5567,7 +5568,7 @@ fn the_compaction_cell_shows_its_count_time_and_share() {
     open_metrics(&mut app, &fixture, "e");
     let text = screen(&mut app, 140, 40);
     assert!(
-        text.contains("compactions 1 15s 25%"),
+        text.contains("compactions 1 (15s, 25%)"),
         "the count, the time and its share are drawn:\n{text}"
     );
     assert!(
@@ -5575,7 +5576,7 @@ fn the_compaction_cell_shows_its_count_time_and_share() {
         "the empty run keeps its count:\n{text}"
     );
     assert!(
-        !text.contains("compactions 0 0s"),
+        !text.contains("compactions 0 ("),
         "a run with no compaction draws no time:\n{text}"
     );
 }
@@ -5699,5 +5700,554 @@ fn leaving_the_metrics_tab_closes_the_open_detail() {
         app.page,
         radian_tui::arc::Page::Plans,
         "Esc returns from the task page"
+    );
+}
+
+/// Old records carry no run metrics: every run draws one weak line, no cell draws a `-`, and the
+/// total opens the list with the runs that predate metrics. Mutation: draw an unreported counter
+/// as `-` again, or push `total` last again.
+#[test]
+fn the_metrics_tab_of_old_records_leaves_the_dashes_out() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    for attempt in 1..=3 {
+        write_worker_metrics(
+            &fixture,
+            &task,
+            attempt,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:13:08Z",
+            None,
+        );
+    }
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    for needle in [
+        "model -",
+        "req -",
+        "cache -",
+        "ctx -",
+        "compactions -",
+        " - ·",
+    ] {
+        assert!(
+            !text.contains(needle),
+            "an unreported value is left out, not `{needle}`:\n{text}"
+        );
+    }
+    assert_eq!(
+        text.matches("no token metrics recorded").count(),
+        3,
+        "one weak detail per run:\n{text}"
+    );
+    let rows: Vec<&str> = text.lines().collect();
+    let total = rows
+        .iter()
+        .position(|row| row.contains("total"))
+        .expect("the total row");
+    let first_attempt = rows
+        .iter()
+        .position(|row| row.contains("attempt 3") && row.contains("queue"))
+        .expect("the newest attempt");
+    assert!(total < first_attempt, "total opens the list:\n{text}");
+    assert!(rows[total].contains("3 attempts"), "{text}");
+    assert!(
+        rows[total].contains("3 runs predate metrics"),
+        "the note names the old records:\n{text}"
+    );
+    assert!(
+        rows[total + 1].trim_end().ends_with('│'),
+        "a blank row follows the total:\n{text}"
+    );
+}
+
+/// A run that reported every counter takes two rows: the route and cost, then every counter with
+/// its label, starting at the detail column.
+#[test]
+fn a_run_with_every_counter_takes_two_labelled_rows() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:12:30Z",
+        Some(json!({
+            "requests": 84,
+            "input_uncached": 1_200_000,
+            "cache_read": 9_800_000,
+            "cache_write": 0,
+            "output": 41_000,
+            "reasoning": 18_000,
+            "fee_micros": 310_000,
+            "peak_context": 83_000,
+            "context_window": 1_000_000,
+            "compactions": 1,
+            "compaction_ms": 15_000,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("worker"))
+        .expect("the worker row");
+    assert!(rows[first].contains("12m30s"), "{text}");
+    assert!(rows[first].contains("anthropic/m"), "{text}");
+    assert!(rows[first].contains("$0.310"), "{text}");
+    // The only label is `worker`, so the detail column is 2 + 6 + 7 + 3 = 18.
+    assert!(
+        rows[first + 1].starts_with(&format!("  │ {}", " ".repeat(18))),
+        "the counters start at the detail column: {:?}\n{text}",
+        rows[first + 1]
+    );
+    for needle in [
+        "84 req",
+        "in 1.2M",
+        "cache 9.8M 89%",
+        "out 41K",
+        "think 18K",
+        "ctx 83K/1.0M",
+        "compactions 1 (15s, 2%)",
+    ] {
+        assert!(
+            text.contains(needle),
+            "the second row misses `{needle}`:\n{text}"
+        );
+    }
+}
+
+/// A run with no `cache_read` leaves the cache part out, and a reported peak with no window draws
+/// `ctx 83K/-` with a weak `-`.
+#[test]
+fn a_run_without_cache_read_or_a_window_leaves_the_cache_part_out() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 83_000,
+            "output": 10,
+            "peak_context": 83_000,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let terminal = render(&mut app, 140, 40);
+    let text = rows(&terminal).join("\n");
+    assert!(!text.contains("cache "), "no cache part is drawn:\n{text}");
+    assert!(text.contains("ctx 83K/-"), "the peak is drawn:\n{text}");
+    let (row, column) = fg_of(&terminal, "ctx 83K/-");
+    let dash = column + u16::try_from("ctx 83K/".chars().count()).expect("a short prefix");
+    assert_eq!(
+        fg(&terminal, row, dash),
+        app.theme.hint.fg,
+        "the unreported window is weak:\n{text}"
+    );
+}
+
+/// A second row wider than the frame wraps onto further rows at the detail column; it is never cut
+/// with `…`.
+#[test]
+fn a_long_counter_row_wraps_at_the_detail_column() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:12:30Z",
+        Some(json!({
+            "requests": 84,
+            "input_uncached": 1_200_000,
+            "cache_read": 9_800_000,
+            "cache_write": 0,
+            "output": 41_000,
+            "reasoning": 18_000,
+            "fee_micros": 310_000,
+            "peak_context": 83_000,
+            "context_window": 1_000_000,
+            "compactions": 1,
+            "compaction_ms": 15_000,
+            "max_tokens_responses": 2,
+            "model_errors": 1,
+            "retries": 3,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("worker"))
+        .expect("the worker row");
+    let indent = " ".repeat(18);
+    let mut wrapped = 0;
+    for row in rows.iter().skip(first + 1) {
+        if row.contains(" · ") && !row.contains("─────") {
+            assert!(
+                row.starts_with(&format!("  │ {indent}")),
+                "a wrapped row starts at the detail column: {row:?}\n{text}"
+            );
+            assert!(
+                !row.contains('…'),
+                "a wrapped row is not cut: {row:?}\n{text}"
+            );
+            wrapped += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(
+        wrapped >= 2,
+        "the counters wrapped onto more than one row:\n{text}"
+    );
+}
+
+/// A command's label is its first word's basename plus its first argument; a shell construct is
+/// `sh`; leading `NAME=value` assignments are stripped from the detail. Mutation: the shell
+/// detection removed.
+#[test]
+fn the_command_label_comes_from_the_first_word_and_its_argument() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_command_times(
+        &fixture,
+        &task,
+        2,
+        &[
+            ("cargo fmt --all -- --check", 2_000),
+            ("CARGO_TARGET_DIR=/x cargo clippy --workspace", 6_000),
+            (
+                "set -e; base=$(git merge-base HEAD origin/main); if true; then echo; fi",
+                2_000,
+            ),
+            ("/Users/x/.local/bin/arc-gate-lxc crates", 3_000),
+            ("make", 1_000),
+            ("A=1 B=2 ./run.sh -v", 1_000),
+        ],
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    for (label, detail) in [
+        ("cargo fmt", "cargo fmt --all -- --check"),
+        ("cargo clippy", "cargo clippy --workspace"),
+        ("arc-gate-lxc", "/Users/x/.local/bin/arc-gate-lxc crates"),
+        ("make", "make"),
+        ("run.sh", "./run.sh -v"),
+    ] {
+        let row = text
+            .lines()
+            .find(|row| row.contains(detail))
+            .unwrap_or_else(|| panic!("no row for `{detail}`:\n{text}"));
+        assert!(
+            row.contains(&format!("│   {label}")),
+            "the label of `{detail}` is `{label}`: {row:?}\n{text}"
+        );
+    }
+    let shell = text
+        .lines()
+        .find(|row| row.contains("set -e; base="))
+        .expect("the shell row");
+    assert!(
+        shell.contains("│   sh"),
+        "a shell construct is labelled `sh`: {shell:?}\n{text}"
+    );
+    assert!(
+        !shell.contains("sh: "),
+        "the detail is the line, not a `sh:` prefix: {shell:?}"
+    );
+}
+
+/// A first attempt that recorded no integration time draws no `integration` row.
+#[test]
+fn a_first_attempt_without_integration_draws_no_integration_row() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_command_times(&fixture, &task, 2, &[("cargo fmt", 1_000)]);
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        !text.contains("integration"),
+        "no integration row without a duration:\n{text}"
+    );
+}
+
+/// The review row's detail names only the severities above zero, `no findings` when the review
+/// recorded none, and nothing when there is no review verdict.
+#[test]
+fn the_review_row_names_only_the_findings_above_zero() {
+    let fixture = Fixture::new();
+    let finding = |severity: &str, summary: &str| Finding {
+        severity: severity.to_owned(),
+        file: Some("src/lib.rs".to_owned()),
+        line: Some(1),
+        summary: summary.to_owned(),
+        trigger: String::new(),
+        pre_existing: false,
+    };
+    let e = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &e,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_review_run(
+        &fixture,
+        &e,
+        2,
+        1,
+        "2026-01-01T00:00:11Z",
+        "2026-01-01T00:00:14Z",
+        json!({"requests": 1, "input_uncached": 1}),
+        vec![finding("major", "a bug"), finding("minor", "a nit")],
+    );
+    let f = fixture.id("f").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &f,
+        3,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_review_run(
+        &fixture,
+        &f,
+        3,
+        1,
+        "2026-01-01T00:00:11Z",
+        "2026-01-01T00:00:14Z",
+        json!({"requests": 1, "input_uncached": 1}),
+        Vec::new(),
+    );
+    let h = fixture.id("h").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &h,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("1 major · 1 minor"),
+        "only the severities above zero:\n{text}"
+    );
+
+    open_metrics(&mut app, &fixture, "f");
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("no findings"),
+        "a review that recorded none says so:\n{text}"
+    );
+
+    open_metrics(&mut app, &fixture, "h");
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        !text.contains("│   review"),
+        "no review verdict draws no review row:\n{text}"
+    );
+    assert!(!text.contains("no findings"), "{text}");
+}
+
+/// Two attempts are separated by a weak rule, the last has none after it, and the queue wait sits
+/// at the frame's right edge.
+#[test]
+fn two_attempts_are_separated_by_a_rule_and_the_queue_is_right_aligned() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    for attempt in 1..=2 {
+        write_worker_metrics(
+            &fixture,
+            &task,
+            attempt,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:10Z",
+            Some(json!({"requests": 1, "input_uncached": 1})),
+        );
+    }
+    write_run_json(
+        &fixture,
+        &task,
+        2,
+        "queue.json",
+        &json!({"queue_wait_secs": 4}),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 80, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let newer = rows
+        .iter()
+        .position(|row| row.contains("attempt 2") && row.contains("queue"))
+        .expect("the newer attempt");
+    let older = rows
+        .iter()
+        .position(|row| row.contains("attempt 1") && row.contains("queue"))
+        .expect("the older attempt");
+    assert!(newer < older, "the newest attempt is first:\n{text}");
+    assert!(
+        rows[newer].ends_with("queue 4s"),
+        "the queue is at the right edge: {:?}\n{text}",
+        rows[newer]
+    );
+    assert_eq!(
+        rows[newer].chars().count(),
+        80,
+        "the queue ends at the frame's edge: {:?}",
+        rows[newer]
+    );
+    assert!(
+        rows[older].contains("queue -"),
+        "an unreported queue is weak:\n{text}"
+    );
+    assert!(
+        rows[newer..older].iter().any(|row| row.contains("─────")),
+        "a rule separates the attempts:\n{text}"
+    );
+    let bottom = rows
+        .iter()
+        .position(|row| row.contains("╰──"))
+        .expect("the frame ends");
+    assert!(
+        !rows[older..bottom].iter().any(|row| row.contains("─────")),
+        "no rule follows the last attempt:\n{text}"
+    );
+}
+
+/// `j` skips a run's second row and lands on the next run; `Enter` opens the detail below the
+/// run's last row, not between its two rows.
+#[test]
+fn the_selection_skips_a_runs_second_row_and_opens_the_detail_below_it() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 7,
+            "input_uncached": 7,
+            "request_log": [request("2026-01-01T00:00:01Z", "chat", 1)],
+        })),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        Some(json!({"requests": 3, "input_uncached": 3})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        0,
+        "the newest worker is selected"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Char('j'))), ArcKey::Redraw);
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        1,
+        "`j` lands on the next run, not on a second row"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    let text = screen(&mut app, 120, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let counters = rows
+        .iter()
+        .position(|row| row.contains("7 req"))
+        .expect("the selected run's counters");
+    assert!(
+        rows[counters + 1].contains("tools"),
+        "the detail opens below the second row:\n{text}"
+    );
+    assert!(
+        !rows[..counters].iter().any(|row| row.contains("tools")),
+        "no detail before the selected run:\n{text}"
+    );
+    let selected = rows
+        .iter()
+        .position(|row| row.contains("❯ worker"))
+        .expect("the selected worker's first row");
+    assert!(
+        selected < counters,
+        "the marker is on row one of the run:\n{text}"
+    );
+}
+
+/// A narrow frame caps the label column at 16 columns and keeps the duration column aligned.
+#[test]
+fn a_narrow_metrics_frame_keeps_the_columns_aligned() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_command_times(&fixture, &task, 2, &[("/x/command-name-here arg", 2_000)]);
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 60, 24);
+    assert!(
+        text.contains("command-name-he…"),
+        "the label caps at 16 columns:\n{text}"
+    );
+    assert!(
+        text.contains("command-name-he…     2s"),
+        "the duration column stays aligned:\n{text}"
     );
 }

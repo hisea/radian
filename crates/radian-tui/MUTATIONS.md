@@ -3535,3 +3535,19 @@ copy under `.radian/mut/`, which `cmp` found identical.
 | TK0295-M8 | `TaskPage::set_tab` assigns the tab without closing `metric_open` | `arc_tui::leaving_the_metrics_tab_closes_the_open_detail` (the detail stayed open, so `Esc` consumed it) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0296: the metrics tab's layout (2026-11-01, branch `work/TK0296-tui-metrics-tab-layout`)
+
+The tab's stage rows share one label/duration/detail layout, the total row opens the list, and a
+run that reported nothing draws one weak line. Each mutation was applied by hand to
+`crates/radian-tui/src/arc/metrics.rs`, the named `arc_tui` test ran with `cargo nextest run -p
+radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`, and the file was
+restored from a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0296-M1 | the command label skips the shell-construct check, so `set -e; …` is labelled `set` | `arc_tui::the_command_label_comes_from_the_first_word_and_its_argument` (the shell row read `set`, expected `sh`) | ✅ 1 failed |
+| TK0296-M2 | a run with no metrics draws the old dash row (`model - · req - · …`) instead of `no token metrics recorded` | `arc_tui::the_metrics_tab_of_old_records_leaves_the_dashes_out` (a row contained `model -`) | ✅ 1 failed |
+| TK0296-M3 | the total row is pushed after the attempts again | `arc_tui::the_metrics_tab_of_old_records_leaves_the_dashes_out` (the total was not the first row) | ✅ 1 failed |
+
+3/3 caught.
