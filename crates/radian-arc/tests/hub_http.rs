@@ -55,6 +55,16 @@ impl Hub {
     /// [`Hub::start`] with extra environment variables, which is how the event-stream tests
     /// shorten the poll and keep-alive intervals.
     fn start_with(home: &Path, envs: &[(&str, &str)]) -> Self {
+        Self::start_on_with(home, 0, envs)
+    }
+
+    /// Starts a hub on `port` (`0` asks the OS for one) and reads the bound port from the
+    /// first stdout line.
+    fn start_on(home: &Path, port: u16) -> Self {
+        Self::start_on_with(home, port, &[])
+    }
+
+    fn start_on_with(home: &Path, port: u16, envs: &[(&str, &str)]) -> Self {
         fs::create_dir_all(home).expect("the hub home is creatable");
         let stderr_path = home.join("hub.stderr.log");
         let stderr = fs::File::create(&stderr_path).expect("the hub stderr file is creatable");
@@ -64,7 +74,7 @@ impl Hub {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
             .env("RADIAN_HOME", home)
-            .args(["hub", "--port", "0"])
+            .args(["hub", "--port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr));
@@ -1311,6 +1321,46 @@ fn a_second_hub_is_refused_by_the_lock_and_a_port_in_use_names_the_port() {
     assert!(
         stderr.contains(&port.to_string()),
         "the startup error names the port: {stderr}"
+    );
+}
+
+/// A hub binds its port again after its predecessor's last connection left the port in
+/// `TIME_WAIT`. The `std::net` bind this replaced did not set `SO_REUSEADDR`, so the hub a
+/// rebuilt binary `exec`s exited `1` with `Address already in use` (review).
+#[test]
+fn a_hub_binds_its_port_again_while_the_last_connection_is_in_time_wait() {
+    let a = Repo::new("hub-http-rebind");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    // The OS picks a free port; the test releases it before the hub binds it.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("the test finds a free port")
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let mut first = Hub::start_on(&home, port);
+    let response = first.authorized("GET", "/v1/version");
+    assert_eq!(response.status, 200, "the first hub serves the port");
+    // The request sent `Connection: close`, so the server closed first and `port` now has a
+    // connection in `TIME_WAIT`.
+    assert_eq!(
+        first.terminate().code(),
+        Some(0),
+        "the first hub stops cleanly"
+    );
+
+    let mut second = Hub::start_on(&home, port);
+    let response = second.authorized("GET", "/v1/version");
+    assert_eq!(
+        response.status, 200,
+        "the replacement hub binds and serves the same port"
+    );
+    assert_eq!(
+        second.terminate().code(),
+        Some(0),
+        "the replacement hub stops cleanly"
     );
 }
 

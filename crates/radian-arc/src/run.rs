@@ -588,11 +588,19 @@ impl Transitions<'_> {
     }
 }
 
-/// Installs the SIGINT and SIGTERM handler of the hub. It clears the flag first so a test or a
-/// second run in one process starts fresh. The handler only stores to an atomic, which is
-/// async-signal-safe.
+/// Installs the SIGINT and SIGTERM handler of the hub and clears the flag first, so a test or
+/// a second run in one process starts fresh. A process that must not lose a signal that
+/// arrives while it is still starting calls [`install_stop_signals`] instead: the hub installs
+/// it before it takes `hub.lock`, prints its first line or binds a port.
 pub(crate) fn catch_stop_signals() {
     STOP.store(false, Ordering::SeqCst);
+    install_stop_signals();
+}
+
+/// Installs the SIGINT and SIGTERM handler without touching the flag, so installing it twice
+/// keeps a stop that arrived in between. The handler only stores to an atomic, which is
+/// async-signal-safe.
+pub(crate) fn install_stop_signals() {
     // SAFETY: `request_stop` has the C ABI `signal` expects, and its body only stores to an
     // `AtomicBool`. The previous handler is not needed.
     unsafe {

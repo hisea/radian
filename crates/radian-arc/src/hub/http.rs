@@ -43,6 +43,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
@@ -73,16 +74,23 @@ pub fn bind_address(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
-/// Runs the hub until the process ends: it creates the token when it is missing, takes
-/// `hub.lock`, binds [`bind_address`], prints `hub: listening on <addr>` as its first stdout
-/// line, and then serves the HTTP API while the scheduling loop (ADR 0048 decision 13) runs
-/// every registered repository on this thread.
+/// Runs the hub until the process ends: it installs the stop-signal handler, creates the
+/// token when it is missing, takes `hub.lock`, binds [`bind_address`], prints
+/// `hub: listening on <addr>` as its first stdout line, and then serves the HTTP API while the
+/// scheduling loop (ADR 0048 decision 13) runs every registered repository on this thread.
+///
+/// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
+/// a test or a person stops the hub as soon as it announces itself, and the default action
+/// would kill the process instead of letting every loop release its lock. The `exec` after a
+/// rebuilt binary resets caught signals, so this is also what arms the process that starts
+/// after the restart.
 ///
 /// # Errors
 ///
 /// The hub directory or the token cannot be prepared, `hub.lock` is held by another hub, or the
 /// port cannot be bound.
 pub fn serve(port: u16) -> Result<(), Error> {
+    crate::run::catch_stop_signals();
     let registry = Registry::open()?;
     let dir = registry.dir().to_path_buf();
     radian_host::ensure_private_dir(&dir)
@@ -92,11 +100,7 @@ pub fn serve(port: u16) -> Result<(), Error> {
     // (ADR 0048 §16).
     let lock = HubLock::take(&dir)?;
     let address = bind_address(port);
-    let listener = std::net::TcpListener::bind(address)
-        .map_err(|error| Error::Failed(format!("cannot bind {address}: {error}")))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| Error::Failed(format!("cannot prepare {address}: {error}")))?;
+    let listener = bind_listener(address)?;
     let bound = listener
         .local_addr()
         .map_err(|error| Error::Failed(format!("cannot read the hub address: {error}")))?;
@@ -116,6 +120,28 @@ pub fn serve(port: u16) -> Result<(), Error> {
         let _ = radian_host::write_stdout(text);
     });
     super::r#loop::run(&registry, emit, lock)
+}
+
+/// Binds `address` with `SO_REUSEADDR`, so a rebuilt binary that `exec`s the hub binds the
+/// same port while the previous process's last connections are still in `TIME_WAIT`. Without
+/// it the new hub fails with `Address already in use` and exits `1` (ADR 0048 decision 16).
+fn bind_listener(address: SocketAddr) -> Result<std::net::TcpListener, Error> {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|error| Error::Failed(format!("cannot open a socket for {address}: {error}")))?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|error| Error::Failed(format!("cannot reuse {address}: {error}")))?;
+    socket
+        .bind(&address.into())
+        .map_err(|error| Error::Failed(format!("cannot bind {address}: {error}")))?;
+    socket
+        .listen(1024)
+        .map_err(|error| Error::Failed(format!("cannot listen on {address}: {error}")))?;
+    let listener: std::net::TcpListener = socket.into();
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| Error::Failed(format!("cannot prepare {address}: {error}")))?;
+    Ok(listener)
 }
 
 /// Serves the hub's HTTP API on `listener` until the process ends.

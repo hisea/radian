@@ -51,7 +51,9 @@ pub fn run(
     let interval = interval_secs(&config);
     let cap = config.hub.concurrency.max(1);
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-    run::catch_stop_signals();
+    // [`http::serve`] already installed it before the hub's first line; installing it again
+    // without clearing keeps a SIGTERM that arrived while the hub was starting.
+    run::install_stop_signals();
 
     'hub: loop {
         let stop_all = Arc::new(AtomicBool::new(false));
