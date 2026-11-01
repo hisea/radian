@@ -555,9 +555,14 @@ pub struct TaskPage {
     /// until the task gains a newer attempt).
     pub attempt: Option<u32>,
     pub latest: Option<u32>,
-    /// The first attempt row the attempts tab draws: the list scrolls only when the selection
-    /// leaves the visible rows.
-    pub attempt_top: usize,
+    /// The first row the attempts tab draws. Attempt rows and the findings under them are
+    /// one list, so the window counts the findings too and every row is reachable.
+    pub attempt_scroll: usize,
+    /// The runner pins the attempts tab to its end (`f`) at the next frame.
+    pub attempt_follow: bool,
+    /// The attempt whose row was last scrolled into view. A changed selection reveals its
+    /// row; a `j`/`k` scroll keeps the place the user chose.
+    attempt_shown: Option<u32>,
     /// Whether the selection follows a new latest attempt.
     follow_latest: bool,
     pub attempts: Vec<AttemptView>,
@@ -611,7 +616,9 @@ impl TaskPage {
             brief_follow: false,
             attempt,
             latest,
-            attempt_top: 0,
+            attempt_scroll: 0,
+            attempt_follow: false,
+            attempt_shown: None,
             follow_latest: true,
             attempts,
             journal: None,
@@ -2622,7 +2629,11 @@ impl ArcApp {
                     page.pending_scroll += 1;
                     ArcKey::Redraw
                 }
-                TaskTab::Attempts => ArcKey::Ignored,
+                TaskTab::Attempts => {
+                    page.attempt_follow = false;
+                    page.attempt_scroll = page.attempt_scroll.saturating_add(1);
+                    ArcKey::Redraw
+                }
             },
             KeyCode::Char('k') | KeyCode::Up => match page.tab {
                 TaskTab::Brief => {
@@ -2638,7 +2649,11 @@ impl ArcApp {
                     page.pending_scroll -= 1;
                     ArcKey::Redraw
                 }
-                TaskTab::Attempts => ArcKey::Ignored,
+                TaskTab::Attempts => {
+                    page.attempt_follow = false;
+                    page.attempt_scroll = page.attempt_scroll.saturating_sub(1);
+                    ArcKey::Redraw
+                }
             },
             KeyCode::Char('f') => {
                 match page.tab {
@@ -2649,7 +2664,7 @@ impl ArcApp {
                     // stored, so `k` moves up from there instead of from a sentinel.
                     TaskTab::Diff => page.diff_scroll = page.diff_body_len().saturating_sub(1),
                     TaskTab::Conversation => page.pending_follow = true,
-                    TaskTab::Attempts => {}
+                    TaskTab::Attempts => page.attempt_follow = true,
                 }
                 ArcKey::Redraw
             }

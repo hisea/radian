@@ -226,41 +226,6 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
     )
 }
 
-/// Feeds one message per turn: writes a line, then waits for that turn's `TurnFinished` in the
-/// session journal before writing the next. The wait matters when the CLI reads stdin while a
-/// turn is in flight — `--yes`, or nobody to ask — because a line written early is taken as a
-/// **steer** and joins the running turn (ADR 0011) instead of opening the next one, so a
-/// two-line feed becomes one turn (three model calls, not four) under load. `sessions` is the
-/// session directory to watch. Every line must be a message that opens its own turn.
-async fn feed_turns_and_wait(
-    mut child: Child,
-    sessions: &Path,
-    lines: &[&str],
-) -> (i32, String, String) {
-    let mut stdin = child.stdin.take().unwrap();
-    for (index, line) in lines.iter().enumerate() {
-        stdin.write_all(line.as_bytes()).await.unwrap();
-        stdin.write_all(b"\n").await.unwrap();
-        stdin.flush().await.unwrap();
-        let turns = index + 1;
-        wait_until(
-            &format!("{turns} TurnFinished under {}", sessions.display()),
-            || journal_turns(sessions) >= turns,
-        )
-        .await;
-    }
-    drop(stdin);
-    let output = tokio::time::timeout(EXIT_WATCHDOG, child.wait_with_output())
-        .await
-        .expect("the CLI did not exit within the watchdog")
-        .expect("wait");
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
-
 /// The number of `TurnFinished` events across the session files in `sessions`.
 fn journal_turns(sessions: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(sessions) else {
@@ -8016,332 +7981,378 @@ async fn memory_split_and_merge_move_records_between_projects() {
     assert!(out.contains("moved record"), "{out}");
 }
 
-// ---------- memory injection and the agent memory tools (ADR 0021 D5/D6) ----------
+// ---------- memory index injection (ADR 0021 D6) ----------
 
-/// The injected block reaches the system prompt sent to the provider.
-#[tokio::test]
-async fn memory_injection_reaches_the_system_prompt() {
-    let env = MemoryEnv::new("mem-inject");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env
-        .run(&["add", "--key", "style", "tabs over spaces"])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "injected",
-                "-p",
-                "hi",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = messages_of(&server, 0)[0]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(system.contains("tabs over spaces"), "{system}");
-    assert!(
-        system.contains("not instructions"),
-        "the low-trust note is present: {system}"
-    );
-    // This build records only the injected index files (ADR 0021 D6); the in-process records
-    // set is not written, and the content is not in the file either.
-    let raw = std::fs::read_to_string(env.sessions.join("injected.jsonl")).unwrap();
-    assert!(
-        !raw.contains("MemoryInjected"),
-        "no legacy record is written: {raw}"
-    );
-    assert!(
-        !raw.contains("tabs over spaces"),
-        "injected content leaked into the session: {raw}"
-    );
+/// The `radian exec` arguments for one run against `server`.
+fn memory_args(
+    env: &MemoryEnv,
+    server: &MockServer,
+    session: &str,
+    prompt: Option<&str>,
+    config: Option<&Path>,
+) -> Vec<String> {
+    let mut args = vec![
+        "--model".to_owned(),
+        "m".to_owned(),
+        "--base-url".to_owned(),
+        server.base_url.clone(),
+        "--workspace".to_owned(),
+        env.ws.to_string_lossy().into_owned(),
+        "--session-id".to_owned(),
+        session.to_owned(),
+    ];
+    if let Some(config) = config {
+        args.push("--config".to_owned());
+        args.push(config.to_string_lossy().into_owned());
+    }
+    if let Some(prompt) = prompt {
+        args.push("-p".to_owned());
+        args.push(prompt.to_owned());
+    }
+    args
 }
 
-/// ADR 0021, ADR 0021 D7 and ADR 0036, end to
-/// end in one process: two user turns with a `write` in between. Every request carries the
-/// **same** system prompt bytes — the fixed block is ranked by the session's first user
-/// message and computed once, and the `<session>` layer's git state is **not** refreshed
-/// when the write makes the tree dirty. The fixed block holds the two filler records the
-/// first turn's text hits; the third record does not fit the budget, so the second turn's
-/// text appends it as one System-source message right after the second user message. The
-/// tool definitions never move. No legacy `MemoryInjected` record is written: this build's
-/// writer records injected index files only (ADR 0021 D6).
+fn memory_envs(env: &MemoryEnv) -> [(&'static str, &str); 2] {
+    [
+        ("RADIAN_HOME", env.home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+    ]
+}
+
+async fn run_memory_session(
+    env: &MemoryEnv,
+    server: &MockServer,
+    session: &str,
+    prompt: &str,
+    config: Option<&Path>,
+) -> (i32, String, String) {
+    let args = memory_args(env, server, session, Some(prompt), config);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    feed_and_wait(spawn_radian(&refs, &memory_envs(env)), "").await
+}
+
+fn write_index(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn project_index_path(env: &MemoryEnv, project: &str) -> PathBuf {
+    env.home
+        .join("memory/projects")
+        .join(project)
+        .join("MEMORY.md")
+}
+
+fn global_index_path(env: &MemoryEnv) -> PathBuf {
+    env.home.join("memory/global/MEMORY.md")
+}
+
+fn system_prompt(server: &MockServer, n: usize) -> String {
+    messages_of(server, n)[0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn notice_count(server: &MockServer, n: usize) -> usize {
+    messages_of(server, n)
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Rewrite the index shorter"))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Edge case 1: both indexes are injected byte for byte, project first, each behind one line
+/// naming its file.
 #[tokio::test]
-async fn the_memory_block_is_fixed_per_process_and_a_new_record_is_appended_once() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let env = MemoryEnv::new("mem-fixed");
-    git(&env.ws, &["init", "-q"]);
-    git(&env.ws, &["config", "user.email", "t@example.invalid"]);
-    git(&env.ws, &["config", "user.name", "t"]);
-    std::fs::write(env.ws.join("a.txt"), "hi\n").unwrap();
-    git(&env.ws, &["add", "."]);
-    git(&env.ws, &["commit", "-qm", "init"]);
+async fn two_indexes_reach_the_system_prompt_project_then_global() {
+    let env = MemoryEnv::new("idx-two");
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
-    // Two filler records (~1900 tokens together) that the first turn's text hits, plus one
-    // small record (~150 tokens) that does not fit the 2000-token budget beside them and
-    // that only the second turn's text hits.
-    for (key, word) in [("filler-a", "quarry alpha"), ("filler-b", "quarry beta")] {
-        let content = format!("{} ", word).repeat(300);
-        let (code, _, stderr) = env.run(&["add", "--key", key, &content]).await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-    let target_content = format!(
-        "the parser lives in src/parse.rs{}",
-        " padding note".repeat(40)
-    );
-    let (code, _, stderr) = env.run(&["add", "--key", "target", &target_content]).await;
+    let project = linked_project(&env, &env.ws).await;
+    let project_text = "- [p](p.md) — project line\n";
+    let global_text = "- [g](g.md) — global line\n";
+    let project_path = project_index_path(&env, &project);
+    let global_path = global_index_path(&env);
+    write_index(&project_path, project_text);
+    write_index(&global_path, global_text);
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = run_memory_session(&env, &server, "idx-two", "hi", None).await;
     assert_eq!(code, 0, "{stderr}");
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("not instructions"), "{system}");
+    assert!(system.contains("Project memory index"), "{system}");
+    assert!(system.contains("Global memory index"), "{system}");
+    assert!(system.contains(project_text), "{system}");
+    assert!(system.contains(global_text), "{system}");
+    assert!(
+        system.contains(&project_path.to_string_lossy().into_owned()),
+        "the project path line: {system}"
+    );
+    assert!(
+        system.contains(&global_path.to_string_lossy().into_owned()),
+        "the global path line: {system}"
+    );
+    let project_at = system.find(project_text).unwrap();
+    let global_at = system.find(global_text).unwrap();
+    assert!(project_at < global_at, "project first: {system}");
+
+    let session = radian_session::Session::open(env.sessions.join("idx-two.jsonl")).unwrap();
+    let indexes: Vec<_> = session
+        .events()
+        .iter()
+        .find_map(|event| match &event.data {
+            radian_session::EventData::MemoryInjected {
+                indexes,
+                records: _,
+            } if !indexes.is_empty() => Some(indexes.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(indexes.len(), 2, "{indexes:?}");
+    assert_eq!(indexes[0].scope, "project");
+    assert_eq!(indexes[1].scope, "global");
+    for index in &indexes {
+        assert_eq!(index.sha256.len(), 64, "{index:?}");
+        assert!(index.path.ends_with("MEMORY.md"), "{index:?}");
+    }
+}
+
+/// Edge case 2: a 201-line index with the default 200-line cap drops line 201, and exactly one
+/// rewrite notice reaches the next model call (not the third).
+#[tokio::test]
+async fn an_index_over_the_line_cap_drops_the_last_line_and_warns_once() {
+    let env = MemoryEnv::new("idx-line-cap");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let path = project_index_path(&env, &project);
+    let text: String = (1..=201).map(|n| format!("line-{n}\n")).collect();
+    write_index(&path, &text);
 
     let server = MockServer::start(vec![
-        // The write makes the working tree dirty; the `<session>` line must not follow it
-        // (ADR 0036: the git state is not refreshed between turns).
-        tool_reply("call_1", "write", r#"{"path":"x.txt","content":"y"}"#),
-        text_reply("saved"),
+        tool_reply("c1", "read", r#"{"path":"missing-one.txt"}"#),
+        tool_reply("c2", "read", r#"{"path":"missing-two.txt"}"#),
         text_reply("done"),
     ])
     .await;
-    let (code, _, stderr) = feed_turns_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "fixed",
-                "--yes",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        &env.sessions,
-        // Turn 1's text hits the fillers; turn 2's text hits the record beside the budget.
-        &["quarry", "parser"],
-    )
-    .await;
+    let (code, _, stderr) = run_memory_session(&env, &server, "idx-line-cap", "hi", None).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(env.ws.join("x.txt").exists(), "the write ran");
-
-    // Turn 1 takes two model calls (write, answer), turn 2 one.
     assert_eq!(server.requests().len(), 3, "{}", server.requests().len());
-    let system = |n: usize| {
-        messages_of(&server, n)[0]["content"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    let first = system(0);
-    assert!(
-        first.contains("quarry"),
-        "the fixed block holds the records the first turn hit: {first}"
-    );
-    assert!(
-        !first.contains("src/parse.rs"),
-        "the record beside the budget is not in the fixed block: {first}"
-    );
-    assert!(
-        first.contains("git: "),
-        "the session layer names the git state: {first}"
-    );
-    assert!(
-        first.contains("(clean)"),
-        "the tree was clean when the process started: {first}"
-    );
-    for n in 1..3 {
-        assert_eq!(
-            system(n),
-            first,
-            "request {n} must carry the same system prompt bytes"
-        );
-    }
-    assert_eq!(
-        advertised_tools(&server, 0),
-        advertised_tools(&server, 2),
-        "tool definitions are never withdrawn mid-session (ADR 0036)"
-    );
 
-    // The second turn's first request carries the addition right after its user message.
-    let messages = messages_of(&server, 2);
-    let messages = messages.as_array().unwrap();
-    let user_at = messages
-        .iter()
-        .position(|m| m["role"] == "user" && m["content"] == json!("parser"))
-        .unwrap_or_else(|| panic!("no second user message in {messages:?}"));
-    let addition = &messages[user_at + 1];
-    assert_eq!(addition["role"], "user", "{addition}");
-    let text = addition["content"].as_str().unwrap();
-    assert!(text.contains("src/parse.rs"), "{text}");
-    assert!(text.contains("not instructions"), "{text}");
-    assert!(text.starts_with("<memory>"), "{text}");
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("line-1\n"), "{system}");
+    assert!(system.contains("line-200\n"), "{system}");
+    assert!(!system.contains("line-201"), "the cap drops it: {system}");
 
-    // The session file: a System-source message with the memory_addition origin, at the
-    // transcript index right after the user message.
-    let session = radian_session::Session::open(env.sessions.join("fixed.jsonl")).unwrap();
-    let history = session.history().unwrap();
-    let addition_at = history
-        .iter()
-        .position(|message| {
-            message
-                .meta()
-                .origin
-                .as_ref()
-                .is_some_and(|origin| origin.get().contains("memory_addition"))
-        })
-        .unwrap_or_else(|| panic!("no addition in {history:?}"));
-    assert_eq!(history[addition_at - 1].text(), "parser");
-    assert_eq!(
-        history[addition_at].meta().source,
-        Some(radian_core::InputSource::System),
-        "an addition is never human input (ADR 0005 G2)"
-    );
-    assert!(history[addition_at].text().contains("src/parse.rs"));
-
-    // The addition's content is in the session file (decision 3's accepted cost); no legacy
-    // `MemoryInjected` record was written.
-    let raw = std::fs::read_to_string(env.sessions.join("fixed.jsonl")).unwrap();
-    assert!(
-        raw.contains("src/parse.rs"),
-        "the addition is in the transcript"
-    );
-    assert!(
-        !raw.contains("MemoryInjected"),
-        "no legacy record is written: {raw}"
-    );
-}
-
-/// ADR 0021 D7: `memory_search` mounts only when the Active records' estimated total exceeds
-/// the injection budget (2000 tokens). A memory that fits in the fixed block needs no search.
-#[tokio::test]
-async fn memory_search_mounts_only_past_the_injection_budget() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    // Within the budget: one small record — the tool is not advertised.
-    let env = MemoryEnv::new("mem-budget-in");
-    git(&env.ws, &["init", "-q"]);
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run(&["add", "tabs over spaces"]).await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let server = MockServer::start(vec![text_reply("noted")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "-p",
-                "hello",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let names = advertised_tools(&server, 0);
-    assert!(
-        !names.iter().any(|name| name == "memory_search"),
-        "a memory within the budget mounts no search: {names:?}"
-    );
-
-    // Past the budget: ~9 KB of records at 4 bytes per token — the tool is advertised and
-    // the fixed block carries what fits.
-    let env = MemoryEnv::new("mem-budget-over");
-    git(&env.ws, &["init", "-q"]);
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    for n in 0..3 {
-        // ~800 tokens each: the first two fill the fixed block, the third does not fit.
-        let content = format!("budget filler {n} ").repeat(200);
-        let (code, _, stderr) = env.run(&["add", &content]).await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-
-    let server = MockServer::start(vec![text_reply("noted")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "-p",
-                "hello",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let names = advertised_tools(&server, 0);
-    assert!(
-        names.iter().any(|name| name == "memory_search"),
-        "a memory past the budget mounts the search: {names:?}"
-    );
-    for gone in ["memory_save", "memory_revise", "memory_get"] {
-        assert!(
-            !names.iter().any(|name| name == gone),
-            "only `memory_search` mounts, never `{gone}`: {names:?}"
-        );
-    }
-    let system = messages_of(&server, 0)[0]["content"]
-        .as_str()
+    assert_eq!(notice_count(&server, 1), 1, "the next call sees one notice");
+    let notices: Vec<String> = messages_of(&server, 1)
+        .as_array()
         .unwrap()
-        .to_owned();
+        .iter()
+        .filter_map(|message| message["content"].as_str().map(str::to_owned))
+        .filter(|text| text.contains("Rewrite the index shorter"))
+        .collect();
+    assert!(notices[0].contains("project"), "{}", notices[0]);
     assert!(
-        system.contains("budget filler"),
-        "the fixed block carries what fits: {system}"
+        notices[0].contains(&path.to_string_lossy().into_owned()),
+        "{}",
+        notices[0]
+    );
+    assert!(notices[0].contains("1 line was dropped"), "{}", notices[0]);
+    assert_eq!(
+        notice_count(&server, 2),
+        1,
+        "a third call gets no second notice"
     );
 }
 
-/// ADR 0021 D5: there is no model-writable memory path. A script model that calls
-/// `memory_save` gets Core's unknown-tool result, and the turn still succeeds.
+/// Edge case 3: an index under the line cap but over the byte cap is cut at the last whole line
+/// within the byte cap, and the notice is sent.
 #[tokio::test]
-async fn a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds() {
+async fn an_index_over_the_byte_cap_is_cut_at_a_line_boundary() {
+    let env = MemoryEnv::new("idx-byte-cap");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    write_index(&project_index_path(&env, &project), "aaa\nbbb\nccc\n");
+    let config = write_file(
+        &env.dir,
+        "config.toml",
+        "schema_version = 1\n[memory]\nindex_max_bytes = 8\n",
+    );
+
+    let server = MockServer::start(vec![
+        tool_reply("c1", "read", r#"{"path":"missing.txt"}"#),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) =
+        run_memory_session(&env, &server, "idx-byte-cap", "hi", Some(&config)).await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("aaa\n"), "{system}");
+    assert!(system.contains("bbb\n"), "{system}");
+    assert!(
+        !system.contains("ccc"),
+        "the third line does not fit: {system}"
+    );
+    assert_eq!(notice_count(&server, 1), 1);
+}
+
+/// Edge case 4: a workspace that maps to no project injects only the global index and one line
+/// saying the project scope has no index. A read never creates a project (ADR 0021 D2).
+#[tokio::test]
+async fn an_unlinked_workspace_injects_only_the_global_index() {
+    let env = MemoryEnv::new("idx-unlinked");
+    write_index(&global_index_path(&env), "global only\n");
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = run_memory_session(&env, &server, "idx-unlinked", "hi", None).await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("global only"), "{system}");
+    assert!(
+        system.to_lowercase().contains("no project memory index"),
+        "{system}"
+    );
+    assert!(
+        !env.home.join("memory/projects").exists(),
+        "the injection created a project directory"
+    );
+}
+
+/// Edge case 5: `[memory] enabled = false` injects nothing, sends no notice and writes no
+/// `MemoryInjected`.
+#[tokio::test]
+async fn memory_disabled_injects_nothing_and_writes_no_record() {
+    let env = MemoryEnv::new("idx-disabled");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let text: String = (1..=201).map(|n| format!("line-{n}\n")).collect();
+    write_index(&project_index_path(&env, &project), &text);
+    write_index(&global_index_path(&env), "global note\n");
+    let config = write_file(
+        &env.dir,
+        "config.toml",
+        "schema_version = 1\n[memory]\nenabled = false\n",
+    );
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) =
+        run_memory_session(&env, &server, "idx-disabled", "hi", Some(&config)).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests().len(), 1);
+    let system = system_prompt(&server, 0);
+    assert!(!system.contains("Memory indexes"), "{system}");
+    assert!(!system.contains("line-1\n"), "{system}");
+    assert!(!system.contains("global note"), "{system}");
+    assert_eq!(notice_count(&server, 0), 0);
+    let raw = std::fs::read_to_string(env.sessions.join("idx-disabled.jsonl")).unwrap();
+    assert!(!raw.contains("MemoryInjected"), "{raw}");
+}
+
+/// Edge case 6: the section is identical on the second call after the index changes on disk; a
+/// resumed session reads the file again.
+#[tokio::test]
+async fn the_section_freezes_per_process_and_a_resume_reads_again() {
+    let env = MemoryEnv::new("idx-freeze");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let path = project_index_path(&env, &project);
+    write_index(&path, "before\n");
+
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let args = memory_args(&env, &server, "idx-freeze", None, None);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut child = spawn_radian(&refs, &memory_envs(&env));
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"one\n").await.unwrap();
+    stdin.flush().await.unwrap();
+    wait_until("the first turn is finished", || {
+        journal_turns(&env.sessions) >= 1
+    })
+    .await;
+    // The file changes between the two turns of one process.
+    write_index(&path, "after\n");
+    stdin.write_all(b"two\n").await.unwrap();
+    stdin.flush().await.unwrap();
+    wait_until("the second turn is finished", || {
+        journal_turns(&env.sessions) >= 2
+    })
+    .await;
+    drop(stdin);
+    let output = timeout(EXIT_WATCHDOG, child.wait_with_output())
+        .await
+        .expect("the CLI exits")
+        .expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(server.requests().len(), 2);
+    let first = system_prompt(&server, 0);
+    assert!(first.contains("before\n"), "{first}");
+    assert!(!first.contains("after\n"), "{first}");
+    assert_eq!(system_prompt(&server, 1), first, "the section is frozen");
+
+    // A resume is a new process: it reads the file again.
+    let server = MockServer::start(vec![text_reply("three")]).await;
+    let mut args = memory_args(&env, &server, "unused", Some("three"), None);
+    // Replace `--session-id idx` with `--resume idx-freeze`.
+    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
+    args[at] = "--resume".to_owned();
+    args[at + 1] = "idx-freeze".to_owned();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let resumed = system_prompt(&server, 0);
+    assert!(resumed.contains("after\n"), "{resumed}");
+    assert!(!resumed.contains("before\n"), "{resumed}");
+}
+
+/// Edge case 7: a retired `[memory.injection]` key gets one migration warning naming it, and the
+/// session starts.
+#[tokio::test]
+async fn a_retired_memory_injection_key_warns_and_the_session_starts() {
+    let env = MemoryEnv::new("idx-retired");
+    let config = write_file(
+        &env.dir,
+        "config.toml",
+        "schema_version = 1\n[memory.injection]\nmax_tokens = 1000\n",
+    );
+
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, stdout, stderr) =
+        run_memory_session(&env, &server, "idx-retired", "hi", Some(&config)).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("ok"), "{stdout}");
+    assert!(
+        stderr.contains("memory.injection.max_tokens"),
+        "the migration warning names the key: {stderr}"
+    );
+    assert!(
+        stderr.contains("index_max_lines"),
+        "the warning names the replacement: {stderr}"
+    );
+}
+
+/// Edge case 9: a model call to `memory_search` is an unknown tool, like `memory_save`, and the
+/// turn still succeeds.
+#[tokio::test]
+async fn a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds() {
     let env = MemoryEnv::new("mem-no-write-tool");
     let server = MockServer::start(vec![
         tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
+        tool_reply("call_2", "memory_search", r#"{"query":"agent note"}"#),
         text_reply("done"),
     ])
     .await;
@@ -8367,322 +8378,54 @@ async fn a_model_call_to_memory_save_is_an_unknown_tool_and_the_turn_succeeds() 
     .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(server.requests().len(), 2);
-    let result = tool_result_content(&server, 1);
+    assert_eq!(server.requests().len(), 3);
     assert!(
-        result.contains("no tool named `memory_save`"),
-        "the model is told the tool does not exist: {result}"
+        tool_result_for(&server, 1, "call_1").contains("no tool named `memory_save`"),
+        "the model is told the save tool does not exist: {}",
+        tool_result_for(&server, 1, "call_1")
+    );
+    assert!(
+        tool_result_for(&server, 2, "call_2").contains("no tool named `memory_search`"),
+        "the model is told the search tool does not exist: {}",
+        tool_result_for(&server, 2, "call_2")
     );
     let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
         stdout.trim(),
         "[]",
-        "the refused call wrote nothing: {stdout}"
+        "the refused calls wrote nothing: {stdout}"
     );
 }
 
-/// The memory block from a system prompt (the `## Memory (ADR 0021)` section only), so a
-/// comparison across processes does not depend on the date or the cwd.
-fn memory_block(system: &str) -> String {
-    let start = system
-        .find("## Memory (ADR 0021)")
-        .unwrap_or_else(|| panic!("no memory block in {system}"));
-    let end = system[start..]
-        .find("<session>")
-        .map(|offset| start + offset)
-        .unwrap_or(system.len());
-    system[start..end].to_owned()
-}
-
-/// ADR 0021, across a resume: a new process ranks the block by the
-/// session's **first** user message, not by the prompt it is resumed with.
+/// Edge case 10: an index with an invalid byte sequence contributes one line saying it could not
+/// be read; the session starts and a warning names the file.
 #[tokio::test]
-async fn a_resumed_session_ranks_the_block_by_its_first_user_message() {
-    let env = MemoryEnv::new("mem-resume-first");
+async fn an_invalid_utf8_index_warns_and_the_session_starts() {
+    let env = MemoryEnv::new("idx-bad-utf8");
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
-    for (key, content) in [("parsers", "about parsers"), ("styles", "about styles")] {
-        let (code, _, stderr) = env.run(&["add", "--key", key, content]).await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-    let envs = [
-        ("RADIAN_HOME", env.home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-    ];
-
-    // The first process opens the session with the text the block is ranked by, then takes a
-    // second turn whose text would order the records the other way round.
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "resumed",
-            ],
-            &envs,
-        ),
-        "parsers\nstyles\n",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let opened = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
-    let parsers_at = opened
-        .find("about parsers")
-        .expect("the record is injected");
-    let styles_at = opened.find("about styles").expect("the record is injected");
-    assert!(parsers_at < styles_at, "ranked by its own prompt: {opened}");
-    assert_eq!(
-        memory_block(messages_of(&server, 1)[0]["content"].as_str().unwrap()),
-        opened,
-        "the block does not move between turns"
-    );
-
-    // The resume asks about styles instead: the block is still ranked by the session's first
-    // user message (not by the previous turn's, and not by this one), and the memory did not
-    // change, so the bytes are the same.
-    let server = MockServer::start(vec![text_reply("three")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--resume",
-                "resumed",
-                "-p",
-                "styles",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let resumed = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
-    assert_eq!(resumed, opened, "the same query and the same memory");
-}
-
-/// ADR 0021, across a **fork**: the child inherits the parent's
-/// transcript, so its block is ranked by the parent's first user message, not by the prompt the
-/// child is resumed with.
-#[tokio::test]
-async fn a_forked_child_ranks_the_block_by_the_parents_first_user_message() {
-    let env = MemoryEnv::new("mem-fork-first");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    for (key, content) in [("parsers", "about parsers"), ("styles", "about styles")] {
-        let (code, _, stderr) = env.run(&["add", "--key", key, content]).await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-    let envs = [
-        ("RADIAN_HOME", env.home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-    ];
-
-    // The parent opens with the text its block is ranked by, then takes a second turn whose
-    // text would order the records the other way round.
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "parent",
-            ],
-            &envs,
-        ),
-        "parsers\nstyles\n",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let parent = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
-    assert!(
-        parent.find("about parsers").unwrap() < parent.find("about styles").unwrap(),
-        "{parent}"
-    );
-    assert_eq!(
-        memory_block(messages_of(&server, 1)[0]["content"].as_str().unwrap()),
-        parent,
-        "the block does not move between the parent's turns"
-    );
-
-    // The fork copies the parent's history; the child's own prompt is about styles.
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(&["--fork", "parent", "--session-id", "child"], &envs),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("forked parent"), "{stdout}");
-    let server = MockServer::start(vec![text_reply("two")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--resume",
-                "child",
-                "-p",
-                "styles",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let child = memory_block(messages_of(&server, 0)[0]["content"].as_str().unwrap());
-    assert_eq!(child, parent, "the inherited first user message decides");
-}
-
-/// ADR 0021: the fixed block is ranked by the session's **first** user
-/// message. `radian exec -p` is one turn built from that prompt, and it appends no addition
-/// (the block already holds what the prompt's own ranking selects).
-#[tokio::test]
-async fn exec_p_ranks_the_block_by_its_prompt_and_appends_nothing() {
-    let env = MemoryEnv::new("mem-first-prompt");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env
-        .run(&["add", "--key", "parser", "the parser lives in src/parse.rs"])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    write_index(&project_index_path(&env, &project), "project note\n");
+    let global = global_index_path(&env);
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, [0xff, 0xfe, 0xfd]).unwrap();
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "prompt",
-                "-p",
-                "where is the parser",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
+    let (code, stdout, stderr) =
+        run_memory_session(&env, &server, "idx-bad-utf8", "hi", None).await;
     assert_eq!(code, 0, "{stderr}");
-    let system = messages_of(&server, 0)[0]["content"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(system.contains("src/parse.rs"), "{system}");
-
-    let session = radian_session::Session::open(env.sessions.join("prompt.jsonl")).unwrap();
-    let history = session.history().unwrap();
+    assert!(stdout.contains("ok"), "{stdout}");
+    let system = system_prompt(&server, 0);
+    assert!(system.contains("project note"), "{system}");
     assert!(
-        !history.iter().any(|message| {
-            message
-                .meta()
-                .origin
-                .as_ref()
-                .is_some_and(|origin| origin.get().contains("memory_addition"))
-        }),
-        "a single-turn run appends no addition: {history:?}"
+        system.contains("The global memory index at") && system.contains("could not be read"),
+        "{system}"
     );
-}
-/// ADR 0021: `[memory.injection] additions = false` leaves the fixed
-/// block as the only injection — a record the second turn's text hits is already in it, so
-/// nothing is appended.
-#[tokio::test]
-async fn memory_additions_can_be_turned_off_in_the_config() {
-    let env = MemoryEnv::new("mem-additions-off");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env
-        .run(&["add", "second: the parser lives in src/parse.rs"])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    let config = write_file(
-        &env.dir,
-        "config.toml",
-        "schema_version = 1\n[memory.injection]\nadditions = false\n",
-    );
-
-    let server = MockServer::start(vec![text_reply("saved"), text_reply("done")]).await;
-    let (code, _, stderr) = feed_turns_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--config",
-                config.to_str().unwrap(),
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "off",
-                "--yes",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        &env.sessions,
-        &["first", "second"],
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = |n: usize| {
-        messages_of(&server, n)[0]["content"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    assert_eq!(system(0), system(1));
     assert!(
-        system(0).contains("src/parse.rs"),
-        "the fixed block carries the record: {}",
-        system(0)
+        stderr.contains(&global.to_string_lossy().into_owned()),
+        "the warning names the file: {stderr}"
     );
-
-    let session = radian_session::Session::open(env.sessions.join("off.jsonl")).unwrap();
-    let history = session.history().unwrap();
-    assert!(
-        !history.iter().any(|message| {
-            message
-                .meta()
-                .origin
-                .as_ref()
-                .is_some_and(|origin| origin.get().contains("memory_addition"))
-        }),
-        "additions = false appends nothing: {history:?}"
-    );
-    // The record is in the fixed block (the system prompt), not in an addition message:
-    // no injected <memory> block carries it.
-    let raw = std::fs::read_to_string(env.sessions.join("off.jsonl")).unwrap();
-    assert!(!raw.contains("<memory>"), "{raw}");
 }
 
 #[tokio::test]

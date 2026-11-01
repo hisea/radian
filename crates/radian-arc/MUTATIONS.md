@@ -1916,6 +1916,25 @@ gate_profile`, and the file was restored from a copy under `.radian/`.
 
 3/3 caught.
 
+## TK0283: the hub's HTTP read routes and bearer token (2026-10-31, branch `work/TK0283-hub-http-read-and-token`)
+
+Every route requires the bearer token, a rotation is picked up without a restart, and a file's
+diff text is cut at 256 KiB. Each mutation was applied by hand to `crates/radian-arc/src/hub/http.rs`,
+the named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test hub_http`,
+after `cargo build -p radian-tui --bin radian` where the test drives the CLI, and the file was
+restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0283-M1 | `handle` accepts every request without checking the token (the `authorized` check replaced by `true`) | `hub_http::every_request_needs_a_bearer_token_and_a_bad_one_gets_an_empty_object` (`/v1/version` without a token answered `200`, expected `401`) | ✅ 1 failed |
+| TK0283-M2 | `TokenState::refresh` returns at once, so a rotated token is never re-read | `hub_http::a_rotated_token_takes_effect_on_the_next_request` (the old token still answered `200`, expected `401`) | ✅ 1 failed |
+| TK0283-M3 | `cap` returns the whole diff text and `truncated: false` | `hub_http::the_diff_route_lists_numstat_and_cuts_one_file_at_256_kib` (`truncated` read `false`, expected `true`) | ✅ 1 failed |
+| TK0283-M4 | `report` and `verdicts` drop the `store.load_task` check (an unknown id is read from `runs/`) | `hub_http::the_report_is_the_newest_attempts_last_assistant_message` (unknown id answered `204`), `hub_http::the_verdicts_route_reads_the_newest_attempts_verdicts` (unknown id answered `200 []`) | ✅ 2 failed |
+| TK0283-M5 | `task_diff_file` reads the whole diff (`crate::git::run`, `truncated: false`) instead of the capped read | `read::the_counts_and_one_file_are_read_without_another_files_text` (`big.txt` was not truncated) | ✅ 1 failed |
+
+5/5 caught. M4 and M5 were added in the review-fix round: M4 was applied to
+`crates/radian-arc/src/hub/http.rs`, M5 to `crates/radian-arc/src/read.rs`, each restored from
+a copy under `.radian/` with `cp`.
 ## TK0265: review findings and `fix_level` (2026-10-31, branch `work/TK0265-review-findings-fix-level`)
 
 A review report now holds `findings`, each at one of `REVIEW_LEVELS`, and a finding at or above
@@ -1939,3 +1958,19 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '…'`. Each file was
 restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
 second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.
+
+## TK0266: the follow-up collects what did not fail each review round (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
+
+The follow-up reads every review round of a collected task, oldest attempt first, and keeps the
+findings below that round's recorded `fix_level` or `pre_existing`; the findings that failed a
+round are fixed before the merge and are not collected. Each mutation was applied by hand to the
+working file and the named test ran with `cargo nextest run -p radian-arc --locked --profile
+sandbox --test review -E 'test(…)'`; the file was restored from a copy under `.radian/mut/` and
+`cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0266-M1 | `ReviewReport::rest_with` keeps every finding (`_ => true`), so the below-`fix_level` filter is gone | `review::a_major_that_failed_a_round_and_was_fixed_is_not_collected` (the fixed `major` was collected and the merge proposed `TK0002-p-followups`) | ✅ 1 failed |
+| TK0266-M2 | `followup_item_key` ignores `summary` (the third part is `String::new()`), so two findings at the same `file:line` collapse | `review::an_old_shape_round_and_a_new_round_merge_into_one_list` (the brief held two `- ` lines instead of three, and the old round's second note disappeared) | ✅ 1 failed |
+
+2/2 caught.

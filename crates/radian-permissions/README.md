@@ -40,8 +40,9 @@ ask. The prefix is resolved like a call's path, so `..` or a symlink that leaves
 does not match. A profile built without a memory root (memory off) adds no memory rule. Under
 `workspace` the sandbox deny set keeps `shell` out of the store — macOS refuses the write,
 Linux masks the directory into a throw-away tmpfs — while `full` runs no sandbox and the deny
-set is inert; the deny set itself is unchanged (ADR 0020). `memory_search` (ADR 0021 D7) is
-still `allow` in both tiers: it is the model's only memory tool. See `with_memory_root` and
+set is inert; the deny set itself is unchanged (ADR 0020). The `memory_search` allow rule
+(ADR 0021 D7) stays in both tiers: no tool registers that name any more, so the rule is inert
+and kept only as defence in depth. See `with_memory_root` and
 the edge-case tests in `src/profile.rs`.
 
 Removed tool names are refused as unknown tools: there is no alias mapping, so a rule

@@ -230,23 +230,31 @@ impl Finding {
         let severity = level_rank(&self.severity).unwrap_or(REVIEW_LEVELS.len());
         severity <= fix_rank(fix_level)
     }
+    /// The finding's place and summary without its trigger:
+    /// `[severity] path:line summary`, leaving out the parts the finding does not have. A line
+    /// without a file names no place, so only a file carries a location. A `summary` that
+    /// starts with a tag that repeats the finding's own severity loses that tag, so the
+    /// severity prints once.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        let mut line = format!("[{}] ", self.severity);
+        if let Some(file) = &self.file {
+            line.push_str(file);
+            if let Some(number) = self.line {
+                line.push_str(&format!(":{number}"));
+            }
+            line.push(' ');
+        }
+        line.push_str(self.summary_without_severity_tag());
+        line
+    }
 }
 
-/// `[severity] path:line summary — trigger`, leaving out the parts the finding does not have.
-/// A line without a file names no place, so only a file carries a location. The trigger part
-/// is left out when the trigger is empty. A `summary` that starts with a tag that repeats the
-/// finding's own severity loses that tag, so the severity prints once.
+/// The finding's place and summary, then its trigger when it has one (ADR 0048 decision 10).
+/// The summary line is [`Finding::summary_line`].
 impl std::fmt::Display for Finding {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "[{}] ", self.severity)?;
-        if let Some(file) = &self.file {
-            write!(formatter, "{file}")?;
-            if let Some(line) = self.line {
-                write!(formatter, ":{line}")?;
-            }
-            formatter.write_str(" ")?;
-        }
-        formatter.write_str(self.summary_without_severity_tag())?;
+        formatter.write_str(&self.summary_line())?;
         if !self.trigger.is_empty() {
             write!(formatter, " — {}", self.trigger)?;
         }

@@ -133,18 +133,19 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
-/// `[memory]` (ADR 0021). Only the two keys this revision adds are read;
-/// the rest of the D6 injection table (`enabled`, `max_tokens`, `global_budget`,
-/// `project_budget`, `overflow`) is still the documented default and is named in
-/// [`Config::skipped`].
+/// `[memory]` (ADR 0021 D6): the index injection configuration. The retired
+/// `[memory.injection]` keys are ignored with one migration warning each.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryConfig {
-    /// `[memory.injection] additions`: append later turns' new hits as one System message.
-    /// `None` means the default, **on**; the host reads `unwrap_or(true)`.
-    pub additions: Option<bool>,
-    /// `[memory.injection] addition_budget`: the token cap on one turn's addition. `None`
-    /// means the default (500).
-    pub addition_budget: Option<u64>,
+    /// `[memory] enabled`: inject the index files. `None` means the default, **on**.
+    pub enabled: Option<bool>,
+    /// `[memory] scopes`: the scopes whose `MEMORY.md` is injected, from
+    /// [`crate::memory::MEMORY_SCOPES`]. `None` means the default, both, in the fixed order.
+    pub scopes: Option<Vec<String>>,
+    /// `[memory] index_max_lines`: the per-index line cap. `None` means the default (200).
+    pub index_max_lines: Option<u64>,
+    /// `[memory] index_max_bytes`: the per-index byte cap. `None` means the default (25600).
+    pub index_max_bytes: Option<u64>,
 }
 
 impl MemoryConfig {
@@ -153,9 +154,10 @@ impl MemoryConfig {
     pub fn injection(&self) -> crate::memory::InjectionConfig {
         let defaults = crate::memory::InjectionConfig::default();
         crate::memory::InjectionConfig {
-            additions: self.additions.unwrap_or(defaults.additions),
-            addition_budget: self.addition_budget.unwrap_or(defaults.addition_budget),
-            ..defaults
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            scopes: self.scopes.clone().unwrap_or(defaults.scopes),
+            index_max_lines: self.index_max_lines.unwrap_or(defaults.index_max_lines),
+            index_max_bytes: self.index_max_bytes.unwrap_or(defaults.index_max_bytes),
         }
     }
 }
@@ -666,40 +668,74 @@ fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), C
         return Err(wrong_type(path, "memory", "a table"));
     };
     for (key, value) in table {
-        match key.as_str() {
-            "injection" => {
-                let Some(injection) = value.as_table() else {
-                    return Err(wrong_type(path, "memory.injection", "a table"));
-                };
-                for (key, value) in injection {
-                    match (key.as_str(), value) {
-                        ("additions", Value::Boolean(on)) => {
-                            config.memory.additions = Some(*on);
+        match (key.as_str(), value) {
+            ("enabled", Value::Boolean(on)) => config.memory.enabled = Some(*on),
+            ("enabled", _) => {
+                return Err(wrong_type(path, "memory.enabled", "a boolean"));
+            }
+            ("scopes", Value::Array(items)) => {
+                let mut scopes = Vec::new();
+                for item in items {
+                    match item {
+                        Value::String(scope)
+                            if crate::memory::MEMORY_SCOPES.contains(&scope.as_str()) =>
+                        {
+                            scopes.push(scope.clone());
                         }
-                        ("additions", _) => {
+                        _ => {
                             return Err(wrong_type(
                                 path,
-                                "memory.injection.additions",
-                                "a boolean",
+                                "memory.scopes",
+                                "an array of `project` or `global`",
                             ));
                         }
-                        ("addition_budget", Value::Integer(budget)) if *budget > 0 => {
-                            config.memory.addition_budget = Some(*budget as u64);
-                        }
-                        ("addition_budget", _) => {
-                            return Err(wrong_type(
-                                path,
-                                "memory.injection.addition_budget",
-                                "a positive integer",
-                            ));
-                        }
-                        // The rest of the D6 table is known but not wired in this slice: it is
-                        // interpreted as the documented default and named on the startup line.
-                        (other, _) => config.skipped.push(format!("memory.injection.{other}")),
                     }
                 }
+                config.memory.scopes = Some(scopes);
             }
-            other => config.skipped.push(format!("memory.{other}")),
+            ("scopes", _) => {
+                return Err(wrong_type(
+                    path,
+                    "memory.scopes",
+                    "an array of `project` or `global`",
+                ));
+            }
+            ("index_max_lines", Value::Integer(lines)) if *lines >= 1 => {
+                config.memory.index_max_lines = Some(*lines as u64);
+            }
+            ("index_max_lines", _) => {
+                return Err(wrong_type(
+                    path,
+                    "memory.index_max_lines",
+                    "a positive integer",
+                ));
+            }
+            ("index_max_bytes", Value::Integer(bytes)) if *bytes >= 1 => {
+                config.memory.index_max_bytes = Some(*bytes as u64);
+            }
+            ("index_max_bytes", _) => {
+                return Err(wrong_type(
+                    path,
+                    "memory.index_max_bytes",
+                    "a positive integer",
+                ));
+            }
+            // ADR 0008 migration: the old injection table is retired. Every key it sets is
+            // named once and ignored; the startup line prints it under `ignored key`.
+            ("injection", Value::Table(injection)) => {
+                for key in injection.keys() {
+                    config.skipped.push(format!(
+                        "memory.injection.{key} is retired; [memory] index_max_lines and \
+                         index_max_bytes replace it"
+                    ));
+                }
+            }
+            ("injection", _) => config.skipped.push(
+                "memory.injection is retired; [memory] index_max_lines and index_max_bytes \
+                 replace it"
+                    .to_owned(),
+            ),
+            (other, _) => config.skipped.push(format!("memory.{other}")),
         }
     }
     Ok(())
@@ -2095,8 +2131,10 @@ future_option = "alpha"
             "skills.extra_paths",
             "skills.builtin",
             "skills.disabled",
-            "memory.injection.additions",
-            "memory.injection.addition_budget",
+            "memory.enabled",
+            "memory.scopes",
+            "memory.index_max_lines",
+            "memory.index_max_bytes",
             "shell",
             "tui.theme",
             "tui.colors",
@@ -2154,7 +2192,6 @@ future_option = "alpha"
             "hooks.StopFailure",
             "hooks.Notification",
             "mcp.mcpServers",
-            "memory.injection",
             "shell",
         ];
         fn covered(path: &str) -> bool {
@@ -2261,9 +2298,11 @@ future_option = "alpha"
                 "builtin = false\n",
                 "disabled = [\"review\"]\n",
                 "extra_paths = [\"skills\"]\n",
-                "[memory.injection]\n",
-                "additions = false\n",
-                "addition_budget = 10\n",
+                "[memory]\n",
+                "enabled = false\n",
+                "scopes = [\"global\"]\n",
+                "index_max_lines = 10\n",
+                "index_max_bytes = 10\n",
                 "[shell]\n",
                 "[tui]\n",
                 "theme = \"mono\"\n",
@@ -2398,7 +2437,7 @@ future_option = "alpha"
         "## `[permissions]`",
         "## `[hooks]`",
         "## `[skills]`",
-        "## `[memory.injection]`",
+        "## `[memory]`",
         "## `[control]`",
         "## `[hub]`",
         "## `[context]`",
@@ -2467,6 +2506,13 @@ future_option = "alpha"
                 model::PROVIDER_KINDS
                     .iter()
                     .map(|s| s.to_string())
+                    .collect(),
+            ),
+            (
+                "memory.scopes",
+                crate::memory::MEMORY_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
                     .collect(),
             ),
             (
@@ -2590,12 +2636,17 @@ future_option = "alpha"
             ("skills.builtin", DEFAULT_SKILLS_BUILTIN.to_string()),
             ("hooks.intent_stop", DEFAULT_INTENT_STOP.to_string()),
             (
-                "memory.injection.additions",
-                empty.memory.injection().additions.to_string(),
+                "memory.enabled",
+                empty.memory.injection().enabled.to_string(),
+            ),
+            ("memory.scopes", empty.memory.injection().scopes.join(", ")),
+            (
+                "memory.index_max_lines",
+                empty.memory.injection().index_max_lines.to_string(),
             ),
             (
-                "memory.injection.addition_budget",
-                empty.memory.injection().addition_budget.to_string(),
+                "memory.index_max_bytes",
+                empty.memory.injection().index_max_bytes.to_string(),
             ),
             (
                 "integrations.herdr",

@@ -140,8 +140,8 @@ type into the message box.
 | `/memory merge` | `/memory merge [--yes] <into> <from>` | Merge one project into another, reporting key conflicts. Asks first. |
 
 `radian memory` outside the interface adds `--workspace <dir>` to resolve the
-project against another directory. Full detail, including kinds, revisions,
-and the `memory_search` tool the model uses, is in `memory.md`.
+project against another directory. Full detail, including kinds and revisions,
+is in `memory.md`.
 
 ## View
 
