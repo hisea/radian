@@ -14,8 +14,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::gate::{
-    DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_REVIEWER, GateConfig, Profile, REVIEW_LEVELS,
-    ReviewConfig, Reviewer, Stage, StageSpec, default_before_attempt,
+    DEFAULT_COMMAND_TIMEOUT_SECS, DEFAULT_FIX_LEVEL, DEFAULT_REVIEWER, GateConfig, Profile,
+    REVIEW_LEVELS, ReviewConfig, Reviewer, Stage, StageSpec, default_before_attempt,
 };
 use crate::store::model::{PREFIX_MAX_CHARS, valid_prefix};
 
@@ -137,6 +137,25 @@ impl Config {
     /// 15). A task that names no flow uses the implicit `default` flow.
     pub fn flow_allow_noop(&self, flow: &str) -> bool {
         self.flows.get(flow).is_some_and(|flow| flow.allow_noop)
+    }
+
+    /// The `fix_level` a task of `flow` uses when its own `review_fix_level` is absent: the
+    /// `fix_level` of the reviewer its gate profile names (ADR 0048 decisions 10 and 15). A
+    /// flow, profile or reviewer the file cannot resolve contributes [`DEFAULT_FIX_LEVEL`];
+    /// the gate refuses such a task before a review runs.
+    pub fn flow_fix_level(&self, flow: &str) -> &str {
+        let Some(flow_config) = self.flows.get(flow) else {
+            return DEFAULT_FIX_LEVEL;
+        };
+        let name = flow_config.gate_profile(&self.gate.profile);
+        let Some(profile) = self.gate.profiles.get(name) else {
+            return DEFAULT_FIX_LEVEL;
+        };
+        self.gate
+            .reviewer(profile)
+            .map_or(DEFAULT_FIX_LEVEL, |(_, reviewer)| {
+                reviewer.fix_level.as_str()
+            })
     }
 
     /// The gate profile a task of `flow` runs, and its name: the flow's `gate_profile`,

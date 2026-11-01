@@ -1037,6 +1037,87 @@ fn a_task_file_parses_through_the_model() {
     assert_eq!(&parsed.body, "brief\n");
 }
 
+/// A task file an earlier build wrote has no `review_fix_level`: it reads as absent (the
+/// reviewer's level), and `adopt` accepts it like any other outside change (ADR 0048 decisions
+/// 5 and 10).
+#[test]
+fn an_old_task_file_without_a_review_fix_level_reads_as_absent_and_is_adopted() {
+    let scratch = fixture("fix-level-old");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+
+    // The fixture string an earlier build leaves: every field but `review_fix_level`.
+    let old = read(&path);
+    assert!(!old.contains("review_fix_level:"), "{old}");
+    let older = old.replace("title: T\n", "title: An older title\n");
+    fs::write(&path, &older).expect("the task is writable");
+
+    store.adopt(&task).expect("an old file is adopted");
+    let loaded = store.load_task(&task).expect("the task reads").item;
+    assert_eq!(loaded.title, "An older title");
+    assert_eq!(loaded.review_fix_level, None, "the field reads as absent");
+    assert_eq!(loaded.fix_level_source(), "reviewer");
+}
+
+/// A `review_fix_level` outside the set is refused where the file is read, naming every value;
+/// `list` fails as a whole, exactly as a bad `allow_noop` does today (ADR 0048 decision 10).
+#[test]
+fn a_review_fix_level_outside_the_set_fails_the_list_like_a_bad_allow_noop() {
+    let scratch = fixture("fix-level-bad");
+    let store = initialized(&scratch);
+    let plan = store.add_plan("p", "P", "request").unwrap();
+    let task = store
+        .add_task(&plan, "t", "T", Vec::new(), false, Vec::new(), "brief")
+        .unwrap();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+    let broken_level = read(&path).replace("---\n", "---\nreview_fix_level: blocker\n");
+    fs::write(&path, &broken_level).expect("the task is writable");
+
+    let error = store
+        .load_task(&task)
+        .expect_err("`blocker` does not parse");
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            error.message().contains(level),
+            "the error names `{level}`: {}",
+            error.message()
+        );
+    }
+    let list = store::cli::list_json(&store, None, false)
+        .expect_err("one bad task file fails the whole list");
+    assert_eq!(list.exit(), Exit::Error);
+    assert!(
+        list.message().contains("review_fix_level"),
+        "{}",
+        list.message()
+    );
+
+    // The same store with a bad `allow_noop` fails the list the same way.
+    let broken_noop = read(&path)
+        .replace("review_fix_level: blocker\n", "")
+        .replace("allow_noop: false\n", "allow_noop: maybe\n");
+    fs::write(&path, &broken_noop).expect("the task is writable");
+    let error = store.load_task(&task).expect_err("`maybe` is not a bool");
+    assert!(
+        error.message().contains("allow_noop"),
+        "{}",
+        error.message()
+    );
+    let noop_list = store::cli::list_json(&store, None, false)
+        .expect_err("a bad `allow_noop` fails the whole list too");
+    assert_eq!(noop_list.exit(), Exit::Error);
+}
+
 /// A plan file written before the `priority` field existed reads as `P3` and is written back
 /// unchanged: only `radian arc priority` adds the field. A hand edit of the field is the
 /// owner's field, so `adopt` refuses it, and a value outside the set is a parse error naming

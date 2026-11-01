@@ -1957,3 +1957,13 @@ empty).
 | TK0276-M1 | the input guard's flag is never set (the `guard.note_mcp_result()` call removed from the MCP branch) | ✅ 1 failed (rc=100) | `cli::a_memory_write_is_refused_after_an_mcp_result_and_allowed_before` (the write after the MCP result changed the file to `after\n`) |
 | TK0276-M2 | the secret guard covers `write` only (the `patch` branch skips its content and inserted text) | ✅ 1 failed (rc=100) | `cli::a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged` (the file gained `sk-abcdefghijklmnopqrst`) |
 | TK0276-M3 | U+FEFF stays in place (`0xFEFF` removed from `is_default_ignorable`) | ✅ 1 failed (rc=100) | `memory::injection::tests::invisible_characters_and_a_fake_marker_are_neutralized_before_injection` (the injected line kept the byte-order mark) |
+## TK0275: the memory role block (2026-10-31)
+
+Branch `work/TK0275-memory-role-rules`. Each mutation was applied in place and the named test
+run with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast
+-E 'test(<name>)'`; each source was restored from `.radian/mut/` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0275-M1 | the project-versus-global sentence is removed from `prompts/memory.md` | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_pins_one_sentence_from_each_rule` (the project-versus-global sentence is missing) |
+| TK0275-M2 | `memory_rules(false)` returns the block instead of nothing | ✅ 1 failed (rc=100) | `prompt::tests::the_memory_block_sits_between_the_role_and_the_context_files_and_is_gated` (the disabled prompt carries every memory sentence) |

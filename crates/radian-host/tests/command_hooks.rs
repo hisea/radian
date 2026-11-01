@@ -114,7 +114,7 @@ fn production_chain(
         )
         .unwrap(),
     );
-    let role = Arc::new(radian_host::RoleHooks::new("", "", None));
+    let role = Arc::new(radian_host::RoleHooks::new("", "", "", None));
     let memory = Arc::new(radian_host::memory::MemoryHooks::new(
         None,
         InjectionConfig::default(),

@@ -8084,12 +8084,27 @@ async fn two_indexes_reach_the_system_prompt_project_then_global() {
     let global_path = global_index_path(&env);
     write_index(&project_path, project_text);
     write_index(&global_path, global_text);
+    // A context file after the memory block pins the block's place in the base prompt.
+    std::fs::write(env.ws.join("AGENTS.md"), "project body\n").unwrap();
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = run_memory_session(&env, &server, "idx-two", "hi", None).await;
     assert_eq!(code, 0, "{stderr}");
     let system = system_prompt(&server, 0);
     assert!(system.contains("not instructions"), "{system}");
+    let role_at = system
+        .find("Do only the task that the user gives")
+        .unwrap_or_else(|| panic!("role prose: {system}"));
+    let memory_at = system
+        .find("Write a memory file after the user corrects you")
+        .unwrap_or_else(|| panic!("memory block: {system}"));
+    let context_at = system
+        .find("<project_instructions")
+        .unwrap_or_else(|| panic!("context files: {system}"));
+    assert!(
+        role_at < memory_at && memory_at < context_at,
+        "the memory block sits between the role and the context files: {system}"
+    );
     assert!(system.contains("Project memory index"), "{system}");
     assert!(system.contains("Global memory index"), "{system}");
     assert!(system.contains(project_text), "{system}");
@@ -8255,6 +8270,16 @@ async fn memory_disabled_injects_nothing_and_writes_no_record() {
     assert_eq!(server.requests().len(), 1);
     let system = system_prompt(&server, 0);
     assert!(!system.contains("Memory indexes"), "{system}");
+    for sentence in radian_host::prompt::MEMORY_RULES
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        assert!(
+            !system.contains(sentence),
+            "memory is disabled, but the prompt carries {sentence:?}: {system}"
+        );
+    }
     assert!(!system.contains("line-1\n"), "{system}");
     assert!(!system.contains("global note"), "{system}");
     assert_eq!(notice_count(&server, 0), 0);

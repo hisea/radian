@@ -22,6 +22,20 @@ use std::sync::{Arc, Mutex};
 /// oversight.
 pub const DEFAULT_ROLE: &str = include_str!("../prompts/default.md");
 
+/// The memory rules part (ADR 0021 D5, ADR 0036 1m).
+///
+/// The host appends it between the role prose and the context files and wraps it in
+/// `<memory>…</memory>`, only when memory is enabled. It is host policy, not overridable role
+/// prose: `--system` does not remove it, just as the memory index section stays. The text is
+/// its own part so the gate never edits `default.md`.
+pub const MEMORY_RULES: &str = include_str!("../prompts/memory.md");
+
+/// The memory rules part for `[memory] enabled`: the block content when `enabled`, else
+/// nothing. The same gate as the memory index section.
+pub fn memory_rules(enabled: bool) -> &'static str {
+    if enabled { MEMORY_RULES } else { "" }
+}
+
 /// Layer 0a: the runtime facts the host generates from what it actually mounted. Never
 /// overridable (ADR 0036).
 pub struct Runtime<'a> {
@@ -134,13 +148,23 @@ pub fn session_layer(cwd: &Path, model: &str) -> String {
     out
 }
 
-/// Assembles layers 0a, 1 and 2 (skills/memory and 0b are appended later).
-pub fn assemble(runtime: &str, role: &str, project: &str) -> String {
+/// Assembles layers 0a, 1, 1m and 2 (skills/memory indexes and 0b are appended later).
+///
+/// `memory` is the [`MEMORY_RULES`] part, or empty when memory is disabled; it sits between the
+/// role prose and the context files. The wrapper is added here, like `<role>` and
+/// `<project_instructions>`.
+pub fn assemble(runtime: &str, role: &str, memory: &str, project: &str) -> String {
     let mut out = String::new();
     out.push_str(runtime.trim_end());
     out.push_str("\n\n<role>\n");
     out.push_str(role.trim_end());
     out.push_str("\n</role>\n");
+    if !memory.trim().is_empty() {
+        out.push('\n');
+        out.push_str("<memory>\n");
+        out.push_str(memory.trim_end());
+        out.push_str("\n</memory>\n");
+    }
     if !project.trim().is_empty() {
         out.push('\n');
         out.push_str(project.trim_end());
@@ -149,28 +173,31 @@ pub fn assemble(runtime: &str, role: &str, project: &str) -> String {
     out
 }
 
-/// The hook that writes layers 0a, 1 and 2.
+/// The hook that writes layers 0a, 1, 1m and 2.
 ///
-/// It runs first in the hook chain and writes the whole base, so the hooks after it (memory,
-/// skills, `<session>`) still append to a complete prompt. Layer 1 is `--system` when given,
-/// else the built-in [`DEFAULT_ROLE`]: fixed for the whole session.
+/// It runs first in the hook chain and writes the whole base, so the hooks after it (memory
+/// indexes, skills, `<session>`) still append to a complete prompt. Layer 1 is `--system` when
+/// given, else the built-in [`DEFAULT_ROLE`]: fixed for the whole session. Layer 1m is the
+/// `memory` part, empty when memory is disabled.
 pub struct RoleHooks {
-    /// The complete base prompt (layers 0a, 1 and 2), assembled once.
+    /// The complete base prompt (layers 0a, 1, 1m and 2), assembled once.
     base: String,
 }
 
 impl RoleHooks {
     /// The production hook: layer 1 is `--system` when given, else the built-in
-    /// [`DEFAULT_ROLE`].
+    /// [`DEFAULT_ROLE`]; `memory` is [`MEMORY_RULES`] or empty.
     pub fn new(
         runtime: impl Into<String>,
+        memory: impl Into<String>,
         project: impl Into<String>,
         system: Option<String>,
     ) -> Self {
         let runtime = runtime.into();
+        let memory = memory.into();
         let project = project.into();
         let role = system.unwrap_or_else(|| DEFAULT_ROLE.to_owned());
-        let base = assemble(&runtime, &role, &project);
+        let base = assemble(&runtime, &role, &memory, &project);
         Self { base }
     }
 }
@@ -420,12 +447,107 @@ mod tests {
         }
     }
 
+    /// The memory block's sentences: one per line in `prompts/memory.md`.
+    fn memory_rule_sentences() -> Vec<&'static str> {
+        MEMORY_RULES
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// Edge case 1: with memory enabled the block sits between the role prose and the context
+    /// files. With `[memory] enabled = false` none of its sentences is present. `--system`
+    /// replaces the role prose and leaves the block, like the memory index section.
+    #[test]
+    fn the_memory_block_sits_between_the_role_and_the_context_files_and_is_gated() {
+        let project = "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>";
+        let on = assemble(
+            "<runtime>\n</runtime>",
+            "ROLE PROSE",
+            memory_rules(true),
+            project,
+        );
+        let role_at = on.find("ROLE PROSE").unwrap();
+        let memory_at = on.find("<memory>").unwrap();
+        let project_at = on.find("<project_instructions").unwrap();
+        assert!(role_at < memory_at && memory_at < project_at, "{on}");
+        let hooks = RoleHooks::new("<runtime>\n</runtime>", memory_rules(true), project, None);
+        assert!(hooks.base.contains(MEMORY_RULES.trim()), "{}", hooks.base);
+
+        // `--system` replaces layer 1 only: the block stays.
+        let system = RoleHooks::new("rt", MEMORY_RULES, "pj", Some("SYSTEM".into()));
+        assert!(system.base.contains(MEMORY_RULES.trim()), "{}", system.base);
+
+        let off = assemble(
+            "<runtime>\n</runtime>",
+            "ROLE PROSE",
+            memory_rules(false),
+            project,
+        );
+        for sentence in memory_rule_sentences() {
+            assert!(
+                !off.contains(sentence),
+                "memory is disabled, but the prompt carries {sentence:?}: {off}"
+            );
+        }
+        let hooks = RoleHooks::new("<runtime>\n</runtime>", memory_rules(false), project, None);
+        assert!(!hooks.base.contains("<memory>"), "{}", hooks.base);
+        assert!(
+            !hooks.base.contains("Write a memory file"),
+            "{}",
+            hooks.base
+        );
+    }
+
+    /// Edge case 2: one pinned sentence from each rule the block states. The brief lists five
+    /// points in six bullets; the project-index rule is pinned as its own sentence too.
+    #[test]
+    fn the_memory_block_pins_one_sentence_from_each_rule() {
+        for sentence in [
+            "Write a memory file after the user corrects you, at a handoff, or when you learn a fact useful later.",
+            "Do not write what the repository already records: code structure, git history, or `AGENTS.md`.",
+            "Write one file per fact under the memory directory named in the index section.",
+            "Content that names this repository's paths, branches, files, ADR numbers, task numbers or structure is project.",
+            "Memory is not proof of current behavior.",
+            "Read the project index before the global index.",
+        ] {
+            assert!(
+                MEMORY_RULES.contains(sentence),
+                "the memory block is missing {sentence:?}"
+            );
+        }
+    }
+
+    /// Edge case 3: every sentence in the block is at most 20 words (ADR 0036, ASD-STE100).
+    #[test]
+    fn every_memory_rule_sentence_has_at_most_twenty_words() {
+        for sentence in memory_rule_sentences() {
+            let words = sentence.split_whitespace().count();
+            assert!(words <= 20, "{words} words in {sentence:?}");
+        }
+    }
+
+    /// Edge case 4: the block names no concrete path of this machine. It points at the memory
+    /// directory the index section names.
+    #[test]
+    fn the_memory_block_names_no_machine_path() {
+        for path in ["/Users", "/home", "/tmp", "/private", "~/"] {
+            assert!(
+                !MEMORY_RULES.contains(path),
+                "the memory block names {path}: {MEMORY_RULES}"
+            );
+        }
+        assert!(MEMORY_RULES.contains("the memory directory named in the index section"));
+    }
+
     /// Layer 1 is the built-in default role, and `--system` replaces it. The hook writes the
     /// whole base (0a, 1, 2) once, so every call is byte-identical.
     #[test]
     fn the_role_hook_writes_the_base_and_system_replaces_layer_one() {
         let hooks = RoleHooks::new(
             "<runtime>\n- read: read a file\n</runtime>",
+            "",
             "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>",
             None,
         );
@@ -437,8 +559,8 @@ mod tests {
         assert_eq!(hooks.base, first);
         assert_eq!(hooks.base, first);
 
-        let system = RoleHooks::new("rt", "pj", Some("SYSTEM".into()));
-        assert_eq!(system.base, assemble("rt", "SYSTEM", "pj"));
+        let system = RoleHooks::new("rt", "", "pj", Some("SYSTEM".into()));
+        assert_eq!(system.base, assemble("rt", "SYSTEM", "", "pj"));
     }
 
     /// ADR 0036: layer 1 is the built-in default role at session start.
@@ -455,6 +577,7 @@ mod tests {
         let text = assemble(
             &runtime_layer(&runtime),
             "ROLE TEXT",
+            "",
             "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>",
         );
         let runtime_at = text.find("<runtime>").unwrap();
@@ -760,7 +883,7 @@ mod tests {
         });
         assert!(runtime.contains(&first), "runtime carries the index");
         // `--system` replaces layer 1 only; the runtime index stays.
-        let hooks = RoleHooks::new(runtime.clone(), "", Some("SYSTEM".into()));
+        let hooks = RoleHooks::new(runtime.clone(), "", "", Some("SYSTEM".into()));
         assert!(hooks.base.contains(&first), "present under --system");
         assert!(hooks.base.contains("SYSTEM"), "system replaced layer 1");
     }
