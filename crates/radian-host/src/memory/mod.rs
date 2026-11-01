@@ -23,8 +23,8 @@ pub use commands::{
     USAGE_ERROR, execute, parse_args, removed_message,
 };
 pub use guard::{
-    INPUT_GUARD, LONG_TOKEN, MemoryWriteGuard, SECRET_GUARD, SettledCall, journal_has_mcp_result,
-    settled_calls,
+    INPUT_GUARD, LONG_TOKEN, MemoryWriteGuard, SECRET_GUARD, SettledCall, USER_RECORD, USER_SOURCE,
+    journal_has_mcp_result, settled_calls,
 };
 pub use identity::{candidate_name, project_identity_key, repository_root};
 pub use injection::{

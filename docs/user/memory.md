@@ -50,6 +50,14 @@ decides which paths they may reach.
   with `40+ characters` in place of the prefix. A `patch` is judged on the
   content it would produce, so inserting a secret is refused even when the old
   text is clean.
+- A user record is refused to both file tools. A record is a user record when
+  its frontmatter declares `source: user`, which `radian memory add` writes; a
+  `write` or `patch` of it is refused with `memory write refused: the record is
+  user-created (invariant 6)`. A `write` or `patch` that would give a record
+  `source: user` is refused with `memory write refused: a model write may not
+  claim source: user (invariant 6)`, so the model cannot create a record that
+  looks like a user's and then edit it. The value is read as the record parser
+  reads it, so a quoted or escaped spelling is the same claim.
 
 ## Memory files and `last_used`
 
@@ -76,7 +84,7 @@ A record starts with `---`, then one field per line, then `---`, then the body.
 | `name` | string | The file stem: `a-z`, `0-9` and `-`, 1 to 64 characters. It must equal the file stem. |
 | `description` | string | One line. The index shows it. |
 | `type` | closed set | `user`, `feedback`, `project`, `reference`. The model is expected to add `**Why:**` and `**How to apply:**` lines to a `feedback` or `project` body; nothing enforces them. |
-| `source` | closed set | `model`, `user`, `import`. `add` writes `user`; the model's own writes carry `model`, as the memory prompt tells it. A value outside the set makes the file unreadable. |
+| `source` | closed set | `model`, `user`, `import`. `add` writes `user`; the model's own writes carry `model`, as the memory prompt tells it, and a model write that declares `user` is refused. A value outside the set makes the file unreadable. |
 | `created` | RFC 3339 UTC | Set once. |
 | `modified` | RFC 3339 UTC | Set on every write. |
 | `last_used` | RFC 3339 UTC or absent | Optional. Absent means the record was never read. A model `read` sets it; a user command never changes it. |

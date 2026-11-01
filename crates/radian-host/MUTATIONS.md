@@ -2061,3 +2061,17 @@ and the file was restored from `.radian/files.rs.bak`, which `cmp` found identic
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0297-M1 | `validate_record_name` returns `MemoryError::InvalidName`'s whole `Display` string again, so the caller's own `InvalidName` prints the prefix twice | ✅ 4 failed (rc=100) | `memory::service::tests::split_refuses_the_session_index_name` (`one refusal, one prefix: invalid memory record name "SESSIONS": invalid memory record name "SESSIONS": a name may contain only a-z, 0-9 and -`) |
+
+## TK0297: the memory guard protects user records (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. Each mutation was applied in
+place to `crates/radian-host/src/memory/guard.rs`, the guard tests were run with `cargo
+nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E
+'test(memory::guard)'`, and the file was restored from `.radian/bak/guard.rs`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M4 | the target's declared source is not read, so a `write` or `patch` of a user record is allowed | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_and_a_patch_of_a_user_record_are_refused` (both calls returned `Ok`) |
+| TK0297-M5 | a `write`'s content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_that_declares_source_user_is_refused` (the claimed user record was accepted, in all four spellings) |
+| TK0297-M6 | a `patch`'s resulting content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_patch_that_would_declare_source_user_is_refused` (the source line was rewritten to `user`) |

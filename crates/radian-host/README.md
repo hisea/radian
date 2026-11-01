@@ -146,17 +146,19 @@ passes the root) and never touches the network. It starts no process except `ope
 
 `MemoryWriteGuard` (ADR 0021 invariant 4) is the host decision in front of `write` and
 `patch`, mounted by `open_session` whenever memory is on. It refuses a call whose canonical
-target is a scope directory in two cases: this session has taken in an MCP tool result (the
+target is a scope directory in three cases: this session has taken in an MCP tool result (the
 input guard; a resumed session counts a settled call in its committed journal only when the
 opened MCP session routes that name and the result came from the tool — a name no server
 provides, and a result the runtime produced without running it (`cancelled`,
 `skipped_by_steering`, `hook_error`, `denied`, `interrupted`, or an error record with no
-`error_code`), do not count), or the
-content — for `patch`, the content the edit would produce (the inserted replacement only when
-the tool itself would write nothing) —
-matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value.
-The permission profile's memory rule is separate and unchanged: these guards can only refuse
-a write the tools would otherwise allow, never grant one.
+`error_code`), do not count); the target's frontmatter already declares `source: user` (a user
+record); or the content — for `patch`, the content the edit would produce (the inserted
+replacement only when the tool itself would write nothing) — declares `source: user`, or
+matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value. The
+source check is invariant 6: `user` belongs to the user commands, so a model cannot overwrite or
+patch a user record, nor claim that source for its own. The permission profile's memory rule is
+separate and unchanged: these guards can only refuse a write the tools would otherwise allow,
+never grant one.
 
 `project_identity_key(workspace)` is pure Rust and returns the **git common dir** of the
 repository containing the workspace, so all worktrees of one repository share a `ProjectId`;
@@ -212,6 +214,9 @@ so a moved repository still matches its old project.
 | Relinking after a move finds the old files | `relinking_after_a_move_finds_the_original_records` | `src/memory/service.rs` |
 | `add` writes the skeleton and the index line | `add_then_list_shows_the_skeleton_and_the_index_line` | `src/memory/service.rs` |
 | `forget` deletes the file and its index line | `forget_deletes_the_file_and_its_index_line` | `src/memory/service.rs` |
+| A model `write` that declares `source: user` is refused | `a_write_that_declares_source_user_is_refused` | `src/memory/guard.rs` |
+| A model `patch` whose result would declare `source: user` is refused | `a_patch_that_would_declare_source_user_is_refused` | `src/memory/guard.rs` |
+| A user record is refused to `write` and to `patch` | `a_write_and_a_patch_of_a_user_record_are_refused` | `src/memory/guard.rs` |
 | A merge collision renames the moved file | `merge_renames_a_collision_instead_of_overwriting` | `src/memory/service.rs` |
 
 End to end through the CLI: `radian-exec/tests/cli.rs` (`memory_…`), including a real

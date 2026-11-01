@@ -1,7 +1,8 @@
-//! The memory write guards (ADR 0021 invariant 4): the input guard and the secret guard.
+//! The memory write guards (ADR 0021 invariants 4 and 6): the input guard, the secret guard
+//! and the user-record guard.
 //!
-//! Both are **host decisions**, not permission rules, and both run before the file tool is
-//! called, so a refused write touches no byte:
+//! All three are **host decisions**, not permission rules, and all three run before the file
+//! tool is called, so a refused write touches no byte:
 //!
 //! - **Input guard**: once this session has taken in a result from an MCP tool, every `write`
 //!   or `patch` whose canonical target is a memory scope directory is refused. The flag is
@@ -13,6 +14,10 @@
 //! - **Secret guard**: the content (for `patch`, the content the edit would produce and each
 //!   inserted replacement) runs through the ADR 0008 §3.2 rule-2 heuristic in
 //!   [`crate::config`]. A hit refuses the write and names the matched prefix, never the value.
+//! - **User-record guard** (ADR 0021 invariant 6): a `write` or `patch` of a file whose
+//!   frontmatter already declares `source: user` is refused, and so is one that would give a
+//!   record that source. The model writes `model`; `user` belongs to the user commands, so a
+//!   claimed user source can neither impersonate nor overwrite a user record.
 //!
 //! The scope directories are the same ones the file tools may reach (ADR 0039 decision 4);
 //! the whole `memory/` tree is not covered, so this guard can never refuse a write the tools
@@ -24,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use radian_core::{ToolCall, ToolFailure, ToolResult};
+use radian_memory::declared_source;
 use radian_session::{EventData, SessionEvent};
 use serde_json::Value;
 
@@ -35,6 +41,15 @@ pub const INPUT_GUARD: &str =
 
 /// The secret guard's refusal prefix; the matched prefix follows in parentheses.
 pub const SECRET_GUARD: &str = "memory write refused: the content looks like a secret";
+
+/// The refusal for a file-tool `write` or `patch` that would declare `source: user`
+/// (ADR 0021 invariant 6): `user` belongs to the user commands, not to the model.
+pub const USER_SOURCE: &str =
+    "memory write refused: a model write may not claim source: user (invariant 6)";
+
+/// The refusal for a file-tool `write` or `patch` of a file that already declares
+/// `source: user` (ADR 0021 invariant 6).
+pub const USER_RECORD: &str = "memory write refused: the record is user-created (invariant 6)";
 
 /// What the secret guard names for the 40-character half of the heuristic, which has no
 /// prefix of its own.
@@ -101,14 +116,29 @@ impl MemoryWriteGuard {
             return Err(ToolFailure::new("memory_write_refused", INPUT_GUARD));
         }
 
+        // ADR 0021 invariant 6: `source: user` is a user command's alone. A file that declares
+        // it is a user record, and the model may neither overwrite nor patch it; a call that
+        // would give a record that source is a claim the host refuses, so the model can never
+        // make its own record look like a user record and inherit the protection.
+        if record_prefix(&target)
+            .and_then(|text| declared_source(&text))
+            .as_deref()
+            == Some("user")
+        {
+            return Err(ToolFailure::new("memory_write_refused", USER_RECORD));
+        }
+
         let refuse = |prefix: &'static str| {
             ToolFailure::new("memory_write_refused", format!("{SECRET_GUARD} ({prefix})"))
         };
         if call.name == "write" {
-            if let Some(content) = call.arguments.get("content").and_then(Value::as_str)
-                && let Some(prefix) = secret_hit(content)
-            {
-                return Err(refuse(prefix));
+            if let Some(content) = call.arguments.get("content").and_then(Value::as_str) {
+                if declared_source(content).as_deref() == Some("user") {
+                    return Err(ToolFailure::new("memory_write_refused", USER_SOURCE));
+                }
+                if let Some(prefix) = secret_hit(content) {
+                    return Err(refuse(prefix));
+                }
             }
             return Ok(());
         }
@@ -120,6 +150,9 @@ impl MemoryWriteGuard {
         // text checked on its own, so a secret cannot be written either way.
         match patch_result_content(&target, &call.arguments) {
             Some(result) => {
+                if declared_source(&result).as_deref() == Some("user") {
+                    return Err(ToolFailure::new("memory_write_refused", USER_SOURCE));
+                }
                 if let Some(prefix) = secret_hit(&result) {
                     return Err(refuse(prefix));
                 }
@@ -242,6 +275,26 @@ fn secret_hit(text: &str) -> Option<&'static str> {
         return Some(LONG_TOKEN);
     }
     None
+}
+
+/// A bounded prefix of a possible record file: enough for its frontmatter. A non-regular
+/// file is not read at all (a fifo would block), and a file too large to be a record is read
+/// only up to this cap. `None` when the path is missing or cannot be read.
+fn record_prefix(path: &Path) -> Option<String> {
+    use std::io::Read;
+
+    const FRONTMATTER_PREFIX: u64 = 8192;
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mut buffer = Vec::with_capacity(FRONTMATTER_PREFIX as usize);
+    std::fs::File::open(path)
+        .ok()?
+        .take(FRONTMATTER_PREFIX)
+        .read_to_end(&mut buffer)
+        .ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 /// Every replacement string a `patch` call inserts, from the legacy `new` or the `edits`
@@ -454,6 +507,88 @@ mod tests {
             guard.check(&patch).is_ok(),
             "the resulting `musk-sk-...` carries no token starting with `sk-`"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A well-formed record text whose frontmatter names `source`.
+    fn record(source: &str) -> String {
+        format!(
+            "---\nname: x\ndescription: d\ntype: user\nsource: {source}\n\
+             created: 2026-10-31T12:00:00.000000Z\nmodified: 2026-10-31T12:00:00.000000Z\n---\nbody\n"
+        )
+    }
+
+    /// ADR 0021 invariant 6: `source: user` belongs to a user command, so a model `write` that
+    /// declares it is refused. The value is read as the parser reads it, so a quoted or an
+    /// escaped spelling is the same claim.
+    #[test]
+    fn a_write_that_declares_source_user_is_refused() {
+        for (label, source) in [
+            ("plain", "user"),
+            ("single-quoted", "'user'"),
+            ("double-quoted", "\"user\""),
+            ("escaped", "\"us\\u0065r\""),
+        ] {
+            let (dir, guard, root) = guard(label);
+            let memory = root.join("global/x.md");
+            let refusal = guard
+                .check(&call("write", &memory, &record(source)))
+                .expect_err("a claimed user source is refused");
+            assert_eq!(refusal.code, "memory_write_refused", "{label}");
+            assert_eq!(refusal.message, USER_SOURCE, "{label}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The claim through a `patch`: the target is a model record, so only the result can say
+    /// `user`, and the guard judges the result.
+    #[test]
+    fn a_patch_that_would_declare_source_user_is_refused() {
+        let (dir, guard, root) = guard("claim-source-patch");
+        let memory = root.join("global/x.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, record("model")).unwrap();
+        let patch = ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": memory.to_str().unwrap(),
+                "old": "source: model",
+                "new": "source: user",
+            }),
+        };
+        let refusal = guard
+            .check(&patch)
+            .expect_err("the result would claim a user source");
+        assert_eq!(refusal.message, USER_SOURCE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file a user command created declares `source: user`; neither file tool may touch it,
+    /// whatever content the model supplies.
+    #[test]
+    fn a_write_and_a_patch_of_a_user_record_are_refused() {
+        let (dir, guard, root) = guard("user-record");
+        let memory = root.join("global/x.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, record("user")).unwrap();
+        let write = guard
+            .check(&call("write", &memory, &record("model")))
+            .expect_err("a user record is not overwritten");
+        assert_eq!(write.message, USER_RECORD);
+        let patch = ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": memory.to_str().unwrap(),
+                "old": "body",
+                "new": "changed",
+            }),
+        };
+        let refusal = guard
+            .check(&patch)
+            .expect_err("a user record is not patched");
+        assert_eq!(refusal.message, USER_RECORD);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

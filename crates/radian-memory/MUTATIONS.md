@@ -90,3 +90,16 @@ with `cargo nextest run -p radian-memory --locked --profile sandbox --test files
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0274-M1 | `replace_name` returns the text unchanged, so the new file keeps the old `name:` | ✅ 1 failed (rc=100) | `rename_rewrites_only_the_name_line_and_keeps_the_rest` (reading the new stem fails with "name ... does not match the file stem") |
+
+## TK0297: the declared source is decoded like the parser (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. The mutation was applied in place
+to `crates/radian-memory/src/files.rs`, the tests were run with `cargo nextest run -p
+radian-memory --locked --profile sandbox --no-fail-fast -E 'test(declared_source)'` and with
+the guard tests (`cargo nextest run -p radian-host --lib --locked --profile sandbox -E
+'test(memory::guard)'`), and the file was restored from `.radian/bak/files.rs`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M7 | `declared_source` returns the raw value (`value.trim()`) instead of `parse_scalar`, so a quoted or escaped `source: user` reads as a different value | ✅ 2 failed (rc=100) | `files::declared_source_reads_the_decoded_frontmatter_value` (`left: Some("\"user\"")`, and the escaped spelling); `memory::guard::tests::a_write_that_declares_source_user_is_refused` (the double-quoted and escaped writes were accepted) |

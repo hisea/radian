@@ -26,7 +26,9 @@ use crate::model::{Scope, now_utc};
 /// The closed `type` set (ADR 0021 D4). The parser, the writer and the docs drift test read it.
 pub const RECORD_TYPES: &[&str] = &["user", "feedback", "project", "reference"];
 
-/// The closed `source` set (ADR 0021 D4). The host sets the value; the model never does.
+/// The closed `source` set (ADR 0021 D4). `add` writes `user`, the migration `import`, and the
+/// model `model` on its own files; the memory write guard refuses a model write or patch that
+/// would declare `user`.
 pub const RECORD_SOURCES: &[&str] = &["model", "user", "import"];
 
 /// The longest record name, in characters.
@@ -225,6 +227,38 @@ impl FileStore {
     pub fn write_sessions_index(&self, scope: &Scope, text: &str) -> Result<(), MemoryError> {
         atomic_write(&self.sessions_index_path(scope), text.as_bytes())
     }
+}
+
+/// The `source` one record text declares, decoded as [`FileStore::read`] decodes it.
+///
+/// Only the frontmatter fences and a top-level `source` line are needed, not a whole valid
+/// record: the memory write guard judges a `write` whose frontmatter is still missing a field,
+/// and a `patch` before it lands. A later `source` line wins, as the parser's builder does.
+/// `None` when the text has no closed frontmatter or no readable `source` line.
+pub fn declared_source(text: &str) -> Option<String> {
+    let first = line_at(text, 0);
+    if first.text.trim() != "---" {
+        return None;
+    }
+    let mut cursor = first.next;
+    let mut source = None;
+    while cursor < text.len() {
+        let line = line_at(text, cursor);
+        let trimmed = line.text.trim();
+        if trimmed == "---" {
+            return source;
+        }
+        if !trimmed.is_empty()
+            && !line.text.starts_with(' ')
+            && !line.text.starts_with('\t')
+            && let Some((key, value)) = line.text.split_once(':')
+            && key.trim() == "source"
+        {
+            source = parse_scalar(value, 0).ok();
+        }
+        cursor = line.next;
+    }
+    None
 }
 
 fn record_path_in(dir: &Path, name: &str) -> PathBuf {
