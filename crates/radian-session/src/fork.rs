@@ -17,7 +17,7 @@ use radian_core::{JournalError, JournalRecord, Message, ReplayError, TranscriptJ
 use serde_json::Value;
 
 use crate::error::ReadError;
-use crate::reader::{Session, SessionEvent};
+use crate::reader::{EventData, Session, SessionEvent};
 use crate::runtime::RuntimeEvent;
 use crate::writer::{ForkParent, SessionCreatedData, SessionJournal, WriteError};
 
@@ -70,6 +70,17 @@ pub enum ForkError {
 pub struct ForkPoint {
     pub seq: u64,
     pub history: Vec<Message>,
+    /// The parent's `ContextFileAppended` audit records at or before `seq`. The child carries
+    /// them so a resume seeds its subtree set and appends no file a second time (ADR 0036).
+    pub appended_context: Vec<AppendedContextFile>,
+}
+
+/// One parent context-file append, copied into a forked child (ADR 0036).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedContextFile {
+    pub path: String,
+    pub bytes: usize,
+    pub truncated: bool,
 }
 
 /// Everything a fork needs. `seq: None` means the parent's last turn boundary.
@@ -137,7 +148,28 @@ pub fn fork_point_history(parent: &Session, seq: u64) -> Result<Vec<Message>, Fo
 pub fn resolve_fork_point(parent: &Session, seq: Option<u64>) -> Result<ForkPoint, ForkError> {
     let seq = seq.unwrap_or_else(|| last_fork_point(parent));
     let history = fork_point_history(parent, seq)?;
-    Ok(ForkPoint { seq, history })
+    let appended_context = parent
+        .events()
+        .iter()
+        .filter(|event| event.seq <= seq)
+        .filter_map(|event| match &event.data {
+            EventData::ContextFileAppended {
+                path,
+                bytes,
+                truncated,
+            } => Some(AppendedContextFile {
+                path: path.clone(),
+                bytes: *bytes,
+                truncated: *truncated,
+            }),
+            _ => None,
+        })
+        .collect();
+    Ok(ForkPoint {
+        seq,
+        history,
+        appended_context,
+    })
 }
 
 /// Forks a session from disk (the CLI path). The parent is locked for writing **before** the
@@ -216,6 +248,26 @@ async fn write_child_and_record(
             });
         }
     };
+    // A context-file append the parent made at or before the fork point is copied first, so a
+    // resume of the child seeds its subtree set from these audit records (ADR 0036). The block
+    // itself already rides in the materialized history above.
+    for appended in &point.appended_context {
+        if let Err(error) = child
+            .append_runtime_event(RuntimeEvent::ContextFileAppended {
+                path: appended.path.clone(),
+                bytes: appended.bytes,
+                truncated: appended.truncated,
+            })
+            .await
+        {
+            drop(child);
+            return Err(child_failure(
+                request,
+                &temp_path,
+                JournalError(error.to_string()),
+            ));
+        }
+    }
     // Only the `testing` fault-injection seam reads this count; a production build never
     // increments it, so it must not exist there either (otherwise it is dead: clippy's
     // `explicit_counter_loop`/`unused_assignments`, caught chasing an unrelated `-D warnings`

@@ -481,7 +481,9 @@ impl MemoryService {
 
     /// `split`: move each named file and its index line from one project to another. A missing
     /// source name is reported; a name already present in the target is reported and left in
-    /// place (never overwritten).
+    /// place (never overwritten). Every given name is checked against the record name rule before
+    /// it is joined into a path, so `SESSIONS`, `MEMORY`, an absolute name or a `..` name is
+    /// refused exactly as `add` refuses it.
     pub fn split(
         &self,
         from: &ProjectId,
@@ -490,6 +492,13 @@ impl MemoryService {
     ) -> Result<MoveReport, MemoryServiceError> {
         let source = Scope::Project(from.clone());
         let target = Scope::Project(to.clone());
+        // Every name is checked before the first move, so a refused split moves nothing.
+        for name in names {
+            validate_record_name(name).map_err(|reason| MemoryError::InvalidName {
+                name: name.clone(),
+                reason,
+            })?;
+        }
         let mut report = MoveReport::default();
         for name in names {
             let mut from_path = self.files.record_path(&source, name);
@@ -987,6 +996,107 @@ mod tests {
                 .len(),
             2,
             "both files are in the merged project"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `split` applies the record name rule before it joins a name into a path, so every name
+    /// class `add` refuses is refused with the same error. A sentinel file in the source project
+    /// stays where it is.
+    fn split_refuses_name(label: &str, name: &str) {
+        let (dir, _ws, service) = service(label);
+        let from = ProjectId("from-project".into());
+        let to = ProjectId("to-project".into());
+        let scope = Scope::Project(from.clone());
+        std::fs::create_dir_all(service.files().scope_dir(&scope)).unwrap();
+        let sentinel = service.files().record_path(&scope, "note");
+        std::fs::write(&sentinel, "STAYS\n").unwrap();
+
+        let error = service
+            .split(&from, &to, &[name.to_owned()])
+            .expect_err("the name is refused");
+        let text = error.to_string();
+        match &error {
+            MemoryServiceError::Storage(MemoryError::InvalidName { name: got, .. })
+                if got == name => {}
+            other => panic!("expected an InvalidName for {name:?}, got {other:?}"),
+        }
+        assert!(
+            text.contains("invalid memory record name"),
+            "the same error add gives: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap(),
+            "STAYS\n",
+            "a refused split moves nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_refuses_the_session_index_name() {
+        split_refuses_name("split-sessions", "SESSIONS");
+    }
+
+    #[test]
+    fn split_refuses_the_memory_index_name() {
+        split_refuses_name("split-memory", "MEMORY");
+    }
+
+    #[test]
+    fn split_refuses_an_absolute_name() {
+        split_refuses_name("split-absolute", "/tmp/x");
+    }
+
+    #[test]
+    fn split_refuses_a_parent_name() {
+        split_refuses_name("split-parent", "..");
+    }
+
+    /// A refused name is found before any earlier name moves, so a list that mixes a valid
+    /// name with an invalid one leaves the source project exactly as it was.
+    #[test]
+    fn split_validates_every_name_before_it_moves_any() {
+        let (dir, _ws, service) = service("split-mixed");
+        let from = ProjectId("from-project".into());
+        let to = ProjectId("to-project".into());
+        let scope = Scope::Project(from.clone());
+        std::fs::create_dir_all(service.files().scope_dir(&scope)).unwrap();
+        let note = service.files().record_path(&scope, "note");
+        std::fs::write(&note, "STAYS\n").unwrap();
+        service
+            .files()
+            .write_index(&scope, "# Memory\n- [note](note.md) — the note\n")
+            .unwrap();
+
+        let error = service
+            .split(&from, &to, &["note".to_owned(), "SESSIONS".to_owned()])
+            .expect_err("the second name is refused");
+        assert!(
+            matches!(
+                &error,
+                MemoryServiceError::Storage(MemoryError::InvalidName { name, .. })
+                    if name == "SESSIONS"
+            ),
+            "expected an InvalidName for SESSIONS, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&note).unwrap(),
+            "STAYS\n",
+            "the valid earlier name did not move"
+        );
+        assert!(
+            !service
+                .files()
+                .record_path(&Scope::Project(to.clone()), "note")
+                .exists(),
+            "the target did not receive the earlier name"
+        );
+        assert!(
+            std::fs::read_to_string(service.files().index_path(&scope))
+                .unwrap()
+                .contains("note.md"),
+            "the source index line stayed"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

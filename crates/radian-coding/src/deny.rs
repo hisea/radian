@@ -49,11 +49,8 @@ impl DenySet {
     /// that was never created (or whose creation failed), or one replaced by a link after the
     /// roots were opened, is not an exception and cannot widen it to the memory directory.
     pub fn allowing(mut self, memory_roots: &MemoryRoots) -> Self {
-        for path in memory_roots.canonical_dirs() {
-            if !self.except.contains(&path) {
-                self.except.push(path);
-            }
-        }
+        self.except
+            .extend(memory_roots.canonical_paths().map(Path::to_path_buf));
         self.except.sort();
         self.except.dedup();
         self

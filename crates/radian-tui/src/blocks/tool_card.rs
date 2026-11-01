@@ -530,7 +530,11 @@ fn memory_read_rows(memory: &crate::memory_card::MemoryRef, width: usize) -> Vec
     let end = text.len();
     wrap_cells(cells, width, width, end)
         .into_iter()
-        .map(|(chunk, chunk_end)| styled_row(chunk, Vec::new(), chunk_end, width, Frame::Head))
+        .enumerate()
+        .map(|(index, (chunk, chunk_end))| {
+            let frame = if index == 0 { Frame::Head } else { Frame::Body };
+            styled_row(chunk, Vec::new(), chunk_end, width, frame)
+        })
         .collect()
 }
 

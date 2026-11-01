@@ -40,7 +40,9 @@ decides which paths they may reach.
   new process never calls it. A call to a name no configured MCP server
   provides is not a result: it fails without reaching a server and does not arm
   the guard. Neither does a call the runtime settles without running the tool
-  (`cancelled`, `skipped_by_steering`, `hook_error`, `denied`).
+  (`cancelled`, `skipped_by_steering`, `hook_error`, `denied`, `interrupted`), nor
+  an error record with no `error_code` (a journal written before that field
+  existed).
 - Content that looks like a secret is refused with `memory write refused: the
   content looks like a secret (<prefix>)`. `<prefix>` is the matched prefix
   (`sk-`, `sk_`, `xoxb-`, `ghp_`, `AKIA` or `Bearer `), and the value is never
@@ -73,7 +75,7 @@ A record starts with `---`, then one field per line, then `---`, then the body.
 |---|---|---|
 | `name` | string | The file stem: `a-z`, `0-9` and `-`, 1 to 64 characters. It must equal the file stem. |
 | `description` | string | One line. The index shows it. |
-| `type` | closed set | `user`, `feedback`, `project`, `reference`. `feedback` and `project` records carry `**Why:**` and `**How to apply:**` lines in the body. |
+| `type` | closed set | `user`, `feedback`, `project`, `reference`. The model is expected to add `**Why:**` and `**How to apply:**` lines to a `feedback` or `project` body; nothing enforces them. |
 | `source` | closed set | `model`, `user`, `import`. `add` writes `user`; the model's own writes carry `model`, as the memory prompt tells it. A value outside the set makes the file unreadable. |
 | `created` | RFC 3339 UTC | Set once. |
 | `modified` | RFC 3339 UTC | Set on every write. |
@@ -86,8 +88,10 @@ path and the line, and the other files still list.
 
 ## In the transcript
 
-When the model writes or patches a file under a memory scope and the call succeeds, the
-transcript draws one card in place of the ordinary `write` or `patch` card:
+When the model writes or patches a record file (`<scope>/<name>.md` or
+`projects/<ProjectId>/<name>.md`) under a memory scope and the call succeeds, the transcript
+draws one card in place of the ordinary `write` or `patch` card. Any other path under a scope
+(such as `global/notes/x.md`) keeps the ordinary card:
 
 ```
 ╭─ memory ──────────────────────────────
@@ -158,7 +162,7 @@ directory.
 | `open [--global\|--project]` | Print the scope directory. In the interface, open that directory with the editor or the platform opener. |
 | `project [--json] [new]` | Show this workspace's identity key and project state, or register the workspace with `new`. |
 | `relink <project-id>` | Attach this workspace's identity key to an existing project. |
-| `split [--yes] <from> <to> <name>...` | Move each named file and its index line from one project to another. A name already present in the target is reported and left in place; a missing name is reported. Asks first. |
+| `split [--yes] <from> <to> <name>...` | Move each named file and its index line from one project to another. A name already present in the target is reported and left in place; a missing name is reported; a name outside the record rule (including `SESSIONS`, `MEMORY`, an absolute name or `..`) is a usage error and moves nothing. Asks first. |
 | `merge [--yes] <into> <from>` | Move every record file from one project into another; `MEMORY.md` and `SESSIONS.md` stay in their own project. When both hold the same name, the file from `from` is renamed `<name>-2` (then `-3`, …, skipping any name either project already has), its `name` line is rewritten, and the collision is reported. Asks first. |
 
 `forget`, `split` and `merge` are the only commands that ask for confirmation. `list`,

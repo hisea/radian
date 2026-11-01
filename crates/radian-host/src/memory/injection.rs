@@ -10,9 +10,9 @@
 //! inject lane; the driver drains it at the next safe point, so the model sees it before its next
 //! call. One notice per session per scope.
 //!
-//! When the section is built, the host writes one `critical: false` `MemoryInjected` runtime event
-//! naming each injected index (path, sha256 of the capped neutralized text, lines, bytes). It
-//! never copies the text.
+//! When at least one index was injected, the host writes one `critical: false` `MemoryInjected`
+//! runtime event naming each injected index (path, sha256 of the capped neutralized text, lines,
+//! bytes). It never copies the text.
 //!
 //! Three rules matter more than the rest:
 //!
@@ -173,6 +173,9 @@ impl MemoryInjection {
     }
 
     /// Whether a `write`/`patch` call names a path under one of this session's memory scopes.
+    /// The call path is canonicalized (its deepest existing ancestor plus the remaining
+    /// components), so a spelling through a symlink or with `..` is judged by where it lands,
+    /// not by its text (ADR 0021 D7).
     fn is_memory_write(&self, call: &ToolCall) -> bool {
         if call.name != "write" && call.name != "patch" {
             return false;
@@ -180,7 +183,7 @@ impl MemoryInjection {
         let Some(path) = call.arguments.get("path").and_then(|value| value.as_str()) else {
             return false;
         };
-        let path = expand_tilde(path);
+        let path = canonical_spelling(&expand_tilde(path));
         self.roots.iter().any(|root| path.starts_with(root))
     }
 
@@ -229,7 +232,7 @@ impl MemoryInjection {
     }
 
     /// The `MemoryInjected` entries due this call, or `None` after the first write (ADR 0021 D6:
-    /// one record when the section is built).
+    /// one record when at least one index was injected).
     fn take_indexes(&self, section: &Section) -> Option<Vec<MemoryInjectedIndex>> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.recorded {
@@ -514,6 +517,51 @@ fn memory_roots(service: Option<&MemoryService>) -> Vec<std::path::PathBuf> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The path with its deepest existing ancestor canonicalized (symlinks and `..` resolved) and
+/// the not-yet-existing rest appended and normalized lexically, so a new file under a scope
+/// still compares under that scope's canonical root.
+fn canonical_spelling(path: &Path) -> std::path::PathBuf {
+    let mut existing = path;
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            let mut joined = canonical;
+            for component in rest.iter().rev() {
+                joined.push(component);
+            }
+            return normalize_lexically(&joined);
+        }
+        match existing.parent() {
+            Some(parent) => {
+                if let Some(name) = existing.file_name() {
+                    rest.push(name);
+                }
+                existing = parent;
+            }
+            None => return normalize_lexically(path),
+        }
+    }
+}
+
+/// Resolves `.` and `..` components without touching the filesystem. A `..` above the root is
+/// dropped, because every memory root is absolute.
+fn normalize_lexically(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !out.pop() && !out.has_root() {
+                    out.push(component.as_os_str());
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Expands a leading `~` against `HOME`; every other spelling is unchanged.
@@ -1171,5 +1219,107 @@ mod tests {
         let indexes = injected_indexes(&journal_path);
         assert_eq!(indexes.len(), 1, "{indexes:?}");
         assert_eq!(indexes[0].sha256, sha256_hex("safeevil\ntail\n"));
+    }
+
+    async fn denied(injection: &Arc<MemoryInjection>, path: &Path) -> bool {
+        let hooks = MemoryHooks::from_shared(Arc::clone(injection));
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "write".into(),
+            arguments: json!({"path": path.to_str().unwrap(), "content": "NOTE\n"}),
+        };
+        matches!(
+            hooks.before_tool_call(&context(), &call).await.unwrap(),
+            ToolDecision::Deny { .. }
+        )
+    }
+
+    fn off_injection(service: &MemoryService) -> Arc<MemoryInjection> {
+        let (warn, _) = warn_sink();
+        let injection = MemoryInjection::new(
+            Some(service.clone()),
+            InjectionConfig::default(),
+            warn,
+            None,
+            None,
+        );
+        injection.set_off(true);
+        injection
+    }
+
+    /// Edge case: the scope root is reached through a symlinked directory and the write is spelled
+    /// through that symlink. `/memory off` must still refuse it.
+    #[tokio::test]
+    async fn a_write_spelled_through_a_symlinked_scope_is_refused_while_memory_is_off() {
+        let dir = TempDir::new("off-symlink");
+        let ws = workspace(&dir);
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        service.file_tool_roots();
+        let link = dir.join("memory-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+
+        let injection = off_injection(&service);
+        assert!(
+            denied(&injection, &link.join("global/note.md")).await,
+            "a symlinked spelling of a scope is still a memory write"
+        );
+    }
+
+    /// Edge case: a `..` round trip back into the scope is refused.
+    #[tokio::test]
+    async fn a_write_with_a_parent_component_into_a_scope_is_refused_while_memory_is_off() {
+        let dir = TempDir::new("off-parent");
+        let ws = workspace(&dir);
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        service.file_tool_roots();
+
+        let injection = off_injection(&service);
+        let path = root.join("global/../global/note.md");
+        assert!(
+            denied(&injection, &path).await,
+            "`..` back into the same scope is still a memory write"
+        );
+    }
+
+    /// Edge case: a path outside every scope, spelled through a symlink that points outside, is
+    /// unaffected.
+    #[tokio::test]
+    async fn a_write_outside_every_scope_through_a_symlink_is_allowed_while_memory_is_off() {
+        let dir = TempDir::new("off-outside-symlink");
+        let ws = workspace(&dir);
+        let root = dir.join("memory");
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let service = MemoryService::open(&ws, &root);
+        service.file_tool_roots();
+        let link = dir.join("outside-link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let injection = off_injection(&service);
+        assert!(
+            !denied(&injection, &link.join("note.md")).await,
+            "a write that lands outside every scope is unaffected"
+        );
+    }
+
+    /// Edge case: a new file in a subdirectory that does not exist yet is still under the scope.
+    #[tokio::test]
+    async fn a_new_file_in_a_missing_subdirectory_of_a_scope_is_refused_while_memory_is_off() {
+        let dir = TempDir::new("off-new-subdir");
+        let ws = workspace(&dir);
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        service.file_tool_roots();
+        let link = dir.join("memory-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+
+        let injection = off_injection(&service);
+        let path = link.join("global/not/yet/there/note.md");
+        assert!(
+            denied(&injection, &path).await,
+            "a new file under a missing subdirectory is still a memory write"
+        );
     }
 }

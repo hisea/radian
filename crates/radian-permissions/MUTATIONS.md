@@ -169,6 +169,6 @@ empty).
 | TK0270-M2 | `rule::resolve_path` skips `canonicalize_existing_prefix` and only normalises lexically | ✅ 1 failed (rc=100) | `profile::tests::a_symlink_out_of_the_memory_store_is_not_matched` |
 | TK0270-M3 | the rule is added to the `full` tier only (`if preset != FullAccess { return self }`) | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::write_to_a_global_memory_file_is_allowed_in_every_tier` |
 | TK0270-M4 | the project scope matches with plain `PathUnder(<root>/projects)`, so a file directly in `projects/` counts | ✅ 1 failed (rc=100) | `profile::tests::a_memory_write_directly_in_the_projects_directory_is_not_matched` |
-| TK0270-M5 | `memory_rules()` returns no rule (the review's deleted-rule regression), so `memory_search` falls to the tier default | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks` |
+| TK0270-M5 | `memory_rules()` returns no rule (the review's deleted-rule regression), so `memory_search` falls to the tier default | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks` (renamed since to `memory_search_gets_the_default_for_an_unknown_tool`; the allow rule is gone, so this row is historical) |
 
 5/5 caught, no equivalent mutation.

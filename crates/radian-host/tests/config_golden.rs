@@ -103,6 +103,18 @@ fn edge_cases() -> Vec<(String, String)> {
             "unknown.memory_injection",
             "schema_version = 1\n[memory.injection]\nfuture = 1\n",
         ),
+        (
+            "unknown.context",
+            "schema_version = 1\n[context]\nfuture = 1\n",
+        ),
+        (
+            "context.section_not_a_table",
+            "schema_version = 1\ncontext = 3\n",
+        ),
+        (
+            "context.subtree_files.wrong_type",
+            "schema_version = 1\n[context]\nsubtree_files = \"yes\"\n",
+        ),
         ("unknown.git", "schema_version = 1\n[git]\nfuture = 1\n"),
         ("unknown.shell", "schema_version = 1\n[shell]\nfuture = 1\n"),
         ("unknown.tui", "schema_version = 1\n[tui]\nfuture = 1\n"),

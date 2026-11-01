@@ -366,6 +366,58 @@ fn a_write_keeps_the_source_of_an_existing_record() {
 }
 
 #[test]
+fn a_quoted_null_last_used_is_not_a_never_read_marker() {
+    let dir = TempDir::new("files-quoted-null");
+    let store = FileStore::open(dir.path());
+    std::fs::create_dir_all(store.scope_dir(&global())).unwrap();
+    let timestamp = "2026-10-31T12:00:00.000000Z";
+    // The plain spellings mean never read.
+    std::fs::write(
+        store.record_path(&global(), "plain"),
+        format!(
+            "---\nname: plain\ndescription: d\ntype: user\nsource: user\ncreated: {timestamp}\nmodified: {timestamp}\nlast_used: null\n---\nbody\n"
+        ),
+    )
+    .unwrap();
+    let plain = store.read(&global(), "plain").unwrap();
+    assert!(plain.frontmatter.last_used.is_none());
+    // A quoted "null" is the string YAML calls a string, so it is not a timestamp.
+    std::fs::write(
+        store.record_path(&global(), "quoted"),
+        format!(
+            "---\nname: quoted\ndescription: d\ntype: user\nsource: user\ncreated: {timestamp}\nmodified: {timestamp}\nlast_used: \"null\"\n---\nbody\n"
+        ),
+    )
+    .unwrap();
+    let error = store.read(&global(), "quoted").unwrap_err();
+    assert!(
+        matches!(&error, MemoryError::Frontmatter { line: 8, message, .. } if message.contains("last_used")),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_replacement_ignores_an_invalid_caller_source() {
+    let dir = TempDir::new("files-replace-source");
+    let store = FileStore::open(dir.path());
+    let mut first = new_record("style");
+    first.source = "user".to_owned();
+    store.write(&global(), first).unwrap();
+
+    // The caller's value is ignored on a replacement, so it is not judged either.
+    let mut second = new_record("style");
+    second.source = "not-a-source".to_owned();
+    let written = store
+        .write(&global(), second)
+        .expect("a replacement keeps the stored source");
+    assert_eq!(written.frontmatter.source, "user");
+    assert_eq!(
+        store.read(&global(), "style").unwrap().frontmatter.source,
+        "user"
+    );
+}
+
+#[test]
 fn rename_rewrites_only_the_name_line_and_keeps_the_rest() {
     let dir = TempDir::new("files-rename");
     let store = FileStore::open(dir.path());
@@ -426,7 +478,7 @@ fn documented_values_after(text: &str, marker: &str) -> Vec<String> {
     while let Some(open) = rest.find('`') {
         if !rest[..open]
             .chars()
-            .all(|ch| ch.is_whitespace() || ch == ':' || ch == ',')
+            .all(|ch| ch.is_whitespace() || ch == ':' || ch == ',' || ch == '(')
         {
             break;
         }
@@ -446,15 +498,17 @@ fn documented_values_after(text: &str, marker: &str) -> Vec<String> {
     values
 }
 
-/// A D4 table row's closed-set cell: `| \`type\` | closed set | \`a\`, \`b\`. |`.
+/// A D4 table row's closed-set cell: the row that starts with the field's name, then every
+/// backticked value in the rest of the row. The phrase `closed set` and the cell count are not
+/// part of the match, so rewording the row does not hide a changed set.
 fn adr_closed_set(adr: &str, field: &str) -> Vec<String> {
-    let prefix = format!("| `{field}` | closed set |");
+    let needle = format!("| `{field}`");
     let row = adr
         .lines()
-        .find(|line| line.starts_with(&prefix))
+        .find(|line| line.trim_start().starts_with(&needle))
         .unwrap_or_else(|| panic!("ADR 0021 D4 has no closed-set row for {field}"));
-    let cell = row.split('|').nth(3).unwrap_or("");
-    backticked(cell)
+    let rest = row.splitn(3, '|').nth(2).unwrap_or("");
+    backticked(rest)
 }
 
 #[test]
@@ -463,7 +517,7 @@ fn the_documented_closed_sets_are_the_constants() {
     let readme = std::fs::read_to_string(root.join("crates/radian-memory/README.md")).unwrap();
     let adr = std::fs::read_to_string(root.join("docs/adr/0021-memory.md")).unwrap();
 
-    let documented_types = documented_values_after(&readme, "`RECORD_TYPES`:");
+    let documented_types = documented_values_after(&readme, "`RECORD_TYPES`");
     assert_eq!(
         documented_types
             .iter()
@@ -472,7 +526,7 @@ fn the_documented_closed_sets_are_the_constants() {
         RECORD_TYPES,
         "the README lists a different `type` set than RECORD_TYPES"
     );
-    let documented_sources = documented_values_after(&readme, "`RECORD_SOURCES`:");
+    let documented_sources = documented_values_after(&readme, "`RECORD_SOURCES`");
     assert_eq!(
         documented_sources
             .iter()

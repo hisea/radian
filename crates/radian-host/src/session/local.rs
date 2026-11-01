@@ -152,10 +152,10 @@ impl LocalSession {
     /// committed history, the open-time tool specs, and `Null` settings (the
     /// route and thinking travel in the model client, not the body).
     ///
-    /// Read-only: it never touches the inbox or the driver, never runs hooks
-    /// (the memory hook would journal a second `MemoryInjected`), and works
-    /// mid-turn. `/context` renders through it; `/btw` appends one trailing
-    /// user message and sends it.
+    /// Read-only: it never touches the inbox or the driver and never runs hooks
+    /// (running them would take the one-shot `MemoryInjected` record and send the
+    /// pending notices), and works mid-turn. `/context` renders through it; `/btw`
+    /// appends one trailing user message and sends it.
     pub fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
         let (history, _, _) = read_committed(&self.journal_path)?;
         // The index section, computed once per process and reused byte for byte afterwards

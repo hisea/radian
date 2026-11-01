@@ -178,7 +178,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
-| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、`~/.radian/credentials/auth.json` 与 `~/.radian/trust/trust.json` 读失败；沙箱内的 `shell` 写 `memory/` 不会改变真实目录；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 6 拒 + 3 可（+1 跳过） | 4 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
+| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、一个 memory scope 目录内的文件、`~/.radian/credentials/auth.json`、`~/.radian/trust/trust.json` 与 `~/.radian/hub/` 读失败；沙箱内的 `shell` 写 `memory/` 不会改变真实目录；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 8 拒 + 3 可（+1 跳过） | 4 拒 + 2 可（`skills_readable`/`trust_unreadable`/`hub_unreadable` 待 VM 恢复后补跑） |
 | deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
@@ -449,9 +449,15 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 **2026-10-31 补（memory 目录的写）**：矩阵新增 `radian_home.memory_write_does_not_reach_store` 1 条
 （沙箱内 `printf x > ~/.radian/memory/shell-write.txt` 跑完后，从测试进程检查真实文件没有出现；
 对照先证明同一条命令能建文件，然后删掉它再跑沙箱）与 `memory_write_tool_is_not_a_sandbox_matter`
-1 条 SKIP（文件工具不进沙箱，由权限档与 `radian-coding` 的文件根决定，与沙箱无关）。macOS 本机重跑
-**49/49 PASS + 1 SKIP**，`escape-macos.{txt,json}` 已更新。**Linux 未跑**（VM 暂停中）：Linux 上
-沙箱内写 `deny_read` 目录会成功并落进遮蔽 tmpfs（见上文 bwrap 段），不会碰到真实目录；
+1 条 SKIP（文件工具不进沙箱，由权限档与 `radian-coding` 的文件根决定，与沙箱无关）。
+
+**2026-11-01 重跑（memory scope 与 hub 禁读）**：`radian_home` 组新增
+`memory_scope_unreadable`（scope 目录内的文件读失败）与 `hub_unreadable`
+（`~/.radian/hub/` 读失败）。macOS 本机重跑 **51 cases, 0 failed, 1 skipped**（50 PASS + 1
+SKIP），`escape-macos.{txt,json}` 已更新。重跑时须给进程一个排在 `PWD` 前的未白名单变量
+（如 `AAA_MATRIX_SECRET=...`），否则 harness 会挑到 `PWD`，其值随 cwd 改变而让 control 失败；
+这是 harness 的选择逻辑，与沙箱结果无关。**Linux 未跑**（VM 暂停中）：Linux 上沙箱内写
+`deny_read` 目录会成功并落进遮蔽 tmpfs（见上文 bwrap 段），不会碰到真实目录；
 `escape-linux.{txt,json}` 待 VM 恢复后重跑补齐。
 
 ## 在沙箱内跑测试（nextest profile `sandbox`）

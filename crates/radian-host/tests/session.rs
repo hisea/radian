@@ -241,6 +241,25 @@ async fn a_local_session_refuses_a_command_it_does_not_declare() {
     drop(scratch);
 }
 
+/// ADR 0021 D5/D6, ADR 0036: the memory rules block is gated on a memory root, not only on
+/// `[memory] enabled`. A session opened without a root (the default here) carries no memory
+/// sentence in its base prompt.
+#[tokio::test]
+async fn a_session_without_a_memory_root_has_no_memory_block() {
+    let (scratch, session) = observe_only("no-memory-root").await;
+    let request = session.next_request_shape().expect("a request shape");
+    let system = request.system_prompt.unwrap_or_default();
+    assert!(
+        !system.contains("Write a memory file after the user corrects you"),
+        "a session with no memory root carries the rules block: {system}"
+    );
+    assert!(!system.contains("## Memory indexes"), "{system}");
+
+    session.stop();
+    assert!(session.join().await.is_ok());
+    drop(scratch);
+}
+
 /// A session that declares the capability accepts the command (the check is not "refuse
 /// everything").
 #[tokio::test]

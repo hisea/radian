@@ -1333,6 +1333,31 @@ fn a_memory_read_draws_one_muted_line_and_the_index_keeps_the_read_head() {
     );
 }
 
+/// A `memory used: <title>` line wider than the row wraps with the same `│ ` rail the ordinary
+/// head uses on continuation rows, not a `•` marker on every row.
+#[test]
+fn a_wrapped_memory_read_line_keeps_the_rail_on_continuation_rows() {
+    let root = memory_root("read-wrap");
+    let name = "a-very-long-record-name-that-wraps-the-memory-used-line";
+    let path = root.join("global").join(format!("{name}.md"));
+    std::fs::write(&path, FEEDBACK.replace("name: x", &format!("name: {name}"))).unwrap();
+    let mut app = tool_app(
+        Some(&root),
+        "read",
+        json!({"path": path.display().to_string()}),
+        "1: ---\n",
+        false,
+    );
+    let lines = rows(&render(&mut app, 60, 12), 60, 12);
+    let block = block_rows(&lines);
+    assert!(block.len() > 1, "the line wrapped: {block:?}");
+    assert!(block[0].contains("memory used:"), "{block:?}");
+    assert!(
+        block[1..].iter().all(|row| row.starts_with("│ ")),
+        "a continuation row lost its rail: {block:?}"
+    );
+}
+
 #[test]
 fn enter_on_a_memory_card_opens_the_file() {
     let root = memory_root("enter");

@@ -41,8 +41,8 @@ pub use export::{
 };
 pub use fee::UsageFee;
 pub use fork::{
-    ForkError, ForkOutcome, ForkPoint, ForkRequest, fork, fork_point_history, fork_with_journal,
-    last_fork_point, resolve_fork_point,
+    AppendedContextFile, ForkError, ForkOutcome, ForkPoint, ForkRequest, fork, fork_point_history,
+    fork_with_journal, last_fork_point, resolve_fork_point,
 };
 pub use fs::{
     PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, ensure_private_dir, ensure_private_file,

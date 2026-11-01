@@ -113,7 +113,7 @@ to Project; `--global` writes a Global file.
 | `open [--global\|--project]` | print the scope directory (the interface opens it) |
 | `project` / `project new` | show the identity key and project state, or register it; `--json` |
 | `relink <ProjectId>` | attach this workspace to an existing project |
-| `split [--yes] <from> <to> <name…>` / `merge [--yes] <into> <from>` | move files and their index lines between projects; need confirmation; a merge collision renames the moved file `<name>-2` |
+| `split [--yes] <from> <to> <name…>` / `merge [--yes] <into> <from>` | move files and their index lines between projects; need confirmation; a merge collision renames the moved file to the first free `<name>-<n>` suffix (`-2`, `-3`, ...) that is free in both projects |
 
 - **A write registers the project itself** (ADR 0021): a default-scope `add` in a
   git repository whose project is not in the registry registers it, saves there, and prints
@@ -164,9 +164,10 @@ cross-project preference is written as a memory record under `global/`.
 
 The section is computed **once per process**, so every request of a session carries the same
 system-prompt bytes and a provider's prefix cache stays valid; a change to an index file takes
-effect in the next session or on resume. The host writes one `MemoryInjected` audit record
-naming each injected index (path, sha256 of the capped neutralized text, lines, bytes); it
-never copies the text. The injected copy has default-ignorable code points removed and fake
+effect in the next session or on resume. When at least one index was injected, the host
+writes one `MemoryInjected` audit record naming each injected index (path, sha256 of the capped
+neutralized text, lines, bytes); with both indexes missing it writes nothing. It never copies
+the text. The injected copy has default-ignorable code points removed and fake
 prompt markers escaped; the file on disk is unchanged. A memory read failure is a `[memory]`
 warning, never a failed turn. Startup prints
 `[memory]` with the project state and the caps.

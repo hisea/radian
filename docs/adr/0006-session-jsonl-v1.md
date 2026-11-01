@@ -213,7 +213,7 @@ Replay rules live in one Core place (`TranscriptFold`), per ADR 0019. Uncommitte
 
 ### 5.12 `MemoryInjected` / `ProjectTrustChanged` / `UserBash`
 
-- `MemoryInjected { indexes: [{ scope, path, sha256, lines, bytes }] }`: one entry per injected index file, in injection order. `scope` is one of `project`, `global`; `path` is the scope's `MEMORY.md`; `sha256` is the 64-hex content hash; `lines` and `bytes` are its size. It never copies the index text. A reader also accepts the old `{ records: [{ id, revision, scope }] }` shape from journals written before the file store; a record carrying both shapes or neither is refused at its line. This build writes only `indexes`.
+- `MemoryInjected { indexes: [{ scope, path, sha256, lines, bytes }] }`: one entry per injected index file, in injection order. `scope` is one of `project`, `global`. `path` is the scope's `MEMORY.md`. `sha256` is the 64-hex content hash; `lines` and `bytes` are its size. It never copies the index text. A reader also accepts the old `{ records: [{ id, revision, scope }] }` shape from journals written before the file store; a record carrying both shapes or neither is refused at its line. This build writes only `indexes`.
 - `ProjectTrustChanged { path, decision }`: `path` is the normalized directory. `decision` is boolean.
 - `UserBash { command, exclude_from_context, exit_code, cancelled }`: `!`/`!!` audit. `!!` records the same way.
 

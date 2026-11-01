@@ -1,10 +1,12 @@
 //! Project context files (ADR 0036): `AGENTS.md` / `CLAUDE.md` discovery, the byte limits,
 //! and the `<project_instructions>` section the model sees.
 //!
-//! Read **once** at session start, by the host process, outside the sandbox (ADR 0036). The
-//! content never enters the journal; only the loaded paths and sizes go into the
-//! `SessionCreated.config_snapshot` (ADR 0006 §6). A file that cannot be read is a warning, not
-//! a failure: the session opens without it.
+//! The startup set is read once at session start, by the host process, outside the sandbox
+//! (ADR 0036). Its content never enters the journal; only the loaded paths and sizes go into
+//! the `SessionCreated.config_snapshot` (ADR 0006 §6). A subtree file discovered on a tool's
+//! first use is read then and appended as an ordinary `Message` record (with a
+//! `ContextFileAppended` audit line). A file that cannot be read is a warning, not a failure:
+//! the session opens without it.
 //!
 //! The 64 KiB/128 KiB limits count the file's expanded bytes (after `@path` imports)
 //! **before** escaping ([`crate::escape`]): they bound how much of the user's file is read.
@@ -366,8 +368,9 @@ impl SubtreeContext {
     /// Discovers the files to append for these trigger paths (tool arguments and listed result
     /// files). For each path under the workspace, walks from its directory up to the workspace
     /// and takes the first existing context file of each directory not yet loaded (ADR 0036),
-    /// inner directory first. The set is updated here before the read, so a parallel call
-    /// cannot append the same file twice, and a file that cannot be read is not retried.
+    /// then appends them outer to inner, the order the startup chain uses. The set is updated
+    /// here before the read, so a parallel call cannot append the same file twice, and a file
+    /// that cannot be read is not retried.
     pub fn discover(&self, triggers: &[PathBuf]) -> (Vec<SubtreeFile>, Vec<String>) {
         let mut files = Vec::new();
         let mut warnings = Vec::new();
@@ -384,43 +387,48 @@ impl SubtreeContext {
             } else {
                 path.parent().map(Path::to_path_buf)
             };
+            // Collect inner first, then reverse, so the broader file's message comes first and
+            // the deeper one (the more specific rules) has the last word (ADR 0036 Order).
+            let mut chain = Vec::new();
             while let Some(current) = dir {
                 if !current.starts_with(&self.workspace) {
                     break;
                 }
                 if let Some(candidate) = context_file_in(&current) {
-                    let key =
-                        std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-                    // A symlink that resolves outside the workspace is skipped (ADR 0036).
-                    // Record the candidate before the read, so a file that cannot be read
-                    // warns once per session instead of on every trigger.
-                    if key.starts_with(&self.workspace)
-                        && loaded.insert(key.clone())
-                        && let Some((file, content)) = read_context_file(
-                            &candidate,
-                            &self.workspace,
-                            self.boundary.as_deref(),
-                            &mut warnings,
-                        )
-                    {
-                        let relative = key
-                            .strip_prefix(&self.workspace)
-                            .unwrap_or(&key)
-                            .to_string_lossy()
-                            .into_owned();
-                        files.push(SubtreeFile {
-                            path: key,
-                            relative: relative.clone(),
-                            bytes: file.bytes,
-                            truncated: file.truncated,
-                            block: file_block(&relative, &content),
-                        });
-                    }
+                    chain.push(candidate);
                 }
                 if current == self.workspace {
                     break;
                 }
                 dir = current.parent().map(Path::to_path_buf);
+            }
+            for candidate in chain.into_iter().rev() {
+                let key = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                // A symlink that resolves outside the workspace is skipped (ADR 0036).
+                // Record the candidate before the read, so a file that cannot be read
+                // warns once per session instead of on every trigger.
+                if key.starts_with(&self.workspace)
+                    && loaded.insert(key.clone())
+                    && let Some((file, content)) = read_context_file(
+                        &candidate,
+                        &self.workspace,
+                        self.boundary.as_deref(),
+                        &mut warnings,
+                    )
+                {
+                    let relative = key
+                        .strip_prefix(&self.workspace)
+                        .unwrap_or(&key)
+                        .to_string_lossy()
+                        .into_owned();
+                    files.push(SubtreeFile {
+                        path: key,
+                        relative: relative.clone(),
+                        bytes: file.bytes,
+                        truncated: file.truncated,
+                        block: file_block(&relative, &content),
+                    });
+                }
             }
         }
         (files, warnings)
@@ -1603,6 +1611,26 @@ mod tests {
         let (deeper, _) = state.discover(&[PathBuf::from("crates/x/sub/c.rs")]);
         assert_eq!(deeper.len(), 1, "{deeper:?}");
         assert_eq!(deeper[0].relative, "crates/x/sub/AGENTS.md");
+    }
+
+    /// Two new files in nested directories append outer to inner, the same order as the
+    /// startup chain, so the more specific file has the last word (ADR 0036 Order).
+    #[test]
+    fn two_new_nested_files_append_outer_to_inner() {
+        let dir = TempDir::new("subtree-order");
+        dir.write("ws/crates/x/AGENTS.md", "X-RULES");
+        dir.write("ws/crates/x/sub/AGENTS.md", "SUB-RULES");
+        dir.write("ws/crates/x/sub/c.rs", "c");
+        let state = SubtreeContext::new(&dir.path().join("ws"), []);
+
+        let (files, warnings) = state.discover(&[PathBuf::from("crates/x/sub/c.rs")]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let names: Vec<&str> = files.iter().map(|file| file.relative.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["crates/x/AGENTS.md", "crates/x/sub/AGENTS.md"],
+            "{files:?}"
+        );
     }
 
     /// The startup chain counts as loaded: the workspace root's `AGENTS.md` is never appended

@@ -97,9 +97,18 @@ impl MemoryRecords {
         }
         let raw = arguments.get("path").and_then(Value::as_str)?;
         let absolute = absolute_path(raw)?;
+        let lexical_root = normalize(root);
         let root = canonical_root(root);
         let absolute = record_path(&absolute);
-        let relative = absolute.strip_prefix(&root).ok()?.to_path_buf();
+        // The canonical pair first; a record whose parent directory is gone at resume falls
+        // back to the lexical spelling on both sides, so the relative path (and the card) is
+        // still drawn. The key is that relative path, which stays stable across either spelling.
+        let relative = if let Ok(relative) = absolute.strip_prefix(&root) {
+            relative.to_path_buf()
+        } else {
+            let lexical_path = normalize(absolute.as_path());
+            lexical_path.strip_prefix(&lexical_root).ok()?.to_path_buf()
+        };
         if !is_record_path(&relative, tool == "read") {
             return None;
         }
@@ -116,7 +125,7 @@ impl MemoryRecords {
                     .get("content")
                     .and_then(Value::as_str)
                     .and_then(|content| frontmatter_type(content, &stem));
-                self.types.insert(absolute.clone(), parsed.clone());
+                self.types.insert(relative.clone(), parsed.clone());
                 parsed
             }
             "read" => match read_frontmatter(result) {
@@ -124,15 +133,22 @@ impl MemoryRecords {
                 // store saw when the call settled; keep it for a later card.
                 Some(text) => {
                     let parsed = frontmatter_type(&text, &stem);
-                    self.types.insert(absolute.clone(), parsed.clone());
+                    self.types.insert(relative.clone(), parsed.clone());
                     parsed
+                }
+                // A full read from line 1 with no frontmatter shows the store would reject the
+                // file: record `None`, so a later patch card shows `?` rather than an older
+                // type the transcript can no longer see.
+                None if read_started_at_first_line(result) => {
+                    self.types.insert(relative.clone(), None);
+                    None
                 }
                 // A partial read (an offset, a directory) establishes nothing either way: the
                 // last recorded type stays.
-                None => self.types.get(&absolute).cloned().unwrap_or(None),
+                None => self.types.get(&relative).cloned().unwrap_or(None),
             },
             // A patch edits the file the transcript last saw; the card carries that type.
-            _ => self.types.get(&absolute).cloned().unwrap_or(None),
+            _ => self.types.get(&relative).cloned().unwrap_or(None),
         };
         Some(MemoryRef {
             title: stem,
@@ -215,6 +231,15 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Whether the read result begins at the file's first line (`1: ...`). A result that starts
+/// anywhere else is a partial read.
+fn read_started_at_first_line(result: &str) -> bool {
+    result
+        .split_once(": ")
+        .and_then(|(number, _)| number.parse::<u64>().ok())
+        == Some(1)
 }
 
 /// The frontmatter block of a `read` result, when the read started at the file's first line.
@@ -668,6 +693,110 @@ mod tests {
         assert_eq!(read_frontmatter(offset), None);
         // A directory listing is not a numbered file.
         assert_eq!(read_frontmatter("kind size name\n"), None);
+    }
+
+    /// A full read that shows no frontmatter clears the type a `write` established, so a later
+    /// `patch` card shows `?`; a partial read still keeps it.
+    #[test]
+    fn a_full_read_with_no_frontmatter_clears_the_recorded_type() {
+        let root = std::env::temp_dir().join(format!(
+            "radian-tui-memory-read-clear-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("global")).unwrap();
+        let path = root.join("global/x.md");
+        let mut records = MemoryRecords::default();
+        let written = records.settle(
+            Some(&root),
+            "write",
+            &serde_json::json!({"path": path, "content": FEEDBACK}),
+            "wrote 8 lines",
+        );
+        assert_eq!(written.unwrap().record_type.as_deref(), Some("feedback"));
+
+        let read = records.settle(
+            Some(&root),
+            "read",
+            &serde_json::json!({"path": path}),
+            "1: no frontmatter here\n2: body\n",
+        );
+        assert_eq!(
+            read.unwrap().record_type,
+            None,
+            "a full read proves no frontmatter"
+        );
+        let patched = records.settle(
+            Some(&root),
+            "patch",
+            &serde_json::json!({"path": path, "old": "body", "new": "changed"}),
+            "replaced 1 occurrence",
+        );
+        assert_eq!(patched.unwrap().type_label(), "?");
+
+        // A partial read leaves the last recorded type alone.
+        let mut records = MemoryRecords::default();
+        records.settle(
+            Some(&root),
+            "write",
+            &serde_json::json!({"path": path, "content": FEEDBACK}),
+            "wrote 8 lines",
+        );
+        records.settle(
+            Some(&root),
+            "read",
+            &serde_json::json!({"path": path, "offset": 9}),
+            "9: body\n",
+        );
+        let patched = records.settle(
+            Some(&root),
+            "patch",
+            &serde_json::json!({"path": path, "old": "body", "new": "changed"}),
+            "replaced 1 occurrence",
+        );
+        assert_eq!(patched.unwrap().type_label(), "feedback");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A record whose parent directory is gone still draws its card, with its type, at resume:
+    /// the canonical pair falls back to the lexical spelling on both sides, and the transcript
+    /// keys the recorded type by the relative path (ADR 0035: the card never comes from the
+    /// file).
+    #[test]
+    fn a_record_whose_parent_directory_is_gone_still_draws_its_card() {
+        let dir = std::env::temp_dir().join(format!(
+            "radian-tui-memory-gone-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(dir.join("real/projects/P")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let root = dir.join("link");
+        let path = root.join("projects/P/x.md");
+        let mut records = MemoryRecords::default();
+        let written = records.settle(
+            Some(&root),
+            "write",
+            &serde_json::json!({"path": path, "content": FEEDBACK}),
+            "wrote 8 lines",
+        );
+        let written = written.expect("the write is a record");
+        assert_eq!(written.relative, Path::new("projects/P/x.md"));
+        assert_eq!(written.type_label(), "feedback");
+
+        // The whole project directory disappears, not just the file.
+        std::fs::remove_dir_all(dir.join("real/projects/P")).unwrap();
+        let patched = records.settle(
+            Some(&root),
+            "patch",
+            &serde_json::json!({"path": path, "old": "body", "new": "changed"}),
+            "replaced 1 occurrence",
+        );
+        let patched = patched.expect("the recorded path still names a record");
+        assert_eq!(patched.relative, Path::new("projects/P/x.md"));
+        assert_eq!(patched.type_label(), "feedback");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The card's path is the same before and after the record disappears: the parent (which

@@ -1358,7 +1358,7 @@ log matches the pre-mutation one; the over-budget and headless set tests pass on
 |---|---|---|---|
 | MT-1 | `injection::exceeds_budget`恒为 `true`（总是挂载） | ✅ 1 failed (`a memory within the budget mounts no search`) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（预算内那半） |
 | MT-2 | `injection::exceeds_budget`恒为 `false`（永不挂载） | ✅ 1 failed (`a memory past the budget mounts the search`) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半） |
-| MT-3 | `memory_rules()` 去掉 `memory_search` 的 `allow` | ✅ 1 failed（`memory_search` 不再是 `Allow`） | `radian-permissions::profile::memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks` |
+| MT-3 | `memory_rules()` 去掉 `memory_search` 的 `allow` | ✅ 1 failed（`memory_search` 不再是 `Allow`） | `radian-permissions::profile::memory_search_is_allowed_in_every_tier_and_no_memory_tool_asks`（改名后为 `profile::tests::memory_search_gets_the_default_for_an_unknown_tool`；该 allow 规则已不存在，此行仅作历史记录） |
 | MT-4 | `default.md` 删掉 Remembering 一节 | ✅ 1 failed（`contains("/memory add")`） | `radian-host::prompt::the_builtin_default_role_carries_its_rules` |
 | MT-5 | `memory_save` 的 spec 加回 `specs()` | ✅ 1 failed (`only \`memory_search\` mounts, never \`memory_save\``) | `radian-exec::cli::memory_search_mounts_only_past_the_injection_budget`（超预算那半的缺席断言） |
 
@@ -1872,16 +1872,18 @@ was restored from a backup under `.radian/`.
 
 ## TK0269: the legacy `MemoryInjected` write path is gone (2026-10-31)
 
-Branch `work/TK0269-memory-journal-record` (rework 1). The mutation restored the old
-implementation of `crates/radian-session/src/runtime.rs`, `crates/radian-host/src/memory/injection.rs`,
-`crates/radian-host/src/control.rs` and `crates/radian-host/src/session/open.rs` from the branch,
-plus a temporary test with the old four-argument `MemoryHooks::new`; it ran with
-`cargo nextest run -p radian-host --test mut_legacy --locked --profile sandbox --no-fail-fast`.
-Each source was restored from a backup under `.radian/mut-backup/` (`git status` empty).
+Branch `work/TK0269-memory-journal-record`, re-recorded for the file-store build. The only
+`MemoryInjected` writer left is the hook's index-record append; the original four-argument
+`MemoryHooks::new` and its `record()` twin are no longer in the tree, so the row below names a
+mutation a maintainer can rerun. It was applied in place to
+`crates/radian-host/src/memory/injection.rs` and run with `cargo nextest run -p radian-host
+--locked --profile sandbox --test memory_injection -E 'test(<name>)'`. The source was restored
+from `.radian/mut/injection.rs.bak` (`cmp` empty).
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
-| TK0269-M4 | restore the legacy `RuntimeEvent::MemoryInjected { records }` writer and the hook's `record()` call (the old four-argument `MemoryHooks::new`) | ✅ 1 failed (rc=100) | the mutation-time twin of `tests/memory_injection.rs::the_block_reaches_the_system_prompt_and_writes_no_legacy_record` (temporary `mut_legacy.rs`, same assertions: 1 `MemoryInjected` event where 0 is expected) |
+| TK0269-M4 | `MemoryInjection::take_indexes` returns `None`, so the hook never writes the index `MemoryInjected` record | ✅ 1 failed (rc=100) | `memory_injection::the_index_section_reaches_the_system_prompt_and_records_the_files_once` (no indexes were recorded) |
+
 ## TK0286: follow-ups for the explicit output cap (2026-10-31)
 
 Branch `work/TK0286-compaction-rereads-reserve-followups`. Each mutation was applied to the
@@ -1904,6 +1906,7 @@ the source was restored from a backup under `.radian/`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0286-M9 | `parse_extra_body` drops the oversized-output-cap refusal, so the body parses again | ✅ 1 failed (rc=100) | `extra_body::tests::an_output_cap_the_reservation_cannot_hold_is_refused_at_startup` (`expect_err`: `{"max_tokens":4294967296}` parsed) |
+
 ## TK0277: subtree context files (2026-10-31)
 
 Branch `work/TK0277-subtree-context-files`. Each mutation was applied in place, the
@@ -1917,6 +1920,7 @@ stale one) and the named tests run with `cargo nextest run ... --profile sandbox
 | TK0277-M1 | `SubtreeContext::discover` does not insert an appended path into the already-loaded set | ✅ 2 failed (rc=100) | `context::tests::a_subtree_file_appends_once_and_a_deeper_file_follows` (the second read appended `crates/x/AGENTS.md` again) and `cli::a_subtree_context_file_appends_once_before_the_next_request` (two `ContextFileAppended` events and two blocks) |
 | TK0277-M2 | `open_session` seeds the loaded set without the startup chain (`Vec::new()`) | ✅ 1 failed (rc=100) | `cli::a_startup_context_file_is_never_appended_again` (the workspace `AGENTS.md` was appended again) |
 | TK0277-M3 | `open_session` passes `true` to `ContextHooks` instead of `[context] subtree_files` | ✅ 1 failed (rc=100) | `cli::the_subtree_switch_turns_the_append_off` (the disabled switch still appended) |
+| TK0277-M4 | `SubtreeContext::discover` inserts a candidate into `loaded` only after a successful read (the old order) | ✅ 1 failed (rc=100) | `context::tests::an_unreadable_subtree_file_warns_once` (the second trigger warned again) |
 
 ## TK0272: memory aging (`last_used` and `stale`) (2026-10-31)
 
@@ -1982,6 +1986,7 @@ one) and ran `cargo nextest run -p radian-exec --test cli ... -E 'test(<name>)'`
 | TK0278-M1 | the same-id replacement is removed (`upsert_session_line` always pushes) | ✅ 2 failed (rc=100) | `memory::sessions::tests::a_second_line_for_the_same_session_replaces_the_first` (two lines) and `cli::a_resumed_session_replaces_its_line` (the resumed session's end left two lines) |
 | TK0278-M2 | the cap is off by one (`max_lines + 1`) | ✅ 1 failed (rc=100) | `memory::sessions::tests::the_cap_drops_the_oldest_lines_and_keeps_the_newest_last` (1001 lines kept) |
 | TK0278-M3 | the `SESSIONS.md` write refusal in `radian-coding` is removed | ✅ 1 failed (rc=100) | `cli::the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers` (the `write` succeeded and the index content changed) |
+
 ## TK0275: the memory role block (2026-10-31)
 
 Branch `work/TK0275-memory-role-rules`. Each mutation was applied in place and the named test
@@ -2031,3 +2036,17 @@ found identical.
 |---|---|---|---|
 | TK0292-M9 | `concurrency` is capped back to `u32::MAX` (`*count <= 4_294_967_295`), so a larger integer is refused instead of carried | ✅ 1 failed (rc=100) | `config_fixtures::the_hub_table_is_carried_and_out_of_range_values_are_refused` (`ValueOutOfRange` for `hub.concurrency = 4294967296`; the test expected the value carried) |
 
+
+## TK0293: the off-switch's path check and `split` names (2026-11-01)
+
+Branch `work/TK0293-memory-model-written-files-followups`. Each mutation was applied in
+place, the named test run with `cargo nextest run -p radian-host --lib --locked --profile
+sandbox --no-fail-fast -E 'test(<name>)'`, and the source restored from `.radian/mut/`;
+`cmp` found each backup identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0293-M1 | `is_memory_write` compares the raw path with the canonical roots (`canonical_spelling` dropped) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_write_spelled_through_a_symlinked_scope_is_refused_while_memory_is_off` (the symlinked spelling was allowed) |
+| TK0293-M2 | `split` joins each given name into a path without `validate_record_name` | ✅ 1 failed (rc=100) | `memory::service::tests::split_refuses_an_absolute_name` (the absolute name reached `record_path`) |
+| TK0293-M3 | `split` validates each name inside the move loop, so the first name is renamed before the second is checked | ✅ 1 failed (rc=100) | `memory::service::tests::split_validates_every_name_before_it_moves_any` (the valid earlier name had moved) |
+| TK0293-M4 | the command path propagates a `split` `InvalidName` with `?` instead of `add_error` (exit 1) | ✅ 1 failed (rc=100) | `memory::commands::tests::split_with_an_invalid_name_is_a_usage_error_and_moves_nothing` (`left: 1, right: 2`) |

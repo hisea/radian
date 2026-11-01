@@ -7534,6 +7534,38 @@ async fn memory_split_reports_a_collision_and_moves_nothing() {
     );
 }
 
+/// A `split` name outside the record rule is a usage error (exit 2), and a valid name
+/// earlier in the same list does not move.
+#[tokio::test]
+async fn memory_split_with_a_bad_name_exits_two_and_moves_nothing() {
+    let env = MemoryEnv::new("mem-split-bad-name");
+    let a = env.workspace("split-bad-a");
+    let b = env.workspace("split-bad-b");
+    std::fs::create_dir_all(a.join(".git")).unwrap();
+    std::fs::create_dir_all(b.join(".git")).unwrap();
+    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, _, stderr) = env.run_in(&a, &["add", "note"]).await;
+    assert_eq!(stderr, "", "{stderr}");
+    let project_a = linked_project(&env, &a).await;
+    let project_b = linked_project(&env, &b).await;
+
+    let (code, _, stderr) = env
+        .run_in(
+            &a,
+            &["split", "--yes", &project_a, &project_b, "note", "SESSIONS"],
+        )
+        .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("invalid memory record name"), "{stderr}");
+    let (_, out, _) = env.run_in(&a, &["list"]).await;
+    assert!(out.contains("note"), "a refused split moves nothing: {out}");
+    let (_, out, _) = env.run_in(&b, &["list"]).await;
+    assert!(!out.contains("note"), "the target received nothing: {out}");
+}
+
 #[tokio::test]
 async fn memory_add_refuses_a_bad_or_existing_name_and_writes_nothing() {
     let env = MemoryEnv::new("mem-add-refusal");
@@ -8341,12 +8373,13 @@ async fn an_unlinked_workspace_writes_no_session_index_and_creates_no_project() 
     // The unlinked run had a message to index; only the missing link explains the missing line.
     let unlinked_session =
         radian_session::Session::open(env.sessions.join("unlinked-session.jsonl")).unwrap();
+    let history = unlinked_session.history().unwrap();
     assert!(
-        unlinked_session
-            .events()
-            .iter()
-            .any(|event| event.event == "MessageAppended"),
-        "the unlinked session committed a user message"
+        history.iter().any(|message| {
+            message.text() == "unlinked work"
+                && message.meta().source == Some(radian_core::InputSource::User)
+        }),
+        "the unlinked session committed its user message, not just any message: {history:?}"
     );
 
     let lines = session_index_lines(&env, &project);

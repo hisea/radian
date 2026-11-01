@@ -82,12 +82,10 @@ impl MemoryRoots {
     /// The canonical paths of the roots that opened, for the `full`-tier deny set's one
     /// exception (ADR 0039 decision 4). A directory [`MemoryRoots::from_dirs`] skipped
     /// contributes nothing, so a scope that was never created, or whose creation failed,
-    /// cannot widen the exception to the memory directory.
-    pub(crate) fn canonical_dirs(&self) -> Vec<PathBuf> {
-        self.roots
-            .iter()
-            .map(|root| root.canonical.clone())
-            .collect()
+    /// cannot widen the exception to the memory directory. Borrowed, so a caller adding them
+    /// to a set does not build a throw-away `Vec` only to copy it again.
+    pub(crate) fn canonical_paths(&self) -> impl Iterator<Item = &Path> {
+        self.roots.iter().map(|root| root.canonical.as_path())
     }
 
     /// The root `path` (already absolute and lexically normalised) falls under, the longest

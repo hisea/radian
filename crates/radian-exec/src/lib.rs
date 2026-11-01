@@ -778,8 +778,9 @@ mod tests {
                     } else {
                         Vec::new()
                     };
-                    // `--type` parses through `parse_type`, not a `ValueEnum`.
-                    if id == "type" {
+                    // `--type` parses through `parse_type`, not a `ValueEnum`; its arg id is
+                    // `record_type` (the field name; `long = "type"` only sets the flag).
+                    if id == "record_type" {
                         values = radian_host::memory::commands::TYPE_NAMES
                             .iter()
                             .map(|name| name.to_string())

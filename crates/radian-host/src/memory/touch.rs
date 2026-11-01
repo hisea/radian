@@ -206,6 +206,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Edge: the project scope's index is not a record either.
+    #[test]
+    fn a_read_of_a_project_memory_md_touches_nothing() {
+        let (dir, service, touch) = touch("project-index");
+        let project = service.project_id().unwrap();
+        let index = service.files().index_path(&Scope::Project(project));
+        std::fs::write(&index, "# the project index\n").unwrap();
+        let before = std::fs::read_to_string(&index).unwrap();
+
+        touch.after_tool(&read_call(&index), true);
+
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Edge: the host-maintained session index is not a record.
     #[test]
     fn a_read_of_sessions_md_touches_nothing() {

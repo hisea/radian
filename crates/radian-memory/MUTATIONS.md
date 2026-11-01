@@ -52,8 +52,9 @@ as the documented equivalent mutation.
 ## TK0268: the file store and the log migration
 
 Base: this branch's code commit · each mutation run with
-`cargo nextest run -p radian-memory --locked --profile sandbox --test <binary> -E 'test(<name>)'`,
-then restored from `.radian/files.rs.bak`; `git status --short` empty at the end.
+`cargo nextest run -p radian-memory --locked --profile sandbox --test files -E 'test(<name>)'`
+(M2 with `--test migrate`), then restored from `.radian/files.rs.bak`; `git status --short`
+empty at the end.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
@@ -65,9 +66,10 @@ then restored from `.radian/files.rs.bak`; `git status --short` empty at the end
 
 ## Re-review: quoted YAML, a fixed source, the directory race, the docs drift test, description bytes
 
-Base: this branch's rework · each mutation run with
-`cargo nextest run -p radian-memory --locked --profile sandbox --test <binary> -E 'test(<name>)'`,
-then restored from `.radian/files.rs.bak` and `.radian/fs.rs.bak`; `git status --short` empty at the end.
+Base: this branch's rework · each mutation run with `cargo nextest run -p radian-memory
+--locked --profile sandbox --test files -E 'test(<name>)'` (M7 with `--lib`, because it is a
+lib unit test), then restored from `.radian/files.rs.bak` and `.radian/fs.rs.bak`;
+`git status --short` empty at the end.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|

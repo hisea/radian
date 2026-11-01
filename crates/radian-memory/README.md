@@ -29,18 +29,25 @@ exactly: a trailing newline and a line that spells `---` included. Every frontma
 one line: plain, single-quoted or double-quoted. The writer leaves a value plain when that is
 unambiguous and double-quotes anything else (a value with `: `, a leading or trailing space, a
 quote at its start, or a control character), so a hand-written quoted value and a written
-record read back the same.
+record read back the same. The frontmatter is a block-form subset of YAML: `provenance` is
+written as an indented block (`provenance:` then `  session_id: ...`), and a flow mapping such
+as `provenance: {session_id: s}` is refused with a must-be-a-map error. A quoted `last_used`
+is a string, so `last_used: "null"` is refused as a non-RFC-3339 timestamp rather than read
+as never-read; only plain `null` or `~` means never read.
 
 The fields are `name` (the file stem; `[a-z0-9-]`, 1 to 64 characters), `description` (one
 line), `type` (the closed set `RECORD_TYPES`: `user`, `feedback`, `project`, `reference`),
-`source` (the closed set `RECORD_SOURCES`: `model`, `user`, `import`; `add` writes `user`, the\nmigration writes `import`, and the model sets `model` on its own writes as its prompt tells it),
+`source` (the closed set `RECORD_SOURCES`: `model`, `user`, `import`; `add` writes `user`, the
+migration writes `import`, and the model sets `model` on its own writes as its prompt tells it),
 `created` and `modified` (RFC 3339 UTC; `created` is kept across a write and `modified` is set
 on every write), `last_used` (RFC 3339 UTC or absent, which means never read), and an optional
 `provenance` map with `session_id` and `turn_id`.
 
 `write` refuses a name outside the rule before it touches a file, and a record's `source` is
 fixed at its first write: replacing a file keeps its existing `source` and ignores the
-caller's new value. `touch_last_used` rewrites only the `last_used` line, or inserts one after
+caller's new value, so the caller's `source` is judged only when the file is new. `add` and
+the migration set `source` themselves; the model writes the other files directly and sets
+`source: model` as its prompt tells it, so the host does not supply that value. `touch_last_used` rewrites only the `last_used` line, or inserts one after
 `modified`; every other byte stays. `rename` rewrites only the `name` line; `modified`,
 `created`, `source` and the body stay byte for byte. The two closed sets are the slices the
 parser, the writer and the docs drift test read.
