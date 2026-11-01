@@ -46,8 +46,23 @@ toml = "0.8"
 # side only): this crate never acts as an MCP client.
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
 # The async runtime the MCP server runs on; the binary is synchronous and builds one. `time`
-# is the channel's 5-second poll (`tokio::time::sleep`), not a test feature.
-tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time"] }
+# is the channel's 5-second poll (`tokio::time::sleep`), not a test feature. `net` is the hub's
+# `TcpListener` (ADR 0048 decision 16); the hub's HTTP server runs on this runtime and its
+# route work is moved off the async threads with `spawn_blocking`, so no loop thread ever
+# blocks on a request.
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time", "net"] }
+# The hub's HTTP server (ADR 0048 decision 16): hyper 1 with its HTTP/1 server and hyper-util's
+# `TokioIo` adapter. Both package versions are already in `Cargo.lock` through reqwest; hyper's
+# `http1` feature adds its small `httpdate` dependency, the only new transitive entry. The
+# router is hand-written; no framework.
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+# `radian hub pair`'s QR code (ADR 0048 decision 16): pure Rust, no network, and the default
+# `image` feature is off because the code is drawn as Unicode half blocks.
+qrcode = { version = "0.14.1", default-features = false }
+# The token's 32 random bytes (ADR 0048 decision 16), from the OS. Already in `Cargo.lock`
+# through radian-host, which uses it for the PKCE verifier.
+getrandom = "0.3"
 
 [dev-dependencies]
 # The manual's drift reader: the flow keys and the task `flow` row are checked against the page.

@@ -114,6 +114,41 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, RunError> {
     })
 }
 
+/// Runs a git command in `dir` and reads at most `limit + 1` bytes of its standard output.
+///
+/// The one extra byte says whether there was more. The process is killed once that much has
+/// been read, so a `git diff` of a huge file is never buffered whole: the caller prints at most
+/// `limit` bytes and says the text was cut. The `+ 1` is deliberate: it is what tells an output
+/// of exactly `limit` bytes from a longer one.
+pub(crate) fn run_capped(
+    dir: &Path,
+    args: &[&str],
+    limit: usize,
+) -> Result<(String, bool), RunError> {
+    let mut command = command(dir)?;
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let mut bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let want = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+        stdout
+            .by_ref()
+            .take(want)
+            .read_to_end(&mut bytes)
+            .map_err(RunError::Spawn)?;
+    }
+    // The output is all the caller can use: a git still writing the rest would only fill the
+    // pipe, so it is killed and reaped.
+    let _ = child.kill();
+    let _ = child.wait();
+    let truncated = bytes.len() > limit;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+}
+
 /// What a git command with a wall-clock limit produced.
 pub(crate) enum TimedRun {
     /// The command finished.

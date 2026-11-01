@@ -9,7 +9,7 @@ It keeps a plan and its tasks as files in the repository, runs each task as a se
 
 This build has the storage layer, the subcommands that read and write it: `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `priority`, `pause`, `start`, `reverify`, `cancel`, `reset-budget`, `merge`, `reject`, `run`, and `serve`.
 It also has `radian arc mcp`, the MCP server a lead writes plans and tasks through, the attempt runner behind `start`, and the gate and merge behind `start`, `merge` and the loop.
-`radian hub add`, `remove` and `list` manage the repositories one hub process reads (see [`hub`](hub.md)).
+`radian hub add`, `remove` and `list` manage the repositories one hub process reads; a bare `radian hub` serves that hub's HTTP API on loopback, and `pair` and `token rotate` handle the bearer token (see [`hub`](hub.md)).
 `radian arc serve` is the scheduling loop and `radian arc run` is one pass of it; a bare `radian arc` opens the TUI, where you see the plans and tasks and act on them (see [`arc/tui`](tui.md)).
 
 The commands are in [`plans and tasks`](planning.md), [`running`](running.md), [`the owner's commands`](owner.md) and [`hooks`](hooks.md); the merge is in [`integration`](integration.md), the loop in [`loop`](loop.md), the gate in [`gate`](gate.md), [`gate-review`](gate-review.md) and [`gate-failures`](gate-failures.md), the MCP server in [`mcp`](mcp.md), the TUI in [`tui`](tui.md), the flows in [`flows`](flows.md), the worker in [`worker`](worker.md), and the files in [`files`](files.md) and [`config`](config.md).
@@ -24,7 +24,7 @@ Each line names one page and what it covers.
 - `arc/running`: the task-running commands.
 - `arc/owner`: the owner's commands.
 - `arc/hooks`: the `[hooks]` points, rules and environment.
-- `arc/hub`: the hub's repository registry, its subcommands, and the `[hub]` keys.
+- `arc/hub`: the hub's HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` keys.
 - `arc/gate`: the gate run, a gate for this repository, and reconcile.
 - `arc/gate-review`: the review stage.
 - `arc/gate-failures`: the failure classes, retries and the budget.
@@ -44,7 +44,7 @@ Without setup, `radian arc` and every subcommand except `init` refuse with a lin
 
 ## The subcommands
 
-`radian arc init`, `radian arc add plan` and `radian arc add task`, `radian arc list`, `radian arc show` and `radian arc adopt` are in [plans and tasks](planning.md); `radian arc start`, `radian arc cancel`, `radian arc reset-budget` and `radian arc reverify` in [running](running.md); `radian arc confirm`, `radian arc auto`, `radian arc priority`, `radian arc pause`, `radian arc merge` and `radian arc reject` in [the owner's commands](owner.md); `radian arc run` and `radian arc serve` in [the loop](loop.md); `radian arc mcp` in [mcp](mcp.md); the `[hooks]` table in [hooks](hooks.md#hooks); and `radian hub add`, `radian hub remove` and `radian hub list` in [hub](hub.md).
+`radian arc init`, `radian arc add plan` and `radian arc add task`, `radian arc list`, `radian arc show` and `radian arc adopt` are in [plans and tasks](planning.md); `radian arc start`, `radian arc cancel`, `radian arc reset-budget` and `radian arc reverify` in [running](running.md); `radian arc confirm`, `radian arc auto`, `radian arc priority`, `radian arc pause`, `radian arc merge` and `radian arc reject` in [the owner's commands](owner.md); `radian arc run` and `radian arc serve` in [the loop](loop.md); `radian arc mcp` in [mcp](mcp.md); the `[hooks]` table in [hooks](hooks.md#hooks); and the `radian hub` subcommands and routes in [hub](hub.md).
 
 ## `radian arc run`
 
