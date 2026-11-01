@@ -279,7 +279,7 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
     .expect("the largest TOML integer is in range");
     assert_eq!(parsed.hub.concurrency, i64::MAX as u64);
 
-    // Zero is the only integer outside the range; it names the key and the range.
+    // A value below 1 is outside the range; it names the key and the range.
     let error = config::parse(&path, "schema_version = 1\n[hub]\nconcurrency = 0\n")
         .expect_err("0 is below the range");
     let message = error.to_string();

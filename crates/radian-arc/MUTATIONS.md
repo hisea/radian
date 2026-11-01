@@ -1885,21 +1885,6 @@ and the file was restored from a copy under `.radian/`, which `cmp` found identi
 | TK0249-M1 | `auto_reverify_tasks` prints the literal `main` in the automatic reverify line instead of the configured target branch | `run::an_automatic_reverify_names_the_target_branch` (the line read `main moved (f8dbd9c)` for a `release` that moved) | ✅ 1 failed |
 | TK0249-M2 | `finish_integration` says `main moved after integration` instead of naming `context.target_branch` | `review::an_integration_that_keeps_moving_names_the_target_branch` (the reason read `main moved after integration`) | ✅ 1 failed |
 
-## TK0281: the hub registry, its CLI and the sandbox deny (2026-10-31, branch `work/TK0281-hub-registry-and-cli`)
-
-The registry reads and writes `$RADIAN_HOME/hub/repos.toml` through a temporary file and an
-atomic rename, and the hub directory joins the sandbox deny list. Each mutation was applied by
-hand to the working file, the named test ran with
-`cargo nextest run -p radian-arc --locked --profile sandbox` (M3 ran the escape matrix with
-`cargo nextest run -p radian-sandbox --test escape_macos`, which needs `sandbox-exec` and so
-must run outside the workspace sandbox), and the file was restored from a copy under
-`.radian/mut/`, which `cmp` found identical.
-
-| # | Mutation | Caught by | Result |
-|---|---|---|---|
-| TK0281-M1 | `add` compares the raw path against the stored entries instead of the canonical one | `hub_registry::add_refuses_the_same_path_reached_through_a_symlink` (`expect_err` got `RepoEntry { name: "alias", … }`: the symlink was registered) | ✅ 1 failed |
-| TK0281-M2 | drop the arc-repository check from `add` | `hub_registry::add_refuses_a_directory_without_an_arc_store_and_leaves_the_file_alone` (the plain directory was registered) | ✅ 1 failed |
-| TK0281-M3 | drop `hub/` from the harness's deny list | `escape_macos::macos_escape_matrix` (`radian_home/hub_unreadable`: sandbox `ok`, verdict `FAIL`) | ✅ 1 failed |
 ## TK0264: reviewer profiles (2026-10-31, branch `work/TK0264-reviewer-profiles-config`)
 
 A gate profile's `reviewer` selects a `[gate.reviewers.<name>]` section, and a file without a
@@ -1932,6 +1917,7 @@ under `.radian/backup/`, which `cmp` found identical.
 | TK0282-M3 | `reconcile` returns once it has any repository, so the registry is read only at start | `hub_loop::add_and_remove_reach_a_running_hub` (`B's lock and task did not happen in 10s`) | ✅ 1 failed |
 | TK0282-M4 | the repository loop runs inline on the hub's own thread instead of a spawned OS thread | `hub_loop::a_slow_pass_does_not_delay_another_repository` (`the quick repository's second task did not happen in 4s`) | ✅ 1 failed |
 | TK0282-M5 | `HubLock::try_take` unlocks the file before returning the guard, so `hub.lock` is not held | `hub_loop::a_second_hub_exits_one_and_names_the_holder` (`the second hub exits instead of running`) | ✅ 1 failed |
+
 ## TK0283: the hub's HTTP read routes and bearer token (2026-10-31, branch `work/TK0283-hub-http-read-and-token`)
 
 Every route requires the bearer token, a rotation is picked up without a restart, and a file's
@@ -1944,13 +1930,14 @@ restored from a copy under `.radian/mut/`, which `cmp` found identical.
 |---|---|---|---|
 | TK0283-M1 | `handle` accepts every request without checking the token (the `authorized` check replaced by `true`) | `hub_http::every_request_needs_a_bearer_token_and_a_bad_one_gets_an_empty_object` (`/v1/version` without a token answered `200`, expected `401`) | ✅ 1 failed |
 | TK0283-M2 | `TokenState::refresh` returns at once, so a rotated token is never re-read | `hub_http::a_rotated_token_takes_effect_on_the_next_request` (the old token still answered `200`, expected `401`) | ✅ 1 failed |
-| TK0283-M3 | `cap` returns the whole diff text and `truncated: false` | `hub_http::the_diff_route_lists_numstat_and_cuts_one_file_at_256_kib` (`truncated` read `false`, expected `true`) | ✅ 1 failed |
+| TK0283-M3 | `cap` returns the whole diff text and `truncated: false` | `hub_http::the_diff_route_lists_numstat_and_cuts_one_file_at_256_kib` (the route now reports `diff.truncated || cut`, so the body read `truncated: true` but the text kept git's 256 KiB + 1 byte and failed on the length assertion) | ✅ 1 failed |
 | TK0283-M4 | `report` and `verdicts` drop the `store.load_task` check (an unknown id is read from `runs/`) | `hub_http::the_report_is_the_newest_attempts_last_assistant_message` (unknown id answered `204`), `hub_http::the_verdicts_route_reads_the_newest_attempts_verdicts` (unknown id answered `200 []`) | ✅ 2 failed |
 | TK0283-M5 | `task_diff_file` reads the whole diff (`crate::git::run`, `truncated: false`) instead of the capped read | `read::the_counts_and_one_file_are_read_without_another_files_text` (`big.txt` was not truncated) | ✅ 1 failed |
 
 5/5 caught. M4 and M5 were added in the review-fix round: M4 was applied to
 `crates/radian-arc/src/hub/http.rs`, M5 to `crates/radian-arc/src/read.rs`, each restored from
 a copy under `.radian/` with `cp`.
+
 ## TK0265: review findings and `fix_level` (2026-10-31, branch `work/TK0265-review-findings-fix-level`)
 
 A review report now holds `findings`, each at one of `REVIEW_LEVELS`, and a finding at or above
@@ -1989,6 +1976,7 @@ under `.radian/mut/`, which `cmp` found identical.
 | TK0282-M7 | `machine_room` counts every registered repository with `?` again, so one unreadable store fails another repository's pass | `hub_loop::a_broken_task_file_in_one_repository_does_not_stop_another` (`the healthy repository schedules its task did not happen in 10s`) | ✅ 1 failed |
 | TK0282-M8 | the hub's interval wait ignores the shared stop flag (`&|| false`) | `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (`the hub waited out an idle interval before the exec (after 6.01s)`) | ✅ 1 failed |
 | TK0282-M9 | every loop that sees the changed binary prints the restart line (unconditional `restart.store`) | `hub_loop::a_binary_replacement_prints_one_restart_line_for_the_hub` (2 stdout lines, expected 1) | ✅ 1 failed |
+
 ## TK0284: the hub's owner write routes (2026-10-31, branch `work/TK0284-hub-http-owner-actions`)
 
 The write routes call the same library functions the TUI calls, map the CLI's outcome to a
@@ -2003,6 +1991,7 @@ restored from `.radian/mut/http.rs`, which `cmp` found identical.
 | TK0284-M1 | the empty-note `400` row is dropped from `action_status` (the `Error::Usage(EMPTY_REJECT_NOTE)` arm removed) | `hub_http::a_reject_with_an_empty_note_is_400_and_changes_nothing` (an empty note answered `422`) | ✅ 1 failed |
 | TK0284-M2 | `Error::Locked` maps to `200` in `action_status` | `hub_http::every_action_on_a_held_state_lock_is_409_with_no_file_change` (`confirm` on a held lock answered `200`) | ✅ 1 failed |
 | TK0284-M3 | `OwnerAction::parse` admits `start` as a route (it maps to `confirm`) | `hub_http::start_reset_budget_and_other_actions_are_404_and_get_confirm_is_405` (`POST …/start` answered `200` with `PL0001-hub confirmed`) | ✅ 1 failed |
+
 ## TK0285: the hub's event stream (2026-10-31, branch `work/TK0285-hub-sse-and-notifications`)
 
 `GET /v1/events` streams the shared poller's transitions for every registered repository: one
@@ -2019,6 +2008,7 @@ below>'`, and the file was restored from a copy under `.radian/backup/` with `cp
 | TK0285-M1 | `doing.running` joins the closed `CHANNEL_PHASES` list, so a transition the channel does not send is streamed | `hub_http::a_transition_the_channel_does_not_send_produces_no_event` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
 | TK0285-M2 | the poller compares the first read with an empty snapshot, so a client that connects after a transition receives it as a replay | `hub_http::a_client_that_connects_after_a_transition_gets_no_replay_and_the_lists_show_it` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
 | TK0285-M3 | `event_frame` drops the `repo` key from a task event's data | `hub_http::one_transition_in_each_repository_arrives_with_its_repository_and_the_channels_fields` (the left object had no `repo`; the right had `"repo": "a"`) | ✅ 1 failed |
+
 ## TK0266: the follow-up collects what did not fail each review round (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
 The follow-up reads every review round of a collected task, oldest attempt first, and keeps the
@@ -2081,6 +2071,7 @@ which `cmp` found identical.
 |---|---|---|---|
 | TK0282-M10 | `bind_listener` drops `set_reuse_address(true)`, so the bind has no `SO_REUSEADDR` | `hub_http::a_hub_binds_its_port_again_while_the_last_connection_is_in_time_wait` (the replacement hub wrote no first line: `the first stdout line names the listener: ""`, its stderr `Address already in use`) | ✅ 1 failed |
 | TK0282-M11 | neither `http::serve` nor `hub::run` installs the stop handler (both calls removed), so SIGTERM takes its default action | `hub::hub_without_an_argument_serves_http_and_runs_the_loop` (`SIGTERM is not an error`, left `None`, right `Some(0)`) and `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (left `None`, right `Some(0)`) | ✅ 2 failed |
+
 ## TK0288: an attempt's metrics and show (2026-11-01, branch `work/TK0288-arc-attempt-metrics-and-show`)
 
 The wrapper copies a radian run's `_meta.radian.metrics` to `Result.metrics`, the review stage
@@ -2122,3 +2113,42 @@ rebuilt `radian` (`cargo build -p radian-tui --bin radian`) because its test run
 | TK0289-M5 | `clear_plan_eligible` is a no-op, so no pause path (`pause`, `set_auto` `off`, an amendment to `draft`, the budget and automatic-rework pauses) drops a wait | `queue_wait::a_plan_set_to_auto_off_drops_the_wait_and_a_later_run_starts_fresh` (the file survived `auto` `off`) | ✅ 1 failed |
 
 5/5 caught.
+
+## TK0281: the hub registry, its CLI and the sandbox deny (2026-10-31, branch `work/TK0281-hub-registry-and-cli`)
+
+The registry reads and writes `$RADIAN_HOME/hub/repos.toml` through a temporary file and an
+atomic rename, and the hub directory joins the sandbox deny list. Each mutation was applied by
+hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox` (M3 ran the escape matrix with
+`cargo nextest run -p radian-sandbox --test escape_macos`, which needs `sandbox-exec` and so
+must run outside the workspace sandbox), and the file was restored from a copy under
+`.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0281-M1 | `add` compares the raw path against the stored entries instead of the canonical one | `hub_registry::add_refuses_the_same_path_reached_through_a_symlink` (`expect_err` got `RepoEntry { name: "alias", … }`: the symlink was registered) | ✅ 1 failed |
+| TK0281-M2 | drop the arc-repository check from `add` | `hub_registry::add_refuses_a_directory_without_an_arc_store_and_leaves_the_file_alone` (the plain directory was registered) | ✅ 1 failed |
+| TK0281-M3 | drop `hub/` from the harness's deny list | `escape_macos::macos_escape_matrix` (`radian_home/hub_unreadable`: sandbox `ok`, verdict `FAIL`) | ✅ 1 failed |
+
+## TK0292 rework: the PL0079 hub follow-ups (2026-11-01, branch `work/TK0292-radian-hub-followups`)
+
+The follow-ups fix the hub's diff error path, its lock probes, its body limit, its exec-failure
+record, its configuration path and the reverify error text. Each mutation was applied by hand to
+the named working file; where the test drives the real binary it was rebuilt with
+`cargo build -p radian-tui --bin radian`, and the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --lib` or `--test hub_http` with
+`-E 'test(<name>)'`. Each file was restored from a copy under `.radian/mut/`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0292-M1 | `capped_git` turns a failed `run_capped` into `DiffText { text: String::new(), truncated: false }` again | `read::tests::a_git_that_cannot_run_is_an_error_not_an_empty_diff` (`expect_err` got `Ok`, so a failed git read as an empty complete diff) | ✅ 1 failed |
+| TK0292-M2 | `repo_view` answers `scheduled` from the pid text in `runner.lock` and never probes the lock | `hub::http::tests::a_stale_runner_lock_pid_is_not_reported_as_scheduled` (`(true, Some(<this pid>))` for a stale pid) | ✅ 1 failed |
+| TK0292-M3 | `HubLock::probe` returns `HubState::Free` when the held lock has no readable pid | `hub::lock::tests::a_held_lock_without_a_pid_is_not_free` (`left: Free, right: Held(None)`) | ✅ 1 failed |
+| TK0292-M4 | `request_body` never answers `TooLarge` (both arms return `Bytes`), so a 64 KiB+ body runs the action | `hub_http::a_body_over_the_limit_is_413_and_changes_nothing` (the oversized body answered `400`, not `413`) | ✅ 1 failed |
+| TK0292-M5 | the request body is read before the route and the method are decided | `hub_http::an_oversized_body_does_not_change_a_404_a_405_or_a_read_route` (an unknown action answered `413`, expected `404`) | ✅ 1 failed |
+| TK0292-M6 | `report_restart_failure` prints the failed exec but writes no `loop.log` line | `hub::r#loop::tests::a_failed_exec_is_written_to_the_claiming_repositorys_loop_log` (`loop.log` was `NotFound`) | ✅ 1 failed |
+| TK0292-M7 | `load_config` reads `resolved_path(None)`, ignoring the top-level `--config` | `hub::r#loop::tests::the_loop_reads_the_explicit_config_path` (`left: 30, right: 5`, the default interval) | ✅ 1 failed |
+| TK0292-M8 | the route's reverify failure drops the verification's own error, keeping only the claim's line | `hub_http::a_reverify_whose_verification_refuses_returns_the_claims_line_and_its_error` (the error line was missing from the body) | ✅ 1 failed |
+
+8/8 caught.

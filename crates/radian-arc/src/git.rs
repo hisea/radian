@@ -133,18 +133,21 @@ pub(crate) fn run_capped(
         .stderr(Stdio::null());
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     let mut bytes = Vec::new();
+    let mut read = Ok(());
     if let Some(mut stdout) = child.stdout.take() {
         let want = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
-        stdout
+        read = stdout
             .by_ref()
             .take(want)
             .read_to_end(&mut bytes)
-            .map_err(RunError::Spawn)?;
+            .map(|_| ());
     }
     // The output is all the caller can use: a git still writing the rest would only fill the
-    // pipe, so it is killed and reaped.
+    // pipe, so it is killed and reaped on every path, a failed read included, so no child is
+    // left unreaped with its pipe open.
     let _ = child.kill();
     let _ = child.wait();
+    read.map_err(RunError::Spawn)?;
     let truncated = bytes.len() > limit;
     Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
 }

@@ -248,7 +248,8 @@ read and write), `token` (the bearer token every HTTP request carries), `hub.loc
 one hub holds for its life, with its pid inside) and the scheduler (`hub::run`).
 `hub::http::serve` is what `radian hub` with no subcommand calls: it takes `hub.lock`, binds
 `127.0.0.1:<[hub] port>`, prints `hub: listening on <addr>` as its first stdout line, serves
-the HTTP API on a thread of its own, and runs the scheduler on the calling thread. The
+the HTTP API on a thread of its own, and runs the hub's own thread (registry re-reads, status
+lines and joins) while every repository's pass runs on a thread of its own. The
 scheduler keeps one `run::LoopState` per registered repository on
 its own OS thread, because a pass blocks; it re-reads the registry every `[hub] interval_secs`,
 records a repository whose `runner.lock` another process holds as read-only (with the holder's

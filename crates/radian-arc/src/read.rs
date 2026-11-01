@@ -87,8 +87,11 @@ pub struct DiffCount {
 /// One file's unified diff, read from git up to a caller's limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffText {
-    /// The diff text, at most the caller's limit plus one byte (the byte that says there was
-    /// more).
+    /// The diff text, read from git up to the caller's limit plus one byte (the byte that
+    /// says there was more). Lossy decoding can make the string longer than that: a character
+    /// split by the cut becomes up to three replacement bytes, and bytes that are not UTF-8 at
+    /// all can expand the same way, so the caller trims the string instead of relying on its
+    /// length.
     pub text: String,
     /// Git had more output than the limit: the caller prints the text cut and says so.
     pub truncated: bool,
@@ -922,7 +925,8 @@ pub fn task_diff_counts(store: &Store, task: &str) -> Result<Vec<DiffCount>, Err
 ///
 /// # Errors
 ///
-/// The task cannot be read.
+/// The task cannot be read, or git cannot produce the file's diff (a spawn or read failure is
+/// an error, not an empty complete diff).
 pub fn task_diff_file(
     store: &Store,
     task: &str,
@@ -955,7 +959,7 @@ pub fn task_diff_file(
                     path,
                 ],
                 limit,
-            ))
+            )?)
         }
         Change::Worktree(change) => {
             if counts_from_numstat(&change.numstat)
@@ -975,7 +979,7 @@ pub fn task_diff_file(
                         path,
                     ],
                     limit,
-                ))
+                )?)
             } else if change.untracked.iter().any(|untracked| untracked == path) {
                 Some(capped_git(
                     &change.worktree,
@@ -990,7 +994,7 @@ pub fn task_diff_file(
                         path,
                     ],
                     limit,
-                ))
+                )?)
             } else {
                 None
             }
@@ -1243,22 +1247,22 @@ fn untracked_count(worktree: &Path, path: &str) -> (usize, usize) {
 /// One file's diff, read from git up to `limit` bytes. A text that fits is trimmed the way
 /// [`git::ok`](crate::git) trims every diff text, so it equals the same file's text in
 /// [`task_diff`]; a cut text is left as it is, since the cut is already a whole number of
-/// bytes of the diff.
-fn capped_git(dir: &Path, args: &[&str], limit: usize) -> DiffText {
-    match crate::git::run_capped(dir, args, limit) {
-        Ok((text, truncated)) if truncated => DiffText {
+/// bytes of the diff. A git run that cannot be started or read is the caller's error, never an
+/// empty complete diff.
+fn capped_git(dir: &Path, args: &[&str], limit: usize) -> Result<DiffText, Error> {
+    let (text, truncated) = crate::git::run_capped(dir, args, limit)
+        .map_err(|error| Error::Failed(format!("cannot read the diff: {error}")))?;
+    Ok(if truncated {
+        DiffText {
             text,
             truncated: true,
-        },
-        Ok((text, _)) => DiffText {
+        }
+    } else {
+        DiffText {
             text: text.trim().to_owned(),
             truncated: false,
-        },
-        Err(_) => DiffText {
-            text: String::new(),
-            truncated: false,
-        },
-    }
+        }
+    })
 }
 
 /// The paths `git status --porcelain -z` names, in either field of a rename or copy.
@@ -2000,6 +2004,21 @@ mod tests {
         assert_eq!(
             merged_range(&verdict),
             Some(("base".to_owned(), "candidate".to_owned()))
+        );
+    }
+
+    /// A git that cannot run is the caller's error, never an empty diff reported as complete.
+    #[test]
+    fn a_git_that_cannot_run_is_an_error_not_an_empty_diff() {
+        let dir = crate::test_support::TempDir::new("read-capped-error");
+        let not_a_directory = dir.path().join("a-file");
+        std::fs::write(&not_a_directory, "not a directory").expect("the test writes a file");
+        let error = capped_git(&not_a_directory, &["diff"], 10)
+            .expect_err("a git run in a file cannot spawn");
+        assert!(
+            error.message().contains("cannot read the diff"),
+            "{}",
+            error.message()
         );
     }
 }

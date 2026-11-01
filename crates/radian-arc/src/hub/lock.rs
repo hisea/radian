@@ -21,6 +21,16 @@ pub struct HubLock {
     file: File,
 }
 
+/// What a probe of `hub.lock` found: no process holds it, or one does and its pid is what the
+/// file carries when it is readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubState {
+    /// No process holds `hub.lock` (or the file does not exist).
+    Free,
+    /// A process holds `hub.lock`; the pid is absent when the holder did not write one.
+    Held(Option<u32>),
+}
+
 impl HubLock {
     /// The `hub.lock` path in `dir`.
     #[must_use]
@@ -91,22 +101,27 @@ impl HubLock {
     }
 
     /// Whether a hub holds `hub.lock`, and its pid when the holder wrote one. The lock is
-    /// taken and released at once; the probe never creates the file. `None` is a free or
-    /// absent lock.
+    /// taken and released at once; the probe never creates the file. [`HubState::Free`] is a
+    /// free or absent lock, and [`HubState::Held`] with no pid is a held lock whose pid could
+    /// not be read: the two are never the same answer.
     #[must_use]
-    pub fn probe(dir: &Path) -> Option<u32> {
+    pub fn probe(dir: &Path) -> HubState {
         let path = Self::path(dir);
         if !path.is_file() {
-            return None;
+            return HubState::Free;
         }
-        let file = OpenOptions::new().read(true).write(true).open(&path).ok()?;
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            return HubState::Free;
+        };
         match file.try_lock_exclusive() {
             Ok(()) => {
                 let _ = FileExt::unlock(&file);
-                None
+                HubState::Free
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => read_pid(&path),
-            Err(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                HubState::Held(read_pid(&path))
+            }
+            Err(_) => HubState::Free,
         }
     }
 }
@@ -132,4 +147,32 @@ fn read_pid(path: &Path) -> Option<u32> {
     let mut text = String::new();
     File::open(path).ok()?.read_to_string(&mut text).ok()?;
     text.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A held lock whose pid is absent or unreadable is held, never free: the TUI must not start
+    /// a second hub against it.
+    #[test]
+    fn a_held_lock_without_a_pid_is_not_free() {
+        let dir = crate::test_support::TempDir::new("hub-lock-probe");
+        let path = HubLock::path(dir.path());
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .expect("the lock file opens");
+        file.lock_exclusive().expect("the test holds the lock");
+        assert_eq!(
+            HubLock::probe(dir.path()),
+            HubState::Held(None),
+            "a held lock with no pid is still held"
+        );
+        FileExt::unlock(&file).expect("the test releases the lock");
+        assert_eq!(HubLock::probe(dir.path()), HubState::Free);
+    }
 }

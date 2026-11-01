@@ -2019,3 +2019,15 @@ test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 | TK0276-M7 | a settled call arms the resume guard whatever its result (the `delivered` check reduced to `true`) | ✅ 1 failed (rc=100) | `memory::guard::tests::a_call_settled_by_the_runtime_without_reaching_a_server_is_not_an_mcp_result` (`Some("cancelled") fx__echo` counted) |
 | TK0276-M8 | the routed name list is ignored on resume (the predicate uses `name.contains("__")`) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` (the forged `fx__nope` success counted) |
 
+## TK0281: the hub's `[hub]` configuration (2026-10-31, branch `work/TK0292-radian-hub-followups`)
+
+The `[hub]` table's three keys are carried with their defaults and a value outside its range is
+refused. The mutation was applied by hand to `src/config/mod.rs`, the named test ran with
+`cargo nextest run -p radian-host --locked --profile sandbox --test config_fixtures -E
+'test(<name>)'`, and the file was restored from `.radian/mut/host-config.rs.bak`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0292-M9 | `concurrency` is capped back to `u32::MAX` (`*count <= 4_294_967_295`), so a larger integer is refused instead of carried | ✅ 1 failed (rc=100) | `config_fixtures::the_hub_table_is_carried_and_out_of_range_values_are_refused` (`ValueOutOfRange` for `hub.concurrency = 4294967296`; the test expected the value carried) |
+

@@ -8,8 +8,10 @@
 //! re-read whenever its mtime changed, one `stat` per request, so `radian hub token rotate`
 //! takes effect on the next request without a restart.
 //!
-//! The HTTP accept loop runs on a thread of its own; the scheduling loop (ADR 0048 decision 13)
-//! runs on this thread, holding `hub.lock` for its life, so one slow pass delays no request.
+//! The HTTP accept loop runs on a thread of its own, and so does the hub's scheduling loop:
+//! the hub's own thread reconciles the registry, composes the status lines and joins the loops,
+//! while each repository's pass runs on its own thread (ADR 0048 decision 16). A slow pass
+//! therefore delays no request.
 //!
 //! The read routes are `GET` and answer JSON, except `GET /v1/events`, which is a
 //! server-sent-event stream; the owner actions are
@@ -76,8 +78,11 @@ pub fn bind_address(port: u16) -> SocketAddr {
 
 /// Runs the hub until the process ends: it installs the stop-signal handler, creates the
 /// token when it is missing, takes `hub.lock`, binds [`bind_address`], prints
-/// `hub: listening on <addr>` as its first stdout line, and then serves the HTTP API while the
-/// scheduling loop (ADR 0048 decision 13) runs every registered repository on this thread.
+/// `hub: listening on <addr>` as its first stdout line, and then runs the hub's own thread
+/// (registry re-reads, status lines and joins) while the HTTP API serves on a thread of its own
+/// and every repository's pass runs on its own thread (ADR 0048 decision 16). `config` is the
+/// top-level `--config` file the loop reads its `[hub] interval_secs` and `[hub] concurrency`
+/// from.
 ///
 /// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
 /// a test or a person stops the hub as soon as it announces itself, and the default action
@@ -87,9 +92,9 @@ pub fn bind_address(port: u16) -> SocketAddr {
 ///
 /// # Errors
 ///
-/// The hub directory or the token cannot be prepared, `hub.lock` is held by another hub, or the
-/// port cannot be bound.
-pub fn serve(port: u16) -> Result<(), Error> {
+/// The hub directory or the token cannot be prepared, the configuration cannot be read,
+/// `hub.lock` is held by another hub, or the port cannot be bound.
+pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     crate::run::catch_stop_signals();
     let registry = Registry::open()?;
     let dir = registry.dir().to_path_buf();
@@ -119,7 +124,7 @@ pub fn serve(port: u16) -> Result<(), Error> {
     let emit = Arc::new(|text: &str| {
         let _ = radian_host::write_stdout(text);
     });
-    super::r#loop::run(&registry, emit, lock)
+    super::r#loop::run(&registry, emit, lock, config)
 }
 
 /// Binds `address` with `SO_REUSEADDR`, so a rebuilt binary that `exec`s the hub binds the
@@ -161,8 +166,12 @@ async fn serve_http(
         let (stream, _) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(error) => {
+                // A transient accept error (EMFILE, ECONNABORTED) must not kill the API for
+                // the rest of the hub's life while it keeps its locks: back off briefly and
+                // keep accepting.
                 eprintln!("hub: cannot accept a hub connection: {error}");
-                return;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
             }
         };
         let registry = registry.clone();
@@ -184,14 +193,36 @@ async fn serve_http(
                     if !authorized(&tokens, header).await {
                         return Ok::<_, Infallible>(unauthorized_response());
                     }
-                    let body = match request_body(request.into_body()).await {
-                        RequestBody::Bytes(body) => body,
-                        RequestBody::TooLarge => {
-                            return Ok::<_, Infallible>(error_response(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "request body too large",
-                            ));
+                    // Decide the route and the method before reading any body too: an unknown
+                    // route or a wrong method answers `404`/`405`, and a read route answers
+                    // without the body, whatever the client declares or sends.
+                    let route = route(&path);
+                    let is_action = matches!(route, Route::Action(..));
+                    if matches!(route, Route::Unknown) {
+                        return Ok::<_, Infallible>(error_response(
+                            StatusCode::NOT_FOUND,
+                            "no such route",
+                        ));
+                    }
+                    let expected = if is_action { Method::POST } else { Method::GET };
+                    if method != expected {
+                        return Ok::<_, Infallible>(error_response(
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            "method not allowed",
+                        ));
+                    }
+                    let body = if is_action {
+                        match request_body(request).await {
+                            RequestBody::Bytes(body) => body,
+                            RequestBody::TooLarge => {
+                                return Ok::<_, Infallible>(error_response(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "request body too large",
+                                ));
+                            }
                         }
+                    } else {
+                        Bytes::new()
                     };
                     let response = tokio::task::spawn_blocking(move || {
                         handle(method, &path, &body, &registry)
@@ -448,7 +479,8 @@ async fn authorized(tokens: &Arc<Mutex<TokenState>>, header: Option<String>) -> 
 }
 
 /// The most request-body bytes the hub keeps. Every write route's body is `{}` or one short
-/// string field; a larger body is refused with `413` instead of being read into memory.
+/// string field; a larger body is refused with `413` instead of being read into memory. Only a
+/// write route's body is read: a read request's body is ignored.
 pub const REQUEST_BODY_LIMIT: usize = 64 * 1024;
 
 /// One request body, up to [`REQUEST_BODY_LIMIT`].
@@ -457,25 +489,44 @@ enum RequestBody {
     TooLarge,
 }
 
-/// The whole request body, up to [`REQUEST_BODY_LIMIT`]. A body over the limit is drained
-/// without being kept, so the client can read its `413` and the hub never holds more than the
-/// limit. Authorization has already run, so no unauthenticated body is read at all.
-async fn request_body(mut body: hyper::body::Incoming) -> RequestBody {
+/// The whole request body, up to [`REQUEST_BODY_LIMIT`]. An over-limit body is never kept:
+/// a declared `Content-Length` over the limit marks it too large before any buffering, and an
+/// undeclared body is dropped the moment it passes the limit. The rest is drained only within
+/// [`BODY_DRAIN_LIMIT`] and [`BODY_DRAIN_TIMEOUT`], so a client that is still sending can read
+/// the `413` without a huge or endless body keeping the task reading. Authorization and routing
+/// have already run, so no unauthenticated body and no read route's body is read at all.
+async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> RequestBody {
+    let mut too_large = declared_over_limit(request.headers());
+    let mut body = request.into_body();
     let mut bytes = Vec::new();
-    let mut too_large = false;
-    while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
-        let Ok(frame) = frame else {
+    let mut drained = 0usize;
+    loop {
+        let next = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx));
+        let frame = if too_large {
+            match tokio::time::timeout(BODY_DRAIN_TIMEOUT, next).await {
+                Ok(frame) => frame,
+                Err(_) => break,
+            }
+        } else {
+            next.await
+        };
+        let Some(Ok(frame)) = frame else {
             break;
         };
         let Ok(data) = frame.into_data() else {
             continue;
         };
         if too_large {
+            drained = drained.saturating_add(data.len());
+            if drained >= BODY_DRAIN_LIMIT {
+                break;
+            }
             continue;
         }
         if bytes.len().saturating_add(data.len()) > REQUEST_BODY_LIMIT {
             bytes = Vec::new();
             too_large = true;
+            drained = data.len();
             continue;
         }
         bytes.extend_from_slice(&data);
@@ -485,6 +536,20 @@ async fn request_body(mut body: hyper::body::Incoming) -> RequestBody {
     } else {
         RequestBody::Bytes(Bytes::from(bytes))
     }
+}
+
+/// How much of an over-limit body is drained, and for how long, so a client that is still
+/// sending reaches the `413` instead of a reset connection.
+const BODY_DRAIN_LIMIT: usize = 1024 * 1024;
+const BODY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Whether a declared `Content-Length` is over [`REQUEST_BODY_LIMIT`], before any byte is kept.
+fn declared_over_limit(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > REQUEST_BODY_LIMIT as u64)
 }
 
 // ---- the owner's write routes ------------------------------------------------------------
@@ -665,14 +730,12 @@ fn repos(registry: &Registry) -> Response<ResponseBody> {
             let list: Vec<Value> = entries
                 .iter()
                 .map(|entry| {
-                    // The scheduling loop holds `runner.lock` for every repository it schedules
-                    // (ADR 0048 decision 13). Another process's pid means the hub only reads
-                    // that repository; no pid means it is not locked at this moment.
-                    let holder = Store::at(entry.path.clone()).runner_lock_pid();
+                    let store = Store::at(entry.path.clone());
+                    let (scheduled, holder) = repo_view(&store);
                     json!({
                         "name": entry.name,
                         "path": entry.path.display().to_string(),
-                        "scheduled": holder == Some(std::process::id()),
+                        "scheduled": scheduled,
                         "lock_holder": holder.map(|pid| pid.to_string()),
                     })
                 })
@@ -681,6 +744,18 @@ fn repos(registry: &Registry) -> Response<ResponseBody> {
         }
         Err(error) => failed(error),
     }
+}
+
+/// Whether this hub schedules `store`'s repository, and the pid its lock names. The lock is
+/// probed, never inferred from the pid text: that text outlives the lock, so a loop that
+/// stopped (repeated error, SIGTERM) leaves the hub's pid in the file while it no longer holds
+/// or schedules that repository.
+fn repo_view(store: &Store) -> (bool, Option<u32>) {
+    if store.runner_lock_free() {
+        return (false, None);
+    }
+    let holder = store.runner_lock_pid();
+    (holder == Some(std::process::id()), holder)
 }
 
 fn items(registry: &Registry, name: &str) -> Response<ResponseBody> {
@@ -1224,6 +1299,27 @@ mod tests {
         assert_eq!(
             action_status(&Error::Failed("the push failed".to_owned())),
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// The pid text left in `runner.lock` outlives the lock. A stale pid is not a holder: the
+    /// repository is neither scheduled nor reported with a `lock_holder`.
+    #[test]
+    fn a_stale_runner_lock_pid_is_not_reported_as_scheduled() {
+        let dir = crate::test_support::TempDir::new("hub-stale-lock");
+        let arc = dir.path().join(".radian").join("arc");
+        std::fs::create_dir_all(&arc).expect("the arc directory is creatable");
+        std::fs::write(
+            arc.join(crate::store::RUNNER_LOCK),
+            std::process::id().to_string(),
+        )
+        .expect("the stale lock file writes");
+        let store = Store::at(dir.path());
+        assert!(store.runner_lock_free(), "no process holds the lock");
+        assert_eq!(
+            repo_view(&store),
+            (false, None),
+            "a stale pid is not a holder"
         );
     }
 }
