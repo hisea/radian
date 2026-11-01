@@ -476,8 +476,17 @@ A hub is one process that manages every repository registered on this machine. T
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `{"path", "added", "removed"}`, from the `git diff --numstat` of `read.rs` for the task's own change. |
 | `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `{"path", "truncated", "text"}`: that file's unified diff, cut at 256 KiB with `truncated: true`. A path not in the list is `404`. |
 | `/v1/events` | `GET` | The event stream of decision 3. Until that stream exists the route answers `404`. |
+| `/v1/repos/<name>/items/<id>/<action>` | `POST` | The owner action `confirm`, `merge`, `cancel`, `pause`, `reverify`, `reject`, `auto` or `priority`; see below. | `200`, `400`, `401`, `404`, `405`, `409`, `422`, `500` |
 
 An unknown repository or id is `404` with the CLI's own message as `{"error": "<message>"}`. Any other path is `404` with `{"error": "no such route"}`, and a method a route does not take is `405`. The owner-action routes (`POST /v1/repos/<name>/items/<id>/<action>`) make the CLI's library calls of decision 11 and change the store, not these read routes.
+
+**The owner's write routes.** `POST /v1/repos/<name>/items/<id>/<action>` is the owner's action in the API: it calls the same library function the TUI calls (decision 11) in the hub's process and changes the store. The actions are `confirm`, `merge`, `cancel`, `pause`, `reverify`, `reject`, `auto` and `priority`. `start` and `reset-budget` are not routes.
+
+The body is JSON. `confirm`, `merge`, `cancel`, `pause` and `reverify` take no field, so an empty `{}` or no body is enough. `reject` takes `{"note": "<text>"}`; a missing or empty note (whitespace only included) is `400` with the CLI's empty-note message and changes nothing. `auto` takes `{"level": "off" | "run" | "merge"}`, and `priority` takes `{"priority": "P0" | "P1" | "P2" | "P3" | "P4" | "P5"}`; both sets are the CLI's own closed lists.
+
+A successful action answers `200` with `{"ok": true, "text": "<the CLI's stdout text>"}`. A failed action answers `{"ok": false, "text": "<the CLI's message>"}` and the status the CLI's outcome maps to: a usage or validation error (the CLI's exit `2`, or exit `3` for a value outside a closed set) is `422`; a held `state.lock` and a refused state change (exit `4` and the "state does not allow the operation" family) are `409`; an unknown repository or id is `404`; anything else is `500`. The mapping is one function, one row per outcome.
+
+The route uses only the repository's `state.lock`, not `runner.lock`, and it waits no longer than the CLI's `LOCK_WAIT` for it. It checks the lock before it acts, so a held `state.lock` answers `409` with the CLI's message and changes no file. There is no second confirmation in the API: `merge`, `reject`, `auto` at level `merge` and `cancel` act at once, and the client asks before it calls them. `GET` on a write route is `405`; any other action name, `start` and `reset-budget` included, is `404` with `{"error": "no such route"}`.
 
 The route work runs on blocking threads, not on the runtime's async threads, so the scheduling loop's threads are never blocked by a request.
 
