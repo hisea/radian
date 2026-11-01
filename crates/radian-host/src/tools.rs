@@ -13,11 +13,15 @@ use radian_core::{
 };
 
 use crate::goal::{GoalSession, GoalTools};
+use crate::memory::MemoryTouch;
 use crate::skills::tools::{SkillSession, SkillTools};
 use crate::subagent::{SubagentSession, SubagentTools};
 
 pub struct HostTools {
     coding: Option<CodingTools>,
+    /// The memory aging hook (ADR 0021 D3/D4): set by `open_session` whenever memory is on.
+    /// It never changes a tool result.
+    memory_touch: Option<MemoryTouch>,
     /// `goal` (ADR 0047). Host-level like `ask_user`: mounted always, so the model's
     /// write end of the persistent goal exists in every session; without an active goal
     /// it answers `no_active_goal`.
@@ -48,6 +52,7 @@ impl HostTools {
     pub fn new(coding: Option<CodingTools>, mcp: McpToolProvider) -> Self {
         Self {
             coding,
+            memory_touch: None,
             goal: None,
             ask: None,
             skills: None,
@@ -100,6 +105,14 @@ impl HostTools {
         self
     }
 
+    /// Mounts the memory aging hook (ADR 0021 D3/D4). Independent of `memory_search`: the
+    /// hook records a model read of a memory record file even when the search tool is not
+    /// advertised.
+    pub fn with_memory_touch(mut self, touch: MemoryTouch) -> Self {
+        self.memory_touch = Some(touch);
+        self
+    }
+
     /// Mounts the `skill` tool (ADR 0025 S3). Without a discovered skill the model's tool list
     /// has no `skill` at all, so a host with no skills does not advertise it.
     pub fn with_skills(mut self, skills: SkillTools) -> Self {
@@ -118,6 +131,7 @@ impl HostTools {
 
 pub struct HostSession {
     coding: Option<CodingSession>,
+    memory_touch: Option<MemoryTouch>,
     goal: Option<GoalSession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
@@ -217,6 +231,7 @@ impl ToolProvider for HostTools {
 
         Ok(HostSession {
             coding,
+            memory_touch: self.memory_touch.clone(),
             goal,
             ask,
             skills,
@@ -242,7 +257,7 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        if self.skill_names.contains(&call.name) {
+        let result = if self.skill_names.contains(&call.name) {
             match &self.skills {
                 Some(skills) => skills.execute(call, cx).await,
                 None => Err(ToolFailure::new(
@@ -284,7 +299,13 @@ impl ToolSession for HostSession {
             }
         } else {
             self.mcp.execute(call, cx).await
+        };
+        // The memory aging hook (ADR 0021 D3/D4): after the read settled, record the use. It
+        // can only warn, so the tool result below is the tool's own.
+        if let Some(touch) = &self.memory_touch {
+            touch.after_tool(call, result.is_ok());
         }
+        result
     }
 
     async fn close(&mut self) -> Result<(), ToolError> {

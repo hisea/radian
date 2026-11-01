@@ -125,6 +125,7 @@ type into the message box.
 | `/memory list` | `/memory list [--global\|--project] [--all] [--json]` | List records, project first then global. `--all` includes archived records. |
 | `/memory search` | `/memory search [--global\|--project] [--json] <words>...` | Search by keyword. Every word must match; matching ignores case. Example: `/memory search vpn profile`. |
 | `/memory show` | `/memory show [--global\|--project] [--json] <id>` | Show one record in full. |
+| `/memory stale` | `/memory stale [--days <N>] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`; `--json` gives an array of objects with the frontmatter fields. Reads the memory files only. |
 | `/memory add` | `/memory add [--global] [--kind preference\|decision\|fact\|lesson] [--key <key>] <text\|->` | Add a record. Project scope by default. The text is literal in the interface: a bare `-` writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. On the command line `-` reads it from stdin. Example: `/memory add The deploy needs the vpn profile "office".` |
 | `/memory edit` | `/memory edit [--global] --revision <N> <id> <text>` | Change a record's content. Needs the current revision. A bare `-` as the text writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. |
 | `/memory archive` | `/memory archive [--global] --revision <N> <id>` | Archive a record. It stays stored but is no longer injected or searched by default. |
@@ -261,7 +262,7 @@ the waiting count.
 the running turn. `ctrl-c` cancels the running turn. A second `ctrl-c`
 within 2 seconds on an empty input quits; any other key disarms it. There is
 no quit command. A side question (`/btw`) and a read command (`/context`,
-`/usage`, `/memory list`, `/memory search`, `/memory show`, `/memory export`,
-`/memory project`) run while a turn
+`/usage`, `/memory list`, `/memory search`, `/memory show`, `/memory stale`,
+`/memory export`, `/memory project`) run while a turn
 runs without interrupting it. Writes take effect at the next turn boundary:
 `/model`, `/thinking`, `/access`, `/compact`, `/memory` writes.
