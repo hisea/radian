@@ -3718,6 +3718,82 @@ fn a_rework_prompt_holds_the_increment_and_the_previous_items() {
     );
 }
 
+/// A pure rename in the rework changes no line of the task's own diff, so it is not an
+/// increment. The review forces rename detection (`-M`), as the `commands` stage's
+/// `diffstat.json` does, so the prompt reads the same way even with the repository's
+/// `diff.renames` set to `false`. Mutation: drop `-M` from the review's own diff and rework
+/// diff and the renamed file's added line appears as an increment.
+#[test]
+fn a_pure_rename_is_not_an_increment_with_diff_renames_off() {
+    let fixture = Fixture::new("review-rework-rename");
+    fixture.add_review_stage();
+    fixture.repo.git(&["config", "diff.renames", "false"]);
+    let first = fixture.publish(&fixture.base.clone(), "one.txt", "one\n");
+    let first_fake = FakeReview::new(
+        "review-rework-rename-first",
+        &[review_object_message(
+            "the change adds one.txt",
+            &[review_item("major", "one.txt", 1, "the line is wrong")],
+            &[],
+        )],
+        0,
+    );
+    assert_eq!(
+        fixture
+            .verifying_with_review(&first, first_fake.program())
+            .phase,
+        "rework_pending"
+    );
+
+    // The rework renames the task's own file and changes no content.
+    plan_ops::add_rework(&fixture.store, &fixture.task, "rename it").expect("a rework brief");
+    let claim = attempt_ops::claim(&fixture.store, &fixture.task).expect("the next attempt");
+    let branch = format!("work/{}", fixture.task);
+    fixture.repo.git(&["checkout", "-B", &branch, &first]);
+    fixture.repo.git(&["mv", "one.txt", "renamed.txt"]);
+    fixture.repo.git(&["commit", "-m", "a pure rename"]);
+    let second = fixture.repo.rev("HEAD");
+    fixture.repo.git(&["push", "origin", &branch]);
+    let finish = Finish {
+        attempt_id: claim.attempt_id.clone(),
+        token: claim.token.clone(),
+        exit_code: 0,
+        outcome: "completed".to_owned(),
+        base_sha: Some(fixture.base.clone()),
+        head_sha: Some(second.clone()),
+        pushed: true,
+        failure: None,
+    };
+    attempt_ops::apply(
+        &fixture.store,
+        &fixture.task,
+        claim.attempt,
+        Some(&finish),
+        None,
+        Some(0),
+    )
+    .expect("the rework result applies");
+
+    let fake = FakeReview::new(
+        "review-rework-rename-second",
+        &[review_object_message("the rename is fine", &[], &[])],
+        0,
+    );
+    let verified = review::verify_with(&fixture.store, &fixture.task, Some(fake.program()))
+        .expect("the rework round runs");
+    assert_eq!(verified.phase, "awaiting_human", "{verified:?}");
+
+    let prompt = fake.prompt(1);
+    assert!(
+        prompt.contains("the rework changed no line of the task's own diff"),
+        "a pure rename is not an increment:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("renamed.txt"),
+        "the renamed file's lines are not an increment:\n{prompt}"
+    );
+}
+
 /// A blocking item in a file the task's own change never touched is moved to `suggestions`
 /// with `pre_existing`, the stage passes, and the verdict records the move. Mutation: skip the
 /// move → the stage stays in `review.rework_pending`.

@@ -684,6 +684,15 @@ impl TaskPage {
     }
 
     /// Keeps the metrics selection inside the run rows the current read offers.
+    /// Moves the tab, closing the metrics detail when the tab it belongs to is left. A detail
+    /// no tab draws is not a level `Esc` may consume, so leaving Metrics also clears it.
+    fn set_tab(&mut self, tab: TaskTab) {
+        if self.tab == TaskTab::Metrics && tab != TaskTab::Metrics {
+            self.metric_open = false;
+        }
+        self.tab = tab;
+    }
+
     fn clamp_metric_sel(&mut self) {
         self.metric_sel = self
             .metric_sel
@@ -2667,15 +2676,15 @@ impl ArcApp {
         match key.code {
             // The tabs cycle both ways; `Tab` no longer leaves the page (`Esc` does).
             KeyCode::BackTab => {
-                page.tab = page.tab.previous();
+                page.set_tab(page.tab.previous());
                 ArcKey::Redraw
             }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                page.tab = page.tab.previous();
+                page.set_tab(page.tab.previous());
                 ArcKey::Redraw
             }
             KeyCode::Tab => {
-                page.tab = page.tab.next();
+                page.set_tab(page.tab.next());
                 ArcKey::Redraw
             }
             KeyCode::Char('m') => {
@@ -2693,11 +2702,11 @@ impl ArcApp {
                 ArcKey::Redraw
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                page.tab = page.tab.previous();
+                page.set_tab(page.tab.previous());
                 ArcKey::Redraw
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                page.tab = page.tab.next();
+                page.set_tab(page.tab.next());
                 ArcKey::Redraw
             }
             KeyCode::Char('j') | KeyCode::Down => match page.tab {

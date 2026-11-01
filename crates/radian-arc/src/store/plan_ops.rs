@@ -204,7 +204,7 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
             model::AUTO_LEVELS.join(", ")
         )));
     }
-    store.change_open_plan(plan, |plan| {
+    store.change_open_plan_clearing_eligible(plan, |plan| {
         if level != "off" && plan.status != "confirmed" {
             return Err(Error::Refused(format!(
                 "plan `{}` is `{}`; only a confirmed plan can use auto level `{level}`",
@@ -215,10 +215,8 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
         Ok(())
     })?;
     // A plan at `off` starts nothing: a task that had begun a queue wait loses it, so a later
-    // resume begins a fresh one (ADR 0048 decision 13).
-    if level == "off" {
-        super::attempt_ops::clear_plan_eligible(store, plan);
-    }
+    // resume begins a fresh one (ADR 0048 decision 13). The clear is the store's, under the
+    // same lock as this write.
     Ok(())
 }
 
@@ -259,13 +257,13 @@ pub fn check_priority(priority: &str) -> Result<(), Error> {
 /// A task that is already started keeps its state, and a later loop reads the level before
 /// it starts anything.
 pub fn pause(store: &Store, plan: &str) -> Result<(), Error> {
-    store.change_plan(plan, |plan| {
+    store.change_plan_clearing_eligible(plan, |plan| {
         plan.auto = "off".to_owned();
         Ok(())
     })?;
     // A paused plan starts nothing: a task that had begun a queue wait loses it, so a later
-    // resume starts a fresh one (ADR 0048 decision 13).
-    super::attempt_ops::clear_plan_eligible(store, plan);
+    // resume starts a fresh one (ADR 0048 decision 13). The clear is the store's, under the
+    // same lock as this write.
     Ok(())
 }
 
@@ -301,8 +299,7 @@ pub fn update_plan(
         ));
     }
     let now = utc_now();
-    let mut unstarted = false;
-    store.change_open_plan(plan, |plan| {
+    store.change_open_plan_clearing_eligible(plan, |plan| {
         if plan.status != "confirmed" {
             if change_record.is_some() {
                 return Err(Error::Refused(format!(
@@ -334,14 +331,11 @@ pub fn update_plan(
         append_change_record(&mut plan.body, &now, record);
         plan.status = "draft".to_owned();
         plan.auto = "off".to_owned();
-        unstarted = true;
         Ok(())
     })?;
     // A plan back at `draft` starts nothing: a task that had begun a queue wait loses it, so a
-    // later confirm begins a fresh one (ADR 0048 decision 13).
-    if unstarted {
-        super::attempt_ops::clear_plan_eligible(store, plan);
-    }
+    // later confirm begins a fresh one (ADR 0048 decision 13). The clear is the store's, under
+    // the same lock as this write.
     Ok(())
 }
 

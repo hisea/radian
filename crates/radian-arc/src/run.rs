@@ -1160,6 +1160,12 @@ fn record_queue_waits(
     claims: &[(Claim, model::TaskFile)],
 ) -> Result<(), Error> {
     let now = plan_ops::utc_now();
+    // The plan reads and the record writes take `state.lock`, the lock an owner's `auto off`
+    // and arc's own budget and automatic-rework pauses hold while they write the plan and drop
+    // its waits (ADR 0048 decision 13). A pass that read a level the plan has since left can
+    // therefore never write a record after the clear, and a crash between a pause's plan write
+    // and its clear leaves the plan at `off` for this pass to see, not a record to recreate.
+    let _lock = store.lock_state()?;
     for view in plans_in_claim_order(store)? {
         if view.plan.changed_outside_arc
             || view.plan.item.status != "confirmed"

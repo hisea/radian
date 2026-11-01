@@ -3519,3 +3519,19 @@ fixes from the rework.
 | TK0290-M3 | `TaskTab::next` leaves `Metrics` out of the cycle (`Attempts` goes straight to `Brief`) | `arc_tui::the_metrics_tab_joins_the_cycle_between_attempts_and_brief` (`Tab` from `Attempts` read `Brief`, expected `Metrics`) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0295: the metrics tab's missing values and its detail (2026-11-01, branch `work/TK0295-task-metrics-followups`)
+
+The follow-ups draw an unresolved context window and a missing tool counter as a weak `-`, and
+close the metrics detail when its tab is left. Each mutation was applied by hand to
+`crates/radian-tui/src/arc/`, the named `arc_tui` test ran with `cargo nextest run -p radian-tui
+--locked --profile sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored from a
+copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0295-M6 | `context_part` draws the unresolved window as reported text (`ctx 83K/-`, all normal style) | `arc_tui::a_missing_context_window_draws_the_dash_weak` (the `-` was not the hint colour) | ✅ 1 failed |
+| TK0295-M7 | `Cell::optional` draws a missing value as a reported `0` | `arc_tui::a_tool_row_with_missing_counters_draws_weak_dashes` (the row read `browser  3  0  0  0`) | ✅ 1 failed |
+| TK0295-M8 | `TaskPage::set_tab` assigns the tab without closing `metric_open` | `arc_tui::leaving_the_metrics_tab_closes_the_open_detail` (the detail stayed open, so `Esc` consumed it) | ✅ 1 failed |
+
+3/3 caught.

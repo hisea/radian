@@ -2154,3 +2154,24 @@ hub_http` with `-E 'test(<name>)'`. Each file was restored from a copy under `.r
 | TK0292-M11 | `capped_git` ignores the reaped exit status again, so a failed `git diff` reads as an empty complete diff | `read::tests::a_git_that_exits_non_zero_is_an_error_not_an_empty_diff` (`expect_err` got `Ok`) | ✅ 1 failed |
 
 10/10 caught.
+
+## TK0295: task-metrics follow-ups (2026-11-01, branch `work/TK0295-task-metrics-followups`)
+
+The review follow-ups force rename detection in the review's own and rework diffs, complete a
+claim's `queue.json` when an attempt ends before its worker, treat an unreadable `queue.json` as
+bookkeeping, and serialize a scheduling pass's eligibility write with the plan changes that
+clear it. Each mutation was applied by hand to the named working file; the wrapper tests run the
+`radian` binary, so it was rebuilt with `cargo build -p radian-tui --bin radian`, and each named
+test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --test <binary> -E
+'test(<name>)'`. Each file was restored from a copy under `.radian/mut/`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0295-M1 | `ReviewRun::own_change` and the rework diff drop `-M`, so the review reads a pure rename as a removal and an addition | `review::a_pure_rename_is_not_an_increment_with_diff_renames_off` (the prompt held the renamed file's added line) | ✅ 1 failed |
+| TK0295-M2 | the wrapper's queue-record guard starts disarmed, so only the path that starts a worker completes `queue.json` | `queue_wait::an_attempt_refused_before_its_worker_still_reports_its_wait` (`started_at` was `Null`, no wait) | ✅ 1 failed |
+| TK0295-M3 | `complete_queue_record` propagates a read error again, so a directory at `queue.json` fails the attempt | `queue_wait::an_unreadable_queue_record_does_not_fail_the_attempt` (no `execution.json`: no worker ran) | ✅ 1 failed |
+| TK0295-M4 | `record_queue_waits` writes `eligible_at.json` without `state.lock` | `queue_wait::a_pass_waits_for_state_lock_before_writing_a_wait_record` (the record appeared while the test held the lock) | ✅ 1 failed |
+| TK0295-M5 | `Store::clear_eligible_of` is a no-op, so the plan changes' in-lock clears drop nothing | `queue_wait::a_paused_plan_drops_the_wait_and_does_not_begin_one` (the file survived the pause) | ✅ 1 failed |
+
+5/5 caught.

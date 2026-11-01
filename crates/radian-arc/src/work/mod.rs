@@ -437,6 +437,15 @@ impl Clock {
 
 /// The `runs/<task>/attempts/<task>-<n>` path of one attempt.
 fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Failure> {
+    // The claim wrote `queue.json` before this wrapper started. Every path out of this function
+    // completes it: the normal one does so when the worker starts, and this guard covers the
+    // earlier ends (a moved ref, a git control file that could not be restored, a conflict),
+    // so an attempt that did queue for a slot reports its wait instead of `-` (ADR 0048
+    // decision 13).
+    let mut queue_end = QueueRecordEnd {
+        run_dir: &s.runs,
+        armed: true,
+    };
     let created = ensure_worktree(
         &s.repo,
         &s.worktree,
@@ -546,6 +555,7 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     // decision 13).
     attempt_ops::complete_queue_record(&s.runs, &started_at)
         .map_err(|error| Failure::error(error.message()))?;
+    queue_end.armed = false;
     let deny = deny_paths(&s.arc);
     // The command worker's own state, outside the worktree and kept across the task's
     // attempts (ADR 0048 decision 7). It exists before the command starts.
@@ -830,6 +840,24 @@ struct Finish<'a> {
     failure: Option<String>,
     /// The notes of the attempt, such as the worker brief being skipped (ADR 0048 decision 7).
     notes: &'a [String],
+}
+
+/// Completes the claimed attempt's `queue.json` when the attempt ends before its worker starts:
+/// the wait ends where the attempt does, and a later `show` or `attempt_metrics` still reports
+/// it. The normal path completes the record with the worker's own start and clears `armed`.
+struct QueueRecordEnd<'a> {
+    run_dir: &'a Path,
+    armed: bool,
+}
+
+impl Drop for QueueRecordEnd<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Best effort, and the same record the normal path writes: `complete_queue_record`
+            // leaves an unreadable file alone instead of failing the attempt.
+            let _ = attempt_ops::complete_queue_record(self.run_dir, &now());
+        }
+    }
 }
 
 fn write_finish(o: &Options, s: &Setup, finish: Finish<'_>) -> Result<i32, Failure> {
