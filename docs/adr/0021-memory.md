@@ -8,7 +8,7 @@ Status: accepted
 2. **Memory never changes session facts.** Memory never modifies session journals, compaction records, or their recovery semantics. A memory failure must never corrupt a session or block a dialogue turn.
 3. **The host judges sources, and sources never rewrite.** A memory record source (user, import; old logs also carry agent-tool-written records) is fixed by the host at write time. The code never trusts a model-claimed source. An original source never changes after write (confirmation records separately).
 4. **Memory is low-trust data.** Memory injected into the model is labeled data, never instructions. It never bypasses tool permissions, sandboxes, tiers, or user instructions.
-5. **The sandbox cannot read or write memory.** Under the `workspace` tier the memory store is unreadable and unwritable to `shell`. The model writes it only through the host's `write` and `patch` tools, which the permission profile allows in both tiers (D7). Radian injection and user commands reach the store directly. The sandbox denylist enforces the shell boundary (ADR 0020), and the escape matrix verifies it.
+5. **The sandbox cannot read or write memory.** Under the `workspace` tier the memory store is unreadable and unwritable to `shell`. The model writes it only through the host's `write` and `patch` tools, which the permission profile allows in both tiers (D7) and which reach the two scope directories in both tiers, `global/` and this workspace's project directory, and nothing else under `memory/` (ADR 0039 decision 4). Radian injection and user commands reach the store directly. The sandbox denylist keeps the whole directory from the shell (ADR 0020), and the escape matrix verifies it.
 6. **User records win.** The agent never modifies, archives, deletes, or overwrites user-created records.
 
 ## Decisions
@@ -109,7 +109,7 @@ addition_budget = 500
 
 - Memory and compaction stay fully independent (ADR 0018 Memory boundary). No automatic extraction exists: only explicit writes.
 - Any automatic extraction reads only **committed** session facts (ADR 0019: uncommitted replacements and candidate-only compactions never read). It uses `MemoryInjected` to separate "injected memory echoed by the model" from "new independent evidence".
-- The sandbox denylist enforces memory unreadability through the ADR 0020 `memory/` entry. With Memory off, Core, compaction, and session-restore test results stay unchanged.
+- The sandbox denylist enforces memory unreadability for the shell through the ADR 0020 `memory/` entry. The host file tools reach the two scope directories only (ADR 0039 decision 4). With Memory off, Core, compaction, and session-restore test results stay unchanged.
 
 ## Verification
 

@@ -74,6 +74,7 @@ pub mod host_git;
 pub mod image;
 mod jobs;
 mod list;
+mod memory_roots;
 mod output;
 mod patch;
 mod provider;
@@ -102,6 +103,7 @@ pub use jobs::{
     JOB_RING_BYTES, JobEvent, JobState, JobSummary, Jobs, MAX_RUNNING_JOBS, OUTPUT_HINT,
     RunningTask, SweepSummary,
 };
+pub use memory_roots::MemoryRoots;
 pub use provider::{CodingSession, CodingTools, CodingToolsError, Limits, ToolPresence};
 pub use read_roots::ReadRoots;
 pub use shell::{

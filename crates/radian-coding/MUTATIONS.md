@@ -1065,3 +1065,18 @@ ran with `cargo nextest run -p radian-coding --locked --profile sandbox --test d
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0258-M1 | one value removed from the ADR 0006 §5.7 list (`content_filtered`) | ✅ 1 failed (rc=100) | `tests/docs.rs::every_model_stop_reason_is_documented` ("ADR 0006 §5.7 does not name `content_filtered`") |
+
+## TK0280: the memory scope directories as file-tool roots (2026-10-31, branch `work/TK0280-memory-file-roots`)
+
+Each mutation was applied by hand, backed up under `.radian/mut/`, and restored from that copy
+(never `git checkout`), confirmed byte-identical with `shasum -a 256` and `cmp`; the tree was
+clean of the mutation afterwards. M1 needs the macOS escape matrix, which self-skips inside any
+sandbox, so it ran with `--test escape_macos` and `--no-fail-fast` from a process outside the
+arc workspace sandbox. M2 and M3 ran with
+`cargo nextest run -p radian-coding --locked --profile sandbox --test memory_roots`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0280-M1 | the memory root added to the **sandbox** deny exception too: a `memory` deny entry emits `(allow file-read* (subpath <memory>/global))` after the deny, so the shell reads a scope file | ✅ 1 failed (rc=100); matrix `48 cases, 1 failed` | `radian-sandbox::escape_macos::macos_escape_matrix` — `radian_home / memory_scope_unreadable` is the only failing case (`fail/ok`); `memory_unreadable` still passes |
+| TK0280-M2 | `O_NOFOLLOW` dropped on the memory root's last component (`safe_fs::open_file`'s leaf flags) | ✅ 1 failed (rc=100) | `radian-coding::memory_roots::a_symlink_in_a_memory_scope_is_refused_for_read_and_write` (the read follows the link instead of refusing) |
+| TK0280-M3 | `projects.jsonl` admitted: `DenySet::denies` returns `None` for a file named `projects.jsonl`, so the full-tier free path reads the registry | ✅ 1 failed (rc=100) | `radian-coding::memory_roots::credentials_and_the_registry_under_memory_are_denied_in_the_full_tier` (the second half: `read` of `projects.jsonl` succeeds) |

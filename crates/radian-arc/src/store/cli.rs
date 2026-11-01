@@ -747,12 +747,7 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
                 field(&mut out, "review_verdict", &path.display().to_string());
                 if let Some(review) = &verdict.review {
                     field(&mut out, "review_summary", &review.summary);
-                    field(&mut out, "review_blocking", &joined_items(&review.blocking));
-                    field(
-                        &mut out,
-                        "review_suggestions",
-                        &joined_items(&review.suggestions),
-                    );
+                    field(&mut out, "review_findings", &joined_findings(review));
                     field(&mut out, "review_verified", &joined(&review.verified));
                 }
                 field(
@@ -821,16 +816,25 @@ fn chain_entries(entries: &[super::chain::Entry]) -> String {
     }
 }
 
-/// The review items as `[level] path:line text`, separated by `; `.
-fn joined_items(items: &[crate::gate::ReviewItem]) -> String {
-    if items.is_empty() {
+/// The review's findings grouped by severity, highest first, each as
+/// `[severity] path:line summary — trigger`, with ` (pre_existing)` on a demoted one. `-`
+/// when the report holds none.
+fn joined_findings(review: &crate::gate::ReviewReport) -> String {
+    let findings: Vec<String> = review
+        .sorted_by_severity()
+        .into_iter()
+        .map(|finding| {
+            if finding.pre_existing {
+                format!("{finding} (pre_existing)")
+            } else {
+                finding.to_string()
+            }
+        })
+        .collect();
+    if findings.is_empty() {
         "-".to_owned()
     } else {
-        items
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ")
+        findings.join("; ")
     }
 }
 

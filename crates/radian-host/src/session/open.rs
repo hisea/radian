@@ -15,7 +15,7 @@ use radian_sandbox::{Sandbox, SandboxSlot};
 use super::facade::{DriverEnd, SessionError};
 use super::local::{DriverTask, LocalSession};
 use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQueue, SessionSetup};
-use super::support::{build_coding_tools, memory_notice, open_journal, session_hooks};
+use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
 use crate::memory::{
@@ -365,13 +365,23 @@ pub async fn open_session(
         .collect();
     let mut file_deny_read = crate::home::file_tool_deny_read(&session_dir);
     file_deny_read.extend(extra_deny_read);
+    // ADR 0039 decision 4: the two memory scope directories are the file tools' writable
+    // roots. A read never registers a project, so an unlinked workspace passes `global/`
+    // only; the memory deny entry above stays for the sandbox (the shell).
+    let memory_scope_dirs = memory
+        .as_ref()
+        .map(MemoryService::file_tool_roots)
+        .unwrap_or_default();
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
         &jobs_dir,
         harden_git,
-        &skill_dirs,
-        &file_deny_read,
+        FileRoots {
+            skill_dirs: &skill_dirs,
+            memory_scope_dirs: &memory_scope_dirs,
+            deny_read: &file_deny_read,
+        },
         image_support,
     )?;
     // ADR 0037 §6: a resumed session clears its jobs directory. The registry is built empty
