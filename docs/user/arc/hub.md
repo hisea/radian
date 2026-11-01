@@ -122,7 +122,7 @@ They change on their own: a route can be added without touching a plan or task f
 
 ## Routes
 
-Every route takes `GET` and answers `application/json`; a `204` has no body.
+Every route takes `GET`; every body is `application/json` except [the event stream](#the-event-stream), which is `text/event-stream`. A `204` has no body.
 The list and show bodies are exactly the bytes `radian arc list --json` and `radian arc show --json` print in that repository, so a field the CLI gains appears on the route too.
 
 A request without a valid bearer token is `401` with `{}` before any route runs.
