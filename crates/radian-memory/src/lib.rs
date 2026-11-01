@@ -21,7 +21,8 @@ mod registry;
 pub use error::MemoryError;
 pub use files::{
     DESCRIPTION_MAX, FileProvenance, FileStore, Frontmatter, IndexLine, ListEntry, NAME_MAX,
-    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, index_lines, validate_record_name,
+    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, SESSIONS_INDEX_FILE, index_lines,
+    validate_record_name,
 };
 pub use migrate::migrate_log;
 #[doc(hidden)]

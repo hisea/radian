@@ -747,6 +747,17 @@ impl WorkspaceRoot {
                 if relative.as_os_str().is_empty() {
                     return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
                 }
+                // ADR 0021 D3: `SESSIONS.md` is the host's own index. The memory permission
+                // rule already leaves it out, so this refusal is what both tiers read once a
+                // switch (auto approval, `full`) let the call through.
+                if relative.file_name().and_then(|name| name.to_str())
+                    == Some(memory_roots::SESSIONS_INDEX_FILE)
+                {
+                    return Err(fail(
+                        "memory_read_only",
+                        "SESSIONS.md is maintained by radian",
+                    ));
+                }
                 let root = &self.memory_roots.roots()[index];
                 if !memory_roots::is_flat(&relative) {
                     return Err(fail(

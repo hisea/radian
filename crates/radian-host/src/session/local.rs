@@ -583,11 +583,55 @@ impl LocalSession {
         // run does not wait for a hook) — so this is the one place the kill belongs.
         self.command_hooks.end_session().await;
         let done = self.driver.done.lock().unwrap().take();
-        match done {
+        let end = match done {
             Some(done) => done
                 .await
                 .unwrap_or_else(|_| DriverEnd::Panicked("the driver watcher stopped".into())),
             None => DriverEnd::Panicked("the driver task was already joined".into()),
+        };
+        self.record_session_index();
+        end
+    }
+
+    /// Appends this session's line to the project's `SESSIONS.md` (ADR 0021 D3), from the
+    /// committed journal only. A failure never changes the session's ending: it is one
+    /// warning. An unlinked workspace, or a session with no committed user message, writes
+    /// nothing and creates no project.
+    fn record_session_index(&self) {
+        let Some(service) = &self.memory else {
+            return;
+        };
+        let session = match radian_session::Session::open(&self.journal_path) {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(
+                    "session index: cannot read {}: {error}",
+                    self.journal_path.display()
+                );
+                return;
+            }
+        };
+        let history = match session.history() {
+            Ok(history) => history,
+            Err(error) => {
+                tracing::warn!("session index: cannot fold the transcript: {error}");
+                return;
+            }
+        };
+        let started_at = session
+            .events()
+            .first()
+            .map(|event| event.ts.clone())
+            .unwrap_or_default();
+        if let Err(error) = crate::memory::record_ended_session(
+            service,
+            session.session_id(),
+            &started_at,
+            &self.workspace,
+            &history,
+            self.memory_injection.config().sessions_index_max_lines,
+        ) {
+            tracing::warn!("session index could not be written: {error}");
         }
     }
 }

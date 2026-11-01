@@ -1955,6 +1955,19 @@ restored from `.radian/mut-backup/`.
 | TK0274-M1 | `MemoryService::remove` deletes the file but skips `remove_index_file` | ✅ 1 failed (rc=100) | `memory::service::tests::forget_deletes_the_file_and_its_index_line` (the index still holds `note.md`) |
 | TK0274-M2 | `MemoryHooks::before_tool_call` returns `Allow` without checking the off switch | ✅ 1 failed (rc=100) | `cli::memory_off_refuses_a_model_write_until_memory_on` (the first write's tool result has no `memory is off for this session`) |
 | TK0274-M3 | `MemoryService::merge` overwrites a collision instead of renaming the moved file | ✅ 1 failed (rc=100) | `memory::service::tests::merge_renames_a_collision_instead_of_overwriting` (one `note` remained and no `note-2` was reported) |
+## TK0278: the project session index file (2026-10-31)
+
+Branch `work/TK0278-session-index-file`. Each mutation was applied in place and the source restored
+from a copy under `.radian/mut/` (`cmp` empty). The host mutation ran with `cargo nextest run -p
+radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`; the two CLI
+mutations rebuilt `radian` (`cargo build -p radian-tui --bin radian`, the CLI tests refuse a stale
+one) and ran `cargo nextest run -p radian-exec --test cli ... -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0278-M1 | the same-id replacement is removed (`upsert_session_line` always pushes) | ✅ 2 failed (rc=100) | `memory::sessions::tests::a_second_line_for_the_same_session_replaces_the_first` (two lines) and `cli::a_resumed_session_replaces_its_line` (the resumed session's end left two lines) |
+| TK0278-M2 | the cap is off by one (`max_lines + 1`) | ✅ 1 failed (rc=100) | `memory::sessions::tests::the_cap_drops_the_oldest_lines_and_keeps_the_newest_last` (1001 lines kept) |
+| TK0278-M3 | the `SESSIONS.md` write refusal in `radian-coding` is removed | ✅ 1 failed (rc=100) | `cli::the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers` (the `write` succeeded and the index content changed) |
 ## TK0275: the memory role block (2026-10-31)
 
 Branch `work/TK0275-memory-role-rules`. Each mutation was applied in place and the named test

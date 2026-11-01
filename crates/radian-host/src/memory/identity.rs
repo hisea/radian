@@ -28,6 +28,26 @@ pub fn project_identity_key(workspace: &Path) -> PathBuf {
     resolve(workspace).0
 }
 
+/// The repository root that contains `workspace`: the directory holding the nearest `.git`
+/// (a directory or a linked-worktree file), canonicalized. `None` outside a repository. The
+/// session index's workspace column is relative to this root (ADR 0021 D3).
+///
+/// Unlike [`project_identity_key`], a linked worktree's root is the worktree directory itself,
+/// not the shared common dir: the index records the workspace the session ran in.
+pub fn repository_root(workspace: &Path) -> Option<PathBuf> {
+    let start = canonical(workspace);
+    let mut dir = start.as_path();
+    loop {
+        let dot_git = dir.join(".git");
+        if let Ok(meta) = std::fs::symlink_metadata(&dot_git)
+            && (meta.is_dir() || meta.is_file())
+        {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
 /// Whether the identity key comes from a git repository rather than the workspace path. This
 /// is what makes a directory a **project workspace** (ADR 0021): only such a
 /// workspace has a project a default-scope write may register. `false` for the fallbacks of

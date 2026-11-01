@@ -16,6 +16,7 @@ deleting it forgets it. There is no id, revision, archive or event log.
   projects/
     <project-id>/
       MEMORY.md               that project's index
+      SESSIONS.md             the host-maintained session index
       <name>.md               a project record
   projects.jsonl              the identity key → project id registry
 ```
@@ -28,16 +29,17 @@ atomic: a crash leaves either the old file or the new one.
 
 A memory file holds one record. Its frontmatter carries `name`, `description`,
 `type`, `source`, `created`, `modified`, `last_used` and an optional
-`provenance`. When the model `read`s a memory file other than `MEMORY.md`, the
-host sets `last_used` to the time of the read and changes no other byte. A
-user command (`list`, `show`, `stale`) never changes it. An absent `last_used`
-means the file was never read.
+`provenance`. When the model `read`s a memory file other than `MEMORY.md` or
+`SESSIONS.md`, the host sets `last_used` to the time of the read and changes no
+other byte. A user command (`list`, `show`, `stale`) never changes it. An absent
+`last_used` means the file was never read.
 
-The model writes these files with the ordinary `write` and `patch` tools. In both tiers those
-tools reach only the global directory and, when the workspace maps to a project, that
-project's directory. Every other path under the memory directory stays denied to those tools.
-Under the `workspace` tier the sandbox also keeps `shell` from reading or writing the memory
-directory; the `full` tier runs no sandbox. See `permissions`.
+The model reads and writes these files with the ordinary file tools (`read`, `grep`, `glob`,
+`write`, `patch`) in both tiers. Those tools reach only the global directory and, when the
+workspace maps to a project, that project's directory. Every other path under the memory
+directory stays denied to those tools. Under the `workspace` tier the sandbox also keeps
+`shell` from reading or writing the memory directory; the `full` tier runs no sandbox. See
+`permissions`.
 
 ## Frontmatter
 
@@ -192,3 +194,31 @@ the session so a resume starts without the index section. It is not a sandbox gu
 line tools keep whatever file access the tier allows. The section this process already built
 stays frozen; the switch takes full effect on the next session. `/memory on` allows those
 writes again. The switch is per session and is never written to the configuration file.
+
+## Past sessions
+
+Each project has one host-maintained index of ended sessions, `SESSIONS.md`,
+beside its `MEMORY.md`. The model's system prompt names the file in one line and
+the model reads it with `read`; the file itself is never injected.
+
+Each line records one ended session:
+
+```text
+- <session id> <start time> <workspace> — <first line of the first user message>
+```
+
+The start time is RFC 3339 UTC. The workspace is relative to the repository
+root, or `.` at the root. The message is the first line, cut at 120 characters,
+with no newline. Newest is last. A session appears only after it ends, and only
+when its journal committed a user message. A resumed session's line is replaced,
+not duplicated. A workspace that maps to no project has no file and creates none.
+
+`[memory] sessions_index_max_lines` (default 1000) caps the file. After an
+append, the oldest lines beyond the cap are dropped.
+
+The file is read-only to the model: `write` and `patch` refuse it with
+`SESSIONS.md is maintained by radian`. Removing the file clears the index; the
+next session that ends in this project creates it again.
+
+To read the conversation behind a line, pass its session id to
+`radian exec --export <id>`; see `sessions`.

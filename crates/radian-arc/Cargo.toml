@@ -49,8 +49,9 @@ rmcp = { version = "=3.5.1", default-features = false, features = ["server", "tr
 # is the channel's 5-second poll (`tokio::time::sleep`), not a test feature. `net` is the hub's
 # `TcpListener` (ADR 0048 decision 16); the hub's HTTP server runs on this runtime and its
 # route work is moved off the async threads with `spawn_blocking`, so no loop thread ever
-# blocks on a request.
-tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time", "net"] }
+# blocks on a request. `sync` carries the event stream's frames from its reader thread to the
+# response body.
+tokio = { workspace = true, features = ["rt-multi-thread", "io-std", "io-util", "time", "net", "sync"] }
 # The hub's HTTP server (ADR 0048 decision 16): hyper 1 with its HTTP/1 server and hyper-util's
 # `TokioIo` adapter. Both package versions are already in `Cargo.lock` through reqwest; hyper's
 # `http1` feature adds its small `httpdate` dependency, the only new transitive entry. The

@@ -14,13 +14,14 @@ mod identity;
 pub mod injection;
 mod open;
 mod service;
+mod sessions;
 mod touch;
 
 pub use commands::{
     COMMAND_NAMES, CommandError, CommandOutput, MemoryCommand, ProjectCommand, TYPE_NAMES,
     USAGE_ERROR, execute, parse_args, removed_message,
 };
-pub use identity::{candidate_name, project_identity_key};
+pub use identity::{candidate_name, project_identity_key, repository_root};
 pub use injection::{
     DEFAULT_INDEX_MAX_BYTES, DEFAULT_INDEX_MAX_LINES, InjectionConfig, MEMORY_SCOPES, MemoryHooks,
     MemoryInjection, Section,
@@ -29,5 +30,9 @@ pub use open::open_path;
 pub use service::{
     CreatedProject, MemoryService, MemoryServiceError, MoveReport, ProjectForWrite, ProjectState,
     ScopeSelection, ScopedEntry, WriteScope,
+};
+pub use sessions::{
+    DEFAULT_SESSIONS_INDEX_MAX_LINES, SessionEntry, append_session, first_line_cut,
+    record_ended_session, session_line, upsert_session_line, workspace_column,
 };
 pub use touch::MemoryTouch;

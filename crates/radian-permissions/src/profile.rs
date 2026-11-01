@@ -9,6 +9,8 @@ use crate::rule::{Action, ResourceMatcher, Rule, ToolMatcher};
 /// The `--profile` tier names, in documentation order. The parsers and the manual's drift
 /// test both read this list.
 pub const TIER_NAMES: &[&str] = &["workspace", "full"];
+/// The host-maintained memory file the model may never write (ADR 0021 D3).
+pub const SESSIONS_INDEX_FILE: &str = "SESSIONS.md";
 /// The `--profile` aliases, accepted but hidden from `--help`.
 pub const TIER_ALIASES: &[&str] = &["workspace-write", "full-access"];
 ///
@@ -278,15 +280,19 @@ impl Profile {
     /// covered either: only the two scope directories are.
     pub fn with_memory_root(mut self, memory_root: impl AsRef<Path>) -> Self {
         let root = crate::rule::resolve_path(memory_root.as_ref());
+        // `SESSIONS.md` is host-maintained and not a memory record (ADR 0021 D3). It is
+        // deliberately outside this allow rule, so the tier's default decides and the file
+        // tools' own refusal (`SESSIONS.md is maintained by radian`) reads the same in both.
+        let index = SESSIONS_INDEX_FILE.to_owned();
         for tool in ["write", "patch"] {
             self.rules.push(Rule::new(
                 ToolMatcher::Name(tool.into()),
-                ResourceMatcher::PathUnder(root.join("global")),
+                ResourceMatcher::PathUnderExceptName(root.join("global"), index.clone()),
                 Action::Allow,
             ));
             self.rules.push(Rule::new(
                 ToolMatcher::Name(tool.into()),
-                ResourceMatcher::PathUnderNested(root.join("projects")),
+                ResourceMatcher::PathUnderNestedExceptName(root.join("projects"), index.clone()),
                 Action::Allow,
             ));
         }
@@ -531,6 +537,31 @@ mod tests {
                     Action::Allow,
                     "{tier}: {tool}"
                 );
+            }
+        }
+    }
+
+    /// ADR 0021 D3: `SESSIONS.md` is host-maintained and outside the memory allow rule in
+    /// both scope directories, so every tier falls to its default.
+    #[test]
+    fn a_write_to_the_session_index_is_not_allowed_by_the_memory_rule() {
+        let ws = TestDir::new("memory-sessions-ws");
+        let root = TestDir::new("memory-sessions-root");
+        std::fs::create_dir_all(root.0.join("global")).unwrap();
+        std::fs::create_dir_all(root.0.join("projects/P")).unwrap();
+        for path in [
+            root.0.join("global").join(SESSIONS_INDEX_FILE),
+            root.0.join("projects/P").join(SESSIONS_INDEX_FILE),
+        ] {
+            for tool in ["write", "patch"] {
+                for (tier, profile) in memory_profiles(&ws, &root) {
+                    assert_eq!(
+                        action_at(&profile, tool, &path),
+                        Action::Ask,
+                        "{tier}: {tool}: {}",
+                        path.display()
+                    );
+                }
             }
         }
     }
