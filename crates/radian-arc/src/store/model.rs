@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use super::config::STAGE_NAMES;
 use super::frontmatter::{self, Value};
+use crate::gate::REVIEW_LEVELS;
 
 /// The plan and task file schema version this build writes and accepts.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -40,6 +41,18 @@ pub const ALLOW_NOOP_FLOW: &str = "flow";
 /// The two sources of a task's effective `allow_noop`, in the order `show` documents them
 /// (ADR 0048 decisions 8 and 15). One list: the code, the manual and its drift test read it.
 pub const ALLOW_NOOP_SOURCES: &[&str] = &[ALLOW_NOOP_TASK, ALLOW_NOOP_FLOW];
+
+/// The source of a task's effective `review_fix_level`: the task file carries the field.
+pub const FIX_LEVEL_TASK: &str = "task";
+
+/// The source of a task's effective `review_fix_level`: the field is absent, so the value is
+/// the `fix_level` of the reviewer its gate profile names.
+pub const FIX_LEVEL_REVIEWER: &str = "reviewer";
+
+/// The two sources of a task's effective `review_fix_level`, in the order `show` documents
+/// them (ADR 0048 decisions 10 and 15). One list: the code, the manual and its drift test read
+/// it.
+pub const FIX_LEVEL_SOURCES: &[&str] = &[FIX_LEVEL_TASK, FIX_LEVEL_REVIEWER];
 
 /// Where `priority` sits in [`PLAN_PRIORITIES`]: `0` for `P0`, the highest. A value the list
 /// does not hold sorts last (a stored file is checked when it is read).
@@ -438,6 +451,10 @@ pub struct TaskFile {
     /// 15). A file written by an earlier build carries `allow_noop: false`, which stays an
     /// explicit `false`.
     pub allow_noop: Option<bool>,
+    /// The task's own `review_fix_level`: `Some` when its file carries the field, `None` when
+    /// it does not, so the task uses the `fix_level` of the reviewer its gate profile names
+    /// (ADR 0048 decisions 10 and 15). One of [`REVIEW_LEVELS`].
+    pub review_fix_level: Option<String>,
     /// Whether the task merged under the review follow-up rule: arc writes it when the task
     /// reaches `done.merged` while `[gate.review] propose_followups` is `true` and the task is
     /// not itself a follow-up (ADR 0048 decision 10). Only a task that carries it is
@@ -553,6 +570,27 @@ impl TaskFile {
         }
     }
 
+    /// The task's effective `review_fix_level` as the `review` stage reads it: its own value
+    /// when its file carries one, else the `fix_level` of the reviewer its flow's gate profile
+    /// names (ADR 0048 decisions 10 and 15). A flow, profile or reviewer the configuration
+    /// cannot resolve contributes [`crate::gate::DEFAULT_FIX_LEVEL`]; the gate refuses such a
+    /// task before a review runs.
+    pub fn effective_fix_level<'a>(&'a self, config: &'a super::config::Config) -> &'a str {
+        self.review_fix_level.as_deref().unwrap_or_else(|| {
+            config.flow_fix_level(self.flow.as_deref().unwrap_or(super::config::DEFAULT_FLOW))
+        })
+    }
+
+    /// Where [`TaskFile::effective_fix_level`] came from: `task` when the task file carries the
+    /// field, `reviewer` when it does not.
+    pub fn fix_level_source(&self) -> &'static str {
+        if self.review_fix_level.is_some() {
+            FIX_LEVEL_TASK
+        } else {
+            FIX_LEVEL_REVIEWER
+        }
+    }
+
     /// Adds one attempt's or one review stage's cost to both counters. The first write of a
     /// file that has no `total_cost_usd` starts the total from its `cost_usd`.
     pub fn add_cost(&mut self, cost: f64) {
@@ -633,6 +671,7 @@ impl TaskFile {
             auto_rework: 0,
             retry_count: 0,
             allow_noop,
+            review_fix_level: None,
             followup_pending: false,
             pending_hooks: Vec::new(),
             pending_hook_states: Vec::new(),
@@ -691,6 +730,9 @@ impl TaskFile {
         }
         if let Some(allow_noop) = self.allow_noop {
             out.push_str(&format!("allow_noop: {allow_noop}\n"));
+        }
+        if let Some(level) = &self.review_fix_level {
+            out.push_str(&format!("review_fix_level: {level}\n"));
         }
         if self.followup_pending {
             out.push_str("followup_pending: true\n");
@@ -798,6 +840,15 @@ impl TaskFile {
         let auto_rework = fields.optional_u32("auto_rework")?.unwrap_or(0);
         let retry_count = fields.optional_u32("retry_count")?.unwrap_or(0);
         let allow_noop = fields.optional_bool("allow_noop")?;
+        let review_fix_level = fields.optional_string("review_fix_level")?;
+        if let Some(level) = &review_fix_level
+            && !REVIEW_LEVELS.contains(&level.as_str())
+        {
+            return Err(format!(
+                "`review_fix_level` `{level}` is not one of {}",
+                REVIEW_LEVELS.join(", ")
+            ));
+        }
         let followup_pending = fields.optional_bool("followup_pending")?.unwrap_or(false);
         let pending_hooks = fields.optional_list("pending_hooks")?;
         for point in &pending_hooks {
@@ -858,6 +909,7 @@ impl TaskFile {
             auto_rework,
             retry_count,
             allow_noop,
+            review_fix_level,
             followup_pending,
             pending_hooks,
             pending_hook_states,
@@ -1053,6 +1105,7 @@ mod tests {
             auto_rework: 2,
             retry_count: 1,
             allow_noop: Some(true),
+            review_fix_level: Some("minor".to_owned()),
             followup_pending: true,
             pending_hooks: vec!["after_merge".to_owned()],
             pending_hook_states: vec!["after_merge=done.merged".to_owned()],

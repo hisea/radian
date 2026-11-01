@@ -11,9 +11,9 @@ mod common;
 use std::sync::Arc;
 
 use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
-use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService, WriteScope};
+use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService};
 use radian_host::{Skill, SkillsHooks, session_hooks};
-use radian_memory::Kind;
+use radian_memory::{FileStore, Scope};
 use radian_permissions::{NoopAudit, PermissionHooks, Profile};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
@@ -51,15 +51,13 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    // A real memory service with one record: the section only renders when it has one.
+    // A real memory service with one index line: the section only renders the store's index.
     let service = MemoryService::open(&ws, dir.join("memory"));
-    service.create_project().unwrap();
-    service
-        .add(
-            WriteScope::Project,
-            Kind::Preference,
-            Some("style".into()),
-            "tabs over spaces".into(),
+    let project = service.create_project().unwrap();
+    FileStore::open(dir.join("memory"))
+        .write_index(
+            &Scope::Project(project),
+            "- [style](style.md) — tabs over spaces\n",
         )
         .unwrap();
     let journal = journal(&dir);
@@ -67,6 +65,8 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         Some(service),
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
+        None,
+        None,
     ));
 
     // One skill, constructed directly: the section needs only a name, a description and paths.
@@ -99,6 +99,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     // the sections the other hooks append.
     let role = Arc::new(radian_host::RoleHooks::new(
         "<runtime>\n</runtime>",
+        "",
         "",
         None,
     ));
@@ -156,7 +157,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     let prompt = request.system_prompt.expect("the hooks set the prompt");
 
     let memory_at = prompt
-        .find("## Memory (ADR 0021)")
+        .find("## Memory indexes")
         .unwrap_or_else(|| panic!("no memory section in {prompt}"));
     let skills_at = prompt
         .find("## Skills (ADR 0025)")

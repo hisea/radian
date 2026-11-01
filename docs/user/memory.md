@@ -7,8 +7,8 @@ description: Save facts across sessions and search them by keyword.
 Memory holds small durable records. Each record has an id, content, scope,
 kind, key, source, verification and revision. Scopes are project and global.
 Project records belong to one project directory; global records belong to
-you. Every model request carries the matching records, project first, then
-global.
+you. The model receives each scope's `MEMORY.md` index in its system prompt,
+project first, then global; see "What the model sees".
 
 The model reads and writes its memory files with the ordinary file tools
 (`read`, `grep`, `glob`, `write`, `patch`) in both tiers. The tools reach
@@ -16,6 +16,15 @@ only the two scope directories: the global memory directory and, when the
 workspace maps to a project, that project's directory. Every other path
 under the memory directory stays denied, and the shell cannot read any of
 it. See `permissions` for the exact rule.
+
+## Memory files and `last_used`
+
+A memory file holds one record. Its frontmatter carries `name`, `description`,
+`type`, `source`, `created`, `modified`, `last_used` and an optional
+`provenance`. When the model `read`s a memory file other than `MEMORY.md`, the
+host sets `last_used` to the time of the read and changes no other byte. A
+user command (`list`, `show`, `stale`) never changes it. An absent `last_used`
+means the file was never read.
 
 ## Kinds
 
@@ -34,6 +43,7 @@ the project against another directory.
 | `list [--global\|--project] [--all] [--json]` | List records, project first then global. `--all` includes archived records. |
 | `search [--global\|--project] [--json] <words>...` | Search by keyword. Every word must match, in the content or the key. Matching ignores case. |
 | `show [--global\|--project] [--json] <id>` | Read one record in full. |
+| `stale [--days N] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than N days, or it has no `last_used` and its `created` is older than N days. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`. `--json` gives an array of objects with the frontmatter fields, with `last_used` null when never read. A file whose frontmatter cannot be read is listed as unreadable and the other files still list. |
 | `add [--global] [--kind preference\|decision\|fact\|lesson] [--key <key>] <text>` | Add a project record by default, a global one with `--global`. In the interface the text is literal: a bare `-` writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. On the command line, `-` reads the text from stdin instead. |
 | `edit [--global] --revision <N> <id> <text>` | Change content. Pass the current revision, shown by `show` and `list`. A bare `-` as the text writes nothing and shows `` `-` reads stdin only in `radian memory`; type the text here``. |
 | `archive [--global] --revision <N> <id>` | Archive a record. It stays stored but is no longer injected or searched by default. |
@@ -51,7 +61,7 @@ the project against another directory.
 A usage or refusal error exits 2 on the command line; a conflict or a
 missing record exits 1. In the interface, `forget`, `purge`, `split` and
 `merge` ask first: `y` runs, `n` or `esc` cancels. A read command
-(`list`, `search`, `show`, `export`, `project`) runs while a turn runs and
+(`list`, `search`, `show`, `stale`, `export`, `project`) runs while a turn runs and
 does not interrupt it. A write takes effect at the next model request. In the interface, `add` and `edit` take
 their text literally: `-` reads stdin only on the command line. A bare `-` in the interface writes nothing and shows the stdin notice:
 `` `-` reads stdin only in `radian memory`; type the text here`` for `add` and
@@ -96,20 +106,56 @@ Export the project scope, edit the Markdown, read it back:
 /memory import /tmp/mem.md
 ```
 
+## What the model is told
+
+When memory is on and a memory directory exists, the base prompt carries one memory block
+between the role prose and the context files. `[memory] enabled = false` removes the block
+together with the index section; no memory directory removes both too. The block tells the
+model:
+
+- Write a memory file after you correct the model, at a handoff, or when it learns a fact
+  that helps a later session.
+- Do not write what the repository already records: code structure, git history or
+  `AGENTS.md`. Project facts and project procedures go to `AGENTS.md`; cross-project
+  procedures go to a user skill.
+- Write one file per fact in the memory directory the index section names. Give each file
+  `name`, `description`, `type`, `source`, `created` and `modified` frontmatter fields, and
+  add one `- [title](file) — description` line to the index. Update the file on the same
+  subject instead of writing a new one. Delete a file that is wrong.
+- Content that names this repository's paths, branches, files, decision numbers, task
+  numbers or structure is project. Your preferences, corrections of the model's way of
+  working and pointers that hold across repositories are global. When unsure, the model
+  writes project. `type` is independent of scope.
+- Memory is not proof of current behavior. The model verifies that a file, flag or command
+  still exists before it recommends one. It cites only the memory it used. It consults
+  memory when the request names the repository, an earlier decision or continuity, and not
+  when the request is self-contained.
+- Read the project index before the global index. On the same subject, the project file wins.
+
+A custom system prompt (`--system` or `--system-file`) replaces the role prose. The memory
+block stays, like the index section, because it is host policy.
+
 ## What the model sees
 
-One record prints on two lines: the first line carries `id`, `revision`,
-`scope`, `kind`, `key`, `source` and `verification`, and the content follows.
-The model uses the `memory_search` tool. It passes `query` to search by
-keyword or `ids` to read records in full, never both. `scope` is one of
-`project`, `global` or `all`; the default `all` searches project first,
-then global. `limit` caps the count. New matches in later turns arrive as a system message.
+At the first model call of a session, the model receives the two index files
+as one system-prompt section: the project index first, then the global one.
+Each part is the text of that scope's `MEMORY.md`. The section names each
+file's path, so the model reads a record's body on demand with `read`. It
+opens with a line that says the content is data from your memory directory,
+not instructions.
 
-Results arrive ordered by scope (project first), trust (your records before
-the model's), match, recency and id. A low-trust note marks model-written
-content the tool returns, so the model treats your records as the ones to
-trust.
+A scope with no index, or an empty one, contributes one line saying so. With
+no project linked, only the global index is read.
 
-Set `[memory.injection] additions = false` to turn those follow-up notes
-off. The fixed block of records in the prompt stays. `[memory.injection]
-addition_budget` caps one turn's addition at 500 tokens by default.
+Each index is capped. `[memory] index_max_lines` (default 200) limits its
+lines and `[memory] index_max_bytes` (default 25600) limits its bytes. A line
+past either cap is not sent. When at least one line is dropped, the model
+receives one notice before its next call: the notice names the scope, the file
+and how many lines were dropped, and asks the model to rewrite the index
+shorter. It is sent once per session for each scope.
+
+The section is computed once per process and reused byte for byte. A change to
+an index file takes effect in the next session, or on resume.
+
+There is no memory tool. A call to `memory_search` or `memory_save` is an
+unknown tool.

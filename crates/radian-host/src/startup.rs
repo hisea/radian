@@ -218,7 +218,7 @@ pub struct SessionSettings {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
-    /// The memory injection configuration (ADR 0021).
+    /// The memory index-injection configuration (ADR 0021 D6).
     pub memory_injection: InjectionConfig,
     /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
     pub subtree_files: bool,

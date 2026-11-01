@@ -72,7 +72,7 @@ propose_followups = true
 exec_args = ["--model", "m"]  # unset: `[worker] exec_args`
 prompt_file = "review.md"      # unset: the built-in prompt only
 timeout_secs = 900
-fix_level = "major"            # a finding at or above this fails the round; also in the verdict
+fix_level = "major"            # a finding at or above this fails the round, unless the task sets review_fix_level; also in the verdict
 
 [gate.profiles.default]
 stages = [{ stage = "commands", required = true }, { stage = "human", required = true }]
@@ -563,7 +563,8 @@ fenced `json` block of the final message is parsed: it holds `summary`, `finding
 (an absent trigger reads as empty), and arc sets `pre_existing`: a value the session's report
 carries is ignored (`ReviewReport::from_session_json`), and only a verdict arc wrote keeps it. A
 finding at or above the
-reviewer's `fix_level` and not `pre_existing` fails with `review_findings`; the rest is
+task's effective `fix_level` (`review_fix_level` when its file carries one, else the reviewer's)
+and not `pre_existing` fails with `review_findings`; the rest is
 recorded (`ReviewReport::failing` / `rest`). A verdict that failed with `review_blocking` was
 decided before findings existed: every item of its old `blocking` list fails whatever its level
 and whatever `fix_level` says (`ReviewReport::failing_in_old_verdict`, `Verdict::review_failing`),
@@ -574,8 +575,8 @@ re-serialized verdict. Unusable output (no block, a missing field, a `severity` 
 `REVIEW_LEVELS`, a timeout, a session error) runs the session once more; two unusable runs
 fail with `review_output`, or `review_timeout` when the last run timed out.
 The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
-(`round`, `reviewer`, `fix_level`, the `exec_args` source key, `timeout_secs` and its source
-key) and, in a rework round, `review_pre_existing`.
+(`round`, `reviewer`, the effective `fix_level`, the `exec_args` source key, `timeout_secs` and
+its source key) and, in a rework round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)

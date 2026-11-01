@@ -29,7 +29,7 @@
 ## 状态
 
 - **`~/.radian/` 目录布局**已实现：`config/` 和 `cache/` 沙箱可读；`sessions/` 和 `memory/` 被拒绝。`RADIAN_HOME` 覆盖根目录。（`--session-dir` / `RADIAN_SESSION_DIR` 仍然只覆盖会话目录。）
-- **记忆**已实现：`radian memory` 命令行命令、TUI 的 `/memory` 斜杠命令（同一组命令）、agent 的 `memory_search` 工具（按关键词搜索，或按 id 读取记录；只在超出注入预算时挂载），以及带 `MemoryInjected` 审计事件的确定性注入。
+- **记忆**已实现：`radian memory` 命令行命令、TUI 的 `/memory` 斜杠命令（同一组命令），以及把两个 `MEMORY.md` 索引文件确定性注入、并写 `MemoryInjected` 审计事件。模型没有记忆工具。
 - **配置文件**已实现，只读：`--config`/`RADIAN_CONFIG`/`~/.radian/config/config.toml`，`model.*`、`permissions.profile` 和 `compaction.auto` 作为默认值生效（命令行优先）。它从不包含密钥值。
 - **Pi 配置迁移（Phase 5）**已实现：`radian config import-pi --from <pi-agent-dir>` 起草一份 Radian 配置（stdout）和一份映射报告（stderr）。它只读你指定的目录，从不读 `auth.json`，从不读密钥值；没有 `--write` 时什么都不写（`--write` 遇到已有文件会拒绝）。Radian **不**承诺兼容 Pi 的文件格式：见 [`docs/user/pi-migration.md`](user/pi-migration.md)。
 - **会话分叉**已实现：`radian exec --fork <parent> [--at <seq>] [--session-id <child>]` 和 TUI 的 `/fork`。分叉点是父会话的轮次边界；子会话在那里物化父会话的有效历史（已提交的压缩生效，未提交的替换丢弃），先于父会话的记录写入，可以恢复，也可以再分叉。

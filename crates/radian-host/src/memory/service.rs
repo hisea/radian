@@ -228,19 +228,34 @@ impl MemoryService {
     /// memory file before any memory command ran still has a root the file tools can open; a
     /// creation that fails leaves the directory absent and the tool build skips it.
     pub fn file_tool_roots(&self) -> Vec<PathBuf> {
+        self.file_scope_roots()
+            .into_iter()
+            .map(|(_, dir)| dir)
+            .collect()
+    }
+
+    /// The same directories as [`MemoryService::file_tool_roots`], each with the scope it is
+    /// the store directory of: `global` first, then this workspace's project when it is linked.
+    /// Each directory is created 0700 on first use, exactly as the file tools need it.
+    pub fn file_scope_roots(&self) -> Vec<(Scope, PathBuf)> {
         let mut scopes = vec![Scope::Global];
         if let Ok(project) = self.project_id() {
             scopes.push(Scope::Project(project));
         }
-        let files = FileStore::open(self.store.root().to_path_buf());
+        let files = self.files();
         scopes
-            .iter()
+            .into_iter()
             .map(|scope| {
-                let dir = files.scope_dir(scope);
+                let dir = files.scope_dir(&scope);
                 let _ = crate::ensure_private_dir(&dir);
-                dir
+                (scope, dir)
             })
             .collect()
+    }
+
+    /// The file store rooted at this service's memory directory (ADR 0021 D3).
+    pub fn files(&self) -> FileStore {
+        FileStore::open(self.store.root().to_path_buf())
     }
 
     /// The current project, or the `Unlinked` error.
@@ -328,7 +343,10 @@ impl MemoryService {
 
     /// The scopes a read covers, in order. `Default` is Project then Global; Project is simply
     /// omitted when the workspace is unlinked, so Global reads always work.
-    fn read_scopes(&self, selection: ScopeSelection) -> Result<Vec<Scope>, MemoryServiceError> {
+    pub(crate) fn read_scopes(
+        &self,
+        selection: ScopeSelection,
+    ) -> Result<Vec<Scope>, MemoryServiceError> {
         Ok(match selection {
             ScopeSelection::GlobalOnly => vec![Scope::Global],
             ScopeSelection::ProjectOnly => vec![Scope::Project(self.project_id()?)],
