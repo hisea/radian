@@ -3496,6 +3496,12 @@ never from the file, so a resume redraws it. Each mutation was applied by hand t
 `crates/radian-tui/src/memory_card.rs` (or `crates/radian-tui/src/blocks/layout.rs`), the named
 test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test card` (the last
 row with `--lib`), and the file was restored from a copy under `.radian/mut/`, which `cmp` found
+## TK0290: the task page's metrics tab (2026-11-01, branch `work/TK0290-tui-task-metrics-tab`)
+
+The tab draws `radian_arc::read::task_metrics`. Each mutation was applied by hand (M1 in
+`crates/radian-arc/src/read.rs`, M2/M3 in `crates/radian-tui/src/arc/`), the named `arc_tui`
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E
+'test(<name>)'`, and the file was restored from a copy under `.radian/`, which `cmp` found
 identical.
 
 | # | Mutation | Caught by | Result |
@@ -3508,3 +3514,8 @@ identical.
 
 5/5 caught. The first two reproduce the original run; M3, M4 and M5 are the resume, layout and parser
 fixes from the rework.
+| TK0290-M1 | `task_metrics` leaves the first attempt's runs, costs and queue wait out of `total` (the loop skips `index == 0`) | `arc_tui::the_metrics_tab_lists_both_attempts_and_sums_them` (the total read `requests 4`, expected `requests 7`) | ✅ 1 failed |
+| TK0290-M2 | `cell_part` draws a not-reported value as `0` instead of a weak `-` | `arc_tui::an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times` (the worker row had no `model -`) | ✅ 1 failed |
+| TK0290-M3 | `TaskTab::next` leaves `Metrics` out of the cycle (`Attempts` goes straight to `Brief`) | `arc_tui::the_metrics_tab_joins_the_cycle_between_attempts_and_brief` (`Tab` from `Attempts` read `Brief`, expected `Metrics`) | ✅ 1 failed |
+
+3/3 caught.

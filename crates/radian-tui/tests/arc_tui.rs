@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use radian_arc::gate::{Finding, ReviewReport, Stage, Verdict, verdict_path};
+use radian_arc::gate::{
+    CommandRecord, Finding, ReviewReport, ReviewRunRecord, Stage, Verdict, verdict_path,
+};
 use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
@@ -1933,6 +1935,7 @@ fn the_task_page_has_the_frame_the_tabs_and_the_attempt_selector() {
         "conversation",
         "diff",
         "attempts",
+        "metrics",
         "attempt 1  2",
         "no session journal yet",
     ] {
@@ -1966,13 +1969,14 @@ fn the_task_tabs_cycle_in_order_in_both_directions() {
     );
     let text = screen(&mut app, 120, 30);
     assert!(
-        text.contains("brief  ·  conversation  ·  diff  ·  attempts"),
+        text.contains("brief  ·  conversation  ·  diff  ·  attempts  ·  metrics"),
         "the tabs are drawn in cycle order:\n{text}"
     );
     for expected in [
         TaskTab::Conversation,
         TaskTab::Diff,
         TaskTab::Attempts,
+        TaskTab::Metrics,
         TaskTab::Brief,
     ] {
         assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
@@ -1980,6 +1984,7 @@ fn the_task_tabs_cycle_in_order_in_both_directions() {
     }
     let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
     for expected in [
+        TaskTab::Metrics,
         TaskTab::Attempts,
         TaskTab::Diff,
         TaskTab::Conversation,
@@ -1991,7 +1996,7 @@ fn the_task_tabs_cycle_in_order_in_both_directions() {
     // A terminal that sends `Tab` with the shift modifier cycles back too.
     let shifted = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
     assert_eq!(app.on_key(&shifted), ArcKey::Redraw);
-    assert_eq!(tab(&app), TaskTab::Attempts);
+    assert_eq!(tab(&app), TaskTab::Metrics);
 }
 
 #[test]
@@ -4985,4 +4990,592 @@ fn the_conversation_tab_rails_every_transcript_row() {
             "row {index} is missing the frame rail: {row:?}\n{text}"
         );
     }
+}
+
+// ---- the metrics tab ----------------------------------------------------------------
+
+/// Writes one JSON file in an attempt's run directory.
+fn write_run_json(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    name: &str,
+    value: &serde_json::Value,
+) {
+    let path = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt).join(name);
+    fs::create_dir_all(path.parent().expect("a parent")).unwrap();
+    fs::write(path, format!("{value}\n")).unwrap();
+}
+
+/// Writes an attempt's worker run: its `Result` metrics (when it reported any) and the
+/// `execution.json` times and route the reader uses for the wall time and model.
+fn write_worker_metrics(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    started: &str,
+    ended: &str,
+    metrics: Option<serde_json::Value>,
+) {
+    let run = radian_arc::store::attempt_ops::run_dir(&fixture.store, task, attempt);
+    if let Some(metrics) = metrics {
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("result.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type": "Result", "outcome": "completed", "metrics": metrics})
+            ),
+        )
+        .unwrap();
+    }
+    write_run_json(
+        fixture,
+        task,
+        attempt,
+        "execution.json",
+        &json!({
+            "started_at": started,
+            "ended_at": ended,
+            "exec_args": ["--provider", "anthropic", "--model", "m"],
+        }),
+    );
+}
+
+/// Writes one review verdict with the runs the test gives it.
+#[allow(clippy::too_many_arguments)]
+fn write_review_run(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    run: u32,
+    started: &str,
+    ended: &str,
+    metrics: serde_json::Value,
+    findings: Vec<Finding>,
+) {
+    let label = format!("{task}-{attempt}");
+    let mut verdict = Verdict::human("c".repeat(40), true, None);
+    verdict.stage = Stage::Review;
+    verdict.review = Some(ReviewReport {
+        summary: "the change reads correctly".to_owned(),
+        findings,
+        verified: Vec::new(),
+        old_blocking: None,
+    });
+    verdict.review_cost_micros = metrics
+        .get("fee_micros")
+        .and_then(serde_json::Value::as_u64);
+    verdict.runs = vec![ReviewRunRecord {
+        run,
+        session_id: format!("{label}-review-{run}"),
+        started_at: started.to_owned(),
+        ended_at: ended.to_owned(),
+        metrics: Some(metrics),
+    }];
+    let path = verdict_path(fixture.store.repo(), task, &label, Stage::Review).unwrap();
+    verdict
+        .write_new(&path)
+        .expect("the review verdict is written");
+}
+
+/// Writes the attempt's `commands` verdict with one duration per command line.
+fn write_command_times(fixture: &Fixture, task: &str, attempt: u32, commands: &[(&str, u64)]) {
+    let label = format!("{task}-{attempt}");
+    let mut verdict = Verdict::human("c".repeat(40), true, None);
+    verdict.stage = Stage::Commands;
+    verdict.commands = commands
+        .iter()
+        .map(|(line, duration_ms)| CommandRecord {
+            line: (*line).to_owned(),
+            exit_code: Some(0),
+            duration_ms: *duration_ms,
+            log: "log".to_owned(),
+        })
+        .collect();
+    let path = verdict_path(fixture.store.repo(), task, &label, Stage::Commands).unwrap();
+    verdict
+        .write_new(&path)
+        .expect("the commands verdict is written");
+}
+
+/// A request-log entry in the shape `radian exec`'s metrics carry.
+fn request(ts: &str, kind: &str, input: u64) -> serde_json::Value {
+    json!({
+        "ts": ts,
+        "latency_ms": 12,
+        "kind": kind,
+        "input_uncached": input,
+        "cache_read": 4,
+        "cache_write": 0,
+        "output": 2,
+        "reasoning": 1,
+        "fee_micros": 1000,
+        "stop_reason": "end_turn",
+        "model": "m",
+    })
+}
+
+/// Opens the metrics tab of one task of the fixture.
+fn open_metrics(app: &mut ArcApp, fixture: &Fixture, name: &str) {
+    app.task_sel = fixture.pos(name);
+    app.open_task();
+    while tab(app) != TaskTab::Metrics {
+        app.on_key(&key(KeyCode::Tab));
+    }
+}
+
+/// Two attempts, each a worker and one review run: the headers are newest first and the total
+/// row sums both attempts. Mutation: the total row skips the first attempt.
+#[test]
+fn the_metrics_tab_lists_both_attempts_and_sums_them() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(
+            json!({"requests": 2, "input_uncached": 10, "cache_read": 0, "output": 3, "fee_micros": 100_000}),
+        ),
+    );
+    write_review_run(
+        &fixture,
+        &task,
+        1,
+        1,
+        "2026-01-01T00:00:11Z",
+        "2026-01-01T00:00:14Z",
+        json!({"requests": 1, "input_uncached": 5, "output": 1, "fee_micros": 50_000}),
+        Vec::new(),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:02:10Z",
+        Some(
+            json!({"requests": 3, "input_uncached": 20, "cache_read": 0, "output": 7, "fee_micros": 200_000}),
+        ),
+    );
+    write_review_run(
+        &fixture,
+        &task,
+        2,
+        1,
+        "2026-01-01T00:02:11Z",
+        "2026-01-01T00:02:14Z",
+        json!({"requests": 1, "input_uncached": 5, "output": 2, "fee_micros": 70_000}),
+        Vec::new(),
+    );
+    write_run_json(
+        &fixture,
+        &task,
+        1,
+        "queue.json",
+        &json!({"queue_wait_secs": 2}),
+    );
+    write_run_json(
+        &fixture,
+        &task,
+        2,
+        "queue.json",
+        &json!({"queue_wait_secs": 3}),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 50);
+
+    assert_eq!(
+        text.matches("worker").count(),
+        2,
+        "one worker row per attempt:\n{text}"
+    );
+    assert_eq!(
+        text.matches("review 1").count(),
+        2,
+        "one review row per attempt:\n{text}"
+    );
+    let newer = text.find("attempt 2").expect("the newer attempt");
+    let older = text.find("attempt 1").expect("the older attempt");
+    assert!(newer < older, "the newest attempt is first:\n{text}");
+    assert!(
+        text.contains("queue 3s") && text.contains("queue 2s"),
+        "{text}"
+    );
+
+    let total = text
+        .lines()
+        .find(|line| line.contains("total"))
+        .unwrap_or_else(|| panic!("no total row:\n{text}"));
+    for needle in ["requests 7", "in 40", "out 13", "cost $0.120", "queue 5s"] {
+        assert!(
+            total.contains(needle),
+            "the total misses `{needle}`: {total}"
+        );
+    }
+}
+
+/// A flow's `acp` agent reports no model metrics: its row draws `-` for every model value while
+/// the wall time and the command times still draw. Mutation: a not-reported value drawn as `0`.
+#[test]
+fn an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_start_worker(
+        &fixture,
+        &task,
+        2,
+        &format!("{task}-1"),
+        json!({"kind": "acp", "program": "codex-acp"}),
+    );
+    write_run_json(
+        &fixture,
+        &task,
+        2,
+        "execution.json",
+        &json!({
+            "started_at": "2026-01-01T00:00:00Z",
+            "ended_at": "2026-01-01T00:01:01Z",
+            "exec_args": [],
+        }),
+    );
+    write_command_times(&fixture, &task, 2, &[("cargo nextest run --locked", 5_000)]);
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    assert!(
+        text.contains("model -"),
+        "the route is not reported:\n{text}"
+    );
+    assert!(
+        text.contains("wall 1m01s"),
+        "the wall time still draws:\n{text}"
+    );
+    assert!(
+        text.contains("command 5s cargo nextest run --locked"),
+        "the command time still draws:\n{text}"
+    );
+}
+
+/// A run with no truncated response, no model error and no retry draws none of those counts; a
+/// run with two retries draws `retries 2`.
+#[test]
+fn the_anomaly_counts_are_drawn_only_above_zero() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "max_tokens_responses": 0,
+            "model_errors": 0,
+            "retries": 0,
+        })),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "max_tokens_responses": 0,
+            "model_errors": 0,
+            "retries": 2,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    assert!(
+        text.contains("retries 2"),
+        "the retry count is drawn:\n{text}"
+    );
+    assert_eq!(
+        text.matches("retries").count(),
+        1,
+        "only the run above zero:\n{text}"
+    );
+    assert!(
+        !text.contains("truncated "),
+        "no zero truncation count:\n{text}"
+    );
+    assert!(!text.contains("errors "), "no zero error count:\n{text}");
+}
+
+/// `Enter` opens the selected worker run's request log below it; `Esc` closes the detail and a
+/// second `Esc` leaves the page.
+#[test]
+fn enter_opens_the_request_log_and_esc_closes_it_then_the_page() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 3,
+            "input_uncached": 3,
+            "request_log": [
+                request("2026-01-01T00:00:01Z", "chat", 1),
+                request("2026-01-01T00:00:02Z", "chat", 2),
+                request("2026-01-01T00:00:03Z", "chat", 3),
+            ],
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        0,
+        "the worker run is selected"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    assert!(app.task.as_ref().unwrap().metric_open, "the detail is open");
+    let text = screen(&mut app, 120, 40);
+    assert_eq!(
+        text.matches("chat").count(),
+        3,
+        "one row per request:\n{text}"
+    );
+    for ts in [
+        "2026-01-01T00:00:01Z",
+        "2026-01-01T00:00:02Z",
+        "2026-01-01T00:00:03Z",
+    ] {
+        assert!(text.contains(ts), "the request's time is drawn:\n{text}");
+    }
+    assert!(
+        text.contains("requests"),
+        "the request log's heading:\n{text}"
+    );
+
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert!(
+        !app.task.as_ref().unwrap().metric_open,
+        "the first Esc closes the detail"
+    );
+    assert_eq!(app.page, radian_tui::arc::Page::Task, "the page stays open");
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(
+        app.page,
+        radian_tui::arc::Page::Plans,
+        "the second Esc leaves the page"
+    );
+}
+
+/// A run whose request log was cut says so.
+#[test]
+fn a_truncated_request_log_says_so() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 501,
+            "input_uncached": 501,
+            "request_log": [request("2026-01-01T00:00:01Z", "chat", 1)],
+            "request_log_truncated": true,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    app.on_key(&key(KeyCode::Enter));
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("request log truncated"),
+        "the cut log is named:\n{text}"
+    );
+}
+
+/// An old review verdict's `blocking` and `suggestions` are counted through the same mapping
+/// the attempts page uses.
+#[test]
+fn the_metrics_tab_counts_an_old_verdicts_findings() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_old_shape_review(
+        &fixture,
+        &task,
+        2,
+        json!([{"level": "critical", "text": "the lock is dropped early"}]),
+        json!([{"level": "minor", "text": "a nicer name"}]),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("findings critical 1 · major 0 · minor 1 · pre-existing 0"),
+        "the old shape is counted through the mapping:\n{text}"
+    );
+}
+
+/// A narrow terminal cuts every metrics row with `…` and keeps the rail; nothing wraps.
+#[test]
+fn the_metrics_tab_cuts_a_narrow_row_with_an_ellipsis() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:01:00Z",
+        Some(json!({
+            "requests": 3,
+            "input_uncached": 83_000,
+            "cache_read": 4_000,
+            "cache_write": 1_000,
+            "output": 2_000,
+            "reasoning": 1_000,
+            "fee_micros": 230_000,
+            "peak_context": 83_000,
+            "context_window": 1_000_000,
+            "compactions": 1,
+            "compaction_ms": 15_000,
+        })),
+    );
+    write_command_times(
+        &fixture,
+        &task,
+        2,
+        &[(
+            "cargo nextest run --workspace --locked --no-fail-fast",
+            5_000,
+        )],
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 40, 24);
+    assert!(text.contains('…'), "a cut row ends in an ellipsis:\n{text}");
+    let rows: Vec<&str> = text.lines().collect();
+    let tab_row = rows
+        .iter()
+        .position(|row| row.contains("brief"))
+        .expect("the tab row is drawn");
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.contains("╰──"))
+        .expect("the frame ends");
+    for (index, row) in rows.iter().enumerate().take(bottom).skip(tab_row) {
+        assert_eq!(
+            row.chars().nth(2),
+            Some('│'),
+            "row {index} is missing the frame rail: {row:?}\n{text}"
+        );
+    }
+}
+
+/// A task with no attempt draws one weak `no attempts yet` line.
+#[test]
+fn the_metrics_tab_says_no_attempts_yet() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "d");
+    let terminal = render(&mut app, 80, 20);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains("no attempts yet"), "{text}");
+    let (row, column) = fg_of(&terminal, "no attempts yet");
+    assert_eq!(
+        fg(&terminal, row, column),
+        app.theme.hint.fg,
+        "the line is weak:\n{text}"
+    );
+}
+
+/// From `attempts`, `Tab` reaches `metrics` and then `brief`; `Shift-Tab` from `brief` goes back
+/// to `metrics`. Mutation: the tab left out of the cycle.
+#[test]
+fn the_metrics_tab_joins_the_cycle_between_attempts_and_brief() {
+    let fixture = Fixture::new();
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("d");
+    app.open_task();
+    while tab(&app) != TaskTab::Attempts {
+        app.on_key(&key(KeyCode::Tab));
+    }
+    assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+    assert_eq!(tab(&app), TaskTab::Metrics);
+    assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+    assert_eq!(tab(&app), TaskTab::Brief);
+    let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.on_key(&back), ArcKey::Redraw);
+    assert_eq!(tab(&app), TaskTab::Metrics);
+}
+
+/// A run with one 15 s compaction in a 60 s run shows the count, the time and its share; a run
+/// with no compaction draws no time.
+#[test]
+fn the_compaction_cell_shows_its_count_time_and_share() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:01:00Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "compactions": 1,
+            "compaction_ms": 15_000,
+        })),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:02:00Z",
+        "2026-01-01T00:03:00Z",
+        Some(json!({"requests": 1, "input_uncached": 1, "compactions": 0})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    assert!(
+        text.contains("compactions 1 15s 25%"),
+        "the count, the time and its share are drawn:\n{text}"
+    );
+    assert!(
+        text.contains("compactions 0"),
+        "the empty run keeps its count:\n{text}"
+    );
+    assert!(
+        !text.contains("compactions 0 0s"),
+        "a run with no compaction draws no time:\n{text}"
+    );
 }
