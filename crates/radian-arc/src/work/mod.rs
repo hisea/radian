@@ -63,7 +63,7 @@ use crate::gate::{
 };
 use crate::git::GitOutput;
 use crate::process;
-use crate::store::attempt_ops::{HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval};
+use crate::store::attempt_ops::{self, HEARTBEAT_FILE, SIGNAL_FILE, heartbeat_interval};
 
 /// How often the wrapper looks at the worker, its jsonl stream and a cancel signal.
 const POLL: Duration = Duration::from_millis(100);
@@ -540,6 +540,12 @@ fn run_attempt(o: &Options, s: &Setup, heartbeat: &Heartbeat) -> Result<i32, Fai
     let (brief, copy_notes) = copy_verdicts(&brief, &s.arc, &s.worktree);
     notes.extend(copy_notes);
     let started_at = now();
+    // The attempt's queue wait ends when the worker starts, not when the claim ran: the wrapper
+    // completes the claim's `queue.json` with this `started_at`, the same value `execution.json`
+    // carries, so a setup that takes time after the claim is part of the wait (ADR 0048
+    // decision 13).
+    attempt_ops::complete_queue_record(&s.runs, &started_at)
+        .map_err(|error| Failure::error(error.message()))?;
     let deny = deny_paths(&s.arc);
     // The command worker's own state, outside the worktree and kept across the task's
     // attempts (ADR 0048 decision 7). It exists before the command starts.

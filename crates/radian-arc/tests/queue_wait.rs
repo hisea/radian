@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::Repo;
+use common::{Repo, work_args};
 use radian_arc::read;
 use radian_arc::run::LoopState;
 use radian_arc::store::model::TaskState;
@@ -82,6 +82,12 @@ fn claim_blocker(store: &Store, task: &str) {
     attempt_ops::claim(store, task).expect("the blocker claims");
 }
 
+/// Completes a claimed attempt's `queue.json` the way the wrapper does when the worker starts.
+fn complete(repo: &Repo, task: &str, attempt: u32, started_at: &str) {
+    attempt_ops::complete_queue_record(&repo.run_dir(task, attempt), started_at)
+        .expect("the queue record completes");
+}
+
 /// Moves a task out of `doing` without a wrapper: the same state a cancel leaves.
 fn release(store: &Store, task: &str) {
     store
@@ -138,13 +144,19 @@ fn a_second_startable_task_waits_and_its_attempt_records_the_wait() {
 
     release(&store, &blocker);
     let claim = attempt_ops::claim(&store, &waited).expect("the waited task claims");
+    // The wrapper completes the record when it starts the worker; the test uses a time 3
+    // seconds after the claim so the wait is visibly the difference from `eligible_at`.
+    let started = utc(&plan_ops::utc_now()) + chrono::Duration::seconds(3);
+    let started_text = started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    complete(&repo, &waited, claim.attempt, &started_text);
     let record = read_json(&queue(&repo, &waited, claim.attempt));
-    let started = utc(record["started_at"].as_str().expect("started_at"));
+    let recorded = utc(record["started_at"].as_str().expect("started_at"));
     let eligible_at = utc(record["eligible_at"].as_str().expect("eligible_at"));
     let wait = record["queue_wait_secs"].as_u64().expect("queue_wait_secs");
+    assert_eq!(recorded, started, "the wrapper's start time is recorded");
     assert_eq!(
         wait,
-        u64::try_from((started - eligible_at).num_seconds()).unwrap_or(0),
+        u64::try_from((recorded - eligible_at).num_seconds()).unwrap_or(0),
         "the wait is started_at - eligible_at: {record}"
     );
     assert!(
@@ -271,6 +283,8 @@ fn a_rework_attempt_waits_again_and_gets_its_own_queue_record() {
     confirm_run(&store, &plan);
 
     let first = attempt_ops::claim(&store, &task).expect("the first attempt claims");
+    let first_started = plan_ops::utc_now();
+    complete(&repo, &task, first.attempt, &first_started);
     let first_record = read_json(&queue(&repo, &task, first.attempt));
     assert_eq!(first_record["queue_wait_secs"], json!(0));
 
@@ -293,6 +307,13 @@ fn a_rework_attempt_waits_again_and_gets_its_own_queue_record() {
     release(&store, &blocker);
     let second = attempt_ops::claim(&store, &task).expect("the rework attempt claims");
     assert_eq!(second.attempt, 2);
+    let second_started = utc(&plan_ops::utc_now()) + chrono::Duration::seconds(2);
+    complete(
+        &repo,
+        &task,
+        second.attempt,
+        &second_started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
     let second_record = read_json(&queue(&repo, &task, second.attempt));
     assert!(
         second_record.get("eligible_at").is_some(),
@@ -325,6 +346,7 @@ fn a_torn_eligibility_record_is_consumed_and_the_wait_is_not_reported() {
 
     let claim = attempt_ops::claim(&store, &task).expect("the claim still succeeds");
     assert!(!path.exists(), "the claim deletes a torn record too");
+    complete(&repo, &task, claim.attempt, &plan_ops::utc_now());
     let record = read_json(&queue(&repo, &task, claim.attempt));
     assert!(
         record.get("queue_wait_secs").is_none(),
@@ -340,6 +362,219 @@ fn a_torn_eligibility_record_is_consumed_and_the_wait_is_not_reported() {
         text.contains("queue_wait_secs=-"),
         "an unreported wait prints `-`: {text}"
     );
+}
+
+/// Review, item 1: the wait ends when the wrapper starts the worker, not when the claim ran.
+/// A task is queued behind a full slot, claimed, and only then does the wrapper start (after a
+/// sleep that stands for its setup); the queue record must carry the wrapper's own `started_at`
+/// — the value `execution.json` carries — and the wait must cover the setup.
+#[test]
+fn the_queue_wait_ends_when_the_wrapper_starts_the_worker() {
+    let repo = Repo::new("queue-wait-wrapper");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "wrapper");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+
+    pass(&store);
+    let first = read_json(&eligible(&repo, &waited));
+    let eligible_at = utc(first["eligible_at"].as_str().expect("eligible_at"));
+
+    release(&store, &blocker);
+    let claim = attempt_ops::claim(&store, &waited).expect("the waited task claims");
+    let claimed = read_json(&queue(&repo, &waited, claim.attempt));
+    assert!(
+        claimed.get("started_at").is_none(),
+        "the claim alone records no start: {claimed}"
+    );
+
+    // The wrapper's setup after the claim takes time; the wait must cover it.
+    std::thread::sleep(Duration::from_millis(1200));
+    let args = work_args(
+        &waited,
+        claim.attempt,
+        &claim.token,
+        &["--flow", "default", "--command", "[\"true\"]"],
+        &[],
+    );
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = repo.work(&refs, "the brief\n");
+    // The command writes no `Result`, so the wrapper ends with the `terminated` outcome; it
+    // still writes its records, which is what this test needs.
+    assert!(
+        repo.run_dir(&waited, claim.attempt)
+            .join("execution.json")
+            .is_file(),
+        "the wrapper wrote its record: {run:?}"
+    );
+
+    let execution = read_json(&repo.run_dir(&waited, claim.attempt).join("execution.json"));
+    let record = read_json(&queue(&repo, &waited, claim.attempt));
+    let started_at = execution["started_at"]
+        .as_str()
+        .expect("the execution start");
+    assert_eq!(
+        record["started_at"],
+        json!(started_at),
+        "the queue wait ends where the attempt started: {record}"
+    );
+    let wait = record["queue_wait_secs"].as_u64().expect("queue_wait_secs");
+    let expected = u64::try_from((utc(started_at) - eligible_at).num_seconds()).unwrap_or(0);
+    assert_eq!(
+        wait, expected,
+        "the wait covers the wrapper setup: {record}"
+    );
+    assert!(
+        wait >= 1,
+        "the post-claim setup is part of the wait: {record}"
+    );
+}
+
+/// Review, item 2: a plan set to `auto` `off` after a task began waiting drops the record, and
+/// a later `run` begins a fresh wait rather than keeping the earlier time.
+#[test]
+fn a_plan_set_to_auto_off_drops_the_wait_and_a_later_run_starts_fresh() {
+    let repo = Repo::new("queue-wait-auto-off");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-off");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+
+    pass(&store);
+    let path = eligible(&repo, &waited);
+    let first = read_json(&path);
+    let first_at = utc(first["eligible_at"].as_str().expect("eligible_at"));
+
+    plan_ops::set_auto(&store, &plan, "off").expect("auto off");
+    assert!(!path.exists(), "auto `off` drops the wait");
+
+    plan_ops::set_auto(&store, &plan, "run").expect("auto run");
+    std::thread::sleep(Duration::from_millis(1100));
+    pass(&store);
+    let second = read_json(&path);
+    let second_at = utc(second["eligible_at"].as_str().expect("eligible_at"));
+    assert!(
+        second_at > first_at,
+        "the resumed plan begins a fresh wait: {second}"
+    );
+
+    release(&store, &blocker);
+    let claim = attempt_ops::claim(&store, &waited).expect("the waited task claims");
+    let started = utc(&plan_ops::utc_now()) + chrono::Duration::seconds(1);
+    complete(
+        &repo,
+        &waited,
+        claim.attempt,
+        &started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    let record = read_json(&queue(&repo, &waited, claim.attempt));
+    let recorded_eligible = utc(record["eligible_at"].as_str().expect("eligible_at"));
+    assert_eq!(
+        recorded_eligible, second_at,
+        "the claim consumes the fresh time, not the stale one: {record}"
+    );
+}
+
+/// Review, item 2: an amendment that sends a confirmed plan back to `draft` makes it
+/// unstartable, so the record a ready task began drops.
+#[test]
+fn a_plan_amendment_back_to_draft_drops_the_wait() {
+    let repo = Repo::new("queue-wait-amend");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "amend");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+
+    pass(&store);
+    let path = eligible(&repo, &waited);
+    assert!(path.is_file(), "the wait began before the amendment");
+
+    plan_ops::update_plan(&store, &plan, None, None, Some("the plan changed"))
+        .expect("the amendment");
+    let stored = store.load_plan(&plan).expect("the plan reads").item;
+    assert_eq!(stored.status, "draft");
+    assert_eq!(stored.auto, "off");
+    assert!(
+        !path.exists(),
+        "a draft plan starts nothing, so the wait drops"
+    );
+}
+
+/// Review, item 2: the automatic-rework limit pauses the plan, so a ready task's wait drops.
+#[test]
+fn an_automatic_rework_pause_drops_the_wait() {
+    let repo = Repo::new("queue-wait-auto-rework");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "auto-rework");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    let reworked = add_task(&store, &plan, "reworked", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+    pass(&store);
+    let path = eligible(&repo, &waited);
+    assert!(path.is_file(), "the wait began before the pause");
+
+    // The task is one automatic rework past the default limit of 2.
+    store
+        .change_task(&reworked, |task| {
+            task.enter(TaskState::Review, "rework_pending");
+            task.auto_rework = 2;
+            Ok(())
+        })
+        .expect("the reworked task waits for a rework");
+    let paused = attempt_ops::record_auto_rework(&store, &reworked)
+        .expect("the rework is counted")
+        .expect("the limit paused the plan");
+    assert_eq!(paused.plan, plan);
+    assert_eq!(
+        store.load_plan(&plan).expect("the plan reads").item.auto,
+        "off"
+    );
+    assert!(!path.exists(), "the paused plan drops the wait");
+}
+
+/// Review, item 2: a plan budget that pauses the plan drops a ready task's wait.
+#[test]
+fn a_plan_budget_pause_drops_the_wait() {
+    let repo = Repo::new("queue-wait-budget");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "budget");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    let budgeted = add_task(&store, &plan, "budgeted", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+    pass(&store);
+    let path = eligible(&repo, &waited);
+    assert!(path.is_file(), "the wait began before the pause");
+
+    store
+        .change_plan(&plan, |plan| {
+            plan.max_cost_usd = Some(0.5);
+            Ok(())
+        })
+        .expect("the plan budget");
+    store
+        .change_task(&budgeted, |task| {
+            task.enter(TaskState::Review, "verifying");
+            Ok(())
+        })
+        .expect("the budgeted task waits for its review");
+    let paused = attempt_ops::charge_review_cost(&store, &budgeted, "budgeted-1", 1.0)
+        .expect("the review cost is charged");
+    assert!(paused, "the plan budget paused the task");
+    assert_eq!(
+        store.load_plan(&plan).expect("the plan reads").item.auto,
+        "off"
+    );
+    assert!(!path.exists(), "the paused plan drops the wait");
 }
 
 /// Edge 9: a task skipped only because the hub's machine-wide cap is full gets

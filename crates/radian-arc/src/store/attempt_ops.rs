@@ -430,27 +430,24 @@ fn queue_wait_secs(eligible_at: &str, started_at: &str) -> Option<u64> {
     Some(u64::try_from(seconds).unwrap_or(0))
 }
 
-/// Writes `queue.json` for a claimed attempt and consumes `eligible_at.json`. Called under the
+/// Writes the claimed attempt's `queue.json` and consumes `eligible_at.json`. Called under the
 /// claim's `state.lock`, after the task file moved to `doing` and `start.json` was written.
-fn write_queue_record(
-    store: &Store,
-    task: &str,
-    attempt: u32,
-    started_at: &str,
-) -> Result<(), Error> {
+///
+/// The record is incomplete on purpose: the claim does not know when the worker starts, and a
+/// wrapper can begin materially later. It holds the eligibility time, `queue_wait_secs` `0`
+/// when the task was startable without a wait, or neither when the record could not be read.
+/// [`complete_queue_record`] adds the wrapper's `started_at` and the wait when `radian arc work`
+/// starts (ADR 0048 decision 13).
+fn write_claim_queue(store: &Store, task: &str, attempt: u32) -> Result<(), Error> {
     let eligible = read_eligible(store, task);
     let mut record = serde_json::Map::new();
-    record.insert("started_at".to_owned(), json!(started_at));
     match eligible {
         Eligible::Missing => {
             record.insert("queue_wait_secs".to_owned(), json!(0));
         }
         Eligible::Torn => {}
         Eligible::At(at) => {
-            if let Some(seconds) = queue_wait_secs(&at, started_at) {
-                record.insert("eligible_at".to_owned(), json!(at));
-                record.insert("queue_wait_secs".to_owned(), json!(seconds));
-            }
+            record.insert("eligible_at".to_owned(), json!(at));
         }
     }
     let path = run_dir(store, task, attempt).join(QUEUE_FILE);
@@ -465,6 +462,55 @@ fn write_queue_record(
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))?;
     clear_eligible_at(store, task);
     Ok(())
+}
+
+/// Completes a claimed attempt's `queue.json` when its worker starts: the wrapper's own
+/// `started_at`, the same value its `execution.json` carries, and — when the claim recorded an
+/// eligibility time — the whole seconds from it. The wrapper's setup after the claim is part of
+/// the wait. A record the claim marked `0` keeps `0`, one the claim left without a wait stays
+/// without one, and a missing file (an attempt claimed before `queue.json` existed) is left
+/// alone (ADR 0048 decision 13).
+pub fn complete_queue_record(run_dir: &Path, started_at: &str) -> Result<(), Error> {
+    let path = run_dir.join(QUEUE_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::Failed(format!(
+                "cannot read {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let mut record = match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(record)) => record,
+        _ => serde_json::Map::new(),
+    };
+    record.insert("started_at".to_owned(), json!(started_at));
+    if let Some(at) = record
+        .get("eligible_at")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        && let Some(seconds) = queue_wait_secs(&at, started_at)
+    {
+        record.insert("queue_wait_secs".to_owned(), json!(seconds));
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(record))
+        .map_err(|error| Error::Failed(format!("cannot encode the queue record: {error}")))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// Drops the eligibility records of every task of a plan that stopped starting work, so a later
+/// resume begins each wait afresh instead of carrying the time its earlier startability period
+/// began (ADR 0048 decision 13). A plan that does not read clears nothing.
+pub fn clear_plan_eligible(store: &Store, plan: &str) {
+    let Ok(loaded) = store.load_plan(plan) else {
+        return;
+    };
+    for task in &loaded.item.tasks {
+        clear_eligible_at(store, task);
+    }
 }
 
 /// The whole seconds one attempt waited for a free worker slot, from its `queue.json`: `None`
@@ -730,7 +776,8 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     // The attempt's queue wait (ADR 0048 decision 13): the pass that first found the task
     // startable but did not start it left its time in `runs/<task>/eligible_at.json`; the claim
     // moves it here and deletes it. A task this claim is the first to find startable waits 0.
-    write_queue_record(store, task_id, number, &started_at)?;
+    // The wrapper completes the record with its own `started_at` when the worker starts.
+    write_claim_queue(store, task_id, number)?;
     Ok(Claim {
         task: task_id.to_owned(),
         attempt: number,
@@ -1226,13 +1273,19 @@ pub fn apply(
         let _ = fs::write(&path, format!("{text}\n"));
     }
     // A plan budget pauses the whole plan: its auto level goes to `off` in its own
-    // transaction, after the task lock is released.
+    // transaction, after the task lock is released. Its tasks' queue waits start over (ADR 0048
+    // decision 13).
     if pause_plan {
         let plan_id = store.load_task(task_id)?.item.plan;
-        let _ = store.change_plan(&plan_id, |plan| {
-            plan.auto = "off".to_owned();
-            Ok(())
-        });
+        if store
+            .change_plan(&plan_id, |plan| {
+                plan.auto = "off".to_owned();
+                Ok(())
+            })
+            .is_ok()
+        {
+            clear_plan_eligible(store, &plan_id);
+        }
     }
     Ok(applied)
 }
@@ -1642,10 +1695,15 @@ pub fn charge_review_cost(
     };
     if pause_plan {
         let plan_id = store.load_task(task_id)?.item.plan;
-        let _ = store.change_plan(&plan_id, |plan| {
-            plan.auto = "off".to_owned();
-            Ok(())
-        });
+        if store
+            .change_plan(&plan_id, |plan| {
+                plan.auto = "off".to_owned();
+                Ok(())
+            })
+            .is_ok()
+        {
+            clear_plan_eligible(store, &plan_id);
+        }
     }
     Ok(paused)
 }
@@ -1984,6 +2042,9 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
     record["pending"] = json!(false);
     write_pause_record(&dir, &record);
     changed?;
+    // The plan starts nothing at `off`: a ready task of it that had begun a queue wait loses it,
+    // so a later resume begins a fresh one (ADR 0048 decision 13).
+    clear_plan_eligible(store, &plan_id);
     Ok(Some(Paused {
         task: task_id.to_owned(),
         plan: plan_id,

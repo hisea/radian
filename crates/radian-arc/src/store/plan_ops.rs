@@ -214,6 +214,11 @@ pub fn set_auto(store: &Store, plan: &str, level: &str) -> Result<(), Error> {
         plan.auto = level.to_owned();
         Ok(())
     })?;
+    // A plan at `off` starts nothing: a task that had begun a queue wait loses it, so a later
+    // resume begins a fresh one (ADR 0048 decision 13).
+    if level == "off" {
+        super::attempt_ops::clear_plan_eligible(store, plan);
+    }
     Ok(())
 }
 
@@ -260,11 +265,7 @@ pub fn pause(store: &Store, plan: &str) -> Result<(), Error> {
     })?;
     // A paused plan starts nothing: a task that had begun a queue wait loses it, so a later
     // resume starts a fresh one (ADR 0048 decision 13).
-    if let Ok(loaded) = store.load_plan(plan) {
-        for task in loaded.item.tasks {
-            super::attempt_ops::clear_eligible_at(store, &task);
-        }
-    }
+    super::attempt_ops::clear_plan_eligible(store, plan);
     Ok(())
 }
 
@@ -300,6 +301,7 @@ pub fn update_plan(
         ));
     }
     let now = utc_now();
+    let mut unstarted = false;
     store.change_open_plan(plan, |plan| {
         if plan.status != "confirmed" {
             if change_record.is_some() {
@@ -332,8 +334,14 @@ pub fn update_plan(
         append_change_record(&mut plan.body, &now, record);
         plan.status = "draft".to_owned();
         plan.auto = "off".to_owned();
+        unstarted = true;
         Ok(())
     })?;
+    // A plan back at `draft` starts nothing: a task that had begun a queue wait loses it, so a
+    // later confirm begins a fresh one (ADR 0048 decision 13).
+    if unstarted {
+        super::attempt_ops::clear_plan_eligible(store, plan);
+    }
     Ok(())
 }
 

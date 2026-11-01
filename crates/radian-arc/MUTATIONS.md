@@ -2105,16 +2105,20 @@ file was restored from a copy under `.radian/mut/`, which `cmp` found identical.
 ## TK0289: a task's queue wait (2026-11-01, branch `work/TK0289-arc-queue-wait`)
 
 A scheduling pass writes `runs/<task>/eligible_at.json` the first time it finds a startable task
-and does not start it, once and never rewritten; the claim moves the time into the attempt's
-`queue.json` and deletes the record; a task that leaves `todo.ready` another way, or whose plan is
-paused, loses it. Each mutation was applied by hand to the working file, the named test ran with
+and does not start it, once and never rewritten; the claim begins the attempt's `queue.json` and
+deletes the record, and the worker wrapper completes it with the worker's real start; a task that
+leaves `todo.ready` another way, and every task of a plan that stops starting work, loses it. Each
+mutation was applied by hand to the working file, the named test ran with
 `cargo nextest run -p radian-arc --locked --profile sandbox --test queue_wait -E 'test(<name>)'`,
-and the file was restored from a copy under `.radian/mut/`, which `cmp` found identical.
+and the file was restored from a copy under `.radian/mut/`, which `cmp` found identical. M4 also
+rebuilt `radian` (`cargo build -p radian-tui --bin radian`) because its test runs the wrapper.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0289-M1 | `record_eligible_at` drops the "return when the file exists" guard, so a second skipping pass rewrites the time | `queue_wait::a_second_skipping_pass_does_not_rewrite_the_record` (the second pass's record read the later time) | ✅ 1 failed |
 | TK0289-M2 | `plan_ops::pause` no longer clears the plan's eligibility records, so a paused plan keeps the wait it had | `queue_wait::a_paused_plan_drops_the_wait_and_does_not_begin_one` (the file survived the pause) | ✅ 1 failed |
-| TK0289-M3 | `write_queue_record` no longer deletes `eligible_at.json` after the claim | `queue_wait::a_rework_attempt_waits_again_and_gets_its_own_queue_record` (the record survived the claim) | ✅ 1 failed |
+| TK0289-M3 | `write_claim_queue` no longer deletes `eligible_at.json` after the claim | `queue_wait::a_rework_attempt_waits_again_and_gets_its_own_queue_record` (the record survived the claim) | ✅ 1 failed |
+| TK0289-M4 | `radian arc work` no longer completes the claim's `queue.json`, so the record keeps the claim's partial form and no wait | `queue_wait::the_queue_wait_ends_when_the_wrapper_starts_the_worker` (`started_at` was `Null`, not the execution's start) | ✅ 1 failed |
+| TK0289-M5 | `clear_plan_eligible` is a no-op, so no pause path (`pause`, `set_auto` `off`, an amendment to `draft`, the budget and automatic-rework pauses) drops a wait | `queue_wait::a_plan_set_to_auto_off_drops_the_wait_and_a_later_run_starts_fresh` (the file survived `auto` `off`) | ✅ 1 failed |
 
-3/3 caught.
+5/5 caught.
