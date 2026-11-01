@@ -20,7 +20,9 @@ use super::support::{
 };
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
-use crate::memory::{MemoryHooks, MemoryInjection, MemoryService, MemoryTouch};
+use crate::memory::{
+    MemoryHooks, MemoryInjection, MemoryService, MemoryTouch, MemoryWriteGuard, settled_calls,
+};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -251,6 +253,16 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
+    // ADR 0021 invariant 4: the write guards. The resume half waits for the MCP session to
+    // open, because only then are the tools it routes known (`HostTools::open_session`); a
+    // name no server provides never counts, whatever its journaled result.
+    let memory_guard = memory
+        .as_ref()
+        .map(|service| MemoryWriteGuard::new(service, false));
+    let resume_calls = parsed
+        .as_ref()
+        .map(|parsed| settled_calls(parsed.events()))
+        .unwrap_or_default();
     // ADR 0027: the journal records each call's fee, computed at the
     // price in force when the call ran, so a resume does not have to re-price history with
     // whatever the catalog says later. The writer asks this closure per usage record; it
@@ -467,9 +479,13 @@ pub async fn open_session(
     }
     let mut tools = HostTools::new(coding, mcp.clone())
         .with_tool_allow(tools_allow)
-        .with_spec_sink(std::sync::Arc::clone(&spec_sink));
+        .with_spec_sink(std::sync::Arc::clone(&spec_sink))
+        .with_resume_calls(resume_calls);
     if let Some(touch) = memory_touch {
         tools = tools.with_memory_touch(touch);
+    }
+    if let Some(guard) = memory_guard {
+        tools = tools.with_memory_guard(guard);
     }
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the

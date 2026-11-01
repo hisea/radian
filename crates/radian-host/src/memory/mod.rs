@@ -10,6 +10,7 @@
 //! memory writes while `/memory off` is in force; there is no model memory tool (ADR 0021 D7).
 
 pub mod commands;
+mod guard;
 mod identity;
 pub mod injection;
 mod open;
@@ -20,6 +21,10 @@ mod touch;
 pub use commands::{
     COMMAND_NAMES, CommandError, CommandOutput, MemoryCommand, ProjectCommand, TYPE_NAMES,
     USAGE_ERROR, execute, parse_args, removed_message,
+};
+pub use guard::{
+    INPUT_GUARD, LONG_TOKEN, MemoryWriteGuard, SECRET_GUARD, SettledCall, journal_has_mcp_result,
+    settled_calls,
 };
 pub use identity::{candidate_name, project_identity_key, repository_root};
 pub use injection::{

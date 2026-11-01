@@ -13,7 +13,7 @@ use radian_core::{
 };
 
 use crate::goal::{GoalSession, GoalTools};
-use crate::memory::MemoryTouch;
+use crate::memory::{MemoryTouch, MemoryWriteGuard, SettledCall};
 use crate::skills::tools::{SkillSession, SkillTools};
 use crate::subagent::{SubagentSession, SubagentTools};
 
@@ -22,6 +22,9 @@ pub struct HostTools {
     /// The memory aging hook (ADR 0021 D3/D4): set by `open_session` whenever memory is on.
     /// It never changes a tool result.
     memory_touch: Option<MemoryTouch>,
+    /// The memory write guards (ADR 0021 invariant 4): set by `open_session` whenever memory
+    /// is on. They refuse a `write`/`patch` before the coding tools see it.
+    memory_guard: Option<MemoryWriteGuard>,
     /// `goal` (ADR 0047). Host-level like `ask_user`: mounted always, so the model's
     /// write end of the persistent goal exists in every session; without an active goal
     /// it answers `no_active_goal`.
@@ -35,6 +38,10 @@ pub struct HostTools {
     /// never passes it for a session whose `parent` relation is `"subagent"` (depth 1).
     subagent: Option<SubagentTools>,
     mcp: McpToolProvider,
+    /// The committed journal's settled calls, when this is a resumed session. The resume half
+    /// of the memory input guard judges them once the MCP session has opened and its routed
+    /// names are known (ADR 0021 invariant 4). A fresh session passes none.
+    resume_calls: Vec<SettledCall>,
     /// The session's built-in tool allow-list. `None` (the default) mounts every built-in the
     /// host has; `Some` mounts only these names — the others are not
     /// in the model's tool list at all and are not in the `<runtime>` layer (the permission
@@ -53,11 +60,13 @@ impl HostTools {
         Self {
             coding,
             memory_touch: None,
+            memory_guard: None,
             goal: None,
             ask: None,
             skills: None,
             subagent: None,
             mcp,
+            resume_calls: Vec::new(),
             tool_allow: None,
             spec_sink: None,
         }
@@ -113,6 +122,21 @@ impl HostTools {
         self
     }
 
+    /// Mounts the memory write guards (ADR 0021 invariant 4). They run before the built-in
+    /// `write`/`patch` and never change any other tool's result.
+    pub fn with_memory_guard(mut self, guard: MemoryWriteGuard) -> Self {
+        self.memory_guard = Some(guard);
+        self
+    }
+
+    /// Hands the committed journal's settled calls to the resume half of the input guard. The
+    /// decision waits for the MCP session to open, because only then are the routed names
+    /// known ([`HostTools::open_session`]).
+    pub fn with_resume_calls(mut self, calls: Vec<SettledCall>) -> Self {
+        self.resume_calls = calls;
+        self
+    }
+
     /// Mounts the `skill` tool (ADR 0025 S3). Without a discovered skill the model's tool list
     /// has no `skill` at all, so a host with no skills does not advertise it.
     pub fn with_skills(mut self, skills: SkillTools) -> Self {
@@ -132,6 +156,7 @@ impl HostTools {
 pub struct HostSession {
     coding: Option<CodingSession>,
     memory_touch: Option<MemoryTouch>,
+    memory_guard: Option<MemoryWriteGuard>,
     goal: Option<GoalSession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
@@ -225,6 +250,19 @@ impl ToolProvider for HostTools {
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
+        // ADR 0021 invariant 4, resume half: a settled call in the committed journal arms the
+        // guard only when it names a tool this MCP session actually routes and its result came
+        // from the tool. The routed list is the same one the live branch checks, so a fabricated
+        // name and a runtime result that never reached a server do not count. The guard's flag
+        // is shared with the `HostSession` clone below.
+        if let Some(guard) = &self.memory_guard {
+            let routed: HashSet<String> = mcp
+                .tool_specs()
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect();
+            guard.adopt_resumed(&self.resume_calls, &routed);
+        }
         if let Some(sink) = &self.spec_sink {
             *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(specs.clone());
         }
@@ -232,6 +270,7 @@ impl ToolProvider for HostTools {
         Ok(HostSession {
             coding,
             memory_touch: self.memory_touch.clone(),
+            memory_guard: self.memory_guard.clone(),
             goal,
             ask,
             skills,
@@ -257,6 +296,13 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
+        // ADR 0021 invariant 4: the memory write guards are a host decision and run before
+        // the built-in tools open, create or truncate the target.
+        if let Some(guard) = &self.memory_guard
+            && let Err(failure) = guard.check(call)
+        {
+            return Err(failure);
+        }
         let result = if self.skill_names.contains(&call.name) {
             match &self.skills {
                 Some(skills) => skills.execute(call, cx).await,
@@ -298,7 +344,22 @@ impl ToolSession for HostSession {
                 )),
             }
         } else {
-            self.mcp.execute(call, cx).await
+            // Only a name the MCP session actually routes reaches a server. A call to an
+            // unmounted or invented name is settled `unknown_tool` by `McpSession::execute`
+            // without any server seeing it, so it is not outside content and must not trigger
+            // the memory input guard.
+            let routed = self
+                .mcp
+                .tool_specs()
+                .iter()
+                .any(|spec| spec.name == call.name);
+            let result = self.mcp.execute(call, cx).await;
+            // A settled MCP call puts outside content in the session: the input guard refuses
+            // memory writes from now on, whether the call succeeded or failed.
+            if routed && let Some(guard) = &self.memory_guard {
+                guard.note_mcp_result();
+            }
+            result
         };
         // The memory aging hook (ADR 0021 D3/D4): after the read settled, record the use. It
         // can only warn, so the tool result below is the tool's own.
@@ -388,5 +449,53 @@ mod tests {
         let merged = merge_tool_specs(vec![spec("read")], vec![spec("fx__echo")]).unwrap();
         let names: Vec<&str> = merged.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["read", "fx__echo"]);
+    }
+
+    /// An invented or unmounted name falls through to `McpSession::execute`, which settles
+    /// `unknown_tool` without any server seeing it. That result is not outside content, so the
+    /// memory input guard must not be armed by it.
+    #[tokio::test]
+    async fn an_invented_tool_call_does_not_arm_the_memory_input_guard() {
+        let dir = crate::test_support::TempDir::with_label("radian-tools-guard", "invented");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = dir.join("memory");
+        let service = crate::memory::MemoryService::open(&ws, &root);
+        let guard = MemoryWriteGuard::new(&service, false);
+        let tools = HostTools::new(None, McpToolProvider::new(Vec::new())).with_memory_guard(guard);
+        let session = tools.open_session().await.unwrap();
+
+        let sink = radian_core::NoopSink;
+        let cancellation = radian_core::CancellationToken::new();
+        let cx = || ToolContext {
+            cancellation: cancellation.clone(),
+            events: &sink,
+            index: 0,
+        };
+
+        let invented = ToolCall {
+            id: "c1".into(),
+            name: "typo_tool".into(),
+            arguments: json!({}),
+        };
+        let failure = session.execute(&invented, cx()).await.unwrap_err();
+        assert_eq!(failure.code, "unknown_tool", "{}", failure.message);
+
+        let write = ToolCall {
+            id: "c2".into(),
+            name: "write".into(),
+            arguments: json!({
+                "path": root.join("global/x.md").to_str().unwrap(),
+                "content": "note\n",
+            }),
+        };
+        let failure = session.execute(&write, cx()).await.unwrap_err();
+        assert_ne!(
+            failure.message,
+            crate::memory::INPUT_GUARD,
+            "an invented tool is not an MCP result"
+        );
+        assert_eq!(failure.code, "unknown_tool", "{}", failure.message);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
