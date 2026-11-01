@@ -133,8 +133,8 @@ type into the message box.
 | `/memory relink` | `/memory relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `/memory split` | `/memory split [--yes] <from> <to> <name>...` | Move files and their index lines between projects. Asks first. |
 | `/memory merge` | `/memory merge [--yes] <into> <from>` | Move every file from one project into another; a name in both is renamed `<name>-2` and reported. Asks first. |
-| `/memory off` | `/memory off` (no arguments) | Refuse memory writes for the rest of this process and record the switch so a resume starts without the index section. Takes effect at once; never written to the config file. |
-| `/memory on` | `/memory on` (no arguments) | Allow memory writes again in this process. |
+| `/memory off` | `/memory off` (no arguments) | Refuse the model's `write` and `patch` calls into a memory scope for the rest of this process, and record the switch so a resume starts without the index section. Takes effect at once; never written to the config file. |
+| `/memory on` | `/memory on` (no arguments) | Allow those memory writes again in this process. |
 
 `archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not
 exist; a call to one exits 2 with the current command set.

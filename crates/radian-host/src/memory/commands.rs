@@ -11,7 +11,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use radian_memory::{Frontmatter, MemoryError, ProjectId, RECORD_TYPES, Record};
+use radian_memory::{
+    Frontmatter, MemoryError, ProjectId, RECORD_TYPES, Record, validate_record_name,
+};
 
 use super::service::{
     MemoryService, MemoryServiceError, ProjectForWrite, ProjectState, ScopeSelection, ScopedEntry,
@@ -332,6 +334,16 @@ pub fn execute(
             record_type,
             name,
         } => {
+            // Validate before resolving the project: an unlinked git workspace would otherwise
+            // register a project (and write projects.jsonl) for a name that is refused.
+            if let Err(reason) = validate_record_name(&name) {
+                return Err(add_error(MemoryServiceError::Storage(
+                    MemoryError::InvalidName {
+                        name: name.clone(),
+                        reason,
+                    },
+                )));
+            }
             let scope = write_scope(global);
             if scope == WriteScope::Project
                 && let ProjectForWrite::Created(created) = service.project_for_write()?
@@ -717,6 +729,11 @@ fn project_text(service: &MemoryService, json: bool) -> Result<String, CommandEr
 }
 
 fn move_report_text(report: &super::service::MoveReport) -> String {
+    let renamed_from: std::collections::BTreeSet<&str> = report
+        .renamed
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
     let mut out = String::new();
     for name in &report.moved {
         out.push_str(&format!("moved {name}\n"));
@@ -726,10 +743,22 @@ fn move_report_text(report: &super::service::MoveReport) -> String {
             "conflict: {name} exists in the target; renamed it to {new_name}\n"
         ));
     }
+    for name in &report.conflicts {
+        if renamed_from.contains(name.as_str()) {
+            continue;
+        }
+        out.push_str(&format!(
+            "conflict: {name} exists in the target; it was not moved\n"
+        ));
+    }
     for name in &report.missing {
         out.push_str(&format!("missing {name}\n"));
     }
-    if report.moved.is_empty() && report.renamed.is_empty() && report.missing.is_empty() {
+    if report.moved.is_empty()
+        && report.renamed.is_empty()
+        && report.conflicts.is_empty()
+        && report.missing.is_empty()
+    {
         out.push_str("nothing to do\n");
     }
     out

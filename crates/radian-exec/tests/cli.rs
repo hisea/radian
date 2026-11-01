@@ -7459,6 +7459,82 @@ async fn memory_add_list_show_edit_round_trip() {
 }
 
 #[tokio::test]
+async fn memory_add_refuses_a_bad_name_before_registering_an_unlinked_git_project() {
+    let env = MemoryEnv::new("mem-add-bad-name-unlinked-git");
+    // A `.git` directory makes the workspace a project workspace that `add` would otherwise
+    // register automatically. The bad name must be refused before that write.
+    std::fs::create_dir_all(env.ws.join(".git")).unwrap();
+
+    let (code, stdout, stderr) = env.run(&["add", "Bad Name"]).await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
+    assert!(
+        !stdout.contains("created project"),
+        "a refused name printed the created-project notice: {stdout}"
+    );
+    assert!(
+        !env.home.join("memory/projects.jsonl").exists(),
+        "a refused name registered a project"
+    );
+    assert!(
+        !env.home.join("memory/projects").exists(),
+        "a refused name created a project directory"
+    );
+}
+
+#[tokio::test]
+async fn memory_add_refuses_a_bad_name_before_an_unlinked_workspace_refusal() {
+    let env = MemoryEnv::new("mem-add-bad-name-unlinked");
+    let (code, _, stderr) = env.run(&["add", "Bad Name"]).await;
+    assert_eq!(
+        code, 2,
+        "the name rule wins over the workspace refusal: {stderr}"
+    );
+    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
+    assert!(
+        !stderr.contains("not a project workspace"),
+        "a bad name is a usage error, not a project refusal: {stderr}"
+    );
+}
+
+/// Edge 5: `split` reports a name already present in the target and moves neither file.
+#[tokio::test]
+async fn memory_split_reports_a_collision_and_moves_nothing() {
+    let env = MemoryEnv::new("mem-split-collision");
+    let a = env.workspace("split-a");
+    let b = env.workspace("split-b");
+    std::fs::create_dir_all(a.join(".git")).unwrap();
+    std::fs::create_dir_all(b.join(".git")).unwrap();
+    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (_, _, stderr) = env.run_in(&a, &["add", "note"]).await;
+    assert_eq!(stderr, "", "{stderr}");
+    let (_, _, stderr) = env.run_in(&b, &["add", "note"]).await;
+    assert_eq!(stderr, "", "{stderr}");
+    let project_a = linked_project(&env, &a).await;
+    let project_b = linked_project(&env, &b).await;
+
+    let (code, out, stderr) = env
+        .run_in(&a, &["split", "--yes", &project_a, &project_b, "note"])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        out.contains("conflict: note exists in the target; it was not moved"),
+        "the collision is reported: {out}"
+    );
+    let (_, out, _) = env.run_in(&a, &["list"]).await;
+    assert!(out.contains("note"), "the source file stays: {out}");
+    let (_, out, _) = env.run_in(&b, &["list"]).await;
+    assert_eq!(
+        out.lines().filter(|line| line.contains("\tnote\t")).count(),
+        1,
+        "the target copied nothing: {out}"
+    );
+}
+
+#[tokio::test]
 async fn memory_add_refuses_a_bad_or_existing_name_and_writes_nothing() {
     let env = MemoryEnv::new("mem-add-refusal");
     let (_, _, _) = env.run(&["project", "new"]).await;
@@ -8017,6 +8093,10 @@ async fn memory_split_and_merge_move_files_and_rename_a_collision() {
         .await;
     assert_eq!(code, 0, "{stderr}");
     assert!(out.contains("renamed it to note-2"), "{out}");
+    assert!(
+        !out.contains("it was not moved"),
+        "a merge renames its collision instead of reporting a skipped split: {out}"
+    );
     let (_, out, _) = env.run_in(&a, &["list"]).await;
     assert!(out.contains("note"), "{out}");
     assert!(out.contains("note-2"), "{out}");
@@ -8869,9 +8949,11 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
     // One memory record, so `radian memory list` has a line to write.
     let home = scratch("sigpipe-home");
     let add = std::process::Command::new(common::radian_bin())
-        .args(["memory", "add", "--global", "a memory record"])
+        .args(["memory", "add", "--global", "memory-note"])
         .env("RADIAN_HOME", home.as_os_str())
         .env("HOME", home.as_os_str())
+        .env("EDITOR", "true")
+        .env("VISUAL", "true")
         .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
         .stdin(Stdio::null())
         .stdout(Stdio::null())

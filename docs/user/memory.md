@@ -35,8 +35,9 @@ means the file was never read.
 
 The model writes these files with the ordinary `write` and `patch` tools. In both tiers those
 tools reach only the global directory and, when the workspace maps to a project, that
-project's directory. Every other path under the memory directory stays denied, and `shell`
-cannot read or write any of it. See `permissions`.
+project's directory. Every other path under the memory directory stays denied to those tools.
+Under the `workspace` tier the sandbox also keeps `shell` from reading or writing the memory
+directory; the `full` tier runs no sandbox. See `permissions`.
 
 ## Frontmatter
 
@@ -47,7 +48,7 @@ A record starts with `---`, then one field per line, then `---`, then the body.
 | `name` | string | The file stem: `a-z`, `0-9` and `-`, 1 to 64 characters. It must equal the file stem. |
 | `description` | string | One line. The index shows it. |
 | `type` | closed set | `user`, `feedback`, `project`, `reference`. `feedback` and `project` records carry `**Why:**` and `**How to apply:**` lines in the body. |
-| `source` | closed set | `model`, `user`, `import`. The host sets it at the first write and keeps it afterwards; the model never supplies it. |
+| `source` | closed set | `model`, `user`, `import`. `add` writes `user`; the model's own writes carry `model`, as the memory prompt tells it. A value outside the set makes the file unreadable. |
 | `created` | RFC 3339 UTC | Set once. |
 | `modified` | RFC 3339 UTC | Set on every write. |
 | `last_used` | RFC 3339 UTC or absent | Optional. Absent means the record was never read. A model `read` sets it; a user command never changes it. |
@@ -185,8 +186,9 @@ There is no memory tool. A call to `memory_search` or `memory_save` is an unknow
 
 ## The session switch
 
-`/memory off` refuses every memory write for the rest of this process, with the reason
-`memory is off for this session`, and records the switch in the session so a resume starts
-without the index section. The section this process already built stays frozen; the switch
-takes full effect on the next session. `/memory on` allows writes again. The switch is per
-session and is never written to the configuration file.
+`/memory off` refuses the model's `write` and `patch` calls into a memory scope for the rest
+of this process, with the reason `memory is off for this session`, and records the switch in
+the session so a resume starts without the index section. It is not a sandbox guard: command
+line tools keep whatever file access the tier allows. The section this process already built
+stays frozen; the switch takes full effect on the next session. `/memory on` allows those
+writes again. The switch is per session and is never written to the configuration file.
