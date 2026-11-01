@@ -9,13 +9,22 @@
 
 use serde_json::{Value, json};
 
+use crate::gate::REVIEW_LEVELS;
+
+/// The token a schema writes where the review levels belong. [`ToolDef::schema`] replaces it
+/// with [`REVIEW_LEVELS`] as JSON strings, so the advertised enum and the set the handler
+/// checks against cannot drift.
+const REVIEW_LEVELS_MARKER: &str = "\"__REVIEW_LEVELS__\"";
+
 /// One MCP tool.
 pub struct ToolDef {
     /// The MCP tool name, which is also the dispatch key.
     pub name: &'static str,
     /// What the tool does, shown by `tools/list`.
     pub description: &'static str,
-    /// The JSON Schema of the arguments, as the text `tools/list` returns.
+    /// The JSON Schema of the arguments as a template. It is valid JSON on its own, and
+    /// [`REVIEW_LEVELS_MARKER`] stands where the review levels belong; [`ToolDef::schema`]
+    /// returns the text `tools/list` sends.
     pub input_schema: &'static str,
 }
 
@@ -24,7 +33,13 @@ impl ToolDef {
     /// parses every one of them, so an unparsable schema is a test failure, not a runtime
     /// surprise; the fallback keeps the server answering anyway.
     pub fn schema(&self) -> Value {
-        serde_json::from_str(self.input_schema).unwrap_or_else(|_| json!({"type": "object"}))
+        let levels = REVIEW_LEVELS
+            .iter()
+            .map(|level| format!("\"{level}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text = self.input_schema.replace(REVIEW_LEVELS_MARKER, &levels);
+        serde_json::from_str(&text).unwrap_or_else(|_| json!({"type": "object"}))
     }
 
     /// The schema's property names and whether each one is required, sorted by name
@@ -122,7 +137,7 @@ pub const TOOLS: &[ToolDef] = &[
     },
     "review_fix_level": {
       "type": "string",
-      "enum": ["critical", "major", "minor"],
+      "enum": ["__REVIEW_LEVELS__"],
       "description": "The level a finding must reach to fail this task's review rounds. Absent: the fix_level of the reviewer its gate profile names."
     }
   },
@@ -197,8 +212,8 @@ pub const TOOLS: &[ToolDef] = &[
       "description": "The [flows.<name>] section whose worker every attempt starts. It must name a flow in config.toml, and it can change only while the task has had no attempt."
     },
     "review_fix_level": {
-      "type": "string",
-      "enum": ["critical", "major", "minor"],
+      "type": ["string", "null"],
+      "enum": ["__REVIEW_LEVELS__", null],
       "description": "The task's own level a finding must reach to fail its review rounds. An explicit null clears it, so the reviewer's fix_level applies."
     }
   },

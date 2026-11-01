@@ -368,3 +368,41 @@ fn add_task_refuses_a_review_fix_level_outside_the_set_and_the_schemas_list_it()
         assert_eq!(values, radian_arc::gate::REVIEW_LEVELS, "{name}");
     }
 }
+
+/// `update_task` clears the override with an explicit `null` (ADR 0048 decision 10), so its
+/// schema must admit `null` as well as the three levels: a schema-validating client drops a
+/// call whose argument does not match the advertised type before the handler ever sees it.
+#[test]
+fn update_task_schema_admits_an_explicit_null_review_fix_level() {
+    let tool = radian_arc::mcp::TOOLS
+        .iter()
+        .find(|tool| tool.name == "update_task")
+        .expect("update_task exists");
+    let property = &tool.schema()["properties"]["review_fix_level"];
+    let types: Vec<&str> = match &property["type"] {
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(names) => names.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    assert!(
+        types.contains(&"string"),
+        "review_fix_level is a string: {property}"
+    );
+    assert!(
+        types.contains(&"null"),
+        "an explicit null clears it, so the type must admit null: {property}"
+    );
+    let values = property["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("review_fix_level's enum is a list: {property}"));
+    assert!(
+        values.iter().any(Value::is_null),
+        "the enum must list null beside the levels: {property}"
+    );
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            values.iter().any(|value| value.as_str() == Some(level)),
+            "the enum names `{level}`: {property}"
+        );
+    }
+}
