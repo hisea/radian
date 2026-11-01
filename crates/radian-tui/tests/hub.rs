@@ -1,10 +1,12 @@
 //! `radian hub` through the real binary: `add`, `list`, `--json`, `remove`, the exit codes,
-//! and the bare command that says the loop and the API are not built yet.
+//! and the bare command that starts the scheduling loop.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// A temp directory that removes itself.
 struct Scratch {
@@ -152,14 +154,37 @@ fn remove_refuses_an_unknown_name_and_removes_only_the_named_entry() {
 }
 
 #[test]
-fn hub_without_an_argument_exits_three_with_the_not_built_line() {
+fn hub_without_an_argument_starts_the_loop_and_holds_hub_lock() {
     let scratch = Scratch::new("bare");
-    let run = scratch.run(&["hub"]);
-    assert_eq!(run.code, Some(3), "{run:?}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_radian"))
+        .current_dir(&scratch.dir)
+        .env("RADIAN_HOME", scratch.home())
+        .args(["hub"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("radian hub starts");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut first = String::new();
+    stdout.read_line(&mut first).expect("the first line");
     assert!(
-        run.err
-            .contains("the hub loop and the API are not built yet"),
-        "{}",
-        run.err
+        first.contains("the scheduling loop runs alone"),
+        "the first line does not say the HTTP listener is missing: {first:?}"
     );
+
+    let lock = scratch.home().join("hub/hub.lock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lock.is_file() {
+        assert!(Instant::now() < deadline, "the hub never wrote hub.lock");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let sent = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success(), "SIGTERM reaches the hub");
+    let status = child.wait().expect("the hub exits");
+    assert_eq!(status.code(), Some(0), "SIGTERM is not an error");
 }

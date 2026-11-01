@@ -151,10 +151,14 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
     // `radian arc serve` as a detached process when no loop runs, and quitting leaves
     // that process alone.
     let mut starter = LoopStarter::new(app.store.clone());
-    if let Err(text) = starter.start() {
-        // A loop that already holds the lock makes this fail before the first frame: the
-        // open-time theme warning stays, with the start's line after it (brief TK0087).
-        app.add_result(text, false);
+    match starter.start() {
+        Ok(Some(line)) => app.add_result(line, false),
+        Ok(None) => {}
+        Err(text) => {
+            // A loop that already holds the lock makes this fail before the first frame: the
+            // open-time theme warning stays, with the start's line after it (brief TK0087).
+            app.add_result(text, false);
+        }
     }
     looping::install_stop_handler();
     app.set_loop_status(starter.status());
@@ -374,8 +378,10 @@ pub(super) fn run_arc(config: Option<&Path>) -> ExitCode {
             Input::Event(Event::Key(key)) => match app.on_key(&key) {
                 ArcKey::Quit => break,
                 ArcKey::StartLoop => {
-                    if let Err(text) = starter.start() {
-                        app.set_result(text, false);
+                    match starter.start() {
+                        Ok(Some(line)) => app.set_result(line, false),
+                        Ok(None) => {}
+                        Err(text) => app.set_result(text, false),
                     }
                     app.set_loop_status(starter.status());
                     dirty = true;

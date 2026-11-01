@@ -188,8 +188,8 @@ radian arc reset-budget TK0001-first-work
 
 ## `radian hub`
 
-`radian hub` manages the repository registry one hub process reads (`~/.radian/hub/repos.toml`).
-This build has the registry only: a bare `radian hub` prints `the hub loop and the API are not built yet` and exits `3`.
+`radian hub` with no subcommand runs the scheduling loop for every repository in the registry (`~/.radian/hub/repos.toml`); `add`, `remove` and `list` manage the registry.
+The loop, `hub.lock`, the machine-wide cap and the status lines are on [`arc/hub`](arc/hub.md#the-loop).
 The registry file, every subcommand and the `[hub]` configuration keys are on [`arc/hub`](arc/hub.md).
 
 | Subcommand | Arguments | What it does |
@@ -198,7 +198,7 @@ The registry file, every subcommand and the `[hub]` configuration keys are on [`
 | `remove <NAME>` | — | Remove a registered repository. It prints `removed <name>`. |
 | `list` | `--json` | Print one line per repository (`name  path`), or a JSON array of `{name, path}`. |
 
-A registry error exits `1`; a usage error exits `2`.
+A registry error exits `1`; a second `radian hub` while one runs exits `1` and names the holder's pid; a usage error exits `2`.
 
 ## `radian login` and `radian logout`
 
@@ -392,7 +392,7 @@ arc/hooks: The `[hooks]` points, their rules and their environment.
 arc/hub: The hub's repository registry, its subcommands, and the `[hub]` configuration keys.
 arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
-arc/loop: The arc scheduling loop: one pass, its output and loop.log, serve, and its signals.
+arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.
 arc/mcp: The lead's MCP server: registering it, its tools and its tool errors.
 arc/owner: The owner's commands: confirm, auto, priority, pause, merge and reject.
 arc/planning: The commands that write plans and tasks: init, add, list, show and adopt.

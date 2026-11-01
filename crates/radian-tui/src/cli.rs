@@ -383,9 +383,9 @@ enum RadianCommand {
         command: Option<ArcCommand>,
     },
 
-    /// The hub: the registry of repositories one hub process manages.
-    /// `radian hub add`, `remove` and `list` write and read `~/.radian/hub/repos.toml`.
-    /// A bare `radian hub` does not start the loop or the API in this build.
+    /// The hub: the scheduling loop and the registry of repositories one hub process manages.
+    /// A bare `radian hub` starts the loop; `radian hub add`, `remove` and `list` read and
+    /// write `~/.radian/hub/repos.toml`.
     Hub {
         #[command(subcommand)]
         command: Option<HubCommand>,
@@ -748,11 +748,11 @@ enum ArcCommand {
     /// Make every transition the auto levels allow now, then exit: reconcile, release due
     /// retries, start a task's gate or a worker, and drive a merge at auto level `merge`. A
     /// pass only schedules: the worker and the gate run outside it and a later pass collects
-    /// them. Use `radian arc serve` to repeat the pass.
+    /// them. To keep advancing, run `radian hub`.
     Run {
-        /// Refused: `run --watch` is now `radian arc serve`. The flag exists only so the
-        /// refusal names the new command in one exact line; the manual documents it as a
-        /// refused input.
+        /// Refused: `run --watch` is now `radian hub`. The flag exists only so the refusal
+        /// names the new command in one exact line; the manual documents it as a refused
+        /// input.
         #[arg(long, hide = true)]
         watch: bool,
         /// Accepted with `--watch` only so the refusal is the exact line above instead of
@@ -762,17 +762,13 @@ enum ArcCommand {
         interval: Option<u64>,
     },
 
-    /// Run the scheduling loop: repeat the pass (which only schedules) every `--interval`
-    /// seconds until SIGINT or SIGTERM, holding `runner.lock` the whole time.
+    /// Removed: the scheduling loop is `radian hub`. The old form exits `2` with one line
+    /// that names the new command. Hidden: it is not an input of this build.
+    #[command(hide = true)]
     Serve {
-        /// Seconds between passes: 5 to 3600. The default is 30.
-        #[arg(
-            long,
-            value_name = "SECONDS",
-            value_parser = clap::value_parser!(u64).range(
-                radian_arc::run::MIN_INTERVAL_SECS..=radian_arc::run::MAX_INTERVAL_SECS
-            )
-        )]
+        /// Refused with the removal; parsed only so the refusal is one exact line instead of
+        /// clap's unknown-argument error.
+        #[arg(long, value_name = "SECONDS", hide = true)]
         interval: Option<u64>,
     },
 
@@ -881,9 +877,7 @@ impl ArcCommand {
             ArcCommand::Merge { task } => ArcRun::Merge { task },
             ArcCommand::Reject { task, note } => ArcRun::Reject { task, note },
             ArcCommand::Run { .. } => ArcRun::Run,
-            ArcCommand::Serve { interval } => ArcRun::Serve {
-                interval: interval.unwrap_or(radian_arc::run::DEFAULT_INTERVAL_SECS),
-            },
+            ArcCommand::Serve { .. } => return None,
             ArcCommand::Mcp {
                 claude_experimental,
             } => ArcRun::Mcp {
@@ -970,11 +964,17 @@ fn run_arc(command: Option<ArcCommand>, config: Option<&Path>) -> ExitCode {
                 radian_arc::gate::background::Options { task, lock_fd },
             ) as u8)
         }
-        // `run --watch` is `radian arc serve` (ADR 0048 §13), with or without `--interval`.
+        // `run --watch` is `radian hub` (ADR 0048 §16), with or without `--interval`.
         // The old form is refused with one exact line and the usage exit code; the hidden
         // flags above exist only so that line is this command's own, not clap's.
         Some(ArcCommand::Run { watch: true, .. }) => {
-            eprintln!("radian arc: `run --watch` is now `radian arc serve`");
+            eprintln!("radian arc: `run --watch` is now `radian hub`");
+            ExitCode::from(2)
+        }
+        // `radian arc serve` was removed with the one-loop decision (ADR 0048 §16): the same
+        // one-line refusal as `run --watch`, naming the command that replaced it.
+        Some(ArcCommand::Serve { .. }) => {
+            eprintln!("radian arc: `serve` is now `radian hub`");
             ExitCode::from(2)
         }
         Some(command) => {
@@ -1191,17 +1191,17 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
     }
 }
 
-/// Runs `radian hub` (ADR 0048): the repository registry. A bare `radian hub` exits `3` with
-/// one line, because the loop and the API are not built yet. A registry error exits `1` and
-/// prints one `radian hub:` line on stderr.
+/// Runs `radian hub` (ADR 0048 §16): with no subcommand the scheduling loop; otherwise the
+/// repository registry. A bare `radian hub` takes `hub.lock` for its life and exits `1` with
+/// one line naming the holder when another hub has it. A registry error exits `1` and prints
+/// one `radian hub:` line on stderr.
 fn run_hub(command: Option<HubCommand>) -> ExitCode {
-    let Some(command) = command else {
-        eprintln!("radian hub: the hub loop and the API are not built yet");
-        return ExitCode::from(3);
-    };
     let registry = match radian_arc::hub::Registry::open() {
         Ok(registry) => registry,
         Err(error) => return hub_error(&error),
+    };
+    let Some(command) = command else {
+        return run_hub_loop(&registry);
     };
     match command {
         HubCommand::Add { path, name } => match registry.add(&path, name.as_deref()) {
@@ -1250,6 +1250,18 @@ fn run_hub(command: Option<HubCommand>) -> ExitCode {
             }
             Err(error) => hub_error(&error),
         },
+    }
+}
+
+/// Runs the hub's scheduling loop, printing its lines to stdout. A closed reader is a normal
+/// stop, as every other print-and-exit command of this binary treats it.
+fn run_hub_loop(registry: &radian_arc::hub::Registry) -> ExitCode {
+    let emit = std::sync::Arc::new(|text: &str| {
+        let _ = radian_host::write_stdout(text);
+    });
+    match radian_arc::hub::run(registry, emit) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => hub_error(&error),
     }
 }
 

@@ -903,6 +903,93 @@ impl Repo {
         self.radian_command(args).spawn().expect("spawn radian")
     }
 
+    /// Like [`Repo::spawn`], with extra environment variables that win over the isolated
+    /// defaults.
+    pub fn spawn_with_env(&self, args: &[&str], envs: &[(&str, String)]) -> std::process::Child {
+        let mut command = self.radian_command(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.spawn().expect("spawn radian")
+    }
+
+    /// The hub registry in this repository's scratch home (`$RADIAN_HOME/hub/repos.toml`).
+    pub fn hub_registry(&self) -> radian_arc::hub::Registry {
+        radian_arc::hub::Registry::at(self.home.join("hub"))
+    }
+
+    /// Registers `path` in this repository's scratch home under `name`.
+    pub fn register_hub_repo(&self, name: &str, path: &Path) {
+        let registry = self.hub_registry();
+        fs::create_dir_all(registry.dir()).expect("the hub directory");
+        let canonical = fs::canonicalize(path).expect("the repository canonicalizes");
+        let mut entries: Vec<(String, PathBuf)> = registry
+            .repos()
+            .expect("the registry reads")
+            .into_iter()
+            .map(|entry| (entry.name, entry.path))
+            .collect();
+        entries.retain(|(existing, _)| existing != name);
+        entries.push((name.to_owned(), canonical));
+        let mut text = String::new();
+        for (name, path) in entries {
+            text.push_str(&format!(
+                "[[repos]]\nname = \"{name}\"\npath = \"{}\"\n\n",
+                path.display()
+            ));
+        }
+        fs::write(registry.file(), text).expect("write the registry");
+    }
+
+    /// Registers this repository as `repo` in its scratch home. `interval` is written to
+    /// `[hub] interval_secs`; a value below the documented minimum is passed to the child as
+    /// the test-only `RADIAN_HUB_INTERVAL_SECS` instead.
+    pub fn init_hub(&self, interval: u64) {
+        self.register_hub_repo("repo", &self.clone);
+        let path = self.home.join("config").join("config.toml");
+        let mut text = fs::read_to_string(&path).unwrap_or_default();
+        if interval >= radian_arc::run::MIN_INTERVAL_SECS && !text.contains("[hub]") {
+            text.push_str(&format!("\n[hub]\ninterval_secs = {interval}\n"));
+        }
+        fs::write(&path, text).expect("write the scratch home config");
+    }
+
+    /// A spawned `radian hub` with this repository registered in the scratch home.
+    pub fn spawn_hub(&self, interval: u64) -> std::process::Child {
+        self.init_hub(interval);
+        self.spawn_hub_with(interval, &[])
+    }
+
+    /// [`Repo::spawn_hub`] with extra environment for the hub.
+    pub fn spawn_hub_with(&self, interval: u64, envs: &[(&str, String)]) -> std::process::Child {
+        self.init_hub(interval);
+        let mut all: Vec<(&str, String)> = envs.to_vec();
+        if interval < radian_arc::run::MIN_INTERVAL_SECS {
+            all.push(("RADIAN_HUB_INTERVAL_SECS", interval.to_string()));
+        }
+        self.spawn_with_env(&["hub"], &all)
+    }
+
+    /// [`Repo::spawn_hub`] in a process group of its own.
+    pub fn spawn_hub_in_own_group(&self, interval: u64) -> std::process::Child {
+        self.init_hub(interval);
+        self.spawn_hub_in_own_group_with(interval, &[])
+    }
+
+    /// [`Repo::spawn_hub_in_own_group`] with extra environment for the hub.
+    pub fn spawn_hub_in_own_group_with(
+        &self,
+        interval: u64,
+        envs: &[(&str, String)],
+    ) -> std::process::Child {
+        self.init_hub(interval);
+        let mut all: Vec<(&str, String)> = envs.to_vec();
+        if interval < radian_arc::run::MIN_INTERVAL_SECS {
+            all.push(("RADIAN_HUB_INTERVAL_SECS", interval.to_string()));
+        }
+        self.spawn_in_own_group_with_env(&["hub"], &all)
+    }
+
     /// Like [`Repo::spawn`], in a process group of its own: a test can signal that group the
     /// way a terminal's Ctrl-C signals the foreground job.
     pub fn spawn_in_own_group(&self, args: &[&str]) -> std::process::Child {

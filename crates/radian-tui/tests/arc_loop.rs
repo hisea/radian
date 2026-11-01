@@ -124,17 +124,31 @@ fn wait_until(limit: Duration, what: &str, mut predicate: impl FnMut() -> bool) 
     }
 }
 
-/// Starts the real `radian arc serve` in `store`'s repository and waits for its lock.
-/// Returns the starter and the holder's pid.
-fn start_real_loop(store: &Store) -> (LoopStarter, u32) {
+/// A scratch `RADIAN_HOME` for the hub the starter spawns: the control port off (a long temp
+/// path would fail the control socket) and a short interval.
+fn scratch_home(scratch: &Scratch) -> PathBuf {
+    let home = scratch.path("home");
+    let config = home.join("config");
+    fs::create_dir_all(&config).expect("the scratch config directory");
+    fs::write(
+        config.join("config.toml"),
+        "schema_version = 1\n[control]\nenabled = false\n[hub]\ninterval_secs = 5\n",
+    )
+    .expect("the scratch config");
+    home
+}
+
+/// Starts the real `radian hub` for `store`'s repository in `home` and waits for the
+/// repository's lock. Returns the starter and the holder's pid.
+fn start_real_loop(store: &Store, home: PathBuf) -> (LoopStarter, u32) {
     let radian = PathBuf::from(env!("CARGO_BIN_EXE_radian"));
-    let mut starter = LoopStarter::with_program(store.clone(), radian);
+    let mut starter = LoopStarter::with_program(store.clone(), radian).with_home(home);
     assert_eq!(
         starter.status(),
         LoopStatus::Stopped,
         "the fixture's runner.lock is free"
     );
-    starter.start().expect("the loop starts");
+    starter.start().expect("the hub starts");
     assert_eq!(starter.status(), LoopStatus::Starting);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -144,16 +158,17 @@ fn start_real_loop(store: &Store) -> (LoopStarter, u32) {
         }
         assert!(
             Instant::now() < deadline,
-            "the started loop never took runner.lock"
+            "the started hub never took runner.lock"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 #[test]
-fn the_detached_start_runs_arc_serve() {
+fn the_detached_start_runs_the_hub() {
     let scratch = Scratch::new("args");
     let store = store_at(&scratch.path("repo"));
+    let home = scratch_home(&scratch);
     let args_file = scratch.path("args");
     let script = scratch.path("fake-loop");
     fs::write(
@@ -169,18 +184,31 @@ fn the_detached_start_runs_arc_serve() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(5));
+    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(5))
+        .with_home(home.clone());
     starter.start().expect("the process is spawned");
     // The shell creates the file for the redirection before it writes the arguments; wait for
     // content, not existence, so a slow writer is not read as an empty argv.
-    wait_until(Duration::from_secs(5), "the fake loop's arguments", || {
+    wait_until(Duration::from_secs(5), "the fake hub's arguments", || {
         fs::read_to_string(&args_file).is_ok_and(|args| !args.trim().is_empty())
     });
-    let args = fs::read_to_string(&args_file).expect("the fake loop wrote its arguments");
+    let args = fs::read_to_string(&args_file).expect("the fake hub wrote its arguments");
     assert_eq!(
         args.lines().collect::<Vec<_>>(),
-        ["arc", "serve"],
-        "the TUI starts `radian arc serve`"
+        ["hub"],
+        "the TUI starts `radian hub`"
+    );
+    // The repository was registered before the hub started, so the hub can schedule it.
+    let registry = fs::read_to_string(home.join("hub/repos.toml")).expect("the registry");
+    assert!(registry.contains("name = \"repo\""), "{registry}");
+    assert!(
+        registry.contains(
+            &fs::canonicalize(scratch.path("repo"))
+                .unwrap()
+                .display()
+                .to_string()
+        ),
+        "{registry}"
     );
 }
 
@@ -188,7 +216,8 @@ fn the_detached_start_runs_arc_serve() {
 fn the_tui_starts_one_loop_and_leaves_it_running() {
     let scratch = Scratch::new("starts");
     let store = store_at(&scratch.path("repo"));
-    let (starter, pid) = start_real_loop(&store);
+    let home = scratch_home(&scratch);
+    let (starter, pid) = start_real_loop(&store, home);
     assert_ne!(pid, std::process::id(), "the loop is another process");
     assert!(
         store.try_runner_lock().unwrap().is_none(),
@@ -221,7 +250,8 @@ fn the_tui_starts_one_loop_and_leaves_it_running() {
 fn the_started_loop_has_its_own_session_and_process_group() {
     let scratch = Scratch::new("session");
     let store = store_at(&scratch.path("repo"));
-    let (starter, pid) = start_real_loop(&store);
+    let home = scratch_home(&scratch);
+    let (starter, pid) = start_real_loop(&store, home);
     let guard = KillOnDrop(Some(pid));
 
     #[cfg(unix)]
@@ -254,9 +284,10 @@ fn the_started_loop_has_its_own_session_and_process_group() {
 fn quitting_while_a_start_is_in_flight_leaves_the_loop_running() {
     let scratch = Scratch::new("start-in-flight");
     let store = store_at(&scratch.path("repo"));
+    let home = scratch_home(&scratch);
     let radian = PathBuf::from(env!("CARGO_BIN_EXE_radian"));
-    let mut starter = LoopStarter::with_program(store.clone(), radian);
-    starter.start().expect("the loop starts");
+    let mut starter = LoopStarter::with_program(store.clone(), radian).with_home(home);
+    starter.start().expect("the hub starts");
     // The TUI quits before its next probe: nothing waits on the child, and nothing signals it.
     drop(starter);
     // The loop writes its pid after it locks; a probe that takes the lock here would race
@@ -308,7 +339,8 @@ fn a_held_lock_starts_nothing_and_the_header_names_the_holder() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut starter = LoopStarter::with_program(store.clone(), script);
+    let mut starter =
+        LoopStarter::with_program(store.clone(), script).with_home(scratch_home(&scratch));
     assert_eq!(
         starter.status(),
         LoopStatus::Elsewhere(Some(std::process::id())),
@@ -316,6 +348,10 @@ fn a_held_lock_starts_nothing_and_the_header_names_the_holder() {
     );
     let error = starter.start().expect_err("a held lock starts nothing");
     assert!(error.contains("already running"), "{error}");
+    assert!(
+        !scratch.path("home/hub/repos.toml").exists(),
+        "a held lock must not touch the hub registry"
+    );
     assert_eq!(
         starter.status(),
         LoopStatus::Elsewhere(Some(std::process::id()))
@@ -381,7 +417,8 @@ fn a_start_that_exits_at_once_is_stopped_with_its_exit_code() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(10));
+    let mut starter = LoopStarter::with_program_and_timeout(store, script, Duration::from_secs(10))
+        .with_home(scratch_home(&scratch));
     starter.start().expect("the process is spawned");
     assert_eq!(starter.status(), LoopStatus::Starting);
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -1371,6 +1371,38 @@ fn spawn_arc(scratch: &Scratch, args: &[&str]) -> ChildGuard {
     )
 }
 
+/// Starts `radian hub` with `scratch.repo()` registered in the scratch home. The home turns the
+/// control port off, as the radian tests' `SCRATCH_HOME_CONFIG` does, so a long temp path is not
+/// a control-socket error.
+fn spawn_hub(scratch: &Scratch, interval: u64) -> ChildGuard {
+    let canonical = fs::canonicalize(scratch.repo()).expect("the repository canonicalizes");
+    scratch.write(
+        "home/config/config.toml",
+        &format!(
+            "schema_version = 1\n[control]\nenabled = false\n[hub]\ninterval_secs = {interval}\n"
+        ),
+    );
+    scratch.write(
+        "home/hub/repos.toml",
+        &format!(
+            "[[repos]]\nname = \"repo\"\npath = \"{}\"\n",
+            canonical.display()
+        ),
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_radian"));
+    command
+        .current_dir(scratch.repo())
+        .env("RADIAN_HOME", scratch.path("home"))
+        .args(["hub"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if interval < radian_arc::run::MIN_INTERVAL_SECS {
+        command.env("RADIAN_HUB_INTERVAL_SECS", interval.to_string());
+    }
+    ChildGuard(command.spawn().expect("radian hub runs"))
+}
+
 /// The child's stdout, read line by line on its own thread, so a test sees a line while the
 /// child still runs.
 struct Lines {
@@ -1569,19 +1601,20 @@ fn run_writes_a_transition_line_before_it_exits() {
     }
 }
 
-/// `serve` runs another pass on its own: a retry that becomes due between passes is released
-/// with no second command, and SIGTERM stops the loop with exit `0` and the lock released.
+/// `radian hub` runs another pass on its own: a retry that becomes due between passes is
+/// released with no second command, and SIGTERM stops the hub with exit `0` and the lock
+/// released.
 ///
 /// Mutations: buffer the lines again and the released line misses its deadline; keep the lock
 /// (and the process) on SIGTERM and the child does not exit within five seconds.
 #[test]
-fn serve_runs_another_pass_and_exits_zero_on_sigterm() {
+fn hub_runs_another_pass_and_exits_zero_on_sigterm() {
     let scratch = fixture("watch");
     init(&scratch);
     let plan = add_plan(&scratch, "watch");
     let task = add_task(&scratch, &plan, "work", "the brief\n");
 
-    let mut child = spawn_arc(&scratch, &["arc", "serve", "--interval", "5"]);
+    let mut child = spawn_hub(&scratch, 5);
     let mut lines = Lines::new(child.0.stdout.take().expect("stdout is piped"));
     let stderr = drain_stderr(&mut child);
 
@@ -1591,12 +1624,16 @@ fn serve_runs_another_pass_and_exits_zero_on_sigterm() {
         lines.seen
     );
 
-    // The loop holds the lock between passes: a second one-shot run, and a second serve, exit
-    // `4`.
+    // The hub holds the repository's lock between passes: a second one-shot run exits `4`,
+    // and a second hub exits `1` on `hub.lock`.
     let blocked = run(&scratch, &["arc", "run"], "");
     assert_eq!(blocked.code, Some(4), "{blocked:?}");
-    let second_serve = run(&scratch, &["arc", "serve"], "");
-    assert_eq!(second_serve.code, Some(4), "{second_serve:?}");
+    let second_hub = run(&scratch, &["hub"], "");
+    assert_eq!(second_hub.code, Some(1), "{second_hub:?}");
+    assert!(
+        second_hub.err.contains("a hub is already running (pid "),
+        "{second_hub:?}"
+    );
 
     // No second command runs: the loop's own next pass releases the retry.
     wait_for_a_retry(&scratch, &task);
@@ -1627,7 +1664,7 @@ fn serve_runs_another_pass_and_exits_zero_on_sigterm() {
         let _ = child.0.kill();
         let _ = child.0.wait();
         let err = stderr.join().unwrap_or_default();
-        panic!("arc serve did not exit on SIGTERM: {err}");
+        panic!("hub did not exit on SIGTERM: {err}");
     };
     let err = stderr.join().expect("the stderr reader");
     assert_eq!(status.code(), Some(0), "SIGTERM is not an error: {err}");
@@ -1639,31 +1676,43 @@ fn serve_runs_another_pass_and_exits_zero_on_sigterm() {
         .expect("runner.lock exists");
     assert!(
         lock.try_lock_exclusive().is_ok(),
-        "arc serve releases runner.lock"
+        "radian hub releases runner.lock"
     );
 }
 
-/// The interval is a closed range.
+/// `radian arc serve` is removed: it exits `2` with one line naming `radian hub`. The interval
+/// is now `[hub] interval_secs`, so the old `--interval` is only part of the refused form.
 #[test]
-fn a_serve_interval_outside_five_to_3600_is_a_usage_error() {
-    let scratch = fixture("interval");
+fn arc_serve_is_removed_and_names_hub() {
+    let scratch = fixture("serve-removed");
     init(&scratch);
     for args in [
-        vec!["arc", "serve", "--interval", "4"],
-        vec!["arc", "serve", "--interval", "3601"],
-        // `--interval` is not `run`'s own input; it belongs to the old `--watch` form and is
-        // refused there with the line below.
+        vec!["arc", "serve"],
+        vec!["arc", "serve", "--interval", "5"],
+        // `--interval` is not `run`'s own input either; clap refuses it.
         vec!["arc", "run", "--interval", "5"],
     ] {
         let run = run(&scratch, &args, "");
         assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
     }
+    for args in [
+        vec!["arc", "serve"],
+        vec!["arc", "serve", "--interval", "5"],
+    ] {
+        let run = run(&scratch, &args, "");
+        assert_eq!(
+            run.err.trim_end(),
+            "radian arc: `serve` is now `radian hub`",
+            "{args:?}: {run:?}"
+        );
+        assert!(run.out.is_empty(), "{args:?}: {run:?}");
+    }
 }
 
 /// `--watch` is gone: `radian arc run --watch` is refused with exit `2` and one line naming
-/// `radian arc serve`, with or without `--interval`.
+/// `radian hub`, with or without `--interval`.
 #[test]
-fn run_watch_is_refused_and_names_arc_serve() {
+fn run_watch_is_refused_and_names_hub() {
     let scratch = fixture("run-watch-refused");
     init(&scratch);
     for args in [
@@ -1675,7 +1724,7 @@ fn run_watch_is_refused_and_names_arc_serve() {
         assert_eq!(run.code, Some(2), "{args:?}: {run:?}");
         assert_eq!(
             run.err.trim_end(),
-            "radian arc: `run --watch` is now `radian arc serve`",
+            "radian arc: `run --watch` is now `radian hub`",
             "{args:?}: {run:?}"
         );
         assert!(run.out.is_empty(), "{args:?}: {run:?}");

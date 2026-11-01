@@ -10,15 +10,24 @@
 //!   directory and an atomic rename, so a reader sees either the old or the new whole
 //!   document, never a partial one.
 //! - `token` (0600): the bearer token the HTTP API requires. It does not exist in this build.
-//! - `hub.lock`: the flock a running hub holds for its lifetime, with its pid inside, the
-//!   same shape as a repository's `runner.lock` (ADR 0048 decision 13). It does not exist in
-//!   this build.
+//! - `hub.lock`: the flock a running hub holds for its lifetime, with its pid inside, the same
+//!   shape as a repository's `runner.lock` (ADR 0048 decisions 13 and 16). The TUI probes it
+//!   take-and-release and never creates it.
+//!
+//! The scheduling loop itself is [`r#loop`](crate::hub::r#loop): one loop per registered repository on its own OS thread,
+//! the registry re-read every interval, and the machine-wide cap.
 //!
 //! The directory is on the sandbox deny list beside `credentials/` (ADR 0020): the model
 //! never reads the registry or the token.
 
+pub mod lock;
+pub mod r#loop;
 pub mod registry;
+pub mod status;
 
+pub use lock::HubLock;
+pub use r#loop::run;
 pub use registry::{
     HUB_LOCK, NAME_MAX_CHARS, REGISTRY_FILE, Registry, RepoEntry, TOKEN_FILE, valid_name,
 };
+pub use status::{HubStatus, RepoState, RepoStatus};

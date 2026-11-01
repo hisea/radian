@@ -47,18 +47,20 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::store::attempt_ops::{self, Claim};
 use crate::store::model::{self, TaskState};
-use crate::store::{Error, Loaded, PlanView, RUNNER_LOCK, Store, plan_ops};
+use crate::store::{Error, Loaded, PlanView, Store, plan_ops};
 
 /// A hard stop on the pass count. Every pass that continues changes at least one task; this
 /// only keeps a store that something else keeps rewriting from looping forever.
 pub const MAX_PASSES: u32 = 1000;
 
-/// The default wait between passes of `serve`, and the closed range it may have.
+/// The default wait between passes, and the closed range it may have. The hub reads the wait
+/// from `[hub] interval_secs`; the constants stay here so the loop and the manual share one
+/// range.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 pub const MIN_INTERVAL_SECS: u64 = 5;
 pub const MAX_INTERVAL_SECS: u64 = 3600;
 
-/// How often an `--interval` wait looks at the stop flag: a signal must end the loop promptly,
+/// How often an interval wait looks at the stop flag: a signal must end the loop promptly,
 /// not after the whole interval.
 const STOP_POLL: Duration = Duration::from_millis(100);
 
@@ -75,18 +77,18 @@ pub const LOOP_LOG_MAX_BYTES: u64 = 1024 * 1024;
 /// Set once when writing `loop.log` failed, so one process prints one line, not one per pass.
 static LOG_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
 
-/// Set by the SIGINT/SIGTERM handler a `serve` loop installs.
+/// Set by the SIGINT/SIGTERM handler a hub installs.
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// How many passes in a row may return the same error text before `serve` stops. A constant,
-/// not a configuration key: a permanent error (a `config.toml` that cannot be read, a
-/// directory that cannot be written) would otherwise print the same line unattended all
-/// night. [`repeated_error_stop`] spells the line from it; the user manual and ADR 0048 quote
-/// the value, so change them with it.
+/// How many passes in a row may return the same error text before a repository's loop stops,
+/// and the hub stops scheduling that repository. A constant, not a configuration key: a
+/// permanent error (a `config.toml` that cannot be read, a directory that cannot be written)
+/// would otherwise print the same line unattended all night. [`repeated_error_stop`] spells
+/// the line from it; the user manual and ADR 0048 quote the value, so change them with it.
 pub const REPEATED_ERROR_LIMIT: u32 = 3;
 
-/// The one line a `serve` loop prints, with its `radian arc: ` prefix, before it replaces
-/// itself with a rebuilt binary. The user manual quotes it.
+/// The one line a loop prints, with its `radian arc: ` prefix, before the hub replaces itself
+/// with a rebuilt binary. The user manual quotes it.
 pub const RESTART_TEXT: &str = "the radian binary changed on disk; restarting the loop with it";
 
 /// How long a loop waits before its second look at a changed binary, so a build that is still
@@ -170,7 +172,7 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
         log.write(text);
         emit(text);
     };
-    let report = match run_quiet(store, &mut sink, None) {
+    let report = match run_quiet(store, &mut sink, None, None) {
         Ok(report) => report,
         Err(error) => {
             sink(&format!("radian arc: {}\n", error.message()));
@@ -182,115 +184,139 @@ pub fn run(store: &Store, emit: &mut dyn FnMut(&str)) -> Result<Report, Error> {
     Ok(report)
 }
 
-/// Runs a pass, then waits `interval_secs` and runs another, until SIGINT or SIGTERM. Holds
-/// `runner.lock` for the whole loop. `emit` receives each transition line with its newline as
-/// it happens, and a pass's summary block when it differs from the last one printed.
+/// One repository's scheduling loop, kept across passes. The hub drives it: it holds the
+/// repository's `runner.lock`, calls [`LoopState::pass`] every `[hub] interval_secs`, and acts
+/// on what the pass returns (ADR 0048 decisions 13 and 16).
 ///
-/// A signal starts no new work: a running worker and a running gate are separate processes.
-/// A worker is left alone (the next pass, or the next `run`, collects it); a running gate is
-/// signalled and gets `[limits] cancel_grace_secs` before SIGKILL, so the next loop starts it
-/// again as unverified. The loop then prints the summary, releases the lock and returns
-/// [`Exit`](crate::store::Exit) `0` through the caller.
-///
-/// **A rebuilt binary replaces the loop's code.** At start the loop records its executable's
-/// path (once) and that file's identity; after each pass, before the interval, it compares the
-/// file at that path with the recorded identity and, when a stable executable differs, prints
-/// [`RESTART_TEXT`], releases `runner.lock` and `exec`s the recorded path with the same
-/// arguments, working directory and environment (ADR 0048 decision 13). It stops no gate and
-/// touches no worker. When the `exec` fails it prints the error, takes the lock again (exit
-/// `1` when it cannot), records the new identity and goes on with the old code.
-///
-/// Three passes in a row that return the same error text stop the loop
-/// ([`REPEATED_ERROR_LIMIT`]): the loop reports [`repeated_error_stop`] instead of the third
-/// error, stops the gates the way a signal does (workers are left alone) and returns an error,
-/// so the caller exits `1`. A pass that succeeds, or a different error, starts the count again.
-///
-/// # Errors
-///
-/// The same as [`run`], and [`repeated_error_stop`] after three identical pass errors.
-pub fn serve(store: &Store, interval_secs: u64, emit: &mut dyn FnMut(&str)) -> Result<(), Error> {
-    let mut log = LoopLog::new(store);
-    let mut lock = take_lock(store, &mut log)?;
-    STOP.store(false, Ordering::SeqCst);
-    catch_stop_signals();
-    // The executable this loop runs, read once: after a replace, `current_exe()` names a
-    // deleted file on Linux (ADR 0048 decision 13).
-    let executable = std::env::current_exe().ok();
-    let mut recorded = executable.as_deref().and_then(executable_identity);
-    let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let mut last: Option<String> = None;
-    // The error text of the pass before and how many passes in a row returned it.
-    let mut repeated: Option<(String, u32)> = None;
-    loop {
+/// The state records the executable's path once (after a replace, `current_exe()` names a
+/// deleted file on Linux), that file's identity, the arguments the hub started with, the last
+/// summary printed and the repeated-error count.
+pub struct LoopState {
+    log: LoopLog,
+    last: Option<String>,
+    repeated: Option<(String, u32)>,
+    executable: Option<PathBuf>,
+    recorded: Option<BinaryIdentity>,
+    arguments: Vec<OsString>,
+}
+
+/// What one [`LoopState::pass`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Passed {
+    /// The pass ran; the caller waits the interval and passes again.
+    Ran,
+    /// A stable, changed executable is at the recorded path. The caller finishes the passes in
+    /// flight, releases every lock and `exec`s it with [`LoopState::arguments`].
+    Restart(PathBuf),
+    /// A SIGINT or SIGTERM arrived. The caller stops the gates and releases its lock.
+    Stopped,
+}
+
+impl LoopState {
+    /// The state of one repository's loop.
+    #[must_use]
+    pub fn new(store: &Store) -> Self {
+        let executable = std::env::current_exe().ok();
+        let recorded = executable.as_deref().and_then(executable_identity);
+        Self {
+            log: LoopLog::new(store),
+            last: None,
+            repeated: None,
+            executable,
+            recorded,
+            arguments: std::env::args_os().skip(1).collect(),
+        }
+    }
+
+    /// The arguments the hub started with, for the `exec` after a rebuilt binary.
+    #[must_use]
+    pub fn arguments(&self) -> &[OsString] {
+        &self.arguments
+    }
+
+    /// Runs one pass and its per-pass handling: the transition lines, the summary when it
+    /// changed, one error line (or the stop line after [`REPEATED_ERROR_LIMIT`] identical
+    /// errors), and the rebuilt-binary check.
+    ///
+    /// `machine` is the hub's machine-wide concurrency cap: the pass asks it before claiming
+    /// the next task. `None` is the one-shot loop, which has no machine beside it.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`run`], and [`repeated_error_stop`] after three identical pass errors.
+    pub fn pass(
+        &mut self,
+        store: &Store,
+        emit: &mut dyn FnMut(&str),
+        machine: Option<&dyn Fn() -> Result<bool, Error>>,
+    ) -> Result<Passed, Error> {
         if stop_requested() {
-            break;
+            return Ok(Passed::Stopped);
         }
         let result = {
-            let mut sink = |text: &str| say(&mut log, emit, text);
-            run_quiet(store, &mut sink, Some(&STOP))
+            let log = &mut self.log;
+            let mut sink = |text: &str| say(log, emit, text);
+            run_quiet(store, &mut sink, Some(&STOP), machine)
         };
         match result {
             Ok(report) => {
                 // A pass that succeeds starts the repeated-error count again.
-                repeated = None;
+                self.repeated = None;
                 let summary = report.render_summary();
-                if last.as_deref() != Some(summary.as_str()) {
-                    say(&mut log, emit, &summary);
-                    last = Some(summary);
+                if self.last.as_deref() != Some(summary.as_str()) {
+                    say(&mut self.log, emit, &summary);
+                    self.last = Some(summary);
                 }
             }
             // One task's error does not end the loop: print it and run the next pass. The
             // lock and every state file stay as they are; a one-shot `run` still returns
             // the error and exits non-zero. A permanent error would repeat forever, so the
-            // third pass in a row with the same text stops the loop instead (the lock is
-            // released when this returns, and the gates are stopped as on a signal).
+            // third pass in a row with the same text stops this repository's loop instead
+            // (its lock is released when the caller sees the error, and the gates are
+            // stopped as on a signal). The hub and every other repository keep running.
             Err(error) => {
                 let text = error.message();
-                let count = match &repeated {
+                let count = match &self.repeated {
                     Some((last_text, count)) if *last_text == text => count + 1,
                     _ => 1,
                 };
                 if count >= REPEATED_ERROR_LIMIT {
                     stop_gates(store);
-                    // The stop line is the error this loop returns, so the CLI prints it once on
-                    // stderr; the log gets it directly, never through the sink, so stdout does
+                    // The stop line is the error this pass returns, so the caller prints it
+                    // once; the log gets it directly, never through the sink, so stdout does
                     // not repeat it (ADR 0048 decision 13).
-                    log.write(&format!("radian arc: {}\n", repeated_error_stop()));
+                    self.log
+                        .write(&format!("radian arc: {}\n", repeated_error_stop()));
                     return Err(Error::Failed(repeated_error_stop()));
                 }
-                say(&mut log, emit, &format!("radian arc: {text}\n"));
-                repeated = Some((text, count));
+                say(&mut self.log, emit, &format!("radian arc: {text}\n"));
+                self.repeated = Some((text, count));
             }
         }
         if stop_requested() {
-            break;
+            return Ok(Passed::Stopped);
         }
-        // A rebuilt binary: one line, the lock released, and `exec` of the recorded path. A
-        // gate and a worker are separate process groups and are left alone (ADR 0048
-        // decision 13).
-        if let (Some(path), Some(identity)) = (executable.as_deref(), recorded) {
+        // A rebuilt binary: one line, and the caller releases the locks and `exec`s the
+        // recorded path. A gate and a worker are separate process groups and are left alone
+        // (ADR 0048 decision 13).
+        if let (Some(path), Some(identity)) = (self.executable.as_deref(), self.recorded) {
             let mut look = |path: &Path| executable_identity(path);
             let mut pause = |wait: Duration| std::thread::sleep(wait);
             if let Some(new_identity) = changed_binary(path, identity, &mut look, &mut pause) {
                 if stop_requested() {
-                    break;
+                    return Ok(Passed::Stopped);
                 }
-                say(&mut log, emit, &format!("radian arc: {RESTART_TEXT}\n"));
-                drop(lock);
-                let exec_error = replace_process(path, &arguments);
-                lock = take_lock_after_failed_exec(store, &mut log, emit, &exec_error)?;
-                recorded = Some(new_identity);
+                say(
+                    &mut self.log,
+                    emit,
+                    &format!("radian arc: {RESTART_TEXT}\n"),
+                );
+                self.recorded = Some(new_identity);
+                return Ok(Passed::Restart(path.to_path_buf()));
             }
         }
-        if !wait_interval(interval_secs) {
-            break;
-        }
+        Ok(Passed::Ran)
     }
-    if stop_requested() {
-        stop_gates(store);
-    }
-    drop(lock);
-    Ok(())
 }
 
 /// Writes a loop line through the log and the caller's sink. A transition line is also kept in
@@ -378,58 +404,27 @@ fn changed_binary(
     (second == first).then_some(second)
 }
 
-/// Prints the failed `exec` and takes `runner.lock` again. When the lock cannot be taken —
-/// another process took it in the gap, or the file cannot be opened — the reason the loop stops
-/// is appended to the loop's log before the error is returned, so `loop.log` holds every
-/// `radian arc:` line `serve` prints (ADR 0048 decision 13) without printing the line twice: the
-/// caller prints the returned error once, on stderr.
-fn take_lock_after_failed_exec(
-    store: &Store,
-    log: &mut LoopLog,
-    emit: &mut dyn FnMut(&str),
-    exec_error: &std::io::Error,
-) -> Result<crate::store::RunnerLock, Error> {
-    say(
-        log,
-        emit,
-        &format!("radian arc: cannot restart with the new binary: {exec_error}\n"),
-    );
-    let text = match store.try_runner_lock() {
-        Ok(Some(retaken)) => return Ok(retaken),
-        Ok(None) => format!(
-            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held by another \
-             process"
-        ),
-        Err(error) => format!(
-            "the new binary could not start ({exec_error}); did not take {RUNNER_LOCK} again: {}",
-            error.message()
-        ),
-    };
-    log.write(&format!("radian arc: {text}\n"));
-    Err(Error::Failed(text))
-}
-
 /// Replaces this process with `program` and its arguments, in the same working directory and
 /// environment. It returns [`std::process::CommandExt::exec`]'s error; on success it never
-/// returns (ADR 0048 decision 13).
+/// returns (ADR 0048 decisions 13 and 16).
 #[cfg(unix)]
-fn replace_process(program: &Path, arguments: &[OsString]) -> std::io::Error {
+pub(crate) fn replace_process(program: &Path, arguments: &[OsString]) -> std::io::Error {
     use std::os::unix::process::CommandExt as _;
     std::process::Command::new(program).args(arguments).exec()
 }
 
 #[cfg(not(unix))]
-fn replace_process(_program: &Path, _arguments: &[OsString]) -> std::io::Error {
+pub(crate) fn replace_process(_program: &Path, _arguments: &[OsString]) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Unsupported, "exec is not available")
 }
 
-/// Stops the gates a serve loop leaves running: a short grace, then SIGKILL. Each gate arc
-/// stopped records `interrupted`, so the next loop starts it again and counts no death.
+/// Stops the gates a loop leaves running: a short grace, then SIGKILL. Each gate arc stopped
+/// records `interrupted`, so the next loop starts it again and counts no death.
 ///
 /// Best effort: the repeated-error stop may be running because `config.toml` itself cannot be
 /// read, so an unreadable config falls back to the default grace and an unreadable task list
 /// stops nothing. The caller then reports the stop line, not the config error.
-fn stop_gates(store: &Store) {
+pub(crate) fn stop_gates(store: &Store) {
     let grace = Duration::from_secs(
         store
             .config()
@@ -517,6 +512,8 @@ impl LoopLog {
     }
 }
 
+/// Takes `runner.lock` for a one-shot `run`, writing the refusal to the loop's log: another
+/// process holds it ([`Error::Locked`], exit `4`).
 fn take_lock(store: &Store, log: &mut LoopLog) -> Result<crate::store::RunnerLock, Error> {
     match store.try_runner_lock()? {
         Some(lock) => Ok(lock),
@@ -530,12 +527,16 @@ fn take_lock(store: &Store, log: &mut LoopLog) -> Result<crate::store::RunnerLoc
     }
 }
 
-/// The passes of one `run` or one `watch` pass, until a pass changes nothing. When `stop` is
+/// The passes of one `run` or one loop pass, until a pass changes nothing. When `stop` is
 /// set, no further pass starts: work already running inside a pass still ends normally.
+///
+/// `machine` is the hub's machine-wide cap (ADR 0048 decision 16). A one-shot `run` passes
+/// `None`.
 fn run_quiet(
     store: &Store,
     emit: &mut dyn FnMut(&str),
     stop: Option<&AtomicBool>,
+    machine: Option<&dyn Fn() -> Result<bool, Error>>,
 ) -> Result<Report, Error> {
     let mut report = Report::default();
     let mut passes = 0;
@@ -554,7 +555,7 @@ fn run_quiet(
                 report: &mut report,
                 emit: &mut *emit,
             };
-            one_pass(store, &mut transitions, stop)?
+            one_pass(store, &mut transitions, stop, machine)?
         };
         if !changed {
             break;
@@ -588,9 +589,11 @@ impl Transitions<'_> {
     }
 }
 
-/// Installs the SIGINT and SIGTERM handler of a watch loop. The handler only stores to an
-/// atomic, which is async-signal-safe.
-fn catch_stop_signals() {
+/// Installs the SIGINT and SIGTERM handler of the hub. It clears the flag first so a test or a
+/// second run in one process starts fresh. The handler only stores to an atomic, which is
+/// async-signal-safe.
+pub(crate) fn catch_stop_signals() {
+    STOP.store(false, Ordering::SeqCst);
     // SAFETY: `request_stop` has the C ABI `signal` expects, and its body only stores to an
     // `AtomicBool`. The previous handler is not needed.
     unsafe {
@@ -609,12 +612,13 @@ extern "C" fn request_stop(_signal: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
-fn stop_requested() -> bool {
+/// Whether a stop signal arrived. The hub's loops and its main thread share this one flag.
+pub(crate) fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
 /// Waits `interval_secs` in [`STOP_POLL`] slices. `false` when a stop signal arrived first.
-fn wait_interval(interval_secs: u64) -> bool {
+pub(crate) fn wait_interval(interval_secs: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(interval_secs);
     loop {
         if stop_requested() {
@@ -635,6 +639,7 @@ fn one_pass(
     store: &Store,
     transitions: &mut Transitions,
     stop: Option<&AtomicBool>,
+    machine: Option<&dyn Fn() -> Result<bool, Error>>,
 ) -> Result<bool, Error> {
     // 0. Hooks a transition owed run before the pass does anything else. The record is cleared
     // after its commands ran, so a process killed mid-hook runs it again here (ADR 0048
@@ -694,7 +699,7 @@ fn one_pass(
     // 5. Start what the auto levels allow, and 6. merge what passed, unless a stop signal
     // arrived while steps 1-4 ran: no new attempt and no new gate starts after it.
     if !stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-        changed |= start_ready(store, transitions)?;
+        changed |= start_ready(store, transitions, machine)?;
         changed |= merge_auto(store, transitions, stop)?;
         // 7. A plan with no open task gets one follow-up for its merged tasks' review items
         // (ADR 0048 decision 10). The check is idempotent, and it also covers a task that
@@ -1045,7 +1050,11 @@ fn verifying_tasks(store: &Store) -> Result<Vec<String>, Error> {
 /// and `[limits] concurrency` must have room (ADR 0048 decision 13); a full flow's task is
 /// skipped, so it does not block a later task of another flow. `true` when it ran at least one
 /// attempt.
-fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Error> {
+fn start_ready(
+    store: &Store,
+    transitions: &mut Transitions,
+    machine: Option<&dyn Fn() -> Result<bool, Error>>,
+) -> Result<bool, Error> {
     let config = store.config()?;
     let concurrency = u64::from(config.limits.concurrency.max(1));
     let mut doing = attempt_ops::doing_counts(store)?;
@@ -1085,6 +1094,15 @@ fn start_ready(store: &Store, transitions: &mut Transitions) -> Result<bool, Err
                 && doing.in_flow(flow) >= u64::from(limit.max(1))
             {
                 continue;
+            }
+            // The machine-wide cap (ADR 0048 decision 16): the number of tasks in `doing` in
+            // every registered repository is read now, not cached. A full machine ends this
+            // pass's claims; a task another repository starts in the same moment may make the
+            // count stale, so the cap bounds steady state rather than acting as a lock.
+            if let Some(room) = machine
+                && !room()?
+            {
+                break;
             }
             match attempt_ops::claim_by(store, &task.item.id, attempt_ops::ClaimBy::SchedulingLoop)
             {
@@ -1610,82 +1628,6 @@ mod tests {
             executable_identity(dir.path()),
             None,
             "a directory is not a binary"
-        );
-    }
-
-    /// A restart whose `exec` failed and whose lock another process took in the gap stops the
-    /// loop with a line that reaches `loop.log` without a second visible copy: the CLI prints the
-    /// returned error on stderr, the sink carries only the printed `cannot restart` line, and the
-    /// log holds every `radian arc:` line `serve` prints (ADR 0048 decision 13). Mutation: drop
-    /// the `log.write` of the returned error and `loop.log` keeps only the `cannot restart` line.
-    #[test]
-    fn a_failed_restart_that_cannot_retake_the_lock_logs_the_reason_before_it_stops() {
-        let dir = crate::test_support::TempDir::new("restart-lock-held");
-        let store = Store::at(dir.path());
-        std::fs::create_dir_all(store.root()).expect("the arc directory");
-        let mut log = LoopLog::new(&store);
-        // A second open file description of the same lock file: `try_runner_lock` sees it as
-        // another process's lock, exactly as a loop started in the gap would.
-        let held = store
-            .try_runner_lock()
-            .expect("take runner.lock")
-            .expect("runner.lock is free");
-        let mut emitted = String::new();
-        let mut emit = |text: &str| emitted.push_str(text);
-        let exec_error = std::io::Error::from_raw_os_error(22);
-
-        let error = take_lock_after_failed_exec(&store, &mut log, &mut emit, &exec_error)
-            .expect_err("another process holds runner.lock");
-        drop(held);
-
-        let expected = format!(
-            "the new binary could not start ({exec_error}); {RUNNER_LOCK} is held by another \
-             process"
-        );
-        assert_eq!(error.message(), expected);
-        let said = format!("radian arc: cannot restart with the new binary: {exec_error}\n");
-        assert_eq!(
-            emitted, said,
-            "the sink repeated the stop line the CLI prints on stderr"
-        );
-        let written = std::fs::read_to_string(log.path()).expect("loop.log");
-        assert!(
-            written.contains(&format!("radian arc: {expected}")),
-            "loop.log is missing the stop line: {written}"
-        );
-    }
-
-    /// The same failure when `runner.lock` cannot be opened at all: the stop line is logged too.
-    #[test]
-    fn a_failed_restart_that_cannot_open_the_lock_logs_the_reason_before_it_stops() {
-        let dir = crate::test_support::TempDir::new("restart-lock-unopenable");
-        let store = Store::at(dir.path());
-        // A directory in the lock's place makes the lock file impossible to open.
-        std::fs::create_dir_all(store.root().join(RUNNER_LOCK)).expect("a directory at the lock");
-        let mut log = LoopLog::new(&store);
-        let mut emitted = String::new();
-        let mut emit = |text: &str| emitted.push_str(text);
-        let exec_error = std::io::Error::from_raw_os_error(22);
-
-        let error = take_lock_after_failed_exec(&store, &mut log, &mut emit, &exec_error)
-            .expect_err("the lock cannot be opened");
-
-        assert!(
-            error
-                .message()
-                .contains(&format!("did not take {RUNNER_LOCK} again")),
-            "{}",
-            error.message()
-        );
-        let line = format!("radian arc: {}", error.message());
-        assert!(
-            !emitted.contains(&line),
-            "the sink repeated the stop line the CLI prints on stderr: {emitted}"
-        );
-        let written = std::fs::read_to_string(log.path()).expect("loop.log");
-        assert!(
-            written.contains(&line),
-            "loop.log is missing the stop line: {written}"
         );
     }
 

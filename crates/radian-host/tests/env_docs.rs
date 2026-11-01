@@ -232,6 +232,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_ARC_PANIC_ACTION",
         "read in radian-tui/src/cli/arc.rs: makes the arc TUI's owner-action worker panic, so the pty suite checks that a panicked worker still replies and leaves the TUI responsive",
     ),
+    (
+        "RADIAN_HUB_INTERVAL_SECS",
+        "read in radian-arc/src/hub/loop.rs: a hub test's interval below the documented five-second minimum, so one repository's slow pass can be shown not to gate another",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

@@ -1505,7 +1505,7 @@ fn sigterm_to_serve_starts_no_new_work_and_the_next_run_collects_the_worker() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
+    let watch = repo.spawn_hub(30);
     wait_for(&repo.attempt_dir(&a, 1).join("identity.json"));
     // While the loop waits out its interval, a new `review.verifying` task appears.
     publish_verifying(&repo, &store, &plan, &b);
@@ -1651,7 +1651,7 @@ fn a_serve_pass_that_errors_prints_a_line_and_goes_on() {
         }),
     );
 
-    let mut watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
+    let mut watch = repo.spawn_hub(30);
     // The pass reads the record, reports it and clears it; the loop then waits its interval.
     wait_until(
         Duration::from_secs(30),
@@ -1721,12 +1721,13 @@ fn wait_for_loop_log(repo: &Repo, text: &str, count: usize) {
     });
 }
 
-/// Three passes in a row with the same error stop `serve`: one stop line, exit `1`, and the
-/// lock released. A gate the loop started is stopped the way a signal stops it, so a broken
-/// configuration does not leave a build running; a worker is not signalled (this test starts
-/// none). Mutation: drop the count and the loop runs until the test's deadline.
+/// Three passes in a row with the same error stop that repository's loop: one stop line in its
+/// `loop.log`, `runner.lock` released, and the hub itself still running so every other
+/// repository keeps scheduling. A gate the loop started is stopped the way a signal stops it,
+/// so a broken configuration does not leave a build running; a worker is not signalled (this
+/// test starts none). Mutation: drop the count and the loop runs until the test's deadline.
 #[test]
-fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
+fn three_identical_pass_errors_stop_the_repository_loop_and_release_its_lock() {
     let repo = Repo::new("run-watch-repeat");
     let store = setup(&repo);
     let plan = add_plan(&store, "watch-repeat");
@@ -1752,52 +1753,19 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
 
     // Every pass now refuses before it reaches the gate, with the same text.
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
-    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if watch.try_wait().expect("try_wait").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "three identical errors did not stop serve"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let output = watch.wait_with_output().expect("the watch loop stops");
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "the repeated error did not exit 1: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut hub = repo.spawn_hub(5);
     let stop = format!("radian arc: {}", radian_arc::run::repeated_error_stop());
-    assert!(
-        stderr.contains(&stop),
-        "the stop line is missing: {stdout}{stderr}"
+    wait_until(
+        Duration::from_secs(45),
+        "the stop line and the lock release",
+        || {
+            fs::read_to_string(repo.arc().join("loop.log")).is_ok_and(|log| log.contains(&stop))
+                && runner_lock_is_free(&repo)
+        },
     );
-    // The stop line is printed once, on stderr by the CLI: the loop logs it without emitting it
-    // through the sink, so stdout carries no second copy (ADR 0048 decision 13).
     assert!(
-        !stdout.contains(&stop),
-        "the stop line is on stdout too: {stdout}"
-    );
-    // The stop line is a line `serve` prints, so `loop.log` holds it like every other
-    // `radian arc:` line (ADR 0048 decision 13).
-    let logged = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
-    assert!(
-        logged.contains(&stop),
-        "loop.log is missing the stop line: {logged}"
-    );
-    assert_eq!(
-        stdout
-            .matches("worker.exec_args must not repeat `--profile`")
-            .count(),
-        2,
-        "the loop printed the third error instead of the stop line: {stdout}"
+        hub.try_wait().expect("try_wait").is_none(),
+        "the repeated error stopped the whole hub, not one repository"
     );
 
     // The gate is stopped and its record says arc stopped it.
@@ -1810,6 +1778,40 @@ fn three_identical_pass_errors_stop_serve_with_exit_one_and_release_the_lock() {
     assert!(
         runner_lock_is_free(&repo),
         "the repeated-error stop kept runner.lock"
+    );
+
+    // The stop line is a line the loop writes, and only `loop.log` carries it; the hub's stdout
+    // keeps the other two error lines and no stop line.
+    let logged = fs::read_to_string(repo.arc().join("loop.log")).expect("loop.log");
+    assert!(
+        logged.contains(&stop),
+        "loop.log is missing the stop line: {logged}"
+    );
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &hub.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = hub.wait_with_output().expect("the hub ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the hub did not exit 0 on SIGTERM: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(&stop),
+        "the stop line is on stdout too: {stdout}"
+    );
+    assert_eq!(
+        stdout
+            .matches("worker.exec_args must not repeat `--profile`")
+            .count(),
+        2,
+        "the loop printed the third error instead of the stop line: {stdout}"
     );
 }
 
@@ -1844,49 +1846,25 @@ fn a_broken_config_stops_serve_with_the_stop_line_and_stops_its_gate() {
 
     // The config no longer parses once the loop is already running: the store opened while it
     // was valid, so every later pass fails before `stop_gates` reads the grace.
-    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
+    let mut hub = repo.spawn_hub(5);
     wait_for_loop_log(&repo, "no transition", 1);
     tune(
         &repo,
         "cancel_grace_secs = 1",
         "cancel_grace_secs = \"one\"",
     );
-    let deadline = Instant::now() + Duration::from_secs(45);
-    loop {
-        if watch.try_wait().expect("try_wait").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "three identical config errors did not stop serve"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let output = watch.wait_with_output().expect("the watch loop stops");
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "the repeated config error did not exit 1: {} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     let stop = format!("radian arc: {}", radian_arc::run::repeated_error_stop());
-    assert!(
-        stderr.contains(&stop),
-        "the stop line is missing: {stdout}{stderr}"
+    wait_until(
+        Duration::from_secs(45),
+        "the stop line and the lock release",
+        || {
+            fs::read_to_string(repo.arc().join("loop.log")).is_ok_and(|log| log.contains(&stop))
+                && runner_lock_is_free(&repo)
+        },
     );
     assert!(
-        !stderr.contains("cancel_grace_secs"),
-        "the config error was reported instead of the stop line: {stderr}"
-    );
-    // The final config error is printed twice; the third is replaced by the stop line. (A
-    // transient read of the half-written file may print a different error line of its own.)
-    assert_eq!(
-        stdout.matches("cancel_grace_secs").count(),
-        2,
-        "the loop printed the third error instead of the stop line: {stdout}"
+        hub.try_wait().expect("try_wait").is_none(),
+        "the repeated config error stopped the whole hub"
     );
 
     // The gate is stopped, with the default grace because the config cannot be read.
@@ -1898,6 +1876,33 @@ fn a_broken_config_stops_serve_with_the_stop_line_and_stops_its_gate() {
     assert!(
         runner_lock_is_free(&repo),
         "the repeated-error stop kept runner.lock"
+    );
+
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &hub.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success(), "kill -TERM");
+    let output = hub.wait_with_output().expect("the hub ends");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the hub did not exit 0 on SIGTERM: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The final config error is printed twice; the third is replaced by the stop line, which
+    // only `loop.log` carries. (A transient read of the half-written file may print a different
+    // error line of its own.)
+    assert_eq!(
+        stdout.matches("cancel_grace_secs").count(),
+        2,
+        "the loop printed the third error instead of the stop line: {stdout}"
+    );
+    assert!(
+        !stdout.contains(&stop),
+        "the stop line is on stdout too: {stdout}"
     );
 }
 
@@ -1912,7 +1917,7 @@ fn two_identical_errors_then_a_success_do_not_stop_serve() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
-    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
+    let mut watch = repo.spawn_hub(5);
     // Wait for the two error lines; then fix the config while the loop waits for pass 3.
     wait_for_loop_log(&repo, "worker.exec_args must not repeat", 2);
     assert!(
@@ -1959,7 +1964,7 @@ fn different_errors_do_not_stop_serve() {
     plan_ops::confirm(&store, &plan).expect("confirm");
     set_exec_args(&repo, "exec_args = []", BAD_EXEC_ARGS_A);
 
-    let mut watch = repo.spawn(&["arc", "serve", "--interval", "5"]);
+    let mut watch = repo.spawn_hub(5);
     // Wait for each error line before changing the config for the next pass, so a slow pass
     // cannot be mistaken for the one the test meant.
     wait_for_loop_log(&repo, "worker.exec_args must not repeat", 1);
@@ -2254,7 +2259,7 @@ fn a_serve_pass_does_not_restart_a_gate_that_left_no_record() {
     publish_verifying(&repo, &store, &plan, &task);
     let env = [(background::EXIT_WITHOUT_RECORD_ENV, "1".to_owned())];
 
-    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "5"], &env);
+    let watch = repo.spawn_hub_in_own_group_with(5, &env);
     wait_until(Duration::from_secs(60), "the no-record gate record", || {
         gate_record(&repo, &task).is_some_and(|record| record["status"] == "no_record")
     });
@@ -2475,7 +2480,7 @@ fn a_reset_does_not_put_back_the_started_record_a_pass_already_read() {
     // A `serve` loop, so a stop signal ends the run after the pass that names its gate: a
     // one-shot `run` would take another pass and start a gate for the removed record, which
     // hides whether the record itself came back.
-    let pass = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "5"], &env);
+    let pass = repo.spawn_hub_in_own_group_with(5, &env);
 
     wait_for_a_pass_naming_the_gate(&repo, &task);
     // The stop arrives while the pass still names its gate; the loop ends after this pass.
@@ -2818,7 +2823,7 @@ fn a_stopped_gate_is_interrupted_and_restarted_without_a_death() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
+    let watch = repo.spawn_hub(30);
     wait_until(Duration::from_secs(30), "the gate's running record", || {
         gate_record(&repo, &task).is_some_and(|record| record["status"] == "running")
     });
@@ -2888,7 +2893,7 @@ fn sigterm_to_serve_stops_a_gate_that_has_not_written_running() {
     publish_verifying(&repo, &store, &plan, &task);
     let env = [(background::SLOW_START_ENV, "15000".to_owned())];
 
-    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "30"], &env);
+    let watch = repo.spawn_hub_in_own_group_with(30, &env);
     wait_until(
         Duration::from_secs(30),
         "the pass's started record with the gate's pid",
@@ -3081,7 +3086,7 @@ fn a_signal_to_the_gate_stops_both_stages_of_the_pair() {
         fake.program().to_string_lossy().into_owned(),
     )];
 
-    let watch = repo.spawn_in_own_group_with_env(&["arc", "serve", "--interval", "30"], &env);
+    let watch = repo.spawn_hub_in_own_group_with(30, &env);
     wait_for(&commands_pid_file);
     wait_until(Duration::from_secs(60), "the review session", || {
         fake.started(1).is_file()
@@ -3459,7 +3464,7 @@ fn sigterm_to_serve_kills_the_running_gate_stage() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
+    let watch = repo.spawn_hub(30);
     wait_for(&pid_file);
     let pid: u32 = fs::read_to_string(&pid_file)
         .expect("stage.pid")
@@ -3688,7 +3693,7 @@ fn sigint_to_the_serve_group_leaves_the_worker_running() {
     ]);
     worker_args(&repo, mock.base_url());
 
-    let watch = repo.spawn_in_own_group(&["arc", "serve", "--interval", "30"]);
+    let watch = repo.spawn_hub_in_own_group(30);
     let identity_path = repo.attempt_dir(&a, 1).join("identity.json");
     wait_for(&identity_path);
     wait_for(&stage_pid_file);
@@ -3745,7 +3750,7 @@ fn sigint_to_a_gate_stops_its_stage() {
     );
     publish_verifying(&repo, &store, &plan, &task);
 
-    let watch = repo.spawn(&["arc", "serve", "--interval", "30"]);
+    let watch = repo.spawn_hub(30);
     wait_for(&stage_pid_file);
     let stage: u32 = fs::read_to_string(&stage_pid_file)
         .expect("stage.pid")
@@ -4759,12 +4764,14 @@ fn a_read_only_loop_log_is_reported_once_and_the_pass_completes() {
 
 // ---- a rebuilt binary and a merge that changed arc's code (ADR 0048 decision 13) -----------
 
-/// Starts `radian arc serve --interval <interval>` from `program` (a copy of the binary) with
-/// the test's isolated environment, the same one [`Repo::radian`] uses.
-fn spawn_serve_from(repo: &Repo, program: &Path, interval: &str) -> std::process::Child {
+/// Starts `radian hub` from `program` (a copy of the binary) with the test's isolated
+/// environment, the same one [`Repo::radian`] uses, and this repository registered in the
+/// scratch home's hub registry.
+fn spawn_hub_from(repo: &Repo, program: &Path, interval: u64) -> std::process::Child {
+    repo.init_hub(interval);
     let mut command = std::process::Command::new(program);
     command
-        .args(["arc", "serve", "--interval", interval])
+        .args(["hub"])
         .current_dir(&repo.clone)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -4814,7 +4821,7 @@ fn serve_replaces_itself_with_a_rebuilt_binary_and_keeps_its_gate_running() {
     let dir = TempDir::new("run-reexec-bin");
     let program = dir.path().join("radian");
     fs::copy(radian_bin(), &program).expect("copy the radian binary");
-    let mut watch = spawn_serve_from(&repo, &program, "5");
+    let mut watch = spawn_hub_from(&repo, &program, 5);
     wait_for_loop_log(&repo, "no transition", 1);
     let pid = watch.id();
 

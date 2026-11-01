@@ -251,14 +251,14 @@ addition_budget = 500
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
-| `hub.concurrency` | integer | `4` | `1` or more | Tasks in `doing` across every registered repository. |
-| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two scheduling passes. |
+| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. Inert until the listener lands. |
+| `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
+| `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
-The reader validates these keys now; the hub that uses them is not built yet, so they have no effect in this build.
-When it runs, a change takes effect at the hub's next start.
+The reader validates these keys now; `hub.interval_secs` and `hub.concurrency` drive the hub's scheduling loop, and `hub.port` is inert until the HTTP listener lands.
+A change takes effect at the hub's next start.
 See `arc/hub` for the registry and the subcommands.
 
 ```toml

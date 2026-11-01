@@ -1915,3 +1915,20 @@ gate_profile`, and the file was restored from a copy under `.radian/`.
 | TK0264-M3 | `config::parse` no longer checks that each profile's `reviewer` names a section | `config::a_profile_names_a_missing_reviewer_is_refused` (the file parsed with reviewer `cheap` absent) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0282: the hub's scheduling loop (2026-10-31, branch `work/TK0282-hub-loop`)
+
+The hub keeps one loop per registered repository, re-reads the registry every interval, holds
+`hub.lock` and applies the machine-wide `[hub] concurrency` cap. Each mutation was applied by
+hand to the working file, the `radian` binary was rebuilt with `cargo build -p radian-tui --bin
+radian` because every test drives the CLI, the named test ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --test hub_loop`, and the file was restored from a copy
+under `.radian/backup/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0282-M1 | `start_ready` no longer asks the machine-wide cap before a claim | `hub_loop::the_machine_cap_holds_one_task_at_a_time` (`the machine-wide cap let a second task start`) | ✅ 1 failed |
+| TK0282-M2 | a repository's first failed pass is returned instead of retried, and `repo_loop` sets the hub-wide stop flag on that error | `hub_loop::a_failed_pass_does_not_stop_the_other_repository` (`B's second task in doing did not happen in 20s`) | ✅ 1 failed |
+| TK0282-M3 | `reconcile` returns once it has any repository, so the registry is read only at start | `hub_loop::add_and_remove_reach_a_running_hub` (`B's lock and task did not happen in 10s`) | ✅ 1 failed |
+| TK0282-M4 | the repository loop runs inline on the hub's own thread instead of a spawned OS thread | `hub_loop::a_slow_pass_does_not_delay_another_repository` (`the quick repository's second task did not happen in 4s`) | ✅ 1 failed |
+| TK0282-M5 | `HubLock::try_take` unlocks the file before returning the guard, so `hub.lock` is not held | `hub_loop::a_second_hub_exits_one_and_names_the_holder` (`the second hub exits instead of running`) | ✅ 1 failed |

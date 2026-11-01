@@ -14818,6 +14818,15 @@ fn run_arc_cli(home: &Path, repo: &Path, args: &[&str]) -> (Option<i32>, String,
     )
 }
 
+/// The pid the holder of `hub.lock` recorded, when it did.
+fn hub_lock_pid(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(home.join("hub/hub.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The pid the holder of `runner.lock` recorded, when it did.
 fn arc_loop_pid(repo: &Path) -> Option<u32> {
     std::fs::read_to_string(repo.join(".radian/arc/runner.lock"))
@@ -14825,6 +14834,41 @@ fn arc_loop_pid(repo: &Path) -> Option<u32> {
         .trim()
         .parse()
         .ok()
+}
+
+/// Starts `radian hub` with `repo` registered in `home` (`RADIAN_HOME`), the control port off
+/// and a short interval. The caller owns the child.
+fn spawn_hub_for(repo: &Path, home: &Path) -> std::process::Child {
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    std::fs::write(
+        home.join("config/config.toml"),
+        "schema_version = 1\n[control]\nenabled = false\n[hub]\ninterval_secs = 5\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join("hub")).unwrap();
+    let canonical = std::fs::canonicalize(repo).unwrap();
+    std::fs::write(
+        home.join("hub/repos.toml"),
+        format!(
+            "[[repos]]\nname = \"repo\"\npath = \"{}\"\n",
+            canonical.display()
+        ),
+    )
+    .unwrap();
+    std::process::Command::new(BIN)
+        .args(["hub"])
+        .current_dir(repo)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("RADIAN_HOME", home)
+        .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("radian hub starts")
 }
 
 /// Stops the loop a test started and waits for its lock to be free.
@@ -14929,29 +14973,17 @@ fn pty_arc_starts_one_loop_so_a_second_arc_run_exits_four() {
     stop_arc_loop(&repo);
 }
 
-/// A TUI opened while `radian arc serve` holds the lock starts no loop: its header names
-/// the holder's pid, and quitting leaves that loop alone. When the serve loop exits, the header
-/// goes back to `stopped` and the TUI starts nothing by itself (`R` is the only way).
+/// A TUI opened while a hub holds the lock starts no hub: its header names the holder's pid,
+/// and quitting leaves that hub alone. When the hub exits, the header goes back to `stopped`
+/// and the TUI starts nothing by itself (`R` is the only way).
 #[test]
-fn pty_arc_is_a_viewer_while_arc_serve_holds_the_lock() {
+fn pty_arc_is_a_viewer_while_a_hub_holds_the_lock() {
     let scratch = TempDir::new("arc-start-viewer");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
     let home = TempDir::new("arc-start-viewer-home");
-    let mut watch = std::process::Command::new(BIN)
-        .args(["arc", "serve", "--interval", "5"])
-        .current_dir(&repo)
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", home.path())
-        .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
-        .env("RADIAN_CATALOG_URL", fast_catalog_url())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("arc serve starts");
-    wait_until(Duration::from_secs(10), "the watch loop's lock", || {
+    let mut watch = spawn_hub_for(&repo, home.path());
+    wait_until(Duration::from_secs(10), "the hub's lock", || {
         !arc_lock_free(&repo)
     });
     let pid = watch.id();
@@ -14987,32 +15019,17 @@ fn pty_arc_is_a_viewer_while_arc_serve_holds_the_lock() {
     );
 }
 
-/// The open-time theme warning is not lost when a loop already runs: `radian arc` opened with
-/// a config whose theme warns, while `radian arc serve` holds `runner.lock`, shows the
-/// warning in the footer with the start's line after it — not only "a loop is already running"
-/// (brief TK0087).
+/// The open-time theme warning is not lost when a hub already runs: `radian arc` opened with
+/// a config whose theme warns, while a hub holds `runner.lock`, shows the warning in the footer
+/// with the start's line after it — not only "a loop is already running" (brief TK0087).
 #[test]
 fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
     let scratch = TempDir::new("arc-theme-warning");
     let repo = scratch.path().join("repo");
     arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
     let home = TempDir::new("arc-theme-warning-home");
-    let serve = KillOnDrop(
-        std::process::Command::new(BIN)
-            .args(["arc", "serve", "--interval", "5"])
-            .current_dir(&repo)
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
-            .env("HOME", home.path())
-            .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
-            .env("RADIAN_CATALOG_URL", fast_catalog_url())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("arc serve starts"),
-    );
-    wait_until(Duration::from_secs(10), "the serve loop's lock", || {
+    let serve = KillOnDrop(spawn_hub_for(&repo, home.path()));
+    wait_until(Duration::from_secs(10), "the hub's lock", || {
         !arc_lock_free(&repo)
     });
     let pid = serve.0.id();
@@ -15053,6 +15070,106 @@ fn pty_arc_keeps_the_theme_warning_when_a_loop_already_runs() {
     pty.send(b"q");
     assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
     assert!(arc_process_alive(pid), "quitting stopped the serve loop");
+}
+
+/// Opening the TUI in an unregistered repository with no hub running registers the repository
+/// (one status line says so) and starts a hub that holds `hub.lock` and the repository's
+/// `runner.lock`.
+#[test]
+fn pty_arc_registers_the_repository_and_starts_the_hub() {
+    let scratch = TempDir::new("arc-hub-register");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let home = TempDir::new("arc-hub-register-home");
+    let mut pty = Pty::spawn_in(
+        &["arc"],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        &repo,
+        30,
+        140,
+    );
+
+    wait_until(Duration::from_secs(10), "the registry entry", || {
+        std::fs::read_to_string(home.path().join("hub/repos.toml"))
+            .is_ok_and(|text| text.contains("name = \"repo\""))
+    });
+    assert!(
+        pty.wait_for_screen("added repo to the hub registry", wait_positive()),
+        "the TUI did not say it registered the repository:\n{}",
+        pty.screen()
+    );
+    wait_until(Duration::from_secs(10), "the hub's repository lock", || {
+        !arc_lock_free(&repo)
+    });
+    let hub = hub_lock_pid(home.path()).expect("the hub wrote its pid into hub.lock");
+    assert_eq!(
+        arc_loop_pid(&repo),
+        Some(hub),
+        "the hub holds hub.lock and the repository's runner.lock"
+    );
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
+    assert!(
+        arc_process_alive(hub),
+        "quitting the TUI stopped the hub it started"
+    );
+    stop_arc_loop(&repo);
+}
+
+/// Opening the TUI while a hub already runs starts nothing and changes no registry: a held
+/// `hub.lock` means the hub picks the repository up at its next registry read.
+#[test]
+fn pty_arc_starts_no_hub_while_hub_lock_is_held() {
+    let scratch = TempDir::new("arc-hub-held");
+    let repo = scratch.path().join("repo");
+    arc_loop_repo(&repo, "off", "http://127.0.0.1:1/v1");
+    let home = TempDir::new("arc-hub-held-home");
+    let held = radian_arc::hub::HubLock::try_take(&home.path().join("hub"))
+        .expect("hub.lock opens")
+        .expect("hub.lock is free");
+    let canonical = std::fs::canonicalize(&repo).unwrap();
+    std::fs::write(
+        home.path().join("hub/repos.toml"),
+        format!(
+            "[[repos]]\nname = \"repo\"\npath = \"{}\"\n",
+            canonical.display()
+        ),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(home.path().join("hub/repos.toml")).unwrap();
+
+    let mut pty = Pty::spawn_in(
+        &["arc"],
+        &[("RADIAN_HOME", home.path().to_str().unwrap())],
+        &repo,
+        30,
+        140,
+    );
+    assert!(
+        pty.wait_for_screen("loop ○ stopped", wait_positive()),
+        "the TUI did not stay a viewer:\n{}",
+        pty.screen()
+    );
+    // No repository lock, no registry change, and the test still holds hub.lock.
+    assert!(
+        arc_lock_free(&repo),
+        "the TUI started a hub beside the held hub.lock"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("hub/repos.toml")).unwrap(),
+        before,
+        "the TUI changed the registry"
+    );
+    assert_eq!(
+        hub_lock_pid(home.path()),
+        Some(std::process::id()),
+        "the test's hub.lock was replaced"
+    );
+    drop(held);
+
+    pty.send(b"q");
+    assert_eq!(pty.wait_for_exit(wait_positive()), Some(0));
 }
 
 /// SIGTERM closes the TUI and nothing else: the loop it started keeps running with the lock
