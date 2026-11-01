@@ -8562,21 +8562,30 @@ async fn a_resumed_session_counts_an_mcp_result_and_refuses_the_first_memory_wri
     .await;
     let (code, _, stderr) = run_memory_mcp_session(&env, &server, "guard-resume", "go", &mcp).await;
     assert_eq!(code, 0, "{stderr}");
-    // The first process settled an MCP call; the journal is the host's record of it.
+    // The first process settled the routed `fx__echo` call; the journal is the host's record
+    // of it. Assert that specific result, not merely that some call settled.
     let session = radian_session::Session::open(env.sessions.join("guard-resume.jsonl")).unwrap();
-    assert!(
-        session.events().iter().any(|event| matches!(
-            &event.data,
-            radian_session::EventData::ToolExecutionSettled { .. }
-        )),
-        "the journal holds the MCP result"
+    let settled = session.events().iter().find_map(|event| match &event.data {
+        radian_session::EventData::ToolExecutionSettled { call_id, result } if call_id == "c1" => {
+            Some(result)
+        }
+        _ => None,
+    });
+    let settled = settled.expect("the journal holds the fx__echo result");
+    assert!(!settled.is_error, "the fixture's MCP call succeeded");
+    assert_ne!(
+        settled.error_code.as_deref(),
+        Some("unknown_tool"),
+        "the journaled call reached the fixture server"
     );
 
     let file = env.home.join("memory/global/x.md");
     let write = serde_json::json!({"path": &file, "content": "after-resume\n"}).to_string();
     let server =
         MockServer::start(vec![tool_reply("w1", "write", &write), text_reply("done")]).await;
-    let mut args = memory_args(&env, &server, "unused", Some("write"), None);
+    // The resumed process still configures the same fixture server, so `fx__echo` is a name it
+    // routes; the guard must judge the journal against that list, not against `__` alone.
+    let mut args = memory_mcp_args(&env, &server, "unused", "write", &mcp);
     let at = args.iter().position(|arg| arg == "--session-id").unwrap();
     args[at] = "--resume".to_owned();
     args[at + 1] = "guard-resume".to_owned();

@@ -1981,3 +1981,16 @@ tests run with `cargo nextest run -p radian-host --lib --locked --profile sandbo
 | TK0276-M4 | an invented tool name arms the input guard (`routed` dropped from the `note_mcp_result` condition) | ✅ 1 failed (rc=100) | `tools::tests::an_invented_tool_call_does_not_arm_the_memory_input_guard` (the write was refused with the input-guard text) |
 | TK0276-M5 | any settled journaled name containing `__` counts as an MCP result (the `unknown_tool` check removed) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` |
 | TK0276-M6 | the patch result is not modelled (the guard's exact-only `None` path stands in for the tool's locators) | ✅ 1 failed (rc=100) | `cli::a_patch_matched_through_a_normalising_locator_still_catches_a_secret` (the file became `sk-abcdefghijklmnopqrst`) |
+
+## TK0276 rework 3: the resume guard counts only a routed tool's result (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place and the named
+test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`. The source was restored from `.radian/rework3/guard.rs.bak`
+(`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M7 | a settled call arms the resume guard whatever its result (the `delivered` check reduced to `true`) | ✅ 1 failed (rc=100) | `memory::guard::tests::a_call_settled_by_the_runtime_without_reaching_a_server_is_not_an_mcp_result` (`Some("cancelled") fx__echo` counted) |
+| TK0276-M8 | the routed name list is ignored on resume (the predicate uses `name.contains("__")`) | ✅ 1 failed (rc=100) | `memory::guard::tests::an_invented_double_underscore_call_is_not_an_mcp_result` (the forged `fx__nope` success counted) |
+

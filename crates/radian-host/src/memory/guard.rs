@@ -6,9 +6,10 @@
 //! - **Input guard**: once this session has taken in a result from an MCP tool, every `write`
 //!   or `patch` whose canonical target is a memory scope directory is refused. The flag is
 //!   per process; a resumed session starts with it set when its committed journal holds a
-//!   settled call to a tool an MCP server provided ([`journal_has_mcp_result`]). A name no
-//!   server provides settles `unknown_tool` without any server seeing it, so it does not
-//!   count.
+//!   settled call to a name the opened MCP session routes ([`journal_has_mcp_result`]). A name
+//!   no server provides is never counted, and neither is a result the runtime produced without
+//!   the tool returning anything (`cancelled`, `skipped_by_steering`, `hook_error`,
+//!   `denied`, `interrupted`, or an error from a journal older than `error_code`).
 //! - **Secret guard**: the content (for `patch`, the content the edit would produce and each
 //!   inserted replacement) runs through the ADR 0008 §3.2 rule-2 heuristic in
 //!   [`crate::config`]. A hit refuses the write and names the matched prefix, never the value.
@@ -17,12 +18,12 @@
 //! the whole `memory/` tree is not covered, so this guard can never refuse a write the tools
 //! could not make anyway.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use radian_core::{ToolCall, ToolFailure};
+use radian_core::{ToolCall, ToolFailure, ToolResult};
 use radian_session::{EventData, SessionEvent};
 use serde_json::Value;
 
@@ -73,6 +74,15 @@ impl MemoryWriteGuard {
         self.polluted.store(true, Ordering::SeqCst);
     }
 
+    /// The resume half of the input guard: arms when the committed journal holds a settled
+    /// call to a name the opened MCP session routes and a result the tool returned
+    /// ([`journal_has_mcp_result`]).
+    pub fn adopt_resumed(&self, calls: &[SettledCall], routed: &HashSet<String>) {
+        if journal_has_mcp_result(calls, routed) {
+            self.note_mcp_result();
+        }
+    }
+
     /// Checks one call before the built-in tools see it. A write or patch outside a memory
     /// scope, and every other tool, pass through untouched.
     pub fn check(&self, call: &ToolCall) -> Result<(), ToolFailure> {
@@ -102,9 +112,9 @@ impl MemoryWriteGuard {
             }
             return Ok(());
         }
-        // The result content is the rule (ADR 0021 invariant 4). The file may not exist or
-        // the edit may use the patch tool's normalising match, so the inserted text is
-        // checked on its own as well: either way, a secret cannot be written.
+        // The result content is the rule (ADR 0021 invariant 4). The file may not exist or the
+        // tool may refuse the edit, so the inserted text is checked on its own as well: either
+        // way, a secret cannot be written.
         for content in patch_new_texts(&call.arguments) {
             if let Some(prefix) = secret_hit(&content) {
                 return Err(refuse(prefix));
@@ -144,35 +154,69 @@ impl MemoryWriteGuard {
     }
 }
 
-/// Whether a settled tool call in `events` reached an MCP server (the resume half of the
-/// input guard). MCP aliases are `server__tool` (ADR: `agent_extensions::tool_alias`), and no
-/// built-in name contains `__`. A name no MCP server provides settles `unknown_tool` without
-/// any server seeing it, so that result is not outside content: an invented `foo__bar` call
-/// must not poison the session on resume.
-pub fn journal_has_mcp_result(events: &[SessionEvent]) -> bool {
+/// One tool call a committed journal records as started and settled: the name its
+/// `ToolExecutionStarted` marker carried and the result its `ToolExecutionSettled` carried.
+#[derive(Debug, Clone)]
+pub struct SettledCall {
+    pub name: String,
+    pub result: ToolResult,
+}
+
+/// The settled calls of a committed journal, in settle order. A result whose start marker is
+/// missing (a recovered call) cannot name a tool, so it is skipped.
+pub fn settled_calls(events: &[SessionEvent]) -> Vec<SettledCall> {
     let mut names: HashMap<&str, &str> = HashMap::new();
+    let mut settled = Vec::new();
     for event in events {
         match &event.data {
             EventData::ToolExecutionStarted { call_id, name, .. } => {
                 names.insert(call_id.as_str(), name.as_str());
             }
-            EventData::ToolExecutionSettled { call_id, result }
-                if result.error_code.as_deref() != Some("unknown_tool")
-                    && names
-                        .get(call_id.as_str())
-                        .is_some_and(|name| is_mcp_tool_name(name)) =>
-            {
-                return true;
+            EventData::ToolExecutionSettled { call_id, result } => {
+                if let Some(name) = names.get(call_id.as_str()) {
+                    settled.push(SettledCall {
+                        name: (*name).to_owned(),
+                        result: result.clone(),
+                    });
+                }
             }
             _ => {}
         }
     }
-    false
+    settled
 }
 
-/// Whether a tool name is an MCP alias (`server__tool`).
-pub fn is_mcp_tool_name(name: &str) -> bool {
-    name.contains("__")
+/// Whether one of `calls` reached an MCP server (the resume half of the input guard).
+///
+/// `routed` is the opened MCP session's tool list — the same names the live guard checks — so
+/// a name no server provides never counts as outside content, double underscore or not. The
+/// result must also be one the call could only produce after it ran: `cancelled`,
+/// `skipped_by_steering`, `hook_error`, `denied`, `interrupted` and an error with no code (a
+/// journal written before `error_code` existed) are all generated without the tool returning
+/// anything, so they do not count either.
+pub fn journal_has_mcp_result(calls: &[SettledCall], routed: &HashSet<String>) -> bool {
+    calls
+        .iter()
+        .any(|call| routed.contains(&call.name) && delivered(&call.result))
+}
+
+/// Whether a settled result carries content the tool returned, as opposed to a result the
+/// runtime or the permission layer produced without the tool returning one.
+fn delivered(result: &ToolResult) -> bool {
+    if !result.is_error {
+        return true;
+    }
+    !matches!(
+        result.error_code.as_deref(),
+        None | Some(
+            "unknown_tool"
+                | "cancelled"
+                | "skipped_by_steering"
+                | "hook_error"
+                | "denied"
+                | "interrupted"
+        )
+    )
 }
 
 /// The heuristic over a memory body: the whole text and every whitespace-separated token. A
@@ -210,9 +254,11 @@ fn patch_new_texts(arguments: &Value) -> Vec<String> {
     texts
 }
 
-/// The content a `patch` call would produce, when the file and the exact matches allow the
-/// computation. This is a conservative superset of the tool's own normalising match: a miss
-/// only means the inserted text is checked on its own instead.
+/// The content a `patch` call would produce, computed with the tool's own locators (the LF
+/// view, typographic normalisation, trailing whitespace) and its own rejections. `None` means
+/// the tool itself would write nothing or the file cannot be read here (it does not exist, is
+/// not a regular file, or is over the tool's byte cap); the inserted text is still checked on
+/// its own in that case.
 fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
     // The patch tool refuses a non-regular file and a file over its byte cap; do not read
     // either here (a fifo would block, a huge file would allocate before the tool's own
@@ -379,11 +425,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn routed(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// A double underscore alone is not proof: a name no MCP server provides settles
+    /// `unknown_tool` without any server seeing it, so a resume must not count it — nor a
+    /// result a `before_tool_call` hook forged for it.
     #[test]
-    fn a_mcp_alias_is_recognised_by_its_double_underscore() {
-        assert!(is_mcp_tool_name("fx__echo"));
-        assert!(!is_mcp_tool_name("read"));
-        assert!(!is_mcp_tool_name("ask_user"));
+    fn an_invented_double_underscore_call_is_not_an_mcp_result() {
+        let routed = routed(&["fx__echo"]);
+        let journal = [
+            started("c1", "foo__bar"),
+            settled(
+                "c1",
+                ToolResult::error("c1", "unknown_tool", "There is no tool named `foo__bar`."),
+            ),
+        ];
+        assert!(!journal_has_mcp_result(&settled_calls(&journal), &routed));
+        let forged = [
+            started("c2", "fx__nope"),
+            settled(
+                "c2",
+                ToolResult::success("c2", vec![ContentPart::text("{}")]),
+            ),
+        ];
+        assert!(
+            !journal_has_mcp_result(&settled_calls(&forged), &routed),
+            "an unrouted name is not outside content whatever its result"
+        );
+    }
+
+    /// The positive control: a settled call to a routed MCP alias counts, and so does an
+    /// error the server itself produced.
+    #[test]
+    fn a_settled_call_to_an_mcp_alias_is_an_mcp_result() {
+        let routed = routed(&["fx__echo"]);
+        let success = [
+            started("c1", "fx__echo"),
+            settled(
+                "c1",
+                ToolResult::success("c1", vec![ContentPart::text("{}")]),
+            ),
+        ];
+        assert!(journal_has_mcp_result(&settled_calls(&success), &routed));
+        let failed = [
+            started("c2", "fx__echo"),
+            settled(
+                "c2",
+                ToolResult::error("c2", "extension_error", "the server answered with an error"),
+            ),
+        ];
+        assert!(journal_has_mcp_result(&settled_calls(&failed), &routed));
+        let tool_error = [
+            started("c3", "fx__echo"),
+            settled(
+                "c3",
+                ToolResult::error("c3", "tool_error", "the tool failed"),
+            ),
+        ];
+        assert!(journal_has_mcp_result(&settled_calls(&tool_error), &routed));
+    }
+
+    /// A fabricated `__` call can be journaled as started and settled without a server ever
+    /// seeing it: an already-cancelled turn, steering, a failing `after_tool_call` hook, a
+    /// permission denial, and a journal from before `error_code` existed all produce a settled
+    /// result the tool did not return. None of them arms the resume guard.
+    #[test]
+    fn a_call_settled_by_the_runtime_without_reaching_a_server_is_not_an_mcp_result() {
+        let routed = routed(&["fx__echo"]);
+        let codes = [
+            (Some("unknown_tool"), "fx__nope"),
+            (Some("cancelled"), "fx__nope"),
+            (Some("cancelled"), "fx__echo"),
+            (Some("skipped_by_steering"), "fx__echo"),
+            (Some("hook_error"), "fx__echo"),
+            (Some("denied"), "fx__echo"),
+            (None, "fx__echo"),
+        ];
+        for (code, name) in codes {
+            let result = match code {
+                Some(code) => ToolResult::error("c1", code, "the runtime settled it"),
+                None => ToolResult {
+                    call_id: "c1".into(),
+                    content: Vec::new(),
+                    structured: None,
+                    is_error: true,
+                    error_code: None,
+                },
+            };
+            let journal = [started("c1", name), settled("c1", result)];
+            assert!(
+                !journal_has_mcp_result(&settled_calls(&journal), &routed),
+                "{code:?} {name} did not reach a server"
+            );
+        }
     }
 
     fn event(seq: u64, data: EventData) -> SessionEvent {
@@ -417,41 +553,5 @@ mod tests {
                 result,
             },
         )
-    }
-
-    /// A double underscore alone is not proof: a name no MCP server provides settles
-    /// `unknown_tool` without any server seeing it, so a resume must not count it.
-    #[test]
-    fn an_invented_double_underscore_call_is_not_an_mcp_result() {
-        let journal = [
-            started("c1", "foo__bar"),
-            settled(
-                "c1",
-                ToolResult::error("c1", "unknown_tool", "There is no tool named `foo__bar`."),
-            ),
-        ];
-        assert!(!journal_has_mcp_result(&journal));
-    }
-
-    /// The positive control: a settled call to a routed MCP alias counts, and so does a
-    /// failure the server or its transport produced (only `unknown_tool` is excluded).
-    #[test]
-    fn a_settled_call_to_an_mcp_alias_is_an_mcp_result() {
-        let success = [
-            started("c1", "fx__echo"),
-            settled(
-                "c1",
-                ToolResult::success("c1", vec![ContentPart::text("{}")]),
-            ),
-        ];
-        assert!(journal_has_mcp_result(&success));
-        let failed = [
-            started("c2", "fx__echo"),
-            settled(
-                "c2",
-                ToolResult::error("c2", "extension_error", "the server answered with an error"),
-            ),
-        ];
-        assert!(journal_has_mcp_result(&failed));
     }
 }

@@ -13,7 +13,7 @@ use radian_core::{
 };
 
 use crate::goal::{GoalSession, GoalTools};
-use crate::memory::{MemoryTouch, MemoryWriteGuard};
+use crate::memory::{MemoryTouch, MemoryWriteGuard, SettledCall};
 use crate::skills::tools::{SkillSession, SkillTools};
 use crate::subagent::{SubagentSession, SubagentTools};
 
@@ -38,6 +38,10 @@ pub struct HostTools {
     /// never passes it for a session whose `parent` relation is `"subagent"` (depth 1).
     subagent: Option<SubagentTools>,
     mcp: McpToolProvider,
+    /// The committed journal's settled calls, when this is a resumed session. The resume half
+    /// of the memory input guard judges them once the MCP session has opened and its routed
+    /// names are known (ADR 0021 invariant 4). A fresh session passes none.
+    resume_calls: Vec<SettledCall>,
     /// The session's built-in tool allow-list. `None` (the default) mounts every built-in the
     /// host has; `Some` mounts only these names — the others are not
     /// in the model's tool list at all and are not in the `<runtime>` layer (the permission
@@ -62,6 +66,7 @@ impl HostTools {
             skills: None,
             subagent: None,
             mcp,
+            resume_calls: Vec::new(),
             tool_allow: None,
             spec_sink: None,
         }
@@ -121,6 +126,14 @@ impl HostTools {
     /// `write`/`patch` and never change any other tool's result.
     pub fn with_memory_guard(mut self, guard: MemoryWriteGuard) -> Self {
         self.memory_guard = Some(guard);
+        self
+    }
+
+    /// Hands the committed journal's settled calls to the resume half of the input guard. The
+    /// decision waits for the MCP session to open, because only then are the routed names
+    /// known ([`HostTools::open_session`]).
+    pub fn with_resume_calls(mut self, calls: Vec<SettledCall>) -> Self {
+        self.resume_calls = calls;
         self
     }
 
@@ -237,6 +250,19 @@ impl ToolProvider for HostTools {
             built_in_specs.retain(|spec| self.allows(&spec.name));
         }
         let specs = merge_tool_specs(built_in_specs, mcp.tool_specs().to_vec())?;
+        // ADR 0021 invariant 4, resume half: a settled call in the committed journal arms the
+        // guard only when it names a tool this MCP session actually routes and its result came
+        // from the tool. The routed list is the same one the live branch checks, so a fabricated
+        // name and a runtime result that never reached a server do not count. The guard's flag
+        // is shared with the `HostSession` clone below.
+        if let Some(guard) = &self.memory_guard {
+            let routed: HashSet<String> = mcp
+                .tool_specs()
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect();
+            guard.adopt_resumed(&self.resume_calls, &routed);
+        }
         if let Some(sink) = &self.spec_sink {
             *sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(specs.clone());
         }

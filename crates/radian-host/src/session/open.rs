@@ -19,8 +19,7 @@ use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal,
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
 use crate::memory::{
-    MemoryHooks, MemoryInjection, MemoryService, MemoryTouch, MemoryWriteGuard,
-    journal_has_mcp_result,
+    MemoryHooks, MemoryInjection, MemoryService, MemoryTouch, MemoryWriteGuard, settled_calls,
 };
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
@@ -252,14 +251,16 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
-    // ADR 0021 invariant 4: the write guards. A resumed session counts an MCP tool result its
-    // committed journal recorded, so the first memory write after the resume is refused too.
-    let memory_guard = memory.as_ref().map(|service| {
-        let polluted = parsed
-            .as_ref()
-            .is_some_and(|parsed| journal_has_mcp_result(parsed.events()));
-        MemoryWriteGuard::new(service, polluted)
-    });
+    // ADR 0021 invariant 4: the write guards. The resume half waits for the MCP session to
+    // open, because only then are the tools it routes known (`HostTools::open_session`); a
+    // name no server provides never counts, whatever its journaled result.
+    let memory_guard = memory
+        .as_ref()
+        .map(|service| MemoryWriteGuard::new(service, false));
+    let resume_calls = parsed
+        .as_ref()
+        .map(|parsed| settled_calls(parsed.events()))
+        .unwrap_or_default();
     // ADR 0027: the journal records each call's fee, computed at the
     // price in force when the call ran, so a resume does not have to re-price history with
     // whatever the catalog says later. The writer asks this closure per usage record; it
@@ -472,7 +473,8 @@ pub async fn open_session(
     }
     let mut tools = HostTools::new(coding, mcp.clone())
         .with_tool_allow(tools_allow)
-        .with_spec_sink(std::sync::Arc::clone(&spec_sink));
+        .with_spec_sink(std::sync::Arc::clone(&spec_sink))
+        .with_resume_calls(resume_calls);
     if let Some(touch) = memory_touch {
         tools = tools.with_memory_touch(touch);
     }
