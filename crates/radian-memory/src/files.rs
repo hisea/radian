@@ -39,6 +39,8 @@ pub const NAME_MAX: usize = 64;
 pub const DESCRIPTION_MAX: usize = 120;
 
 const INDEX_FILE: &str = "MEMORY.md";
+/// The host-maintained session index file of a project scope (ADR 0021 D3).
+pub const SESSIONS_INDEX_FILE: &str = "SESSIONS.md";
 const LOG_FILE: &str = "log.jsonl";
 const MIGRATED_LOG_FILE: &str = "log.jsonl.migrated";
 
@@ -145,6 +147,11 @@ impl FileStore {
         self.scope_dir(scope).join(INDEX_FILE)
     }
 
+    /// `<scope>/SESSIONS.md`, the host-maintained session index (ADR 0021 D3).
+    pub fn sessions_index_path(&self, scope: &Scope) -> PathBuf {
+        self.scope_dir(scope).join(SESSIONS_INDEX_FILE)
+    }
+
     /// Every readable record's frontmatter, sorted by `name`, followed by one `Unreadable`
     /// entry per file that does not parse. An absent scope directory lists as empty and is not
     /// created.
@@ -181,6 +188,17 @@ impl FileStore {
     /// Replaces the index with `text`, verbatim. The store does not interpret it.
     pub fn write_index(&self, scope: &Scope, text: &str) -> Result<(), MemoryError> {
         write_index_dir(&self.scope_dir(scope), text)
+    }
+
+    /// The session index as written, or an empty string when the scope has none.
+    pub fn read_sessions_index(&self, scope: &Scope) -> Result<String, MemoryError> {
+        read_plain_file(&self.sessions_index_path(scope))
+    }
+
+    /// Replaces the session index with `text` through a temporary file and an atomic rename
+    /// (ADR 0021 D3). The store does not interpret it.
+    pub fn write_sessions_index(&self, scope: &Scope, text: &str) -> Result<(), MemoryError> {
+        atomic_write(&self.sessions_index_path(scope), text.as_bytes())
     }
 }
 
@@ -654,7 +672,8 @@ fn list_dir(dir: &Path) -> Result<Vec<ListEntry>, MemoryError> {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if file_name.starts_with('.') || file_name == INDEX_FILE {
+        if file_name.starts_with('.') || file_name == INDEX_FILE || file_name == SESSIONS_INDEX_FILE
+        {
             continue;
         }
         let Some(stem) = file_name.strip_suffix(".md") else {
@@ -912,11 +931,14 @@ fn replace_last_used(text: &str, at: &str) -> Result<String, ParseError> {
 }
 
 fn read_index_dir(dir: &Path) -> Result<String, MemoryError> {
-    let path = dir.join(INDEX_FILE);
-    match std::fs::read_to_string(&path) {
+    read_plain_file(&dir.join(INDEX_FILE))
+}
+
+fn read_plain_file(path: &Path) -> Result<String, MemoryError> {
+    match std::fs::read_to_string(path) {
         Ok(text) => Ok(text),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(MemoryError::io(&path, error)),
+        Err(error) => Err(MemoryError::io(path, error)),
     }
 }
 

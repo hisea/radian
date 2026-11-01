@@ -24,6 +24,10 @@ use std::path::{Path, PathBuf};
 use crate::read_roots::normalise_absolute;
 use crate::safe_fs::{OpenMode, RootDir, SafeFsError};
 
+/// The host-maintained session index file name. The model never writes it, even though its
+/// directory is a writable memory scope (ADR 0021 D3).
+pub const SESSIONS_INDEX_FILE: &str = "SESSIONS.md";
+
 /// One writable memory scope, held as a directory fd plus the absolute spellings a model path
 /// may use to name it.
 #[derive(Debug)]
