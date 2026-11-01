@@ -519,8 +519,12 @@ impl MemoryService {
         Ok(report)
     }
 
-    /// `merge`: move every file from `from` into `into`. A name already present in the target
-    /// is reported, and the `from` file is renamed `<name>-2`, `<name>-3`, ... first.
+    /// `merge`: move every record file from `from` into `into`. A name already present in the
+    /// target is reported, and the `from` file is renamed `<name>-2`, `<name>-3`, ... first.
+    ///
+    /// Only record files move: `MEMORY.md` (an index) and `SESSIONS.md` (the host's session
+    /// index) are not records and stay in their scope. A chosen suffix must be free in both
+    /// scopes, because the rename happens inside the source and the move replaces nothing.
     pub fn merge(
         &self,
         into: &ProjectId,
@@ -529,50 +533,30 @@ impl MemoryService {
         let source = Scope::Project(from.clone());
         let target = Scope::Project(into.clone());
         let mut report = MoveReport::default();
-        let mut taken: std::collections::BTreeSet<String> = self
-            .files
-            .list(&target)?
-            .into_iter()
-            .map(|entry| match entry {
-                ListEntry::Record(frontmatter) => frontmatter.name,
-                ListEntry::Unreadable { path, .. } => path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            })
-            .collect();
-        let mut names = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(self.files.scope_dir(&source)) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                if file_name == "MEMORY.md" || !file_name.ends_with(".md") {
-                    continue;
-                }
-                names.push(file_name.trim_end_matches(".md").to_owned());
-            }
-        }
+        let mut target_names = record_names(self.files.list(&target)?);
+        let mut source_names = record_names(self.files.list(&source)?);
+        let mut names: Vec<String> = source_names.iter().cloned().collect();
         names.sort();
         for name in names {
             let mut from_path = self.files.record_path(&source, &name);
             let mut target_name = name.clone();
-            if taken.contains(&target_name) {
+            if target_names.contains(&target_name) {
+                let mut taken: std::collections::BTreeSet<String> =
+                    target_names.union(&source_names).cloned().collect();
                 target_name = unique_name(&name, &mut taken);
                 self.files
                     .rename(&source, &name, &target_name)
                     .map_err(MemoryServiceError::from)?;
+                source_names.remove(&name);
+                source_names.insert(target_name.clone());
                 from_path = self.files.record_path(&source, &target_name);
                 report.conflicts.push(name.clone());
                 report.renamed.push((name.clone(), target_name.clone()));
-            } else {
-                taken.insert(target_name.clone());
             }
             let to_path = self.files.record_path(&target, &target_name);
+            if to_path.exists() {
+                return Err(MemoryServiceError::AlreadyExists { name: target_name });
+            }
             crate::ensure_private_dir(&self.files.scope_dir(&target)).map_err(|source| {
                 MemoryError::Open {
                     path: self.files.scope_dir(&target),
@@ -583,6 +567,8 @@ impl MemoryService {
                 path: from_path.clone(),
                 source,
             })?;
+            source_names.remove(&name);
+            target_names.insert(target_name.clone());
             self.move_index_line(&source, &target, &name, &target_name)?;
             report.moved.push(target_name);
         }
@@ -670,6 +656,22 @@ fn line_file(line: &str) -> Option<String> {
         radian_memory::IndexLine::Entry { file, .. } => Some(file),
         radian_memory::IndexLine::Invalid { .. } => None,
     }
+}
+
+/// The record names a [`FileStore::list`] result carries: a readable record's `name`, or an
+/// unreadable file's stem.
+fn record_names(entries: Vec<ListEntry>) -> std::collections::BTreeSet<String> {
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            ListEntry::Record(frontmatter) => frontmatter.name,
+            ListEntry::Unreadable { path, .. } => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// The first free `<base>-N` name, `N` starting at 2.

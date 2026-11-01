@@ -33,7 +33,7 @@ record read back the same.
 
 The fields are `name` (the file stem; `[a-z0-9-]`, 1 to 64 characters), `description` (one
 line), `type` (the closed set `RECORD_TYPES`: `user`, `feedback`, `project`, `reference`),
-`source` (the closed set `RECORD_SOURCES`: `model`, `user`, `import`; the host sets it),
+`source` (the closed set `RECORD_SOURCES`: `model`, `user`, `import`; `add` writes `user`, the\nmigration writes `import`, and the model sets `model` on its own writes as its prompt tells it),
 `created` and `modified` (RFC 3339 UTC; `created` is kept across a write and `modified` is set
 on every write), `last_used` (RFC 3339 UTC or absent, which means never read), and an optional
 `provenance` map with `session_id` and `turn_id`.

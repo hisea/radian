@@ -8555,6 +8555,89 @@ async fn memory_split_and_merge_move_files_and_rename_a_collision() {
     assert!(out.contains("moved-record"), "{out}");
 }
 
+/// `merge` moves record files only: each project keeps its own `SESSIONS.md` (the host's session
+/// index), so the source does not lose it and the target's is not replaced.
+#[tokio::test]
+async fn memory_merge_leaves_the_session_indexes_alone() {
+    let env = MemoryEnv::new("mem-merge-sessions");
+    let a = env.workspace("a");
+    let b = env.workspace("b");
+    std::fs::create_dir_all(a.join(".git")).unwrap();
+    std::fs::create_dir_all(b.join(".git")).unwrap();
+    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    env.run_in(&b, &["add", "moved-note"]).await;
+    let project_a = linked_project(&env, &a).await;
+    let project_b = linked_project(&env, &b).await;
+    let projects = env.home.join("memory/projects");
+    let a_sessions = projects.join(&project_a).join("SESSIONS.md");
+    let b_sessions = projects.join(&project_b).join("SESSIONS.md");
+    write_index(&a_sessions, "# Sessions\n- target-session\n");
+    write_index(&b_sessions, "# Sessions\n- source-session\n");
+
+    let (code, out, stderr) = env
+        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains("moved moved-note"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&a_sessions).unwrap(),
+        "# Sessions\n- target-session\n",
+        "the target's session index was replaced"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&b_sessions).unwrap(),
+        "# Sessions\n- source-session\n",
+        "the source lost its session index"
+    );
+    let (_, out, _) = env.run_in(&a, &["list"]).await;
+    assert!(out.contains("moved-note"), "the record moved: {out}");
+}
+
+/// A merge suffix must be free in both scopes: the rename happens inside the source before the
+/// move, so a name the source already has (here `note-2`) is skipped.
+#[tokio::test]
+async fn memory_merge_picks_a_collision_name_free_in_both_projects() {
+    let env = MemoryEnv::new("mem-merge-double-collision");
+    let a = env.workspace("a");
+    let b = env.workspace("b");
+    std::fs::create_dir_all(a.join(".git")).unwrap();
+    std::fs::create_dir_all(b.join(".git")).unwrap();
+    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    env.run_in(&a, &["add", "note"]).await;
+    env.run_in(&b, &["add", "note"]).await;
+    env.run_in(&b, &["add", "note-2"]).await;
+    let project_a = linked_project(&env, &a).await;
+    let project_b = linked_project(&env, &b).await;
+
+    let (code, out, stderr) = env
+        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
+        .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        out.contains("conflict: note exists in the target; renamed it to note-3"),
+        "the free suffix skips the source's own note-2: {out}"
+    );
+    let (_, out, _) = env.run_in(&a, &["list"]).await;
+    for name in ["note", "note-2", "note-3"] {
+        assert!(
+            out.lines()
+                .any(|line| line.contains(&format!("\t{name}\t"))),
+            "the target lists {name}: {out}"
+        );
+    }
+    assert_eq!(
+        out.lines().filter(|line| line.contains("\tnote")).count(),
+        3,
+        "both files moved: {out}"
+    );
+}
+
 #[tokio::test]
 async fn memory_off_refuses_a_model_write_until_memory_on() {
     let env = MemoryEnv::new("mem-off");

@@ -22,8 +22,10 @@ deleting it forgets it. There is no id, revision, archive or event log.
 ```
 
 The memory root is `$RADIAN_HOME/memory` when `RADIAN_HOME` is set, otherwise
-`$HOME/.radian/memory`. Directories are owner-only and files are owner-only. Every write is
-atomic: a crash leaves either the old file or the new one.
+`$HOME/.radian/memory`. Directories are owner-only and files are owner-only. Every record file and
+index is written atomically: a crash leaves either the old file or the new one. `projects.jsonl`
+is append-only instead; a crash during an append leaves a torn tail that the next open drops, so
+that one registration can be lost.
 
 ## Refused writes
 
@@ -130,7 +132,7 @@ directory.
 | `project [--json] [new]` | Show this workspace's identity key and project state, or register the workspace with `new`. |
 | `relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `split [--yes] <from> <to> <name>...` | Move each named file and its index line from one project to another. A name already present in the target is reported and left in place; a missing name is reported. Asks first. |
-| `merge [--yes] <into> <from>` | Move every file from one project into another. When both hold the same name, the file from `from` is renamed `<name>-2` (then `-3`, …), its `name` line is rewritten, and the collision is reported. Asks first. |
+| `merge [--yes] <into> <from>` | Move every record file from one project into another; `MEMORY.md` and `SESSIONS.md` stay in their own project. When both hold the same name, the file from `from` is renamed `<name>-2` (then `-3`, …, skipping any name either project already has), its `name` line is rewritten, and the collision is reported. Asks first. |
 
 `forget`, `split` and `merge` are the only commands that ask for confirmation. `list`,
 `show`, `stale`, `project` and `open` are reads: they run while a turn runs and do not
@@ -218,12 +220,13 @@ There is no memory tool. A call to `memory_search` or `memory_save` is an unknow
 
 ## The session switch
 
-`/memory off` refuses the model's `write` and `patch` calls into a memory scope for the rest
-of this process, with the reason `memory is off for this session`, and records the switch in
-the session so a resume starts without the index section. It is not a sandbox guard: command
-line tools keep whatever file access the tier allows. The section this process already built
-stays frozen; the switch takes full effect on the next session. `/memory on` allows those
-writes again. The switch is per session and is never written to the configuration file.
+`/memory off` refuses the model's `write` and `patch` calls into a memory scope until
+`/memory on` in the same process, with the reason `memory is off for this session`, and records
+the switch in the session so a resume starts without the index section. It is not a sandbox
+guard: command line tools keep whatever file access the tier allows. The section this process
+already built stays frozen; the switch takes full effect on the next session. `/memory on`
+allows those writes again. The switch is per session and is never written to the configuration
+file.
 
 ## Past sessions
 

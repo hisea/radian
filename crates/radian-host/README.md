@@ -177,7 +177,8 @@ injection never call it**, so they only ever read Global on an unregistered work
 `create_project()` and `relink()` stay the explicit routes. Reads default to Project then Global
 (`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). `add` writes a
 `source: user` skeleton and its index line; `remove` deletes the file and its index line;
-`split`/`merge` move files and their index lines (a merge collision renames `<name>-2`).
+`split`/`merge` move record files and their index lines (a merge collision renames `<name>-2`, or
+the first suffix free in both projects; `MEMORY.md` and `SESSIONS.md` stay put).
 
 `file_tool_roots()` names the two scope directories the file tools may read and write in both
 tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,

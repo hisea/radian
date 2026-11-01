@@ -20,8 +20,8 @@ Some arguments come from host data, not fixed words. `tab` completes them:
 `custom` names a new endpoint and asks for its protocol: `openai-compatible`, `anthropic` or `openai-responses` (pi's `openai-completions` and `anthropic-messages` are accepted).
 `/logout` offers the providers with a stored credential; `/theme` offers the
 built-ins plus your theme files; `/skill:<name>` offers the discovered skill
-names (`/skills` lists them with descriptions); `/memory` id arguments offer
-record ids. When nothing matches, `tab` does nothing.
+names (`/skills` lists them with descriptions); `/memory` name arguments offer the
+memory file names. When nothing matches, `tab` does nothing.
 
 While a turn runs, `/queue` still works and `Enter` steers the turn. Everything
 else waits or is refused. See "While a turn runs" below.
@@ -132,8 +132,8 @@ type into the message box.
 | `/memory project` | `/memory project [--json] [new]` | Show this workspace's identity key and project state, or register it with `new`. |
 | `/memory relink` | `/memory relink <project-id>` | Attach this workspace's identity key to an existing project. |
 | `/memory split` | `/memory split [--yes] <from> <to> <name>...` | Move files and their index lines between projects. Asks first. |
-| `/memory merge` | `/memory merge [--yes] <into> <from>` | Move every file from one project into another; a name in both is renamed `<name>-2` and reported. Asks first. |
-| `/memory off` | `/memory off` (no arguments) | Refuse the model's `write` and `patch` calls into a memory scope for the rest of this process, and record the switch so a resume starts without the index section. Takes effect at once; never written to the config file. |
+| `/memory merge` | `/memory merge [--yes] <into> <from>` | Move every record file from one project into another; `MEMORY.md` and `SESSIONS.md` stay in their own project. A name in both is renamed `<name>-2` (then `-3`, …) and reported. Asks first. |
+| `/memory off` | `/memory off` (no arguments) | Refuse the model's `write` and `patch` calls into a memory scope until `/memory on` in the same process, and record the switch so a resume starts without the index section. Takes effect at once; never written to the config file. |
 | `/memory on` | `/memory on` (no arguments) | Allow those memory writes again in this process. |
 
 `archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not
