@@ -718,7 +718,7 @@ mod tests {
     /// parsers' own consts, and the login choices come from the descriptor list. Hidden
     /// flags are test seams, not user surface, so they are not required; clap's own
     /// `--help`/`--version` are documented once in the TUI table. Each flag's rows are read
-    /// only from the `radian exec` sections; a row in another table never counts.
+    /// only from the anchored sections' tables; a row in another table never counts.
     #[test]
     fn cli_option_values_and_defaults_appear_in_cli_md() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -731,19 +731,34 @@ mod tests {
             .flat_map(|heading| radian_coding::drift::tables_under(&cli_md, "cli.md", heading))
             .flatten()
             .collect();
+        // The flag's rows, from any table under the anchored headings. The flag column differs
+        // per table: the `radian exec` table lists the flag first, and the `radian memory`
+        // table lists the subcommand first and the flags in its second cell. Every table here
+        // ends with a prose cell ("What it does"), so a flag named in any cell but the last
+        // matches; a flag another row's prose merely mentions never joins its set.
         fn table_rows<'a>(rows: &'a [Vec<String>], flag: &str) -> Vec<&'a Vec<String>> {
             rows.iter()
-                .filter(|row| row.first().is_some_and(|cell| cell.contains(flag)))
+                .filter(|row| {
+                    row.iter()
+                        .take(row.len().saturating_sub(1))
+                        .any(|cell| cell.contains(flag))
+                })
                 .collect()
         }
         // The default must sit in the row's Default cell (the Allowed/Value cells would
-        // mask a changed default). Tables without a Default column fall back to the whole
-        // row.
+        // mask a changed default). A table without a Default column (`radian memory`'s)
+        // names the default in its flag cell, as ``(default `30`)``; only the text after the
+        // word `default` counts, so the same value in the set above it never passes.
         fn default_in_row(row: &[String], default: &str) -> bool {
             if row.len() >= 4 {
                 row[2].contains(default)
             } else {
-                row.iter().any(|cell| cell.contains(default))
+                let default = default.to_lowercase();
+                row.iter().any(|cell| {
+                    let cell = cell.to_lowercase();
+                    cell.find("default")
+                        .is_some_and(|at| cell[at..].contains(default.as_str()))
+                })
             }
         }
         fn collect(
