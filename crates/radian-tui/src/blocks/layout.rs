@@ -181,7 +181,15 @@ pub fn line_count_cached(
     height: usize,
 ) -> usize {
     let text_len = entry.text.len();
-    let key = (width, height, text_len, modes, entry.fold_override);
+    // ADR 0035: a settled memory card changes the shape (a one-row head becomes the open box)
+    // while the entry's text length can stay the same, so the key carries the card's kind and
+    // line. `None` for every other entry.
+    let memory = entry
+        .tool
+        .as_ref()
+        .and_then(|card| card.memory.as_ref())
+        .map(|memory| (memory.read, memory.line()));
+    let key = (width, height, text_len, modes, entry.fold_override, memory);
     if let Some(lines) = entry
         .layout_cache
         .as_ref()
@@ -1407,5 +1415,35 @@ pub(crate) mod tests {
                 "{source:?}: {pieces:?}"
             );
         }
+    }
+
+    /// ADR 0035: a settled call turns a one-row tool head into the memory card without
+    /// necessarily changing the entry's text length. The cached line count must follow the
+    /// shape, or the frame measures the card as one row and the transcript's window and
+    /// scroll position drift.
+    #[test]
+    fn a_settled_memory_card_invalidates_the_cached_line_count() {
+        let mut entry = Entry::new(EntryKind::ToolCall, "write /memory/global/abcde.md");
+        entry.tool = Some(Box::new(crate::tools::ToolCard::new(
+            "c1",
+            "write",
+            serde_json::json!({"path": "/memory/global/abcde.md", "content": "no frontmatter\n"}),
+        )));
+        let width = 80;
+        let height = 20;
+        assert_eq!(line_count_cached(&mut entry, EXPANDED, width, height), 1);
+        // The result settles: the card gains its memory ref and the entry's text is
+        // regenerated. The two texts have the same length, so only the shape tells them apart.
+        let memory = crate::memory_card::MemoryRef {
+            title: "abcde".to_owned(),
+            record_type: None,
+            path: "/memory/global/abcde.md".into(),
+            relative: "global/abcde.md".into(),
+            read: false,
+        };
+        entry.text = memory.line();
+        entry.tool.as_mut().expect("one card").memory = Some(memory);
+        assert_eq!(entry.text.len(), "write /memory/global/abcde.md".len());
+        assert_eq!(line_count_cached(&mut entry, EXPANDED, width, height), 3);
     }
 }

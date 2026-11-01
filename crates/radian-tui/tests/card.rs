@@ -1077,11 +1077,24 @@ fn tool_app(
 ) -> App {
     let mut app = App::new("m", "s");
     app.set_memory_root(root.map(std::path::Path::to_path_buf));
+    push_tool(&mut app, "c1", name, arguments, text, is_error);
+    app
+}
+
+/// One tool call and its settled result, in journal order.
+fn push_tool(
+    app: &mut App,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+    text: &str,
+    is_error: bool,
+) {
     app.push_message(&Message::Assistant {
         content: vec![],
         reasoning: vec![],
         tool_calls: vec![ToolCall {
-            id: "c1".into(),
+            id: id.into(),
             name: name.into(),
             arguments,
         }],
@@ -1091,7 +1104,7 @@ fn tool_app(
     });
     app.push_message(&Message::Tool {
         result: ToolResult {
-            call_id: "c1".into(),
+            call_id: id.into(),
             content: vec![ContentPart::text(text)],
             structured: None,
             is_error,
@@ -1099,7 +1112,14 @@ fn tool_app(
         },
         meta: Default::default(),
     });
-    app
+}
+
+/// A file's text as the `read` tool returns it: every line prefixed with its number.
+fn numbered(text: &str) -> String {
+    text.lines()
+        .enumerate()
+        .map(|(index, line)| format!("{}: {line}\n", index + 1))
+        .collect()
 }
 
 const FEEDBACK: &str = "---\nname: x\ndescription: a fact\ntype: feedback\nsource: model\n\
@@ -1136,6 +1156,29 @@ fn a_memory_write_draws_one_card_with_the_title_type_and_relative_path() {
 }
 
 #[test]
+fn a_memory_write_with_a_frontmatter_the_store_cannot_read_shows_a_question_mark() {
+    let root = memory_root("unreadable");
+    let path = root.join("global/x.md");
+    // Every field but `name` and `type` is missing: `radian-memory` refuses the file, so the
+    // card shows the stem and `?` even though the two lines it needs are there.
+    let mut app = tool_app(
+        Some(&root),
+        "write",
+        json!({
+            "path": path.display().to_string(),
+            "content": "---\nname: x\ntype: feedback\n---\n",
+        }),
+        "wrote 4 lines",
+        false,
+    );
+    let lines = rows(&render(&mut app, 100, 12), 100, 12);
+    assert!(
+        lines.iter().any(|line| line == "│ x · ? · global/x.md"),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn a_memory_write_with_a_broken_frontmatter_shows_the_stem_and_a_question_mark() {
     let root = memory_root("broken");
     let path = root.join("projects/P/x.md");
@@ -1157,9 +1200,21 @@ fn a_memory_write_with_a_broken_frontmatter_shows_the_stem_and_a_question_mark()
 fn a_memory_patch_draws_the_card_with_the_file_title() {
     let root = memory_root("patch");
     let path = root.join("global/y.md");
-    std::fs::write(&path, FEEDBACK.replace("name: x", "name: y")).unwrap();
-    let mut app = tool_app(
-        Some(&root),
+    let file = FEEDBACK.replace("name: x", "name: y");
+    let mut app = App::new("m", "s");
+    app.set_memory_root(Some(root.clone()));
+    // The model patches what it read: the read's result is what records the frontmatter.
+    push_tool(
+        &mut app,
+        "r1",
+        "read",
+        json!({"path": path.display().to_string()}),
+        &numbered(&file),
+        false,
+    );
+    push_tool(
+        &mut app,
+        "c1",
         "patch",
         json!({
             "path": path.display().to_string(),
@@ -1189,13 +1244,6 @@ fn a_memory_patch_draws_the_card_with_the_file_title() {
 #[test]
 fn a_workspace_write_keeps_the_ordinary_card() {
     let root = memory_root("workspace");
-    let mut plain = tool_app(
-        None,
-        "write",
-        json!({"path": "src/main.rs", "content": "fn main() {}\n"}),
-        "wrote 1 line",
-        false,
-    );
     let mut with_root = tool_app(
         Some(&root),
         "write",
@@ -1203,18 +1251,41 @@ fn a_workspace_write_keeps_the_ordinary_card() {
         "wrote 1 line",
         false,
     );
-    let plain_rows = rows(&render(&mut plain, 100, 12), 100, 12);
-    let rooted_rows = rows(&render(&mut with_root, 100, 12), 100, 12);
-    assert_eq!(plain_rows, rooted_rows, "the memory root changed the card");
-    assert!(
-        rooted_rows
-            .iter()
-            .any(|line| line.contains("write src/main.rs")),
-        "{rooted_rows:?}"
+    let lines = rows(&render(&mut with_root, 100, 12), 100, 12);
+    // Today's ordinary write card, character for character: the memory root changes nothing.
+    let block: Vec<&str> = block_rows(&lines).into_iter().map(String::as_str).collect();
+    assert_eq!(
+        block,
+        ["◻ write src/main.rs · +1 ✓", "│    1 + fn main() {}"]
     );
     assert!(
-        !rooted_rows.iter().any(|line| line.contains("memory")),
-        "{rooted_rows:?}"
+        !lines.iter().any(|line| line.contains("memory")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_memory_patch_without_a_recorded_frontmatter_shows_a_question_mark() {
+    let root = memory_root("patch-unknown");
+    let path = root.join("global/y.md");
+    // The file on disk is a readable record; the transcript never recorded its frontmatter, so
+    // the card never reads the file (ADR 0035: the card comes from the recorded calls).
+    std::fs::write(&path, FEEDBACK.replace("name: x", "name: y")).unwrap();
+    let mut app = tool_app(
+        Some(&root),
+        "patch",
+        json!({
+            "path": path.display().to_string(),
+            "old": "body",
+            "new": "changed",
+        }),
+        "replaced 1 occurrence in the file (matched by exact)",
+        false,
+    );
+    let lines = rows(&render(&mut app, 100, 12), 100, 12);
+    assert!(
+        lines.iter().any(|line| line == "│ y · ? · global/y.md"),
+        "{lines:?}"
     );
 }
 
@@ -1345,5 +1416,144 @@ fn a_resumed_transcript_renders_the_same_memory_card_and_line() {
     assert!(
         resumed_rows.iter().any(|line| line == "• memory used: y"),
         "{resumed_rows:?}"
+    );
+}
+
+/// ADR 0035: a memory card resolves from the recorded calls, never from the file. A record
+/// edited or deleted after the calls settled must draw the same card on a resume. The `patch`
+/// names no frontmatter of its own; the `read` before it records the type.
+#[test]
+fn a_resumed_patch_card_keeps_the_type_the_transcript_recorded() {
+    let root = memory_root("resume-patch");
+    let record = root.join("global/y.md");
+    let file = FEEDBACK.replace("name: x", "name: y");
+    std::fs::write(&record, &file).unwrap();
+    let path = record.display().to_string();
+    let messages = vec![
+        Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "r1".into(),
+                name: "read".into(),
+                arguments: json!({"path": path}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success("r1", vec![ContentPart::text(numbered(&file))]),
+            meta: Default::default(),
+        },
+        Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "p1".into(),
+                name: "patch".into(),
+                arguments: json!({"path": path, "old": "body", "new": "changed"}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success(
+                "p1",
+                vec![ContentPart::text(
+                    "replaced 1 occurrence in the file (matched by exact)",
+                )],
+            ),
+            meta: Default::default(),
+        },
+    ];
+    let mut live = App::new("m", "s");
+    live.set_memory_root(Some(root.clone()));
+    for message in &messages {
+        live.push_message(message);
+    }
+    let live_rows = rows(&render(&mut live, 100, 20), 100, 20);
+    assert!(
+        live_rows
+            .iter()
+            .any(|line| line == "│ y · feedback · global/y.md"),
+        "{live_rows:?}"
+    );
+
+    // The record's frontmatter changes after the calls settled.
+    std::fs::write(&record, file.replace("type: feedback", "type: user")).unwrap();
+    let mut edited = App::new("m", "s");
+    edited.set_memory_root(Some(root.clone()));
+    for message in &messages {
+        edited.push_message(message);
+    }
+    assert_eq!(
+        rows(&render(&mut edited, 100, 20), 100, 20),
+        live_rows,
+        "the edited file changed the resumed card"
+    );
+
+    // And it disappears.
+    std::fs::remove_file(&record).unwrap();
+    let mut gone = App::new("m", "s");
+    gone.set_memory_root(Some(root));
+    for message in &messages {
+        gone.push_message(message);
+    }
+    assert_eq!(
+        rows(&render(&mut gone, 100, 20), 100, 20),
+        live_rows,
+        "the deleted file changed the resumed card"
+    );
+}
+
+/// ADR 0035: the read line's title is the file stem, so removing the record after the read
+/// settled leaves the resumed transcript unchanged.
+#[test]
+fn a_resumed_read_line_survives_the_record_disappearing() {
+    let root = memory_root("resume-read");
+    let record = root.join("global/y.md");
+    let file = FEEDBACK.replace("name: x", "name: y");
+    std::fs::write(&record, &file).unwrap();
+    let messages = vec![
+        Message::Assistant {
+            content: vec![],
+            reasoning: vec![],
+            tool_calls: vec![ToolCall {
+                id: "r1".into(),
+                name: "read".into(),
+                arguments: json!({"path": record.display().to_string()}),
+            }],
+            provider_payload: None,
+            interrupted: false,
+            meta: Default::default(),
+        },
+        Message::Tool {
+            result: ToolResult::success("r1", vec![ContentPart::text(numbered(&file))]),
+            meta: Default::default(),
+        },
+    ];
+    let mut live = App::new("m", "s");
+    live.set_memory_root(Some(root.clone()));
+    for message in &messages {
+        live.push_message(message);
+    }
+    let live_rows = rows(&render(&mut live, 100, 20), 100, 20);
+    assert!(
+        live_rows.iter().any(|line| line == "• memory used: y"),
+        "{live_rows:?}"
+    );
+
+    std::fs::remove_file(&record).unwrap();
+    let mut resumed = App::new("m", "s");
+    resumed.set_memory_root(Some(root));
+    for message in &messages {
+        resumed.push_message(message);
+    }
+    assert_eq!(
+        rows(&render(&mut resumed, 100, 20), 100, 20),
+        live_rows,
+        "the deleted file changed the resumed read line"
     );
 }

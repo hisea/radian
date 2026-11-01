@@ -7,14 +7,18 @@ use super::*;
 
 /// The layout cache's key (ADR 0028 R1/R6): the width, the transcript area's height (ADR
 /// 0028 R10: an image's run follows it), the entry's text length, the display
-/// modes and the per-entry fold override. The override is part of it, so a search hit's
-/// expansion invalidates the count.
+/// modes, the per-entry fold override, and the memory card's shape. The override is part of it,
+/// so a search hit's expansion invalidates the count. So is the shape, because a settled call
+/// turns a one-row head into the memory card without necessarily changing the text length
+/// (ADR 0035). The last element is the entry's memory ref as `(read, line)`, `None` for every
+/// ordinary entry.
 pub(crate) type LayoutKey = (
     usize,
     usize,
     usize,
     crate::tools::DisplayModes,
     Option<bool>,
+    Option<(bool, String)>,
 );
 
 /// A compaction summary's display data (ADR 0028 R5). The `summary` and the verbatim user

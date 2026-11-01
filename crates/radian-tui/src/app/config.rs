@@ -37,6 +37,7 @@ impl App {
             layers: vec![Layer::Surface],
             memory_enabled: false,
             memory_root: None,
+            memory_records: crate::memory_card::MemoryRecords::default(),
             pending_expand: VecDeque::new(),
             slash_completion: None,
             mention_completion: None,
@@ -155,6 +156,11 @@ impl App {
     /// The memory root the transcript resolves a memory card's path against (ADR 0035). Set
     /// once at startup, beside [`App::set_memory_enabled`].
     pub fn set_memory_root(&mut self, root: Option<PathBuf>) {
+        // A different root means different files: the record types the transcript established
+        // for the old root no longer name anything.
+        if self.memory_root != root {
+            self.memory_records = crate::memory_card::MemoryRecords::default();
+        }
         self.memory_root = root;
     }
 

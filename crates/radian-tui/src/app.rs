@@ -790,9 +790,13 @@ pub struct App {
     /// service; without one the command is refused with the same notice as before.
     pub memory_enabled: bool,
     /// The memory root (ADR 0021): what a memory path in the transcript is relative to, and
-    /// where [`crate::memory_card::detect`] looks up a record. `None` when this process has no
-    /// memory root. The service stays on the loop's side (ADR 0023 U3).
+    /// where [`crate::memory_card::MemoryRecords`] resolves a record. `None` when this process
+    /// has no memory root. The service stays on the loop's side (ADR 0023 U3).
     pub memory_root: Option<PathBuf>,
+    /// The record types the transcript's settled calls established, in message order (ADR 0035).
+    /// A `patch` card reads it; a resume rebuilds it from the same messages, so the two paths
+    /// draw the same card. It is never filled from the file.
+    pub memory_records: crate::memory_card::MemoryRecords,
     /// The sends waiting for their `@` expansion, in submit order (see
     /// [`Effect::ExpandMentions`]): one entry per submitted send, so two rapid submits —
     /// `/queue a` then `/queue b`, or two fast Enters — cannot overwrite each other and drop

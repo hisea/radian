@@ -79,6 +79,10 @@ serde_json.workspace = true
 # (`radian-host`), so a `[roles]` table and `[tui.colors]` share one value shape
 # (`TuiColorOverride::from_toml`). The crate is already in the tree via `radian-host`.
 toml = "0.8"
+# The memory card's frontmatter parser (ADR 0021, ADR 0035) validates `created`/`modified`
+# with the same `chrono` the memory store uses, so the card and the store agree on RFC 3339
+# UTC. Already in the workspace lock via `radian-memory`.
+chrono = "0.4"
 unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
@@ -103,8 +107,6 @@ libc = "0.2"
 [dev-dependencies]
 # The shared heading-anchored table reader for the manual drift tests.
 radian-coding = { path = "../radian-coding", features = ["testing"] }
-# The board test writes a heartbeat a known age before now, so its card prints that age.
-chrono = "0.4"
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
 # The `radian arc mcp` tests drive the real server through a real MCP client over the

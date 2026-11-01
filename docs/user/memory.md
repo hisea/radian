@@ -95,8 +95,14 @@ transcript draws one card in place of the ordinary `write` or `patch` card:
 ╰──
 ```
 
-The title is the file's frontmatter `name`, or the file stem when the frontmatter does not
-parse. The type is the frontmatter `type`, or `?` when the frontmatter does not parse. The path
+The title is the file stem: a readable record's frontmatter `name` is its stem, and a file
+whose frontmatter does not parse falls back to the same stem. The type is the frontmatter
+`type`; a file parses only when its frontmatter has every required field, uses a value from
+each closed set and carries valid timestamps. The card comes from the
+recorded tool calls, never from the file: a `write` from its content, a `read` from its result,
+and a `patch` from the type the same transcript recorded for that file (a patch names no
+frontmatter of its own), so a resumed session draws the same card after the record changed or
+disappeared. A `patch` to a file the transcript never read or wrote shows `?`. The path
 is relative to the memory root. With the message box empty, `Enter` opens the newest memory
 card's file with `$EDITOR` when set, otherwise the platform opener. A failed call, and a path
 outside the memory scopes, keep the ordinary `write` or `patch` card.
