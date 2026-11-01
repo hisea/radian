@@ -2050,3 +2050,14 @@ sandbox --no-fail-fast -E 'test(<name>)'`, and the source restored from `.radian
 | TK0293-M2 | `split` joins each given name into a path without `validate_record_name` | ✅ 1 failed (rc=100) | `memory::service::tests::split_refuses_an_absolute_name` (the absolute name reached `record_path`) |
 | TK0293-M3 | `split` validates each name inside the move loop, so the first name is renamed before the second is checked | ✅ 1 failed (rc=100) | `memory::service::tests::split_validates_every_name_before_it_moves_any` (the valid earlier name had moved) |
 | TK0293-M4 | the command path propagates a `split` `InvalidName` with `?` instead of `add_error` (exit 1) | ✅ 1 failed (rc=100) | `memory::commands::tests::split_with_an_invalid_name_is_a_usage_error_and_moves_nothing` (`left: 1, right: 2`) |
+
+## TK0297: the record-name reason is not wrapped twice (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. The mutation was applied in place
+to `crates/radian-memory/src/files.rs`, the named tests were run with `cargo nextest run -p
+radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(memory::service::tests::split_refuses)'`,
+and the file was restored from `.radian/files.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M1 | `validate_record_name` returns `MemoryError::InvalidName`'s whole `Display` string again, so the caller's own `InvalidName` prints the prefix twice | ✅ 4 failed (rc=100) | `memory::service::tests::split_refuses_the_session_index_name` (`one refusal, one prefix: invalid memory record name "SESSIONS": invalid memory record name "SESSIONS": a name may contain only a-z, 0-9 and -`) |

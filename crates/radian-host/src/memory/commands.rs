@@ -916,6 +916,11 @@ mod tests {
             error.message.contains("invalid memory record name"),
             "the same error add gives: {error}"
         );
+        assert_eq!(
+            error.message.matches("invalid memory record name").count(),
+            1,
+            "one refusal, one prefix: {error}"
+        );
         let source = Scope::Project(project);
         assert!(
             service.files().exists(&source, "note").unwrap(),

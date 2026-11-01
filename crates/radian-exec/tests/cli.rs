@@ -7560,6 +7560,11 @@ async fn memory_split_with_a_bad_name_exits_two_and_moves_nothing() {
         .await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("invalid memory record name"), "{stderr}");
+    assert_eq!(
+        stderr.matches("invalid memory record name").count(),
+        1,
+        "one refusal, one prefix: {stderr}"
+    );
     let (_, out, _) = env.run_in(&a, &["list"]).await;
     assert!(out.contains("note"), "a refused split moves nothing: {out}");
     let (_, out, _) = env.run_in(&b, &["list"]).await;
@@ -7573,6 +7578,11 @@ async fn memory_add_refuses_a_bad_or_existing_name_and_writes_nothing() {
     let (code, _, stderr) = env.run(&["add", "Bad Name"]).await;
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
+    assert_eq!(
+        stderr.matches("invalid memory record name").count(),
+        1,
+        "one refusal, one prefix: {stderr}"
+    );
 
     let (code, _, stderr) = env.run(&["add", "note"]).await;
     assert_eq!(code, 0, "{stderr}");

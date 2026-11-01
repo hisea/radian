@@ -1025,6 +1025,17 @@ mod tests {
             text.contains("invalid memory record name"),
             "the same error add gives: {text}"
         );
+        // The refusal names the record and the rule once: the reason comes from the name rule
+        // and `InvalidName` adds the prefix, so a second wrap would print the prefix twice.
+        assert_eq!(
+            text.matches("invalid memory record name").count(),
+            1,
+            "one refusal, one prefix: {text}"
+        );
+        assert!(
+            text.starts_with(&format!("invalid memory record name {name:?}: ")),
+            "the message names the record and the rule once: {text}"
+        );
         assert_eq!(
             std::fs::read_to_string(&sentinel).unwrap(),
             "STAYS\n",

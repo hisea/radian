@@ -92,7 +92,7 @@ attaches a key to an existing project.
   touch_last_used, scope_dir, record_path, index_path}` — the record store and its indexes.
 - `ProjectRegistry::{register, resolve, relink, projects, identity_keys}` — the registry.
 - `migrate_log` — the one-time old-log migration.
-- `validate_record_name` — the name rule's message, for a command that validates before it
+- `validate_record_name` — the name rule's reason, for a command that validates before it
   writes.
 - The closed sets `RECORD_TYPES` and `RECORD_SOURCES`, and `NAME_MAX`/`DESCRIPTION_MAX`.
 
