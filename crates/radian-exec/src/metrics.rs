@@ -33,14 +33,17 @@
 //!   (`request_log_truncated` then says so). The anchor is the turn's `TurnStarted` for its
 //!   first request and, for a later one, the last record written between the previous response
 //!   and this request: a `ToolExecutionStarted`/`ToolExecutionSettled`, a tool-result or steer
-//!   `MessageAppended`, a compaction's records, the max-tokens notice. A response's own records
-//!   (its assistant `MessageAppended` and its usage record) never move it; the usage record
-//!   closes the request and is itself the anchor of a request that follows with no record in
-//!   between (a `PauseTurn` continuation). Records the host writes while a request is in flight
+//!   `MessageAppended`, a compaction's records, the max-tokens notice, or the previous turn's
+//!   `TurnFinished` (a `/compact` served between turns). A response's own records (its assistant
+//!   `MessageAppended` and its usage record) never move it; the usage record closes the request
+//!   and is itself the anchor of a request that follows with no record in between (a
+//!   `PauseTurn` continuation). Records the host writes while a request is in flight
 //!   (`InboxEnqueued` for a steer or a background-job notice, `BackgroundJobSettled`, a
-//!   `ConfigChanged`) do not move it. So the value is the model's whole response time, not the
-//!   gap between two writes of one response. A range with no `TurnStarted` and no usage record
-//!   before its first request has no anchor, so that first `latency_ms` is null.
+//!   `ConfigChanged`) do not move it. So inside a turn the value is the model's whole response
+//!   time, not the gap between two writes of one response; a between-turns `/compact` also spans
+//!   the idle time from the turn's end, because its request writes no record. A range with no
+//!   `TurnStarted`, usage record or `TurnFinished` before its first request has no anchor, so
+//!   that first `latency_ms` is null.
 //!
 //! A counter no record reported is `None` ("not reported", never 0, ADR 0007 J1). `retries`
 //! counts the live `ModelRetrying` events of the folded range (ADR 0010: they are not journal
@@ -457,6 +460,15 @@ impl Folder {
                 self.opening = false;
                 self.request_anchor = ts.map(str::to_owned);
             }
+            // The turn's end. A control request the driver serves between turns (a manual
+            // `/compact`, ADR 0018) writes no record of its own, so the `TurnFinished` is the
+            // last record before that request and must anchor it. It also opens the anchor for
+            // a folded range whose first record is a `TurnFinished`.
+            "TurnFinished" => {
+                self.anchor_ready = true;
+                self.opening = false;
+                self.request_anchor = ts.map(str::to_owned);
+            }
             // The response has begun. Its assistant message is the response's own first write
             // and never moves the anchor; the records after it belong to the tool work the
             // next request follows.
@@ -471,8 +483,8 @@ impl Folder {
             // flight or outside the turn's request cycle: `InboxEnqueued` (a steer's enqueue
             // or a background-job notice, ADR 0037) and `BackgroundJobSettled`,
             // `ConfigChanged`, `PermissionResolved`, `Goal*`, `UserBash` and the turn's
-            // opening (`InputClaimed`, `InputAdmitted`) and end (`TurnFinished`). None of
-            // them is the last record before a request.
+            // opening (`InputClaimed`, `InputAdmitted`). None of them is the last record
+            // before a request.
             "ToolExecutionStarted"
             | "ToolExecutionSettled"
             | "ContextCompacted"
@@ -1557,6 +1569,56 @@ mod tests {
         assert_eq!(
             metrics.request_log[2]["latency_ms"], 4200,
             "the chat request after the compaction anchors on its 6 s commit"
+        );
+    }
+
+    /// A `/compact` served between turns follows the previous turn's `TurnFinished`, which is
+    /// then the last record written before its request; the anchor must not stay on the
+    /// previous turn's final usage record.
+    #[test]
+    fn a_compaction_after_a_turn_anchors_on_the_turns_end() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            assistant(2, "2026-10-31T00:00:01Z"),
+            record(
+                3,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                4,
+                "2026-10-31T00:00:05Z",
+                "TurnFinished",
+                json!({"turn_id": "t-1", "outcome": "completed"}),
+            ),
+            // The user waited a minute and then ran `/compact`; the compaction request has
+            // no journal record of its own, so the turn's end is the last write before it.
+            record(
+                5,
+                "2026-10-31T00:01:05Z",
+                "CompactionUsageRecorded",
+                json!({"revision": 1, "usage": {"input": 50}}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:01:06Z",
+                "ContextCompacted",
+                json!({"revision": 1}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log.len(), 2);
+        assert_eq!(metrics.request_log[0]["latency_ms"], 1000);
+        assert_eq!(metrics.request_log[1]["kind"], "compaction");
+        assert_eq!(
+            metrics.request_log[1]["latency_ms"], 60000,
+            "the anchor is the 5 s TurnFinished, not the 1 s usage record"
         );
     }
 

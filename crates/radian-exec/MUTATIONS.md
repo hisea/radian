@@ -831,3 +831,16 @@ turn writes after `TurnStarted` becomes the first request's anchor. Both were ap
 |---|---|---|---|
 | TK0299-M4 | the anchor match's `_` arm moves the anchor, so an in-flight `InboxEnqueued`/`BackgroundJobSettled` becomes the anchor again (`_ => {}` becomes `_ => self.move_anchor(ts)`) | ✅ 1 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) |
 | TK0299-M5 | `move_anchor` drops the turn's opening exemption (`anchor_ready && !opening` becomes `anchor_ready`), so the input `MessageAppended` moves the first anchor | ✅ 1 failed (rc=100) | `metrics::tests::the_turns_opening_input_keeps_the_turn_start_anchor` (`left: 2050`, `right: 3050`) |
+
+## TK0299 rework 4: a between-turns request after `TurnFinished` (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 3. The mutation
+removes the `TurnFinished` arm from the anchor match, so a `/compact` the driver serves between
+turns is timed from the previous turn's last usage record instead of from the record written
+before its request. It was applied to `src/metrics.rs`, the named test was run with `cargo
+nextest run -p radian-exec --locked --profile sandbox -E 'test(<name>)'`, and the source was
+restored from `.radian/metrics-r4.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M6 | the anchor match drops its `TurnFinished` arm, so a between-turns `/compact` anchors on the previous turn's last usage record | ✅ 1 failed (rc=100) | `metrics::tests::a_compaction_after_a_turn_anchors_on_the_turns_end` (`left: 64000`, `right: 60000`) |
