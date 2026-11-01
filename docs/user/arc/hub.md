@@ -105,6 +105,7 @@ When the holder lets go, the next probe schedules the repository.
 
 The machine-wide [`hub.concurrency`](#the-hub-configuration) cap applies on top of each repository's own [`limits.concurrency`](config.md#configtoml) and flow concurrency.
 Before it starts a task, a pass reads the number of tasks in `doing` in every registered repository at that moment and starts the task only when that number is below the cap.
+A repository whose store cannot be read is left out of that count, so a broken task file there cannot stop another repository's pass; that repository's own loop reports the error.
 The count is read, not cached: two passes in different repositories can each see a free slot and both start one task, so the cap bounds the steady state, not a lock; the next passes see the new count.
 
 A pass error in one repository is written to that repository's [`loop.log`](files.md), and its loop continues at the next interval; the other repositories are unaffected.
@@ -119,7 +120,8 @@ radian  /home/me/Code/radian  scheduled
 work-tools  /home/me/Code/work-tools  read-only (pid 4242)
 ```
 
-A running hub follows a rebuilt binary as the old loop did: when a pass sees that the file at its recorded executable path changed and is stable, the hub prints `radian arc: the radian binary changed on disk; restarting the loop with it`, finishes the passes in flight, releases every `runner.lock` and then `hub.lock`, and replaces itself with `exec` of the recorded path.
+A running hub follows a rebuilt binary as the old loop did: when a pass sees that the file at its recorded executable path changed and is stable, the hub prints `radian arc: the radian binary changed on disk; restarting the loop with it` once, in the `loop.log` of the repository whose pass saw it, finishes the passes in flight, releases every `runner.lock` and then `hub.lock`, and replaces itself with `exec` of the recorded path.
+A loop that sees the same replacement after the first one stops without printing a second line.
 The pid does not change, and a running gate and a running worker are left alone.
 When `exec` fails, the hub prints one line, takes `hub.lock` again and goes on with the old code.
 

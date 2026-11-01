@@ -320,8 +320,16 @@ fn repo_loop(
                 }
                 Ok(Passed::Stopped) => break,
                 Ok(Passed::Restart(path)) => {
-                    *restart_path.lock().expect("the path lock") = Some(path);
-                    restart.store(true, Ordering::SeqCst);
+                    // One replacement is one line for the whole hub: every loop may see the
+                    // same change, but only the first one claims the restart and announces
+                    // it, in its own `loop.log` and on stdout. A sibling that sees it too
+                    // stops without printing a second line.
+                    if !restart.swap(true, Ordering::SeqCst) {
+                        *restart_path.lock().expect("the path lock") = Some(path);
+                        let line = format!("radian arc: {}\n", run::RESTART_TEXT);
+                        run::LoopLog::new(&store).write(&line);
+                        (emit)(&line);
+                    }
                     break;
                 }
                 Err(_) => {
@@ -333,7 +341,9 @@ fn repo_loop(
                 }
             }
         }
-        if !run::wait_interval(interval) {
+        if !run::wait_interval(interval, &|| {
+            stop_all.load(Ordering::SeqCst) || removed.load(Ordering::SeqCst)
+        }) {
             break;
         }
     }
@@ -352,19 +362,31 @@ fn set_state(state: &Arc<Mutex<RepoState>>, next: RepoState) {
 
 /// The machine-wide count against `[hub] concurrency`: `true` when one more task may start.
 fn machine_room(registry: &Registry, cap: u64) -> Result<bool, Error> {
-    Ok(machine_doing(registry)? < cap)
+    Ok(machine_doing(registry) < cap)
 }
 
 /// Tasks in `doing` across every registered repository, read now, never cached: two passes in
 /// different repositories may each see room and both start one task, so the cap bounds the
 /// steady state rather than acting as a lock.
-fn machine_doing(registry: &Registry) -> Result<u64, Error> {
+///
+/// A repository whose store cannot be read contributes nothing instead of failing the count.
+/// That is the fault-isolation rule: a broken task file in one repository must not make
+/// another repository's pass fail and, after [`run::REPEATED_ERROR_LIMIT`], stop its loop. The
+/// repository that owns the file reports the error in its own pass; the cap can only be
+/// undercounted while it is broken, which keeps a healthy repository scheduling.
+fn machine_doing(registry: &Registry) -> u64 {
+    let Ok(entries) = registry.repos() else {
+        // The hub's own thread reports a registry it cannot read; a pass must not fail on it.
+        return 0;
+    };
     let mut total = 0u64;
-    for entry in registry.repos()? {
+    for entry in entries {
         let store = Store::at(&entry.path);
-        total = total.saturating_add(crate::store::attempt_ops::doing_counts(&store)?.total);
+        if let Ok(counts) = crate::store::attempt_ops::doing_counts(&store) {
+            total = total.saturating_add(counts.total);
+        }
     }
-    Ok(total)
+    total
 }
 
 /// The status structure the HTTP task will serve.
@@ -375,7 +397,7 @@ fn compose_status(
 ) -> HubStatus {
     HubStatus {
         cap,
-        doing: machine_doing(registry).unwrap_or(0),
+        doing: machine_doing(registry),
         repos: repos
             .values()
             .map(|handle| RepoStatus {

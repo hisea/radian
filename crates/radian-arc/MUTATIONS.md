@@ -1955,3 +1955,18 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '…'`. Each file was
 restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
 second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.
+
+## TK0282 rework: review findings (2026-10-31, branch `work/TK0282-hub-loop`)
+
+A review of the hub's loop found that a broken repository could fail another repository's pass,
+that an idle loop held a rebuilt-binary restart for a whole interval, and that two loops could
+each print the restart line. Each mutation was applied by hand to `src/hub/loop.rs`, the
+`radian` binary was rebuilt, the named test ran with `cargo nextest run -p radian-arc --locked
+--profile sandbox --test hub_loop -E 'test(<name>)'`, and the file was restored from a copy
+under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0282-M7 | `machine_room` counts every registered repository with `?` again, so one unreadable store fails another repository's pass | `hub_loop::a_broken_task_file_in_one_repository_does_not_stop_another` (`the healthy repository schedules its task did not happen in 10s`) | ✅ 1 failed |
+| TK0282-M8 | the hub's interval wait ignores the shared stop flag (`&|| false`) | `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (`the hub waited out an idle interval before the exec (after 6.01s)`) | ✅ 1 failed |
+| TK0282-M9 | every loop that sees the changed binary prints the restart line (unconditional `restart.store`) | `hub_loop::a_binary_replacement_prints_one_restart_line_for_the_hub` (2 stdout lines, expected 1) | ✅ 1 failed |

@@ -312,6 +312,12 @@ impl HubRun {
         }
     }
 
+    /// Reads lines until none arrives for `quiet`, so what the old process wrote before a
+    /// restart is in [`HubRun::seen`] after the new one runs.
+    fn drain(&mut self, quiet: Duration) {
+        while self.next_line(quiet).is_some() {}
+    }
+
     fn term(&mut self) -> bool {
         Command::new("kill")
             .args(["-TERM", &self.id().to_string()])
@@ -797,6 +803,181 @@ fn a_slow_pass_does_not_delay_another_repository() {
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the quick repository waited for the slow pass"
+    );
+
+    assert!(hub.term());
+    assert_eq!(
+        hub.wait_exit(Duration::from_secs(10))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
+}
+
+/// A task file that does not parse in one registered repository must not fail another
+/// repository's pass: the machine-wide `doing` count skips a store it cannot read, because
+/// that repository's own loop is the one that reports the error (review: fault isolation).
+#[test]
+fn a_broken_task_file_in_one_repository_does_not_stop_another() {
+    let broken = Repo::new("hub-fault-file-broken");
+    let healthy = Repo::new("hub-fault-file-healthy");
+    setup(&broken);
+    let healthy_store = setup(&healthy);
+    let task = ready_task(&healthy_store, "healthy");
+    command_worker(&healthy);
+    slow_before_attempt(&healthy, 10);
+    // A task file `doing_counts` cannot read. The machine-wide count reads every registered
+    // repository's store before each claim, so without isolation this error lands in the
+    // healthy repository's pass too, and three identical ones stop its loop.
+    let tasks = broken.arc().join("tasks");
+    fs::create_dir_all(&tasks).expect("the tasks directory");
+    fs::write(tasks.join("TK9001-broken.md"), "this is not a task file\n")
+        .expect("the broken task file");
+
+    let home = HubHome::new("hub-fault-file", 1, 4);
+    home.register(&[("broken", &broken.clone), ("healthy", &healthy.clone)]);
+    let mut hub = home.spawn();
+
+    wait_until(
+        Duration::from_secs(10),
+        "the healthy repository schedules its task",
+        || is_doing(&healthy_store, &task),
+    );
+    // Three intervals is the repeated-error stop. The healthy loop must still be alive.
+    std::thread::sleep(Duration::from_millis(5000));
+    assert!(
+        is_doing(&healthy_store, &task),
+        "the healthy loop stopped after the broken repository's error"
+    );
+    assert!(
+        !runner_lock_free(&healthy),
+        "the healthy loop released runner.lock after the broken repository's error"
+    );
+    assert!(
+        loop_log(&broken).contains("radian arc: "),
+        "the broken repository did not report its own error: {}",
+        loop_log(&broken)
+    );
+
+    assert!(hub.term());
+    assert_eq!(
+        hub.wait_exit(Duration::from_secs(10))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
+}
+
+/// A rebuilt binary restarts the hub without waiting out an idle sibling loop's interval: a
+/// repository asleep in the interval wait must see the hub's shared stop flag, not only the
+/// process signal (review: a full interval of restart delay per idle loop).
+#[test]
+fn a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval() {
+    let a = Repo::new("hub-reexec-idle-a");
+    let b = Repo::new("hub-reexec-idle-b");
+    setup(&a);
+    setup(&b);
+    let home = HubHome::new("hub-reexec-idle-home", 10, 4);
+    home.register(&[("a", &a.clone)]);
+
+    let dir = TempDir::new("hub-reexec-idle-bin");
+    let program = dir.path().join("radian");
+    fs::copy(radian_bin(), &program).expect("copy the radian binary");
+    let mut hub = home.spawn_from(&program);
+    wait_until(Duration::from_secs(10), "A's first pass", || {
+        loop_log(&a).contains("no transition")
+    });
+
+    // B is registered only now, so the hub starts its loop at the next registry read
+    // (t ≈ 10 s) and that loop then sleeps until t ≈ 20 s. A's next pass sees the replacement
+    // at t ≈ 11 s; the hub must exec then, not at B's next wake.
+    home.register(&[("a", &a.clone), ("b", &b.clone)]);
+    std::thread::sleep(Duration::from_millis(500));
+    let replacement = dir.path().join("radian.new");
+    fs::copy(radian_bin(), &replacement).expect("copy the new radian binary");
+    fs::rename(&replacement, &program).expect("replace the running binary");
+
+    assert!(
+        hub.wait_line_where(Duration::from_secs(25), |line| line
+            .contains(radian_arc::run::RESTART_TEXT))
+            .is_some(),
+        "no restart line: {:?}",
+        hub.seen
+    );
+    // The exec'd hub prints the first line again. When a loop waits out its interval, the new
+    // process appears only at B's wake, seconds after the restart.
+    let restarted = Instant::now();
+    assert!(
+        hub.wait_line_where(Duration::from_secs(6), |line| line
+            .starts_with("radian hub:"))
+            .is_some(),
+        "the hub waited out an idle interval before the exec (after {:?}): {:?}",
+        restarted.elapsed(),
+        hub.seen
+    );
+    assert!(
+        restarted.elapsed() < Duration::from_secs(6),
+        "the restart took {:?}",
+        restarted.elapsed()
+    );
+
+    assert!(hub.term());
+    assert_eq!(
+        hub.wait_exit(Duration::from_secs(10))
+            .and_then(|s| s.code()),
+        Some(0)
+    );
+}
+
+/// One replacement, one line: the whole hub restarts when any loop sees the change, so the
+/// first loop to see it announces it and a sibling that sees the same change does not print it
+/// again (review: two loops, two restart lines).
+#[test]
+fn a_binary_replacement_prints_one_restart_line_for_the_hub() {
+    let a = Repo::new("hub-reexec-one-a");
+    let b = Repo::new("hub-reexec-one-b");
+    setup(&a);
+    setup(&b);
+    let home = HubHome::new("hub-reexec-one-home", 1, 4);
+    home.register(&[("a", &a.clone), ("b", &b.clone)]);
+
+    let dir = TempDir::new("hub-reexec-one-bin");
+    let program = dir.path().join("radian");
+    fs::copy(radian_bin(), &program).expect("copy the radian binary");
+    let mut hub = home.spawn_from(&program);
+    wait_until(Duration::from_secs(10), "both loops' first pass", || {
+        loop_log(&a).contains("no transition") && loop_log(&b).contains("no transition")
+    });
+    let replacement = dir.path().join("radian.new");
+    fs::copy(radian_bin(), &replacement).expect("copy the new radian binary");
+    fs::rename(&replacement, &program).expect("replace the running binary");
+
+    assert!(
+        hub.wait_line_where(Duration::from_secs(30), |line| line
+            .contains(radian_arc::run::RESTART_TEXT))
+            .is_some(),
+        "no restart line: {:?}",
+        hub.seen
+    );
+    // Let the exec'd hub settle, then read every line the old process wrote (the losing loop
+    // writes its own line on the old code) and both `loop.log`s.
+    wait_until(Duration::from_secs(15), "the new hub's locks", || {
+        !runner_lock_free(&a) && !runner_lock_free(&b)
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    hub.drain(Duration::from_secs(1));
+    let announced = hub.seen.join("\n");
+    assert_eq!(
+        announced.matches(radian_arc::run::RESTART_TEXT).count(),
+        1,
+        "the hub printed the restart line more than once on stdout: {announced}"
+    );
+    let logged = loop_log(&a).matches(radian_arc::run::RESTART_TEXT).count()
+        + loop_log(&b).matches(radian_arc::run::RESTART_TEXT).count();
+    assert_eq!(
+        logged,
+        1,
+        "the restart line reached more than one loop.log: {}\n{}",
+        loop_log(&a),
+        loop_log(&b)
     );
 
     assert!(hub.term());

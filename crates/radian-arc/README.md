@@ -229,7 +229,8 @@ summary only when it changed, prints a pass error as one `radian arc: <message>`
 the next pass, starts no new worker or gate once a signal arrived, leaves a running worker
 alone, and signals a running gate (`gate::background::stop`) before it returns. Three identical
 pass errors stop that repository's loop. A stable, changed executable at the recorded path
-makes it return `Passed::Restart`; the hub releases every lock and `exec`s.
+makes it return `Passed::Restart`; the first loop to see it prints the one restart line and
+the hub releases every lock and `exec`s.
 
 `run::LoopLog` is the one writer of `loop.log`, used by `run` and every hub loop: each line gets an
 RFC 3339 UTC timestamp and a space, is appended and flushed at once, and a log at or above
@@ -246,7 +247,8 @@ its own OS thread, because a pass blocks; it re-reads the registry every `[hub] 
 records a repository whose `runner.lock` another process holds as read-only (with the holder's
 pid), and never writes the registry. The machine-wide `[hub] concurrency` cap is read from every
 registered repository's store before each claim, not cached, so it bounds steady state rather
-than acting as a lock.
+than acting as a lock; a repository whose store cannot be read is left out of that count, so its
+broken task file cannot fail another repository's pass.
 
 ## Gate checkout
 

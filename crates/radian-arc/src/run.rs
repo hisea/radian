@@ -206,8 +206,9 @@ pub struct LoopState {
 pub enum Passed {
     /// The pass ran; the caller waits the interval and passes again.
     Ran,
-    /// A stable, changed executable is at the recorded path. The caller finishes the passes in
-    /// flight, releases every lock and `exec`s it with [`LoopState::arguments`].
+    /// A stable, changed executable is at the recorded path. The caller prints the one
+    /// [`RESTART_TEXT`] line for the whole hub, finishes the passes in flight, releases every
+    /// lock and `exec`s it with [`LoopState::arguments`].
     Restart(PathBuf),
     /// A SIGINT or SIGTERM arrived. The caller stops the gates and releases its lock.
     Stopped,
@@ -297,9 +298,11 @@ impl LoopState {
         if stop_requested() {
             return Ok(Passed::Stopped);
         }
-        // A rebuilt binary: one line, and the caller releases the locks and `exec`s the
-        // recorded path. A gate and a worker are separate process groups and are left alone
-        // (ADR 0048 decision 13).
+        // A rebuilt binary: the caller (the hub) releases every lock and `exec`s the recorded
+        // path, and it prints the one line for the whole hub: every loop sees the same change,
+        // so this returns the path and leaves the announcement to the first loop that acts on
+        // it. A gate and a worker are separate process groups and are left alone (ADR 0048
+        // decision 13).
         if let (Some(path), Some(identity)) = (self.executable.as_deref(), self.recorded) {
             let mut look = |path: &Path| executable_identity(path);
             let mut pause = |wait: Duration| std::thread::sleep(wait);
@@ -307,11 +310,6 @@ impl LoopState {
                 if stop_requested() {
                     return Ok(Passed::Stopped);
                 }
-                say(
-                    &mut self.log,
-                    emit,
-                    &format!("radian arc: {RESTART_TEXT}\n"),
-                );
                 self.recorded = Some(new_identity);
                 return Ok(Passed::Restart(path.to_path_buf()));
             }
@@ -618,11 +616,14 @@ pub(crate) fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
-/// Waits `interval_secs` in [`STOP_POLL`] slices. `false` when a stop signal arrived first.
-pub(crate) fn wait_interval(interval_secs: u64) -> bool {
+/// Waits `interval_secs` in [`STOP_POLL`] slices. `false` when a stop signal arrived first, or
+/// when `also_stop` says to stop: the hub passes its shared `stop_all` (a rebuilt binary, a
+/// removed repository, or a sibling loop's restart) so an idle loop does not hold the hub
+/// until its interval ends.
+pub(crate) fn wait_interval(interval_secs: u64, also_stop: &dyn Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(interval_secs);
     loop {
-        if stop_requested() {
+        if stop_requested() || also_stop() {
             return false;
         }
         let now = Instant::now();
