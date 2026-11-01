@@ -10,21 +10,22 @@ Project records belong to one project directory; global records belong to
 you. The model receives each scope's `MEMORY.md` index in its system prompt,
 project first, then global; see "What the model sees".
 
-The model reads and writes its memory files with the ordinary file tools
+The model reads and writes its memory record files with the ordinary file tools
 (`read`, `grep`, `glob`, `write`, `patch`) in both tiers. The tools reach
 only the two scope directories: the global memory directory and, when the
 workspace maps to a project, that project's directory. Every other path
 under the memory directory stays denied, and the shell cannot read any of
-it. See `permissions` for the exact rule.
+it. The host-maintained `SESSIONS.md` is the one file there the model may read
+but not write; see "Past sessions". See `permissions` for the exact rule.
 
 ## Memory files and `last_used`
 
 A memory file holds one record. Its frontmatter carries `name`, `description`,
 `type`, `source`, `created`, `modified`, `last_used` and an optional
-`provenance`. When the model `read`s a memory file other than `MEMORY.md`, the
-host sets `last_used` to the time of the read and changes no other byte. A
-user command (`list`, `show`, `stale`) never changes it. An absent `last_used`
-means the file was never read.
+`provenance`. When the model `read`s a memory file other than `MEMORY.md` or
+`SESSIONS.md`, the host sets `last_used` to the time of the read and changes no
+other byte. A user command (`list`, `show`, `stale`) never changes it. An absent
+`last_used` means the file was never read.
 
 ## Kinds
 
@@ -159,3 +160,31 @@ an index file takes effect in the next session, or on resume.
 
 There is no memory tool. A call to `memory_search` or `memory_save` is an
 unknown tool.
+
+## Past sessions
+
+Each project has one host-maintained index of ended sessions, `SESSIONS.md`,
+beside its `MEMORY.md`. The model's system prompt names the file in one line and
+the model reads it with `read`; the file itself is never injected.
+
+Each line records one ended session:
+
+```text
+- <session id> <start time> <workspace> — <first line of the first user message>
+```
+
+The start time is RFC 3339 UTC. The workspace is relative to the repository
+root, or `.` at the root. The message is the first line, cut at 120 characters,
+with no newline. Newest is last. A session appears only after it ends, and only
+when its journal committed a user message. A resumed session's line is replaced,
+not duplicated. A workspace that maps to no project has no file and creates none.
+
+`[memory] sessions_index_max_lines` (default 1000) caps the file. After an
+append, the oldest lines beyond the cap are dropped.
+
+The file is read-only to the model: `write` and `patch` refuse it with
+`SESSIONS.md is maintained by radian`. Removing the file clears the index; the
+next session that ends in this project creates it again.
+
+To read the conversation behind a line, pass its session id to
+`radian exec --export <id>`; see `sessions`.

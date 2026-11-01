@@ -40,7 +40,6 @@
 | `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
 | `memory-files.md` | decided | 0021、0020、0036、0035、0043、0012 | 记忆改成模型可写的 Markdown 文件加 `MEMORY.md` 索引注入（Claude Code / Gemini CLI 的形状）；取消 JSONL 存储、排序注入、`memory_search` |
 | `memory-aging.md` | decided（1、2；自动归档天数未定） | 0021 | 宿主在 `read` 时写 `last_used`，`memory stale` 列久未用的；自动归档等数据 |
-| `memory-session-search.md` | decided | 0021、0006、0019、0043 | 过去的会话当记忆：模型能查「上次我们怎么做的」（Amp、Codex 的形状），工具还是会话索引文件待定 |
 | `memory-shared-tier.md` | idea | 0021、0020、0031、0036 | 随仓库走的共享记忆层与多机私有记忆：是否另开 `.radian/memory/`，倾向共享层由人经 PR 放 |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
 | `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
@@ -56,7 +55,6 @@
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `arc-gate-batch.md` | decided（合并方式已落地） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
-| `arc-reviewer-profiles.md` | decided | 0048 | reviewer profile（模型、prompt 写审查范围、时限、`fix_level`，第一轮可另设模型与时限）；只审 diff，返工轮只审增量和上轮问题，`pre_existing` 由 arc 按改动行机械判定、不打回；问题分 `critical`/`major`/`minor` 并附校准例子，用户选修到哪级，task 可覆盖；review 与 commands 并行，review 失败由 arc 自动写返工；没修的问题变成 `todo.proposed` 收尾 task，新增 task 级 `confirm` |
 | `arc-serve.md` | decided（派发前的小事已定） | 0048、0013、0020、0008、0034 | 远程客户端的服务端：一个 hub 管本机登记的所有仓库，每仓库各持一把 `runner.lock` 跑调度循环（`arc serve` 并入 hub），owner 动作走 CLI 库函数与 `state.lock`；只听 loopback，token 必须；`/v1/` 读接口与 `list`/`show --json` 同构，加报告、verdict、diff；SSE 事件只是提示；通知走 `[hooks]`（两个时间点已随 ADR 0048 的 `[hooks]` 落地），radian 不发推送；v1 不看实时会话 |
 | `arc-ios.md` | idea | 0048、0034 | 原生 SwiftUI 客户端，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；待决：仓库位置、分发、最低版本 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |

@@ -233,6 +233,7 @@ extra_paths = ["~/.claude/skills"]
 | `memory.scopes` | array of strings | `project, global` | `project`, `global` | Next session | Which index files are injected. The order is always project then global. |
 | `memory.index_max_lines` | positive integer | `200` | 1 or more | Next session | The line cap for each index. A line past the cap is not injected. |
 | `memory.index_max_bytes` | positive integer | `25600` | 1 or more | Next session | The byte cap for each index, cut at the last whole line within the cap. A dropped line triggers one rewrite notice. |
+| `memory.sessions_index_max_lines` | positive integer | `1000` | 1 or more | When a session ends | How many lines a project's `SESSIONS.md` keeps. After an append, the oldest lines beyond the cap are dropped. |
 
 Every `[memory.injection]` key is retired: a file that sets one gets one migration warning naming the key and stating that the index caps replace it, and the key is ignored. See `memory` for the injected section and the caps.
 
@@ -242,6 +243,7 @@ enabled = true
 scopes = ["project", "global"]
 index_max_lines = 200
 index_max_bytes = 25600
+sessions_index_max_lines = 1000
 ```
 
 ## `[control]`

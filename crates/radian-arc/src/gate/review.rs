@@ -22,8 +22,8 @@
 //! set: a value the session's report carries is ignored.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
-//! block. A finding at or above the reviewer's `fix_level` and not `pre_existing` fails the
-//! stage with reason `review_findings`; the rest is recorded. No parsable block, a missing
+//! block. A finding at or above the task's effective `fix_level` and not `pre_existing` fails
+//! the stage with reason `review_findings`; the rest is recorded. No parsable block, a missing
 //! field, a severity outside the closed list, a timeout, or a session error makes the stage run
 //! the session once more; when the second run is unusable too the stage fails with
 //! `review_output` (or `review_timeout` when the last run timed out). A session whose `Result`
@@ -67,7 +67,7 @@ pub const REVIEW_TOOLS: &str = "read,grep,glob";
 /// output is unusable (ADR 0048 decision 10).
 pub const REVIEW_RUNS: u32 = 2;
 
-/// A review stage failed at or above the reviewer's `fix_level` (ADR 0048 decision 10).
+/// A review stage failed at or above the task's effective `fix_level` (ADR 0048 decision 10).
 pub const REVIEW_FINDINGS: &str = "review_findings";
 /// A review stage failed with blocking items before findings existed. Old verdicts and old
 /// task files still carry it; arc never writes it again (ADR 0048 decision 10).
@@ -95,8 +95,9 @@ pub const REVIEW_FAILURE_REASONS: &[&str] = &[
 /// decision 10): the window rules never mark it pre-existing.
 const CRITICAL: &str = "critical";
 
-/// The level the decision compares at: the reviewer's `fix_level`, or the default when an
-/// old verdict or a damaged setting carries one outside [`REVIEW_LEVELS`].
+/// The level the decision compares at: the effective `fix_level` (the task's own when its file
+/// carries one, else the reviewer's), or the default when an old verdict or a damaged setting
+/// carries one outside [`REVIEW_LEVELS`].
 fn effective_fix_level(fix_level: &str) -> &str {
     if REVIEW_LEVELS.contains(&fix_level) {
         fix_level
@@ -357,7 +358,7 @@ impl ReviewRun<'_> {
                     if let Some(round) = &round {
                         pre_existing = Some(round.mark_pre_existing(found));
                     }
-                    // The decision is the reviewer's `fix_level`: a finding at or above it
+                    // The decision is the effective `fix_level`: a finding at or above it
                     // and not pre-existing sends the task back (ADR 0048 decision 10).
                     let fix_level = effective_fix_level(&self.settings.fix_level);
                     if !found.failing(fix_level).is_empty() {

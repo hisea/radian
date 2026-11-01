@@ -1805,3 +1805,82 @@ fn priority_is_set_listed_and_shown_and_a_bad_value_exits_three() {
     let value: serde_json::Value = serde_json::from_str(&json.out).expect("show --json parses");
     assert_eq!(value["priority"], "P0");
 }
+
+/// `radian arc add task --review-fix-level` writes the field, and a value outside the set exits
+/// `3` naming every value it may hold (ADR 0048 decision 10).
+#[test]
+fn add_task_review_fix_level_is_set_and_a_bad_value_exits_three() {
+    let scratch = fixture("review-fix-level");
+    init(&scratch);
+    let plan = add_plan(&scratch, "plan");
+
+    let refused = run(
+        &scratch,
+        &[
+            "arc",
+            "add",
+            "task",
+            "--plan",
+            &plan,
+            "--slug",
+            "bad",
+            "--title",
+            "a task",
+            "--review-fix-level",
+            "blocker",
+        ],
+        "the brief\n",
+    );
+    assert_eq!(refused.code, Some(3), "{refused:?}");
+    for level in radian_arc::gate::REVIEW_LEVELS {
+        assert!(
+            refused.err.contains(level),
+            "the refusal for `blocker` must list `{level}`: {}",
+            refused.err
+        );
+    }
+    let store = radian_arc::store::Store::at(scratch.repo());
+    assert!(
+        store
+            .load_plan(&plan)
+            .expect("the plan reads")
+            .item
+            .tasks
+            .is_empty(),
+        "a refusal writes nothing"
+    );
+
+    let added = run(
+        &scratch,
+        &[
+            "arc",
+            "add",
+            "task",
+            "--plan",
+            &plan,
+            "--slug",
+            "one",
+            "--title",
+            "a task",
+            "--review-fix-level",
+            "minor",
+        ],
+        "the brief\n",
+    );
+    assert_eq!(added.code, Some(0), "{added:?}");
+    let task = added.out.trim();
+    let path = scratch
+        .repo()
+        .join(".radian/arc/tasks")
+        .join(format!("{task}.md"));
+    assert!(
+        fs::read_to_string(&path)
+            .expect("the task file reads")
+            .contains("review_fix_level: minor"),
+        "the field is written"
+    );
+    let shown = run(&scratch, &["arc", "show", task, "--json"], "");
+    let value: serde_json::Value = serde_json::from_str(&shown.out).expect("show --json parses");
+    assert_eq!(value["review_fix_level"], "minor", "{value}");
+    assert_eq!(value["review_fix_level_source"], "task", "{value}");
+}

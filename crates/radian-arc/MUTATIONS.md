@@ -2004,3 +2004,20 @@ sandbox --test review -E 'test(…)'`; the file was restored from a copy under `
 | TK0266-M2 | `followup_item_key` ignores `summary` (the third part is `String::new()`), so two findings at the same `file:line` collapse | `review::an_old_shape_round_and_a_new_round_merge_into_one_list` (the brief held two `- ` lines instead of three, and the old round's second note disappeared) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0267: a task's own `review_fix_level` replaces its reviewer's (2026-10-31, branch `work/TK0267-task-review-fix-level`)
+
+The task file's optional `review_fix_level` is the effective level a finding must reach to fail
+that task's reviews; it falls back to the `fix_level` of the reviewer its gate profile names,
+and `show` prints the effective value and its source. Each mutation was applied by hand to the
+working file, the named test ran with `cargo nextest run -p radian-arc --locked --profile
+sandbox --test <binary> -E 'test(<name>)'`, and the file was restored from a copy under
+`.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0267-M1 | the review stage records and decides on the reviewer's `fix_level`, ignoring the task's `review_fix_level` (`settings.fix_level` back to `reviewer.fix_level.clone()`) | `review::a_tasks_review_fix_level_replaces_the_reviewers` (the `minor` finding passed under the reviewer's `major`, so the task reached `review.awaiting_human`) | ✅ 1 failed |
+| TK0267-M2 | `TaskFile::fix_level_source` always answers `reviewer` | `update_task::review_fix_level_is_set_and_cleared` (the set call's `review_fix_level_source` read `reviewer`, expected `task`) | ✅ 1 failed |
+| TK0267-M3 | `TaskFile::from_text` accepts any `review_fix_level` (the `REVIEW_LEVELS` check dropped) | `store::a_review_fix_level_outside_the_set_fails_the_list_like_a_bad_allow_noop` (`blocker` read as a task, so `load_task` succeeded) | ✅ 1 failed |
+
+3/3 caught.
