@@ -270,11 +270,7 @@ fn list(plan: Option<&str>, all: bool, json: bool) -> Result<String, Error> {
         // `--json` follows the text filter for cancelled plans (by status or by their tasks):
         // `--all` adds them. A plan named with `--plan` is always shown. Scripts and the MCP
         // `list` tool read it.
-        let value = list_json(&store, plan, all)?;
-        return Ok(format!(
-            "{}\n",
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
-        ));
+        return list_json_text(&store, plan, all);
     }
     // A task's flow gets a column only when the repository defines one besides `default`:
     // a repository without `[flows]` prints no flow column (ADR 0048 decision 15).
@@ -535,11 +531,7 @@ fn changed_marker(changed: bool) -> &'static str {
 fn show(id: &str, json: bool) -> Result<String, Error> {
     let store = open()?;
     if json {
-        let value = show_json(&store, id)?;
-        return Ok(format!(
-            "{}\n",
-            serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
-        ));
+        return show_json_text(&store, id);
     }
     show_text(&store, id)
 }
@@ -1464,6 +1456,27 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
             value
         }
     })
+}
+
+/// The bytes `radian arc list --json` prints: [`list_json`] rendered pretty with one trailing
+/// newline. The hub's `GET /v1/repos/<name>/items` returns exactly these bytes, so a field the
+/// CLI gains appears on the route without a second writer.
+pub fn list_json_text(store: &Store, plan: Option<&str>, all: bool) -> Result<String, Error> {
+    let value = list_json(store, plan, all)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned())
+    ))
+}
+
+/// The bytes `radian arc show --json` prints: [`show_json`] rendered pretty with one trailing
+/// newline. The hub's `GET /v1/repos/<name>/items/<id>` returns exactly these bytes.
+pub fn show_json_text(store: &Store, id: &str) -> Result<String, Error> {
+    let value = show_json(store, id)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_owned())
+    ))
 }
 
 #[cfg(test)]

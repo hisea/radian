@@ -20,8 +20,9 @@
 //! - [`worker_args`]: the worker's `radian acp` command line, parsed with the `radian acp`
 //!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
-//! - [`hub`]: the hub's repository registry (`~/.radian/hub/repos.toml`), its `hub.lock` and
-//!   the scheduling loop that runs one pass per registered repository.
+//! - [`hub`]: the hub's repository registry (`~/.radian/hub/repos.toml`), its `hub.lock`, its
+//!   bearer token, its HTTP API on loopback (ADR 0048 decision 16), and the scheduling loop
+//!   that runs one pass per registered repository.
 //! - [`read`]: the read-only views the arc TUI draws (the remote main, attempts and their
 //!   verdicts, a task's diff, and the merge page's stage rows, review and commits). Nothing
 //!   in it writes or fetches.

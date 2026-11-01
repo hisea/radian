@@ -194,16 +194,21 @@ pub(super) fn build_coding_tools(
 }
 
 pub(super) fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> String {
+    let budget = format!(
+        "index caps {} lines / {} bytes",
+        config.index_max_lines, config.index_max_bytes
+    );
     match memory {
+        Some(_) if !config.enabled => {
+            "[memory] injection off ([memory] enabled = false)".to_owned()
+        }
         Some(service) => match service.state() {
-            Ok(ProjectState::Known(project)) => format!(
-                "[memory] project {project}; injection on, up to {} tokens",
-                config.max_tokens
-            ),
+            Ok(ProjectState::Known(project)) => {
+                format!("[memory] project {project}; {budget}")
+            }
             Ok(ProjectState::Unlinked { .. }) => format!(
                 "[memory] no project linked; global memory only (run `radian memory project new` \
-                 or `radian memory relink <ProjectId>`); injection on, up to {} tokens",
-                config.max_tokens
+                 or `radian memory relink <ProjectId>`); {budget}"
             ),
             Err(error) => format!("[memory] unavailable: {error}"),
         },

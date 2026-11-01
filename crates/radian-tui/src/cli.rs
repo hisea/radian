@@ -383,12 +383,18 @@ enum RadianCommand {
         command: Option<ArcCommand>,
     },
 
-    /// The hub: the scheduling loop and the registry of repositories one hub process manages.
-    /// A bare `radian hub` starts the loop; `radian hub add`, `remove` and `list` read and
-    /// write `~/.radian/hub/repos.toml`.
+    /// The hub: one process that serves the HTTP API, runs the scheduling loop for every
+    /// registered repository, and manages that repository list. `radian hub add`, `remove`
+    /// and `list` write and read `~/.radian/hub/repos.toml`; `pair` prints the URL, the token
+    /// and a QR code; `token rotate` replaces the token. A bare `radian hub` serves the API on
+    /// loopback and schedules every registered repository until it is stopped.
     Hub {
         #[command(subcommand)]
         command: Option<HubCommand>,
+        /// Bind this port instead of `[hub] port`. It exists only for tests (`0` asks the OS
+        /// for a free port); a person sets `[hub] port`.
+        #[arg(long, value_name = "PORT", hide = true)]
+        port: Option<u16>,
     },
 
     /// Footer tools: `radian footer export <preset>`
@@ -474,6 +480,24 @@ enum HubCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print the URL, the token and a QR code for a client to pair with.
+    Pair {
+        /// Print the URL and the token only; no QR code.
+        #[arg(long)]
+        no_qr: bool,
+    },
+    /// Manage the bearer token every request must carry.
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+}
+
+/// The `radian hub token` subcommands.
+#[derive(clap::Subcommand, Debug)]
+enum TokenCommand {
+    /// Write a new token; the old one fails on the next request.
+    Rotate,
 }
 
 /// The `priority` argument's parser. It lists [`radian_arc::store::PLAN_PRIORITIES`], the one
@@ -1071,7 +1095,7 @@ fn run_subcommand(command: RadianCommand, config: Option<&Path>) -> ExitCode {
         )),
         RadianCommand::Theme { command } => run_theme(command),
         RadianCommand::Arc { command } => run_arc(command, config),
-        RadianCommand::Hub { command } => run_hub(command),
+        RadianCommand::Hub { command, port } => run_hub(command, port, config),
         RadianCommand::Footer { command } => run_footer(command),
         RadianCommand::Docs { topic } => run_docs(topic.as_deref()),
         RadianCommand::Attach {
@@ -1191,75 +1215,122 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
     }
 }
 
-/// Runs `radian hub` (ADR 0048 §16): with no subcommand the scheduling loop; otherwise the
-/// repository registry. A bare `radian hub` takes `hub.lock` for its life and exits `1` with
-/// one line naming the holder when another hub has it. A registry error exits `1` and prints
-/// one `radian hub:` line on stderr.
-fn run_hub(command: Option<HubCommand>) -> ExitCode {
-    let registry = match radian_arc::hub::Registry::open() {
-        Ok(registry) => registry,
-        Err(error) => return hub_error(&error),
-    };
+/// Runs `radian hub` (ADR 0048 decision 16): the HTTP API and the scheduling loop, the
+/// repository registry, pairing and the token. A bare `radian hub` binds `[hub] port`, takes
+/// `hub.lock` for its life and runs the loop until the process is stopped; its first stdout
+/// line is `hub: listening on 127.0.0.1:<port>`. An error exits `1` and prints one
+/// `radian hub:` line on stderr.
+fn run_hub(
+    command: Option<HubCommand>,
+    port: Option<u16>,
+    config: Option<&std::path::Path>,
+) -> ExitCode {
     let Some(command) = command else {
-        return run_hub_loop(&registry);
+        let port = match hub_port(port, config) {
+            Ok(port) => port,
+            Err(code) => return code,
+        };
+        return hub_result(radian_arc::hub::http::serve(port));
     };
     match command {
-        HubCommand::Add { path, name } => match registry.add(&path, name.as_deref()) {
-            Ok(entry) => {
-                let line = format!("added {}  {}", entry.name, entry.path.display());
-                if let Err(error) = radian_host::write_line(&line) {
-                    return stdout_error(error);
-                }
-                ExitCode::SUCCESS
-            }
-            Err(error) => hub_error(&error),
-        },
-        HubCommand::Remove { name } => match registry.remove(&name) {
-            Ok(entry) => {
-                if let Err(error) = radian_host::write_line(&format!("removed {}", entry.name)) {
-                    return stdout_error(error);
-                }
-                ExitCode::SUCCESS
-            }
-            Err(error) => hub_error(&error),
-        },
-        HubCommand::List { json } => match registry.list() {
-            Ok(entries) => {
-                let text = if json {
-                    match serde_json::to_string(&entries) {
-                        Ok(mut text) => {
-                            text.push('\n');
-                            text
-                        }
-                        Err(error) => {
-                            eprintln!("radian hub: cannot render the registry as JSON: {error}");
-                            return ExitCode::from(1);
-                        }
+        HubCommand::Pair { no_qr } => {
+            let port = match hub_port(port, config) {
+                Ok(port) => port,
+                Err(code) => return code,
+            };
+            hub_result(radian_arc::hub::http::pair(port, no_qr))
+        }
+        HubCommand::Token {
+            command: TokenCommand::Rotate,
+        } => hub_result(radian_arc::hub::http::rotate()),
+        HubCommand::Add { path, name } => {
+            let registry = match radian_arc::hub::Registry::open() {
+                Ok(registry) => registry,
+                Err(error) => return hub_error(&error),
+            };
+            match registry.add(&path, name.as_deref()) {
+                Ok(entry) => {
+                    let line = format!("added {}  {}", entry.name, entry.path.display());
+                    if let Err(error) = radian_host::write_line(&line) {
+                        return stdout_error(error);
                     }
-                } else {
-                    let mut text = String::new();
-                    for entry in &entries {
-                        text.push_str(&format!("{}  {}\n", entry.name, entry.path.display()));
-                    }
-                    text
-                };
-                if let Err(error) = radian_host::write_stdout(&text) {
-                    return stdout_error(error);
+                    ExitCode::SUCCESS
                 }
-                ExitCode::SUCCESS
+                Err(error) => hub_error(&error),
             }
-            Err(error) => hub_error(&error),
-        },
+        }
+        HubCommand::Remove { name } => {
+            let registry = match radian_arc::hub::Registry::open() {
+                Ok(registry) => registry,
+                Err(error) => return hub_error(&error),
+            };
+            match registry.remove(&name) {
+                Ok(entry) => {
+                    if let Err(error) = radian_host::write_line(&format!("removed {}", entry.name))
+                    {
+                        return stdout_error(error);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => hub_error(&error),
+            }
+        }
+        HubCommand::List { json } => {
+            let registry = match radian_arc::hub::Registry::open() {
+                Ok(registry) => registry,
+                Err(error) => return hub_error(&error),
+            };
+            match registry.list() {
+                Ok(entries) => {
+                    let text = if json {
+                        match serde_json::to_string(&entries) {
+                            Ok(mut text) => {
+                                text.push('\n');
+                                text
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "radian hub: cannot render the registry as JSON: {error}"
+                                );
+                                return ExitCode::from(1);
+                            }
+                        }
+                    } else {
+                        let mut text = String::new();
+                        for entry in &entries {
+                            text.push_str(&format!("{}  {}\n", entry.name, entry.path.display()));
+                        }
+                        text
+                    };
+                    if let Err(error) = radian_host::write_stdout(&text) {
+                        return stdout_error(error);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => hub_error(&error),
+            }
+        }
     }
 }
 
-/// Runs the hub's scheduling loop, printing its lines to stdout. A closed reader is a normal
-/// stop, as every other print-and-exit command of this binary treats it.
-fn run_hub_loop(registry: &radian_arc::hub::Registry) -> ExitCode {
-    let emit = std::sync::Arc::new(|text: &str| {
-        let _ = radian_host::write_stdout(text);
-    });
-    match radian_arc::hub::run(registry, emit) {
+/// The port the hub binds: the hidden test flag when it is set, else `[hub] port`. A
+/// configuration error exits `1` and names the key.
+fn hub_port(port: Option<u16>, config: Option<&std::path::Path>) -> Result<u16, ExitCode> {
+    if let Some(port) = port {
+        return Ok(port);
+    }
+    match radian_host::load_config(config) {
+        Ok(config) => Ok(config.hub.port),
+        Err(error) => {
+            eprintln!("radian hub: config: {error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Maps a hub operation's outcome to an exit code.
+fn hub_result(result: Result<(), radian_arc::store::Error>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => hub_error(&error),
     }

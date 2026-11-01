@@ -130,9 +130,16 @@ fn scratch_home(scratch: &Scratch) -> PathBuf {
     let home = scratch.path("home");
     let config = home.join("config");
     fs::create_dir_all(&config).expect("the scratch config directory");
+    // Every hub needs a loopback port of its own: tests run in parallel with their own home.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free loopback port")
+        .port();
     fs::write(
         config.join("config.toml"),
-        "schema_version = 1\n[control]\nenabled = false\n[hub]\ninterval_secs = 5\n",
+        format!(
+            "schema_version = 1\n[control]\nenabled = false\n[hub]\ninterval_secs = 5\nport = {port}\n"
+        ),
     )
     .expect("the scratch config");
     home

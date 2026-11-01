@@ -16,6 +16,7 @@ This does not mean "no network by default": a `full` session has network (ADR 00
 - Background refresh of provider model lists (read-only `GET <base>/models`, with that provider key; TTL 1 hour, retry 5 minutes after failure, never blocks startup; the cache stores only the key fingerprint);
 - opencode-go usage interface (read-only `GET https://opencode.ai/zen/go/v1/usage`, key from `auth.json`; active only when the current provider is opencode-go);
 - MCP child processes can use the network themselves (user-configured services; Radian does not manage their network behavior);
+- The **hub listener**: `radian hub` serves the hub's HTTP API on `127.0.0.1` only (ADR 0048 decision 16). It exists only while the process runs, it makes no outbound connection, and every request must carry the bearer token; there is no way to turn it on without `radian hub` and no way to turn its token off;
 - Shell, `git`, and network runs from tool execution (they belong to the tool execution boundary, ADR 0012 and ADR 0016).
 
 ### T2: Usage and cost are local records

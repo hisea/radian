@@ -345,3 +345,96 @@ fn a_target_branch_ahead_of_main_is_the_task_diff_base() {
         "the merge page lists only the task's commits: {subjects:?}"
     );
 }
+
+/// The hub's diff routes read only the counts and the one requested file: a task whose head
+/// changed a 1 MiB file must not make the list or another file's route read that file's text.
+/// The file route stops git after the limit, so its text is bounded even though the full diff
+/// of the same file is far larger.
+#[test]
+fn the_counts_and_one_file_are_read_without_another_files_text() {
+    let repo = Repo::new("read-counts");
+    let base = repo.main_sha();
+    repo.git(&["checkout", "-q", "-B", "work/T-read-counts", &base]);
+    commit(&repo, "big.txt", &"x".repeat(1024 * 1024), "the big file");
+    let head = commit(&repo, "small.txt", "a\nb\n", "the small file");
+    repo.git(&["checkout", "-q", "main"]);
+
+    let store = store(&repo);
+    let plan = store
+        .add_plan("read", "the read plan", "a request\n")
+        .unwrap();
+    let task = store
+        .add_task(
+            &plan,
+            "counts",
+            "the counts task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .unwrap();
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            task.attempt = 1;
+            task.base_sha = Some(base.clone());
+            task.head_sha = Some(head.clone());
+            Ok(())
+        })
+        .unwrap();
+    finish(&repo, &task, 1, &base, &head);
+
+    // The list is numstat only: both files, with their counts and no text.
+    let counts = read::task_diff_counts(&store, &task).unwrap();
+    let listed: Vec<(&str, usize, usize)> = counts
+        .iter()
+        .map(|file| (file.path.as_str(), file.added, file.removed))
+        .collect();
+    assert_eq!(listed, [("big.txt", 1, 0), ("small.txt", 2, 0)]);
+
+    // The 1 MiB file's route reads at most the limit plus the byte that says there is more.
+    let limit = 4096;
+    let big = read::task_diff_file(&store, &task, "big.txt", limit)
+        .unwrap()
+        .expect("big.txt is in the task's diff");
+    assert!(big.truncated, "the reader stops before the end of the diff");
+    assert!(
+        big.text.len() <= limit + 1,
+        "the text is bounded: {} bytes",
+        big.text.len()
+    );
+
+    // A small file's text is the same one the full diff holds, and an unknown path is absent.
+    let full = read::task_diff(&store, &task, Some(1)).unwrap();
+    let small = read::task_diff_file(&store, &task, "small.txt", limit)
+        .unwrap()
+        .expect("small.txt is in the task's diff");
+    assert!(!small.truncated);
+    assert_eq!(
+        small.text,
+        full.files
+            .iter()
+            .find(|file| file.path == "small.txt")
+            .expect("the full diff holds small.txt")
+            .text
+    );
+    assert!(
+        read::task_diff_file(&store, &task, "missing.txt", limit)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The diff readers refuse an id that is not a task before they read any run directory, with
+/// the message `radian arc show` gives.
+#[test]
+fn an_unknown_id_is_refused_before_any_run_directory_is_read() {
+    let repo = Repo::new("read-unknown");
+    let store = store(&repo);
+    let error = read::task_diff_counts(&store, "TK9999-missing").unwrap_err();
+    assert_eq!(error.message(), "no task `TK9999-missing`");
+    let error = read::task_diff_file(&store, "TK9999-missing", "a.txt", 10).unwrap_err();
+    assert_eq!(error.message(), "no task `TK9999-missing`");
+}

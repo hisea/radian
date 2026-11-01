@@ -58,6 +58,30 @@ impl HubLock {
         }
     }
 
+    /// Takes `hub.lock`, or returns the one-line refusal naming the holder. This is what a
+    /// starting hub calls: the message names both the holder's pid and the lock file, so the
+    /// second `radian hub` says why it exits `1`.
+    ///
+    /// # Errors
+    ///
+    /// The directory or the lock file cannot be created or opened.
+    pub fn take(dir: &Path) -> Result<Self, Error> {
+        match Self::try_take(dir)? {
+            Some(lock) => Ok(lock),
+            None => {
+                let message = match Self::holder(dir) {
+                    Some(pid) => {
+                        format!("a hub is already running (pid {pid}); {HUB_LOCK} is held")
+                    }
+                    None => {
+                        format!("a hub is already running (its pid is unknown); {HUB_LOCK} is held")
+                    }
+                };
+                Err(Error::Failed(message))
+            }
+        }
+    }
+
     /// The pid the holder of `hub.lock` recorded, when it did. Only meaningful while the lock
     /// is held. `None` for a lock file an older radian wrote, or one whose pid could not be
     /// written.

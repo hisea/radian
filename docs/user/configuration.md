@@ -225,20 +225,23 @@ disabled = ["review"]
 extra_paths = ["~/.claude/skills"]
 ```
 
-## `[memory.injection]`
+## `[memory]`
 
-| Key | Type | Default | What it does |
-|---|---|---|---|
-| `memory.injection.additions` | boolean | `true` | Append later turns' new memory hits as one system message. `false` leaves only the fixed block. |
-| `memory.injection.addition_budget` | positive integer | `500` | The token cap on one turn's addition. Whole records only; a record that does not fit is skipped. |
+| Key | Type | Default | Allowed | When it takes effect | What it does |
+|---|---|---|---|---|---|
+| `memory.enabled` | boolean | `true` | `true`, `false` | Next session | `false` turns off memory: no memory rules block in the base prompt, no index section, no rewrite notice and no `MemoryInjected` record. User commands still work. |
+| `memory.scopes` | array of strings | `project, global` | `project`, `global` | Next session | Which index files are injected. The order is always project then global. |
+| `memory.index_max_lines` | positive integer | `200` | 1 or more | Next session | The line cap for each index. A line past the cap is not injected. |
+| `memory.index_max_bytes` | positive integer | `25600` | 1 or more | Next session | The byte cap for each index, cut at the last whole line within the cap. A dropped line triggers one rewrite notice. |
 
-The rest of the injection table (`memory.injection.enabled`, `memory.injection.max_tokens`, `memory.injection.global_budget`, `memory.injection.project_budget`, `memory.injection.overflow`) is recognized and interpreted as the documented default, and named on the startup line.
-See `memory` for scopes and injection.
+Every `[memory.injection]` key is retired: a file that sets one gets one migration warning naming the key and stating that the index caps replace it, and the key is ignored. See `memory` for the injected section and the caps.
 
 ```toml
-[memory.injection]
-additions = true
-addition_budget = 500
+[memory]
+enabled = true
+scopes = ["project", "global"]
+index_max_lines = 200
+index_max_bytes = 25600
 ```
 
 ## `[control]`
@@ -251,15 +254,16 @@ addition_budget = 500
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. Inert until the listener lands. |
+| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
-The reader validates these keys now; `hub.interval_secs` and `hub.concurrency` drive the hub's scheduling loop, and `hub.port` is inert until the HTTP listener lands.
+`radian hub` reads `hub.port` at start and binds the HTTP API there, on `127.0.0.1` only.
+`hub.concurrency` and `hub.interval_secs` drive the hub's scheduling loop.
 A change takes effect at the hub's next start.
-See `arc/hub` for the registry and the subcommands.
+See `arc/hub` for the registry, the routes, the loop and the subcommands.
 
 ```toml
 [hub]

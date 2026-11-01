@@ -192,13 +192,13 @@ impl HubHome {
 
     fn spawn(&self) -> HubRun {
         let program = radian_bin();
-        let mut command = self.command(&program, &["hub"]);
+        let mut command = self.command(&program, &["hub", "--port", "0"]);
         command.stdout(Stdio::piped()).stderr(Stdio::null());
         HubRun::new(command.spawn().expect("radian hub starts"))
     }
 
     fn spawn_from(&self, program: &Path) -> HubRun {
-        let mut command = self.command(program, &["hub"]);
+        let mut command = self.command(program, &["hub", "--port", "0"]);
         command.stdout(Stdio::piped()).stderr(Stdio::null());
         HubRun::new(command.spawn().expect("the copied radian hub starts"))
     }
@@ -747,7 +747,7 @@ fn a_second_hub_exits_one_and_names_the_holder() {
     let a_pid = Store::at(&a.clone).runner_lock_pid();
     let b_pid = Store::at(&b.clone).runner_lock_pid();
     let second = home
-        .run_within(&["hub"], Duration::from_secs(10))
+        .run_within(&["hub", "--port", "0"], Duration::from_secs(10))
         .expect("the second hub exits instead of running");
     assert_eq!(second.code, 1, "{second:?}");
     assert!(
@@ -902,12 +902,12 @@ fn a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval() {
         "no restart line: {:?}",
         hub.seen
     );
-    // The exec'd hub prints the first line again. When a loop waits out its interval, the new
-    // process appears only at B's wake, seconds after the restart.
+    // The exec'd hub prints its first line, `hub: listening on …`, again. When a loop waits
+    // out its interval, the new process appears only at B's wake, seconds after the restart.
     let restarted = Instant::now();
     assert!(
         hub.wait_line_where(Duration::from_secs(6), |line| line
-            .starts_with("radian hub:"))
+            .starts_with("hub: listening on"))
             .is_some(),
         "the hub waited out an idle interval before the exec (after {:?}): {:?}",
         restarted.elapsed(),

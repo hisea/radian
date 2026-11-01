@@ -20,7 +20,7 @@ Run it only in a real terminal: it takes over the screen.
 |---|---|---|---|---|---|
 | `--config` | `FILE` | `RADIAN_CONFIG`, else `~/.radian/config/config.toml` | `RADIAN_CONFIG` | — | Read this configuration file. Radian never writes it. |
 | `-w`, `--workspace` | `DIR` | current directory | — | — | Root the built-in file tools here. Without it the current directory is the workspace. |
-| `--system` | `SYSTEM` | — | — | — | System prompt text. |
+| `--system` | `SYSTEM` | — | — | — | System prompt text. Replaces the role prose only. |
 | `-h`, `--help` | — | — | — | — | Print help and exit. |
 | `-V`, `--version` | — | — | — | — | Print the version and exit. |
 
@@ -89,7 +89,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--config` | `FILE` | `RADIAN_CONFIG`, else default file | — | Read this configuration file. Radian never writes it. |
 | `--max-tokens` | `N` | `16384` | — | `max_tokens` for anthropic. Refused for `openai-compatible`. |
 | `--thinking` | `MODE` | `medium` | — | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, clamped per route. Legacy `adaptive` and `enabled:<budget>` warn and still work. |
-| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. |
+| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. Replaces the role prose only. |
 | `--system-file` | `FILE` | — | — | Read the system prompt from this file. |
 | `--mcp-config` | `FILE` | — | — | MCP servers JSON file. |
 | `--workspace` | `DIR` | current directory | — | Root the built-in file tools here. |
@@ -188,17 +188,19 @@ radian arc reset-budget TK0001-first-work
 
 ## `radian hub`
 
-`radian hub` with no subcommand runs the scheduling loop for every repository in the registry (`~/.radian/hub/repos.toml`); `add`, `remove` and `list` manage the registry.
-The loop, `hub.lock`, the machine-wide cap and the status lines are on [`arc/hub`](arc/hub.md#the-loop).
-The registry file, every subcommand and the `[hub]` configuration keys are on [`arc/hub`](arc/hub.md).
+`radian hub` manages the repository registry one hub process schedules (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `127.0.0.1`, runs the scheduling loop, and prints or rotates the bearer token every request carries.
+A bare `radian hub` serves the HTTP API and schedules every registered repository until it is stopped; its first stdout line is `hub: listening on 127.0.0.1:<port>`.
+The registry file, every subcommand, the pairing and token rules, every route and the loop are on [`arc/hub`](arc/hub.md).
 
 | Subcommand | Arguments | What it does |
 |---|---|---|
 | `add <PATH>` | `--name <NAME>` (default: the directory's base name) | Register a directory that has a `.radian/arc/`. It prints `added <name>  <path>`. |
 | `remove <NAME>` | — | Remove a registered repository. It prints `removed <name>`. |
 | `list` | `--json` | Print one line per repository (`name  path`), or a JSON array of `{name, path}`. |
+| `pair` | `--no-qr` | Print the URL, the token, and a QR code for a client (text only off a terminal or with `--no-qr`). |
+| `token rotate` | — | Write a new token and print `rotated`; the old token fails on the next request. |
 
-A registry error exits `1`; a second `radian hub` while one runs exits `1` and names the holder's pid; a usage error exits `2`.
+A registry or startup error exits `1`; a usage error exits `2`.
 
 ## `radian login` and `radian logout`
 
@@ -241,6 +243,7 @@ Needs no model, no key, no session file, no network.
 | `list` | `--global`, `--project`, `--all`, `--json` | List records, project first then global. `--all` includes archived records. |
 | `search` | `--global`, `--project`, `--json`, `WORD...` (required) | Search by keyword. Every word must match. |
 | `show` | `--global`, `--project`, `--json`, `ID` | Show one record by id. |
+| `stale` | `--days DAYS` (default `30`), `--global`, `--project`, `--json` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`; `DAYS` is an integer of 1 or more. Reads the memory files only. |
 | `add` | `--global`, `--kind preference\|decision\|fact\|lesson` (default `fact`), `--key KEY`, `CONTENT` (`-` reads stdin) | Add a project record, or a global record with `--global`. A git workspace registers itself on first write. |
 | `edit` | `--global`, `--revision REV` (required), `ID`, `CONTENT` | Change a record. Needs the current revision. |
 | `archive` | `--global`, `--revision REV` (required), `ID` | Archive a record. It stays stored but leaves injection and default search. |
@@ -256,7 +259,7 @@ Needs no model, no key, no session file, no network.
 | `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. Reports key conflicts. |
 
 `--global` and `--project` conflict except where both are absent (the default scope).
-`list`, `search`, `show`, and `project` accept `--json` for machine output.
+`list`, `search`, `show`, `stale`, and `project` accept `--json` for machine output.
 `forget`, `purge`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
 Exit `0` on success, `1` for a conflict or a missing record, `2` for bad use.
 See `memory` for scopes, revisions, and confirmation rules.
@@ -389,7 +392,7 @@ arc/gate-failures: The gate's failure classes, the retry rules, the budget, and 
 arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
 arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
 arc/hooks: The `[hooks]` points, their rules and their environment.
-arc/hub: The hub's repository registry, its subcommands, and the `[hub]` configuration keys.
+arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, and the `[hub]` configuration keys.
 arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
 arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.

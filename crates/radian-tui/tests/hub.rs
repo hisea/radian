@@ -1,8 +1,8 @@
 //! `radian hub` through the real binary: `add`, `list`, `--json`, `remove`, the exit codes,
-//! and the bare command that starts the scheduling loop.
+//! and the bare command that serves the HTTP API and runs the scheduling loop.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -154,25 +154,28 @@ fn remove_refuses_an_unknown_name_and_removes_only_the_named_entry() {
 }
 
 #[test]
-fn hub_without_an_argument_starts_the_loop_and_holds_hub_lock() {
+fn hub_without_an_argument_serves_http_and_runs_the_loop() {
     let scratch = Scratch::new("bare");
     let mut child = Command::new(env!("CARGO_BIN_EXE_radian"))
         .current_dir(&scratch.dir)
         .env("RADIAN_HOME", scratch.home())
-        .args(["hub"])
+        .args(["hub", "--port", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("radian hub starts");
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
-    let mut first = String::new();
-    stdout.read_line(&mut first).expect("the first line");
+    let mut stdout = BufReader::new(child.stdout.take().expect("the hub has stdout"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the first stdout line reads");
     assert!(
-        first.contains("the scheduling loop runs alone"),
-        "the first line does not say the HTTP listener is missing: {first:?}"
+        line.starts_with("hub: listening on 127.0.0.1:"),
+        "the first stdout line names the loopback listener: {line:?}"
     );
 
+    // The same process runs the scheduling loop and holds `hub.lock` for its life.
     let lock = scratch.home().join("hub/hub.lock");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !lock.is_file() {
@@ -187,4 +190,80 @@ fn hub_without_an_argument_starts_the_loop_and_holds_hub_lock() {
     assert!(sent.success(), "SIGTERM reaches the hub");
     let status = child.wait().expect("the hub exits");
     assert_eq!(status.code(), Some(0), "SIGTERM is not an error");
+}
+
+/// Runs `radian hub pair` under a real pty, so `is_terminal` is true, and returns what the
+/// program wrote. The pty ends at EOF when the program exits.
+fn pair_on_a_pty(scratch: &Scratch, args: &[&str]) -> String {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("a pty opens");
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_radian"));
+    for arg in args {
+        command.arg(arg);
+    }
+    command.env("RADIAN_HOME", scratch.home().as_os_str());
+    command.cwd(&scratch.dir);
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .expect("the hub pair command starts");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("the pty reads");
+    let mut out = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => out.extend_from_slice(&buffer[..read]),
+        }
+    }
+    let _ = child.wait();
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn contains_a_qr_block(text: &str) -> bool {
+    text.contains('█') || text.contains('▀') || text.contains('▄')
+}
+
+#[test]
+fn pair_off_a_terminal_prints_the_url_and_token_without_a_qr() {
+    let scratch = Scratch::new("pair-pipe");
+    let run = scratch.run(&["hub", "pair"]);
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let token = fs::read_to_string(scratch.home().join("hub/token"))
+        .expect("pair creates the token")
+        .trim()
+        .to_owned();
+    assert_eq!(run.out, format!("http://127.0.0.1:7341\n{token}\n"));
+    assert!(
+        !contains_a_qr_block(&run.out),
+        "a pipe gets no QR: {}",
+        run.out
+    );
+}
+
+#[test]
+fn pair_on_a_terminal_prints_a_qr_block_and_no_qr_flag_prints_none() {
+    let scratch = Scratch::new("pair-pty");
+    let with_qr = pair_on_a_pty(&scratch, &["hub", "pair"]);
+    assert!(with_qr.contains("http://127.0.0.1:7341"), "{with_qr}");
+    assert!(
+        contains_a_qr_block(&with_qr),
+        "a terminal gets the QR half blocks: {with_qr}"
+    );
+
+    let without = pair_on_a_pty(&scratch, &["hub", "pair", "--no-qr"]);
+    assert!(without.contains("http://127.0.0.1:7341"), "{without}");
+    assert!(
+        !contains_a_qr_block(&without),
+        "--no-qr prints no QR: {without}"
+    );
 }

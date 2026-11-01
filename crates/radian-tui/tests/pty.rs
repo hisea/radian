@@ -444,7 +444,10 @@ impl Pty {
                 std::fs::create_dir_all(&dir).unwrap();
                 let text = match other {
                     TestConfig::Explicit(text) => text.to_owned(),
-                    _ => "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n".to_string(),
+                    _ => format!(
+                        "schema_version = 1\n[tui.footer]\npreset = \"classic\"\n[hub]\nport = {}\n",
+                        free_hub_port()
+                    ),
                 };
                 std::fs::write(dir.join("config.toml"), text).unwrap();
             }
@@ -5391,7 +5394,7 @@ async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
             let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
             notice.contains("[memory]")
                 && notice.contains("no project linked")
-                && notice.contains("injection on, up to 2000 tokens")
+                && notice.contains("index caps 200 lines / 25600 bytes")
         }),
         "the memory startup notice is missing:\n{}",
         pty.screen()
@@ -5463,13 +5466,20 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// ADR 0021 D7: `/memory` commands run in the TUI without a model request, and the record
-/// they create is injected into the next request's system prompt.
+/// ADR 0021 D6/D7: `/memory` commands run in the TUI without a model request, and the
+/// file store's global index is injected into the next request's system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_memory_commands_run_without_a_model_request() {
     let dir = TempDir::new("memory-commands");
+    let home = dir.path().join("radian");
+    std::fs::create_dir_all(home.join("memory/global")).unwrap();
+    std::fs::write(
+        home.join("memory/global/MEMORY.md"),
+        "- [hello](hello.md) — hello world from the index\n",
+    )
+    .unwrap();
     let server = MockServer::start(vec![text_reply("REPLY-AFTER-MEMORY")]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -5480,6 +5490,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
             "--session-id",
             "memcmd",
         ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
         30,
         110,
     );
@@ -5524,7 +5535,10 @@ async fn pty_memory_commands_run_without_a_model_request() {
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    assert!(system.contains("hello world"), "system prompt: {system}");
+    assert!(
+        system.contains("hello world from the index"),
+        "system prompt: {system}"
+    );
 
     pty.quit();
     assert_eq!(pty.app_exit_code(), Some(0));
@@ -14836,6 +14850,17 @@ fn arc_loop_pid(repo: &Path) -> Option<u32> {
         .ok()
 }
 
+/// A free loopback port for the hub a test starts: bind port `0`, read the port, release it.
+/// Tests run in parallel with their own `RADIAN_HOME`, so each hub needs a port of its own
+/// unless the test passes `--port 0`.
+fn free_hub_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free loopback port");
+    listener
+        .local_addr()
+        .expect("the bound loopback address")
+        .port()
+}
+
 /// Starts `radian hub` with `repo` registered in `home` (`RADIAN_HOME`), the control port off
 /// and a short interval. The caller owns the child.
 fn spawn_hub_for(repo: &Path, home: &Path) -> std::process::Child {
@@ -14856,7 +14881,7 @@ fn spawn_hub_for(repo: &Path, home: &Path) -> std::process::Child {
     )
     .unwrap();
     std::process::Command::new(BIN)
-        .args(["hub"])
+        .args(["hub", "--port", "0"])
         .current_dir(repo)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())

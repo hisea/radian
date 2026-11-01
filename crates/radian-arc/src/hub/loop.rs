@@ -29,29 +29,29 @@ use super::lock::HubLock;
 use super::registry::{Registry, RepoEntry};
 use super::status::{HubStatus, RepoState, RepoStatus};
 
-/// The first line `radian hub` prints: the HTTP listener lands in a later change, and the
-/// scheduling loop is what this build runs.
-pub const NO_HTTP_TEXT: &str = "the HTTP listener is not built yet; the scheduling loop runs alone";
-
 /// How often the hub's own thread wakes to look at the registry, the status and the signals.
 const TICK: Duration = Duration::from_millis(100);
 
-/// Runs the hub until SIGINT or SIGTERM (or until it replaces itself with a rebuilt binary).
-/// `emit` receives every line the hub prints: the first line, each repository's loop lines,
-/// and the status block when it changes.
+/// Runs the scheduling loop until SIGINT or SIGTERM (or until the hub replaces itself with a
+/// rebuilt binary). `lock` is the `hub.lock` the caller already took: the hub holds it for its
+/// whole life and releases it last. `emit` receives every line the hub prints: each
+/// repository's loop lines and the status block when it changes.
 ///
 /// # Errors
 ///
-/// `hub.lock` is held by another hub (the message names its pid), the hub configuration
-/// cannot be read, or `hub.lock` cannot be opened.
-pub fn run(registry: &Registry, emit: Arc<dyn Fn(&str) + Send + Sync>) -> Result<(), Error> {
-    let mut lock = Some(take_hub_lock(registry)?);
+/// The hub configuration cannot be read, or `hub.lock` cannot be opened again after a failed
+/// restart.
+pub fn run(
+    registry: &Registry,
+    emit: Arc<dyn Fn(&str) + Send + Sync>,
+    lock: HubLock,
+) -> Result<(), Error> {
+    let mut lock = Some(lock);
     let config = load_config()?;
     let interval = interval_secs(&config);
     let cap = config.hub.concurrency.max(1);
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     run::catch_stop_signals();
-    (emit)(&format!("radian hub: {NO_HTTP_TEXT}\n"));
 
     'hub: loop {
         let stop_all = Arc::new(AtomicBool::new(false));
@@ -144,16 +144,7 @@ struct RepoHandle {
 
 /// Takes `hub.lock` or returns the one-line refusal naming the holder.
 fn take_hub_lock(registry: &Registry) -> Result<HubLock, Error> {
-    match HubLock::try_take(registry.dir())? {
-        Some(lock) => Ok(lock),
-        None => {
-            let message = match HubLock::holder(registry.dir()) {
-                Some(pid) => format!("a hub is already running (pid {pid})"),
-                None => "a hub is already running (its pid is unknown)".to_owned(),
-            };
-            Err(Error::Failed(message))
-        }
-    }
+    HubLock::take(registry.dir())
 }
 
 /// Re-reads the registry and starts or retires the loops that changed.

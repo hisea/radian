@@ -90,7 +90,7 @@ radian
 
 You see an input box and an empty transcript.
 Type a task and press Enter.
-Radian reads files, searches code, and edits with built-in tools: `read`, `write`, `patch`, `glob`, `grep`, `shell`, `job`, `memory_search`, `ask_user`, `skill`, and `subagent`.
+Radian reads files, searches code, and edits with built-in tools: `read`, `write`, `patch`, `glob`, `grep`, `shell`, `job`, `ask_user`, `skill`, and `subagent`.
 Each tool call shows in the transcript with its arguments and its result.
 Watch one run: ask for a summary of the project, and follow each `read` as it prints.
 

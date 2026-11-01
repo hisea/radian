@@ -114,11 +114,13 @@ fn production_chain(
         )
         .unwrap(),
     );
-    let role = Arc::new(radian_host::RoleHooks::new("", "", None));
+    let role = Arc::new(radian_host::RoleHooks::new("", "", "", None));
     let memory = Arc::new(radian_host::memory::MemoryHooks::new(
         None,
         InjectionConfig::default(),
         Arc::new(|_message: &str| {}),
+        Some(Arc::clone(&journal)),
+        None,
     ));
     let skills = Arc::new(radian_host::SkillsHooks::new(&[]));
     // ADR 0047: the goal block rides between skills and the session facts; empty here, so

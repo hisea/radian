@@ -3454,3 +3454,20 @@ copy under `.radian/backup/`, which `cmp` found identical.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0282-M6 | `LoopStarter::start` skips adding an unregistered repository to the hub registry | ✅ 1 failed (rc=100) | `pty_arc_registers_the_repository_and_starts_the_hub` (`the registry entry did not happen in 10s`) |
+## TK0266: the TUI lists a review verdict's findings by severity (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
+
+The attempts tab draws a review verdict's findings grouped by severity, highest first, a
+`pre_existing` mark on a demoted finding and the trigger on its own indented row; an old-shape
+verdict reads through the same mapping. The tab's window counts the finding rows it draws, so a
+finding below the fold is reachable with `j`/`f`. The mutations were applied by hand to the
+`AttemptVerdict` construction in `crates/radian-arc/src/read.rs` and to `draw_attempts` in
+`crates/radian-tui/src/arc/render.rs`, the named tests ran with `cargo nextest run -p radian-tui
+--locked --profile sandbox --test arc_tui -E 'test(…)'`, and each file was restored from a copy
+under `.radian/mut/` (`cmp` found it identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0266-M3 | `AttemptVerdict::findings` drops an old-shape report's findings (`filter(\|report\| report.old_blocking.is_none())`), removing the old-shape mapping from the page | `arc_tui::the_attempts_tab_renders_an_old_shape_review_through_the_same_mapping` (the attempt drew `✓ review` but no `major` or `minor` group) | ✅ 1 failed |
+| TK0266-M4 | `draw_attempts` draws the first `visible` rows and ignores `attempt_scroll` (`rows.into_iter().take(visible)`), so the window no longer reaches what the row scroll counts | `arc_tui::the_attempts_tab_reaches_a_finding_below_the_terminal` (the last finding stayed clipped below the fifth `minor` row) | ✅ 1 failed |
+
+2/2 caught.

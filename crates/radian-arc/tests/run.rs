@@ -4771,7 +4771,7 @@ fn spawn_hub_from(repo: &Repo, program: &Path, interval: u64) -> std::process::C
     repo.init_hub(interval);
     let mut command = std::process::Command::new(program);
     command
-        .args(["hub"])
+        .args(["hub", "--port", "0"])
         .current_dir(&repo.clone)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())

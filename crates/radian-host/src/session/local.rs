@@ -90,7 +90,7 @@ pub struct LocalSession {
     pub(super) system_base: String,
     /// The exact `RoleHooks` base (layers 0a, 1 and 2) the next formal request
     /// carries. The side-question shape rebuilds the prompt from it (plus the
-    /// memory block, the skills section, the `<goal>` block when a goal exists,
+    /// memory index section, the skills section, the `<goal>` block when a goal exists,
     /// and the cached `<session>` facts) so
     /// the bytes match what the driver would send.
     pub(super) role_base: String,
@@ -146,7 +146,7 @@ pub struct LocalSession {
 
 impl LocalSession {
     /// The next formal request's shape (backlog `tui-btw-side-question`): the
-    /// system prompt the hook chain would build (role base, fixed memory block,
+    /// system prompt the hook chain would build (role base, memory index section,
     /// skills section, the `<goal>` block when a goal exists, cached `<session>`
     /// facts — in hook order), the journal's
     /// committed history, the open-time tool specs, and `Null` settings (the
@@ -157,17 +157,10 @@ impl LocalSession {
     /// mid-turn. `/context` renders through it; `/btw` appends one trailing
     /// user message and sends it.
     pub fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
-        use crate::memory::first_user_text;
-
         let (history, _, _) = read_committed(&self.journal_path)?;
-        // The fixed memory block, computed once per process and reused
-        // byte-for-byte afterwards (ADR 0021). A read failure injects
-        // nothing (invariant 2).
-        let memory_text = self
-            .memory_injection
-            .fixed(|| first_user_text(&history).unwrap_or_default())
-            .map(|injection| injection.text)
-            .unwrap_or_default();
+        // The index section, computed once per process and reused byte for byte afterwards
+        // (ADR 0021 D6, ADR 0036). A read failure injects nothing (invariant 2).
+        let memory_text = self.memory_injection.section().text.clone();
         // Hook order: role base, memory, skills, goal, then `\n` + the cached session
         // facts (`SessionFactsHooks::before_model_call` runs after `GoalHooks`).
         let mut system_prompt = format!("{}{}{}", self.role_base, memory_text, self.skills_section);
@@ -241,7 +234,6 @@ impl LocalSession {
         use crate::context_estimate::{
             ContextBlock, ContextReport, EstimateInput, SystemSplit, estimate,
         };
-        use crate::memory::first_user_text;
 
         // The committed view: history, compactions, and the last reported input
         // in the current revision. A read failure is a notice, never a turn
@@ -258,14 +250,12 @@ impl LocalSession {
                 return Err(format!("context: cannot read the session file: {error}"));
             }
         };
-        // The fixed block's text and record count, for the estimate's split and
-        // memory row. Cached after the first call, so this is the same block the
-        // shape above carries.
-        let (memory_text, memory_records) = self
-            .memory_injection
-            .fixed(|| first_user_text(&history).unwrap_or_default())
-            .map(|injection| (injection.text, injection.records.len()))
-            .unwrap_or_default();
+        // The index section's text and its injected index count, for the estimate's split and
+        // memory row. Cached after the first call, so this is the same section the shape above
+        // carries.
+        let section = self.memory_injection.section();
+        let memory_text = section.text.clone();
+        let memory_records = section.indexes.len();
         let system = SystemSplit {
             base: self.system_base.clone(),
             context_files: self.context_section.clone(),

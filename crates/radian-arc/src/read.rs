@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{Stage, Verdict};
+use super::gate::{Finding, Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -69,6 +69,28 @@ pub struct TaskDiff {
     pub base: DiffBase,
 }
 
+/// One changed file's path and line counts, without its diff text: what
+/// `GET /v1/repos/<name>/items/<task>/diff` lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffCount {
+    /// The repository-relative path, as git prints it after `--numstat`.
+    pub path: String,
+    /// Added lines (`0` for a binary file).
+    pub added: usize,
+    /// Removed lines (`0` for a binary file).
+    pub removed: usize,
+}
+
+/// One file's unified diff, read from git up to a caller's limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffText {
+    /// The diff text, at most the caller's limit plus one byte (the byte that says there was
+    /// more).
+    pub text: String,
+    /// Git had more output than the limit: the caller prints the text cut and says so.
+    pub truncated: bool,
+}
+
 /// One stage's verdict in one attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptVerdict {
@@ -77,6 +99,9 @@ pub struct AttemptVerdict {
     pub passed: bool,
     /// The failure reason: `command_failed`, `timeout`, `conflict`, an owner's note.
     pub reason: Option<String>,
+    /// A `review` verdict's findings, highest severity first; empty for another stage or a
+    /// verdict without a report. An old-shape verdict reads through the same mapping.
+    pub findings: Vec<Finding>,
 }
 
 /// How one stage of the merge page stands (ADR 0048 §6, §10).
@@ -329,6 +354,11 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
                 stage: verdict.stage.as_str(),
                 passed: verdict.is_pass(),
                 reason: verdict.reason.clone(),
+                findings: verdict
+                    .review
+                    .as_ref()
+                    .map(|report| report.sorted_by_severity().into_iter().cloned().collect())
+                    .unwrap_or_default(),
             });
         }
         verdicts.sort_by_key(|verdict| {
@@ -374,41 +404,139 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
 ///
 /// The task cannot be read, or git cannot produce the diff.
 pub fn task_diff(store: &Store, task: &str, attempt: Option<u32>) -> Result<TaskDiff, Error> {
-    let item = store.load_task(task)?.item;
-    if item.state == TaskState::Doing
-        && item.phase == "running"
-        && let Some(diff) = live_worktree_diff(store, &item)?
-    {
-        return Ok(diff);
-    }
-    let (range, base) = match item.state {
-        // A merged task's merge commit is its change on the target branch: the first-parent
-        // diff of the candidate (or the branch itself when the target was fast-forwarded to
-        // it).
-        TaskState::Done => match merged_candidate(store, task)? {
-            Some(verdict) => match merged_range(&verdict) {
-                Some(range) => (Some(range), DiffBase::default()),
-                None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
-            },
-            None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
-        },
-        _ => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
-    };
-    let Some((base_sha, head)) = range else {
-        return Ok(TaskDiff::default());
-    };
-    if base_sha == head {
-        // No commit yet, but the range still fell back when the merge base could not be taken:
-        // the page says so under `no change yet`.
-        return Ok(TaskDiff {
-            base,
+    match task_change(store, task, attempt)? {
+        Change::Empty { base_reason } => Ok(TaskDiff {
+            base: base_reason,
             ..TaskDiff::default()
-        });
+        }),
+        Change::Range {
+            base,
+            head,
+            base_reason,
+        } => diff_range(store.repo(), &base, &head).map(|mut diff| {
+            diff.base = base_reason;
+            diff
+        }),
+        Change::Worktree(change) => Ok(worktree_diff(change)),
     }
-    diff_range(store.repo(), &base_sha, &head).map(|mut diff| {
-        diff.source = DiffSource::Range;
-        diff.base = base;
-        diff
+}
+
+/// Every changed file's path and line counts, without reading any file's diff text: what
+/// `GET /v1/repos/<name>/items/<task>/diff` lists. Only `--numstat` runs (and, for a running
+/// attempt, the worktree's status), so one huge changed file costs one line, not its whole
+/// text.
+///
+/// # Errors
+///
+/// The task cannot be read.
+pub fn task_diff_counts(store: &Store, task: &str) -> Result<Vec<DiffCount>, Error> {
+    match task_change(store, task, None)? {
+        Change::Empty { .. } => Ok(Vec::new()),
+        Change::Range { base, head, .. } => {
+            let range = format!("{base}..{head}");
+            match git(store.repo(), &["diff", "--numstat", "-z", &range]) {
+                Ok(text) => Ok(counts_from_numstat(&text)),
+                // A base that is not a commit: no diff rather than an error.
+                Err(_) => Ok(Vec::new()),
+            }
+        }
+        Change::Worktree(change) => {
+            let mut files = counts_from_numstat(&change.numstat);
+            for path in &change.untracked {
+                if files.iter().any(|file| file.path == *path) {
+                    continue;
+                }
+                let (added, removed) = untracked_count(&change.worktree, path);
+                files.push(DiffCount {
+                    path: path.clone(),
+                    added,
+                    removed,
+                });
+            }
+            Ok(files)
+        }
+    }
+}
+
+/// One file's unified diff, read from git only up to `limit` bytes: the caller prints at most
+/// that much and says whether git had more ([`DiffText::truncated`]), so a huge file is never
+/// held whole. `None` when the task's change has no file at `path`.
+///
+/// # Errors
+///
+/// The task cannot be read.
+pub fn task_diff_file(
+    store: &Store,
+    task: &str,
+    path: &str,
+    limit: usize,
+) -> Result<Option<DiffText>, Error> {
+    Ok(match task_change(store, task, None)? {
+        Change::Empty { .. } => None,
+        Change::Range { base, head, .. } => {
+            let range = format!("{base}..{head}");
+            let Ok(numstat) = git(store.repo(), &["diff", "--numstat", "-z", &range]) else {
+                return Ok(None);
+            };
+            if !counts_from_numstat(&numstat)
+                .iter()
+                .any(|file| file.path == path)
+            {
+                return Ok(None);
+            }
+            Some(capped_git(
+                store.repo(),
+                &[
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "-M",
+                    "--unified=3",
+                    &range,
+                    "--",
+                    path,
+                ],
+                limit,
+            ))
+        }
+        Change::Worktree(change) => {
+            if counts_from_numstat(&change.numstat)
+                .iter()
+                .any(|file| file.path == path)
+            {
+                Some(capped_git(
+                    &change.worktree,
+                    &[
+                        "diff",
+                        "--no-color",
+                        "--no-ext-diff",
+                        "-M",
+                        "--unified=3",
+                        &change.base,
+                        "--",
+                        path,
+                    ],
+                    limit,
+                ))
+            } else if change.untracked.iter().any(|untracked| untracked == path) {
+                Some(capped_git(
+                    &change.worktree,
+                    &[
+                        "diff",
+                        "--no-index",
+                        "--no-color",
+                        "--no-ext-diff",
+                        "--unified=3",
+                        "--",
+                        "/dev/null",
+                        path,
+                    ],
+                    limit,
+                ))
+            } else {
+                None
+            }
+        }
     })
 }
 
@@ -433,14 +561,88 @@ fn attempt_change(
     }
 }
 
-/// The running attempt's change: the worker's worktree against the merge base of the remote
-/// target branch and the worktree's HEAD (the attempt's recorded base when the merge base
-/// cannot be taken), with modified and untracked files included. `None` when the attempt has no
-/// worktree yet or no base to compare with.
-fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>, Error> {
+/// Where a task's change is, before any diff text is read: the one resolution [`task_diff`],
+/// [`task_diff_counts`] and [`task_diff_file`] share, so the three never disagree about the
+/// range.
+enum Change {
+    /// The running attempt's worktree, with its `--numstat` already read.
+    Worktree(WorktreeChange),
+    /// A committed range.
+    Range {
+        base: String,
+        head: String,
+        /// Why the range does not start at the merge base, when it does not.
+        base_reason: DiffBase,
+    },
+    /// No commit to compare yet.
+    Empty {
+        /// Why the range could not start at the merge base, when it could not.
+        base_reason: DiffBase,
+    },
+}
+
+/// A running attempt's worktree change, before any file's text is read.
+struct WorktreeChange {
+    worktree: PathBuf,
+    /// The commit the worktree is compared with.
+    base: String,
+    /// Why the range starts where it does.
+    base_reason: DiffBase,
+    /// `git diff --numstat -z <base>`: every tracked file with worktree changes.
+    numstat: String,
+    /// The paths with worktree changes (modified, staged or untracked).
+    dirty: Vec<String>,
+    /// The untracked paths: `git diff <base>` does not list them.
+    untracked: Vec<String>,
+}
+
+/// Resolves a task's change without reading any diff text.
+fn task_change(store: &Store, task: &str, attempt: Option<u32>) -> Result<Change, Error> {
+    let item = store.load_task(task)?.item;
+    if item.state == TaskState::Doing
+        && item.phase == "running"
+        && let Some(change) = worktree_change(store, &item)
+    {
+        return Ok(Change::Worktree(change));
+    }
+    let (range, base_reason) = match item.state {
+        // A merged task's merge commit is its change on the target branch: the first-parent
+        // diff of the candidate (or the branch itself when the target was fast-forwarded to
+        // it).
+        TaskState::Done => match merged_candidate(store, task)? {
+            Some(verdict) => match merged_range(&verdict) {
+                Some(range) => (Some(range), DiffBase::default()),
+                None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+            },
+            None => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+        },
+        _ => attempt_change(store, &item.id, attempt, &item.base_sha, &item.head_sha),
+    };
+    let Some((base, head)) = range else {
+        return Ok(Change::Empty {
+            base_reason: DiffBase::default(),
+        });
+    };
+    if base == head {
+        // No commit yet, but the range still fell back when the merge base could not be taken:
+        // the page says so under `no change yet`.
+        return Ok(Change::Empty { base_reason });
+    }
+    Ok(Change::Range {
+        base,
+        head,
+        base_reason,
+    })
+}
+
+/// The running attempt's change before any text is read: the worker's worktree against the
+/// merge base of the remote target branch and the worktree's HEAD (the attempt's recorded base
+/// when the merge base cannot be taken). `None` when the attempt has no worktree yet or no base
+/// to compare with.
+fn worktree_change(store: &Store, task: &TaskFile) -> Option<WorktreeChange> {
     let worktree = store.root().join("worktrees").join(&task.id);
     if !worktree.join(".git").exists() {
-        return Ok(None);
+        return None;
     }
     let recorded = std::fs::read_to_string(
         store
@@ -467,14 +669,8 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
         .map_or((None, DiffBase::NoRemoteTarget), |head| {
             remote_target_base(store, head).into_parts()
         });
-    let Some(base) = merge_base.or(recorded) else {
-        return Ok(None);
-    };
-    let Some(numstat) = git_raw(&worktree, &["diff", "--numstat", "-z", &base]) else {
-        // A base that is not a commit (a worktree made outside the wrapper): no diff rather
-        // than a screen full of an error.
-        return Ok(None);
-    };
+    let base = merge_base.or(recorded)?;
+    let numstat = git_raw(&worktree, &["diff", "--numstat", "-z", &base])?;
     // The paths with worktree changes (modified, staged or untracked), so a file that only
     // exists in the working tree is marked. `--porcelain` keeps a leading space for an
     // unstaged change, so its output is read raw.
@@ -484,19 +680,42 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
     )
     .map(|text| porcelain_paths(&text))
     .unwrap_or_default();
-    let mut files = numstat_entries(&numstat)
+    // Untracked files are not in `git diff <base>`: they are new content of the attempt.
+    let untracked = git_raw(
+        &worktree,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    .unwrap_or_default()
+    .split('\0')
+    .filter(|path| !path.is_empty())
+    .map(str::to_owned)
+    .collect();
+    Some(WorktreeChange {
+        worktree,
+        base,
+        base_reason,
+        numstat,
+        dirty,
+        untracked,
+    })
+}
+
+/// The full diff of a running attempt's worktree: one `git diff` per file, untracked files
+/// included.
+fn worktree_diff(change: WorktreeChange) -> TaskDiff {
+    let mut files = numstat_entries(&change.numstat)
         .into_iter()
         .map(|(path, added, removed)| DiffFile {
-            uncommitted: dirty.iter().any(|dirty| dirty == &path),
+            uncommitted: change.dirty.iter().any(|dirty| dirty == &path),
             text: git_raw(
-                &worktree,
+                &change.worktree,
                 &[
                     "diff",
                     "--no-color",
                     "--no-ext-diff",
                     "-M",
                     "--unified=3",
-                    &base,
+                    &change.base,
                     "--",
                     &path,
                 ],
@@ -507,31 +726,81 @@ fn live_worktree_diff(store: &Store, task: &TaskFile) -> Result<Option<TaskDiff>
             removed,
         })
         .collect::<Vec<_>>();
-    // Untracked files are not in `git diff <base>`: they are new content of the attempt.
-    let untracked = git_raw(
-        &worktree,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )
-    .unwrap_or_default();
-    for path in untracked.split('\0').filter(|path| !path.is_empty()) {
-        if files.iter().any(|file| file.path == path) {
+    for path in &change.untracked {
+        if files.iter().any(|file| file.path == *path) {
             continue;
         }
-        let text = no_index_diff(&worktree, path);
+        let text = no_index_diff(&change.worktree, path);
         let (added, removed) = count_diff_lines(&text);
         files.push(DiffFile {
-            path: path.to_owned(),
+            path: path.clone(),
             added,
             removed,
             text,
             uncommitted: true,
         });
     }
-    Ok(Some(TaskDiff {
+    TaskDiff {
         files,
         source: DiffSource::Worktree,
-        base: base_reason,
-    }))
+        base: change.base_reason,
+    }
+}
+
+/// The `--numstat` records as counts, preserving git's file order.
+fn counts_from_numstat(text: &str) -> Vec<DiffCount> {
+    numstat_entries(text)
+        .into_iter()
+        .map(|(path, added, removed)| DiffCount {
+            path,
+            added,
+            removed,
+        })
+        .collect()
+}
+
+/// The line counts of an untracked file, from `git diff --numstat --no-index`: git prints the
+/// counts without the file's content, so a huge new file costs one line. git exits `1` for a
+/// difference, so the status is not checked.
+fn untracked_count(worktree: &Path, path: &str) -> (usize, usize) {
+    let Ok(output) = crate::git::run(
+        worktree,
+        &[
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-index",
+            "--",
+            "/dev/null",
+            path,
+        ],
+    ) else {
+        return (0, 0);
+    };
+    numstat_entries(&output.stdout)
+        .first()
+        .map_or((0, 0), |(_, added, removed)| (*added, *removed))
+}
+
+/// One file's diff, read from git up to `limit` bytes. A text that fits is trimmed the way
+/// [`git::ok`](crate::git) trims every diff text, so it equals the same file's text in
+/// [`task_diff`]; a cut text is left as it is, since the cut is already a whole number of
+/// bytes of the diff.
+fn capped_git(dir: &Path, args: &[&str], limit: usize) -> DiffText {
+    match crate::git::run_capped(dir, args, limit) {
+        Ok((text, truncated)) if truncated => DiffText {
+            text,
+            truncated: true,
+        },
+        Ok((text, _)) => DiffText {
+            text: text.trim().to_owned(),
+            truncated: false,
+        },
+        Err(_) => DiffText {
+            text: String::new(),
+            truncated: false,
+        },
+    }
 }
 
 /// The paths `git status --porcelain -z` names, in either field of a rename or copy.

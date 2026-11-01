@@ -1,0 +1,600 @@
+//! The hub's HTTP API against a real process and real repositories (ADR 0048 decision 16).
+//!
+//! Every test starts `radian hub` on port `0` with a temporary `RADIAN_HOME`, reads the bound
+//! port from its first stdout line, and speaks HTTP/1.1 to it on loopback. The read routes are
+//! compared with the CLI's own `--json` output, which is the contract: the route returns the
+//! bytes `radian arc list --json` and `radian arc show --json` print.
+
+mod common;
+
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use common::{Repo, radian_bin, write};
+use radian_arc::gate::Verdict;
+use radian_arc::hub::Registry;
+use radian_arc::store::model::TaskState;
+use radian_arc::store::{Store, config};
+use serde_json::Value;
+
+/// A `radian` command with the same isolated environment the hub uses.
+fn radian(home: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(radian_bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("RADIAN_HOME", home)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("radian runs")
+}
+
+/// A running hub. Dropping it kills the process.
+struct Hub {
+    child: Child,
+    _stdout: BufReader<std::process::ChildStdout>,
+    home: PathBuf,
+    stderr_path: PathBuf,
+    port: u16,
+}
+
+impl Hub {
+    /// Starts `radian hub --port 0` and reads the bound port from the first stdout line.
+    fn start(home: &Path) -> Self {
+        fs::create_dir_all(home).expect("the hub home is creatable");
+        let stderr_path = home.join("hub.stderr.log");
+        let stderr = fs::File::create(&stderr_path).expect("the hub stderr file is creatable");
+        let mut child = Command::new(radian_bin())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", home)
+            .env("RADIAN_HOME", home)
+            .args(["hub", "--port", "0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("radian hub starts");
+        let stdout = child.stdout.take().expect("the hub has stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .expect("the hub's first stdout line reads");
+        let first = line.trim_end();
+        let port: u16 = first
+            .strip_prefix("hub: listening on 127.0.0.1:")
+            .unwrap_or_else(|| panic!("the first stdout line names the listener: {first:?}"))
+            .parse()
+            .expect("the first stdout line names a port");
+        Self {
+            child,
+            _stdout: reader,
+            home: home.to_path_buf(),
+            stderr_path,
+            port,
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn token(&self) -> String {
+        fs::read_to_string(self.home.join("hub/token"))
+            .expect("the token file exists")
+            .trim()
+            .to_owned()
+    }
+
+    fn stderr(&self) -> String {
+        fs::read_to_string(&self.stderr_path).unwrap_or_default()
+    }
+
+    fn request(&self, method: &str, path: &str, header: Option<&str>) -> Response {
+        http(self.port, method, path, header)
+    }
+
+    fn authorized(&self, method: &str, path: &str) -> Response {
+        self.request(method, path, Some(&format!("Bearer {}", self.token())))
+    }
+}
+
+impl Drop for Hub {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// One HTTP/1.1 response, split at the first blank line.
+#[derive(Debug)]
+struct Response {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl Response {
+    fn json(&self) -> Value {
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|error| panic!("the body is JSON: {error}: {:?}", self.body))
+    }
+}
+
+/// One request over a fresh connection. `header` is the full `Authorization` value, so a test
+/// can send `Basic <token>` as well as `Bearer <token>`.
+fn http(port: u16, method: &str, path: &str, header: Option<&str>) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the hub accepts a connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a read timeout is settable");
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    if let Some(header) = header {
+        request.push_str(&format!("Authorization: {header}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .expect("the request is written");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("the response reads");
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or_else(|| panic!("the response has a header block: {:?}", raw));
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .expect("the status line has a code")
+        .parse()
+        .expect("the status code is a number");
+    Response {
+        status,
+        body: raw[split + 4..].to_vec(),
+    }
+}
+
+/// The hub home inside a repository's scratch root.
+fn hub_home(repo: &Repo) -> PathBuf {
+    let home = repo.root.join("hub-home");
+    fs::create_dir_all(&home).expect("the hub home is creatable");
+    home
+}
+
+/// Registers `repo` under `name` in `home`'s registry.
+fn register(home: &Path, name: &str, repo: &Repo) {
+    Registry::at(home.join("hub"))
+        .add(&repo.clone, Some(name))
+        .expect("the repository registers");
+}
+
+/// An initialized arc store in the repository's clone.
+fn arc_store(repo: &Repo) -> Store {
+    let root = repo.arc();
+    fs::create_dir_all(&root).expect("the arc directory is creatable");
+    fs::write(root.join("config.toml"), config::default_text("main")).expect("the config writes");
+    Store::at(repo.clone.clone())
+}
+
+fn add_task(store: &Store, slug: &str, title: &str) -> (String, String) {
+    let plan = store
+        .add_plan("hub", "the hub plan", "a request\n")
+        .expect("the plan adds");
+    let task = store
+        .add_task(
+            &plan,
+            slug,
+            title,
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("the task adds");
+    (plan, task)
+}
+
+fn set_attempt(store: &Store, task: &str, base: &str, head: &str) {
+    store
+        .change_task(task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "awaiting_human".to_owned();
+            task.attempt = 1;
+            task.base_sha = Some(base.to_owned());
+            task.head_sha = Some(head.to_owned());
+            Ok(())
+        })
+        .expect("the task changes");
+}
+
+fn commit(repo: &Repo, path: &str, content: &str, message: &str) -> String {
+    write(&repo.clone.join(path), content);
+    repo.git(&["add", path]);
+    repo.git(&["commit", "-q", "-m", message]);
+    repo.git(&["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+// ---- edge case 1 -------------------------------------------------------------------------
+
+#[test]
+fn the_list_and_show_routes_are_the_cli_json_bytes() {
+    let a = Repo::new("hub-http-list-a");
+    let b = Repo::new("hub-http-list-b");
+    let store = arc_store(&a);
+    let (_plan, task) = add_task(&store, "one", "the one task");
+    // A second registered repository: `GET /v1/repos` names both, in file order.
+    arc_store(&b);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    register(&home, "b", &b);
+    let hub = Hub::start(&home);
+
+    let listed = hub.authorized("GET", "/v1/repos/a/items");
+    assert_eq!(listed.status, 200);
+    let cli = a.radian(&["arc", "list", "--json"]);
+    assert_eq!(cli.code, 0, "{}", cli.stderr);
+    assert_eq!(
+        listed.body,
+        cli.stdout.as_bytes(),
+        "the route returns exactly what the CLI prints"
+    );
+
+    let shown = hub.authorized("GET", &format!("/v1/repos/a/items/{task}"));
+    assert_eq!(shown.status, 200);
+    let cli = a.radian(&["arc", "show", &task, "--json"]);
+    assert_eq!(cli.code, 0, "{}", cli.stderr);
+    assert_eq!(shown.body, cli.stdout.as_bytes());
+
+    // The scheduling loop takes each repository's `runner.lock`; wait for both, then the
+    // route reports them as scheduled by this hub.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let repos = hub.authorized("GET", "/v1/repos").json();
+        let scheduled = repos.as_array().is_some_and(|list| {
+            list.iter()
+                .all(|repo| repo["scheduled"] == serde_json::json!(true))
+        });
+        if scheduled {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub never scheduled both repositories: {repos}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let repos = hub.authorized("GET", "/v1/repos");
+    assert_eq!(repos.status, 200);
+    assert_eq!(
+        repos.json(),
+        serde_json::json!([
+            {
+                "name": "a",
+                "path": fs::canonicalize(&a.clone).unwrap().display().to_string(),
+                "scheduled": true,
+                "lock_holder": hub.pid().to_string(),
+            },
+            {
+                "name": "b",
+                "path": fs::canonicalize(&b.clone).unwrap().display().to_string(),
+                "scheduled": true,
+                "lock_holder": hub.pid().to_string(),
+            }
+        ])
+    );
+
+    let version = hub.authorized("GET", "/v1/version");
+    assert_eq!(version.status, 200);
+    assert_eq!(
+        version.json(),
+        serde_json::json!({ "api_version": 1, "schema_version": 1 })
+    );
+}
+
+// ---- edge case 2 -------------------------------------------------------------------------
+
+#[test]
+fn every_request_needs_a_bearer_token_and_a_bad_one_gets_an_empty_object() {
+    let a = Repo::new("hub-http-token");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let token = hub.token();
+
+    for (path, header) in [
+        ("/v1/version", None),
+        ("/v1/repos", None),
+        ("/v1/repos", Some("Bearer wrong".to_owned())),
+        ("/v1/repos", Some(format!("Basic {token}"))),
+        ("/v1/version", Some("Bearer".to_owned())),
+    ] {
+        let response = hub.request("GET", path, header.as_deref());
+        assert_eq!(response.status, 401, "{path} {header:?}");
+        assert_eq!(response.body, b"{}".to_vec(), "{path} {header:?}");
+    }
+
+    // The good token still works, and the server never wrote the token to stderr.
+    assert_eq!(hub.authorized("GET", "/v1/version").status, 200);
+    let stderr = hub.stderr();
+    assert!(
+        !stderr.contains(&token),
+        "the token never reaches stderr: {stderr}"
+    );
+}
+
+// ---- edge case 3 -------------------------------------------------------------------------
+
+#[test]
+fn a_rotated_token_takes_effect_on_the_next_request() {
+    let a = Repo::new("hub-http-rotate");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let old = hub.token();
+    assert_eq!(
+        hub.request("GET", "/v1/version", Some(&format!("Bearer {old}")))
+            .status,
+        200
+    );
+
+    let rotated = radian(&home, &["hub", "token", "rotate"]);
+    assert_eq!(rotated.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&rotated.stdout), "rotated\n");
+    let new = hub.token();
+    assert_ne!(new, old, "rotate writes a new token");
+
+    assert_eq!(
+        hub.request("GET", "/v1/version", Some(&format!("Bearer {old}")))
+            .status,
+        401,
+        "the old token fails on the next request"
+    );
+    assert_eq!(
+        hub.request("GET", "/v1/version", Some(&format!("Bearer {new}")))
+            .status,
+        200,
+        "the new token works without a restart"
+    );
+}
+
+// ---- edge case 4 -------------------------------------------------------------------------
+
+#[test]
+fn the_report_is_the_newest_attempts_last_assistant_message() {
+    let a = Repo::new("hub-http-report");
+    let store = arc_store(&a);
+    let (plan, task) = add_task(&store, "report", "the report task");
+    for (attempt, text) in [(1, "the first report"), (2, "the newest report")] {
+        let dir = a.run_dir(&task, attempt);
+        fs::create_dir_all(&dir).expect("the run directory is creatable");
+        fs::write(
+            dir.join("result.jsonl"),
+            format!(
+                "{{\"type\":\"Result\",\"text\":\"{text}\"}}\n\
+                 {{\"type\":\"Result\",\"text\":\"the last one of attempt {attempt}\"}}\n"
+            ),
+        )
+        .expect("result.jsonl writes");
+    }
+    let (_plan, empty) = add_task(&store, "empty", "the empty task");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let report = hub.authorized("GET", &format!("/v1/repos/a/items/{task}/report"));
+    assert_eq!(report.status, 200);
+    assert_eq!(
+        report.json(),
+        serde_json::json!({
+            "attempt": format!("{task}-2"),
+            "text": "the last one of attempt 2",
+        })
+    );
+
+    let none = hub.authorized("GET", &format!("/v1/repos/a/items/{empty}/report"));
+    assert_eq!(none.status, 204);
+    assert!(none.body.is_empty());
+
+    // An id that names no task is the CLI's 404, not a task without an attempt; a plan's id
+    // is not a task either.
+    let unknown = hub.authorized("GET", "/v1/repos/a/items/TK9999-missing/report");
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        unknown.json(),
+        serde_json::json!({"error": "no task `TK9999-missing`"})
+    );
+    let plan_only = hub.authorized("GET", &format!("/v1/repos/a/items/{plan}/report"));
+    assert_eq!(plan_only.status, 404, "a plan id names no task");
+    assert_eq!(
+        plan_only.json(),
+        serde_json::json!({"error": format!("no task `{plan}`")})
+    );
+}
+
+// ---- edge case 5 -------------------------------------------------------------------------
+
+#[test]
+fn the_diff_route_lists_numstat_and_cuts_one_file_at_256_kib() {
+    let a = Repo::new("hub-http-diff");
+    let base = a.main_sha();
+    a.git(&["checkout", "-q", "-B", "work/diff-test", &base]);
+    commit(&a, "one.txt", "a\nb\n", "one file");
+    let big = "x".repeat(300 * 1024);
+    let head = commit(&a, "big.txt", &big, "the big file");
+    a.git(&["checkout", "-q", "main"]);
+    // The store is created after the branch commits, so `.radian/` never enters them.
+    let store = arc_store(&a);
+    let (_plan, task) = add_task(&store, "diff", "the diff task");
+    set_attempt(&store, &task, &base, &head);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let listed = hub.authorized("GET", &format!("/v1/repos/a/items/{task}/diff"));
+    assert_eq!(listed.status, 200);
+    let files = listed.json();
+    let files = files.as_array().expect("the diff list is an array");
+    assert_eq!(files.len(), 2, "{files:?}");
+    let one = files
+        .iter()
+        .find(|file| file["path"] == "one.txt")
+        .expect("one.txt is listed");
+    assert_eq!(one["added"], 2);
+    assert_eq!(one["removed"], 0);
+    let big = files
+        .iter()
+        .find(|file| file["path"] == "big.txt")
+        .expect("big.txt is listed");
+    assert_eq!(big["added"], 1);
+    assert_eq!(big["removed"], 0);
+
+    let body = hub.authorized("GET", &format!("/v1/repos/a/items/{task}/diff/big.txt"));
+    assert_eq!(body.status, 200);
+    let body = body.json();
+    assert_eq!(body["path"], "big.txt");
+    assert_eq!(body["truncated"], true);
+    let text = body["text"].as_str().expect("the text is a string");
+    assert_eq!(text.len(), 256 * 1024, "the text is cut exactly at 256 KiB");
+
+    assert_eq!(
+        hub.authorized("GET", &format!("/v1/repos/a/items/{task}/diff/missing.txt"))
+            .status,
+        404
+    );
+}
+
+// ---- edge case 6 -------------------------------------------------------------------------
+
+#[test]
+fn an_unknown_repository_path_and_method_answer_404_and_405() {
+    let a = Repo::new("hub-http-404");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let unknown = hub.authorized("GET", "/v1/repos/b/items");
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        unknown.json(),
+        serde_json::json!({"error": "no repository named `b` is registered"})
+    );
+
+    let route = hub.authorized("GET", "/v1/nothing");
+    assert_eq!(route.status, 404);
+    assert_eq!(route.json(), serde_json::json!({"error": "no such route"}));
+
+    let method = hub.authorized("POST", "/v1/repos");
+    assert_eq!(method.status, 405);
+}
+
+// ---- edge case 9 -------------------------------------------------------------------------
+
+#[test]
+fn the_token_file_is_0600_and_a_missing_one_is_created_at_start() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let a = Repo::new("hub-http-token-file");
+    let home = hub_home(&a);
+    let path = home.join("hub/token");
+    assert!(!path.exists(), "the fixture starts without a token");
+    let hub = Hub::start(&home);
+    assert!(path.is_file(), "the hub creates the token at start");
+    let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the token file is 0600");
+    let token = hub.token();
+    assert_eq!(token.len(), 64);
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "the token is lowercase hex: {token}"
+    );
+}
+
+// ---- edge case 10 ------------------------------------------------------------------------
+
+#[test]
+fn a_second_hub_is_refused_by_the_lock_and_a_port_in_use_names_the_port() {
+    let a = Repo::new("hub-http-lock");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let second = radian(&home, &["hub", "--port", "0"]);
+    assert_eq!(second.status.code(), Some(1), "{second:?}");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("hub.lock") && stderr.contains(&hub.pid().to_string()),
+        "the refusal names hub.lock and the holder's pid: {stderr}"
+    );
+
+    // A port another program holds is a startup error that names the port. A fresh home has
+    // no lock, so the bind is the failure the test sees.
+    let holder = TcpListener::bind("127.0.0.1:0").expect("the test holds a port");
+    let port = holder.local_addr().unwrap().port();
+    let other_home = a.root.join("other-home");
+    fs::create_dir_all(&other_home).unwrap();
+    let blocked = radian(&other_home, &["hub", "--port", &port.to_string()]);
+    assert_eq!(blocked.status.code(), Some(1), "{blocked:?}");
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        stderr.contains(&port.to_string()),
+        "the startup error names the port: {stderr}"
+    );
+}
+
+// ---- the verdicts route ------------------------------------------------------------------
+
+#[test]
+fn the_verdicts_route_reads_the_newest_attempts_verdicts() {
+    let a = Repo::new("hub-http-verdicts");
+    let store = arc_store(&a);
+    let (plan, task) = add_task(&store, "verdict", "the verdict task");
+    let dir = a.run_dir(&task, 1).join("verdicts");
+    fs::create_dir_all(&dir).expect("the verdict directory is creatable");
+    let path = dir.join("human.json");
+    Verdict::human("a".repeat(40), true, None)
+        .write_new(&path)
+        .expect("the verdict writes");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let response = hub.authorized("GET", &format!("/v1/repos/a/items/{task}/verdicts"));
+    assert_eq!(response.status, 200);
+    let list = response.json();
+    let list = list.as_array().expect("the verdict list is an array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["stage"], "human");
+    assert_eq!(list[0]["result"], "pass");
+    assert!(list[0]["reason"].is_null());
+    assert_eq!(list[0]["path"], path.display().to_string());
+    assert_eq!(list[0]["verdict"]["stage"], "human");
+    assert_eq!(list[0]["verdict"]["result"], "pass");
+
+    // An id that names no task is the CLI's 404, not an empty list; a plan's id is not a task
+    // either.
+    let unknown = hub.authorized("GET", "/v1/repos/a/items/TK9999-missing/verdicts");
+    assert_eq!(unknown.status, 404);
+    assert_eq!(
+        unknown.json(),
+        serde_json::json!({"error": "no task `TK9999-missing`"})
+    );
+    let plan_only = hub.authorized("GET", &format!("/v1/repos/a/items/{plan}/verdicts"));
+    assert_eq!(plan_only.status, 404, "a plan id names no task");
+    assert_eq!(
+        plan_only.json(),
+        serde_json::json!({"error": format!("no task `{plan}`")})
+    );
+}

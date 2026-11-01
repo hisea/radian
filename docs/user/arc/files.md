@@ -48,6 +48,8 @@ Any prefix of 1 to 4 uppercase letters is a well-formed id, and the kind comes f
 The id is the file name and never changes.
 An id names one item: `show`, `adopt`, `reset-budget`, `cancel`, and the MCP `show` tool refuse an id that names both a plan file and a task file with exit `3` (the MCP tool: a tool error), name both files, and change nothing.
 
+`schema_version` names the plan and task file shape. The hub's HTTP API has its own `api_version`, which changes on its own; the difference is on [`hub`](hub.md#version).
+
 ### Plan fields
 
 | Field | Type | Required | Allowed values |

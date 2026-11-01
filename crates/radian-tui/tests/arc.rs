@@ -1393,7 +1393,7 @@ fn spawn_hub(scratch: &Scratch, interval: u64) -> ChildGuard {
     command
         .current_dir(scratch.repo())
         .env("RADIAN_HOME", scratch.path("home"))
-        .args(["hub"])
+        .args(["hub", "--port", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
