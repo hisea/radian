@@ -18,7 +18,7 @@ use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQue
 use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
-use crate::memory::{MemoryHooks, MemoryInjection, MemoryService};
+use crate::memory::{MemoryHooks, MemoryInjection, MemoryService, MemoryTouch};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -178,6 +178,11 @@ pub async fn open_session(
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
+    // ADR 0021 D3/D4: the memory aging hook. It is built whenever memory is on, from the
+    // same scope directories the file tools receive.
+    let memory_touch = memory
+        .as_ref()
+        .map(|service| MemoryTouch::new(service, Arc::clone(&memory_warning)));
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
     let mcp_server_configs = servers.clone();
@@ -454,6 +459,9 @@ pub async fn open_session(
     let mut tools = HostTools::new(coding, mcp.clone())
         .with_tool_allow(tools_allow)
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
+    if let Some(touch) = memory_touch {
+        tools = tools.with_memory_touch(touch);
+    }
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the
     // result, and every change is journaled first so the fold always rebuilds it.

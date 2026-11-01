@@ -243,6 +243,7 @@ Needs no model, no key, no session file, no network.
 | `list` | `--global`, `--project`, `--all`, `--json` | List records, project first then global. `--all` includes archived records. |
 | `search` | `--global`, `--project`, `--json`, `WORD...` (required) | Search by keyword. Every word must match. |
 | `show` | `--global`, `--project`, `--json`, `ID` | Show one record by id. |
+| `stale` | `--days DAYS` (default `30`), `--global`, `--project`, `--json` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`; `DAYS` is an integer of 1 or more. Reads the memory files only. |
 | `add` | `--global`, `--kind preference\|decision\|fact\|lesson` (default `fact`), `--key KEY`, `CONTENT` (`-` reads stdin) | Add a project record, or a global record with `--global`. A git workspace registers itself on first write. |
 | `edit` | `--global`, `--revision REV` (required), `ID`, `CONTENT` | Change a record. Needs the current revision. |
 | `archive` | `--global`, `--revision REV` (required), `ID` | Archive a record. It stays stored but leaves injection and default search. |
@@ -258,7 +259,7 @@ Needs no model, no key, no session file, no network.
 | `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. Reports key conflicts. |
 
 `--global` and `--project` conflict except where both are absent (the default scope).
-`list`, `search`, `show`, and `project` accept `--json` for machine output.
+`list`, `search`, `show`, `stale`, and `project` accept `--json` for machine output.
 `forget`, `purge`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
 Exit `0` on success, `1` for a conflict or a missing record, `2` for bad use.
 See `memory` for scopes, revisions, and confirmation rules.

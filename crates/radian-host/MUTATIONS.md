@@ -1918,6 +1918,19 @@ stale one) and the named tests run with `cargo nextest run ... --profile sandbox
 | TK0277-M2 | `open_session` seeds the loaded set without the startup chain (`Vec::new()`) | ✅ 1 failed (rc=100) | `cli::a_startup_context_file_is_never_appended_again` (the workspace `AGENTS.md` was appended again) |
 | TK0277-M3 | `open_session` passes `true` to `ContextHooks` instead of `[context] subtree_files` | ✅ 1 failed (rc=100) | `cli::the_subtree_switch_turns_the_append_off` (the disabled switch still appended) |
 
+## TK0272: memory aging (`last_used` and `stale`) (2026-10-31)
+
+Branch `work/TK0272-memory-aging-last-used`. Each mutation was applied in place, the
+`radian` binary rebuilt where the CLI test needed it (`cargo build -p radian-tui --bin
+radian`, the CLI tests refuse a stale one), and the named tests run with `cargo nextest run
+-p radian-host -p radian-exec --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`.
+Each source was restored from `.radian/*.bak` (`cmp` empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0272-M1 | the hook also writes `last_used` into `MEMORY.md` (the index guard removed and a direct append added) | ✅ 1 failed (rc=100) | `memory::touch::tests::a_read_of_memory_md_touches_nothing` (the index gained a `last_used` line) |
+| TK0272-M2 | `stale` never treats a file without `last_used` as stale (`created` ignored) | ✅ 1 failed (rc=100) | `memory::commands::tests::stale_lists_a_never_read_file_by_its_created_date` (`unread-old` missing) |
+| TK0272-M3 | the hook also bumps `modified` after `touch_last_used` | ✅ 2 failed (rc=100) | `memory::touch::tests::a_read_of_a_record_sets_last_used_and_changes_no_other_line` and `cli::a_model_read_of_a_project_memory_file_records_last_used` (the bytes beyond `last_used` changed) |
 ## TK0271: the two memory index files are injected, capped, and noticed (2026-10-31)
 
 Branch `work/TK0271-memory-index-injection`. Each mutation was applied in place and the named

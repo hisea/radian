@@ -13,6 +13,7 @@ pub mod commands;
 mod identity;
 pub mod injection;
 mod service;
+mod touch;
 
 pub use commands::{
     CommandError, CommandOutput, MemoryCommand, ProjectCommand, USAGE_ERROR, execute, parse_args,
@@ -26,3 +27,4 @@ pub use service::{
     CreatedProject, MemoryService, MemoryServiceError, ProjectForWrite, ProjectState,
     ScopeSelection, WriteScope,
 };
+pub use touch::MemoryTouch;
