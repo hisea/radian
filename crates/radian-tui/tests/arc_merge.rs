@@ -385,56 +385,6 @@ fn item(severity: &str, file: &str, line: u32, summary: &str) -> Finding {
     }
 }
 
-/// A finding with a trigger and the `pre_existing` mark the tests need.
-fn found(
-    severity: &str,
-    file: &str,
-    line: u32,
-    summary: &str,
-    trigger: &str,
-    pre_existing: bool,
-) -> Finding {
-    Finding {
-        trigger: trigger.to_owned(),
-        pre_existing,
-        ..item(severity, file, line, summary)
-    }
-}
-
-/// Writes an old-shape review verdict for attempt 1: `blocking` and `suggestions` as a build
-/// before findings wrote them.
-fn write_old_shape_review(
-    fixture: &Fixture,
-    blocking: serde_json::Value,
-    suggestions: serde_json::Value,
-) {
-    let path = verdict_path(
-        &fixture.repo,
-        &fixture.task,
-        &fixture.label(),
-        Stage::Review,
-    )
-    .expect("the verdict path");
-    let mut verdict = fixture.review(report(Vec::new(), Vec::new()));
-    verdict.review = None;
-    let mut value = serde_json::to_value(&verdict).expect("the verdict serializes");
-    value["review"] = json!({
-        "summary": "the change adds the first file",
-        "blocking": blocking,
-        "suggestions": suggestions,
-        "verified": ["it compiles"],
-    });
-    fs::create_dir_all(path.parent().expect("a parent")).expect("the verdict directory");
-    fs::write(
-        &path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&value).expect("the verdict serializes")
-        ),
-    )
-    .expect("the old-shape verdict is written");
-}
-
 #[test]
 fn every_stage_passes_with_its_commands_and_the_review_groups() {
     let fixture = Fixture::new("pass", &["commands", "review", "human"]);
@@ -462,7 +412,7 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
         "✓ human       approver auto".to_owned(),
         "◻ integration not run yet".to_owned(),
         "Adds the reverify command".to_owned(),
-        "minor".to_owned(),
+        "suggestions".to_owned(),
         "• [minor] src/x.rs:3 use a helper".to_owned(),
         "verified".to_owned(),
         "✓ the CLI prints one line".to_owned(),
@@ -473,12 +423,10 @@ fn every_stage_passes_with_its_commands_and_the_review_groups() {
     ] {
         assert!(text.contains(&needle), "missing `{needle}`:\n{text}");
     }
-    for absent in ["critical", "major", "blocking", "suggestions"] {
-        assert!(
-            !text.contains(absent),
-            "a severity with no finding is omitted (`{absent}`):\n{text}"
-        );
-    }
+    assert!(
+        !text.contains("blocking"),
+        "an empty group is omitted:\n{text}"
+    );
     // The passing marks take the success role.
     assert_eq!(
         mark_fg(&mut app, "commands", '✓', 120, 44),
@@ -670,7 +618,7 @@ fn a_task_whose_extra_stages_list_review_shows_its_review_and_summary() {
 }
 
 #[test]
-fn the_review_groups_its_findings_by_severity_and_then_shows_verified() {
+fn the_review_draws_blocking_suggestions_and_verified_for_the_three_groups() {
     let fixture = Fixture::new("groups", &["commands", "review", "human"]);
     fixture.write(&mut fixture.commands(true, None));
     fixture.write(&mut fixture.review(report(
@@ -683,9 +631,9 @@ fn the_review_groups_its_findings_by_severity_and_then_shows_verified() {
     let mut app = fixture.app();
     let text = screen(&mut app, 120, 44);
     for needle in [
-        "critical".to_owned(),
+        "blocking".to_owned(),
         "× [critical] src/a.rs:7 the lock is dropped early".to_owned(),
-        "minor".to_owned(),
+        "suggestions".to_owned(),
         "• [minor] src/b.rs:2 name it better".to_owned(),
         "verified".to_owned(),
         "✓ the exit codes".to_owned(),
@@ -693,16 +641,6 @@ fn the_review_groups_its_findings_by_severity_and_then_shows_verified() {
     ] {
         assert!(text.contains(&needle), "missing `{needle}`:\n{text}");
     }
-    // Highest severity first, and no heading for a severity with no finding.
-    let position = |needle: &str| {
-        text.find(needle)
-            .unwrap_or_else(|| panic!("no `{needle}`:\n{text}"))
-    };
-    assert!(position("critical") < position("minor"), "{text}");
-    assert!(
-        !text.contains("major"),
-        "a severity with no finding:\n{text}"
-    );
 }
 
 #[test]
@@ -713,125 +651,14 @@ fn a_review_with_no_items_shows_only_its_summary() {
     let mut app = fixture.app();
     let text = screen(&mut app, 120, 44);
     assert!(text.contains("Adds the reverify command"), "{text}");
-    for absent in ["critical", "major", "minor", "blocking", "suggestions"] {
+    for group in ["blocking", "suggestions"] {
         assert!(
-            !text.contains(absent),
-            "`{absent}` is omitted when empty:\n{text}"
+            !text.contains(group),
+            "`{group}` is omitted when empty:\n{text}"
         );
     }
     // `verified` is also omitted; the stage row is `✓ review`, not the group.
     assert!(!text.contains("│ verified"), "{text}");
-}
-
-/// A verdict's findings are grouped by severity, highest first, the critical and major rows in
-/// the error colour, the minor row in the text colour, a demoted finding marked
-/// `(pre_existing)`, and a trigger on its own indented line. Mutation: drop the old-shape
-/// mapping from the review view → [`an_old_shape_review_renders_through_the_same_mapping`]
-/// fails, not this test; the severity grouping is what this one pins.
-#[test]
-fn the_review_groups_three_severities_and_marks_a_demoted_finding() {
-    let fixture = Fixture::new("severities", &["commands", "review", "human"]);
-    let theme = radian_tui::theme::Theme::default();
-    fixture.write(&mut fixture.commands(true, None));
-    fixture.write(&mut fixture.review(report(
-        vec![
-            found("minor", "src/c.rs", 9, "a nit", "", false),
-            found(
-                "critical",
-                "src/a.rs",
-                7,
-                "the lock is dropped early",
-                "run two workers",
-                false,
-            ),
-            found("major", "src/b.rs", 4, "the count is off", "", true),
-        ],
-        vec!["the exit codes"],
-    )));
-    let mut app = fixture.app();
-    let text = screen(&mut app, 120, 44);
-    for needle in [
-        "│ critical",
-        "× [critical] src/a.rs:7 the lock is dropped early",
-        "│ major",
-        "× [major] src/b.rs:4 the count is off (pre_existing)",
-        "│ minor",
-        "• [minor] src/c.rs:9 a nit",
-        "✓ the exit codes",
-    ] {
-        assert!(text.contains(needle), "missing `{needle}`:\n{text}");
-    }
-    let position = |needle: &str| {
-        text.find(needle)
-            .unwrap_or_else(|| panic!("no `{needle}`:\n{text}"))
-    };
-    assert!(
-        position("│ critical") < position("│ major") && position("│ major") < position("│ minor"),
-        "the headings are not highest first:\n{text}"
-    );
-    // The trigger is its own indented row, not part of the finding's row.
-    let trigger_row = text
-        .lines()
-        .find(|line| line.contains("run two workers"))
-        .expect("the trigger row");
-    assert!(
-        trigger_row.trim_start().starts_with("│   run two workers"),
-        "the trigger is not indented under its finding: {trigger_row:?}\n{text}"
-    );
-    assert!(
-        !text
-            .lines()
-            .any(|line| line.contains("[critical]") && line.contains("run two workers")),
-        "the trigger shares the finding's row:\n{text}"
-    );
-    assert_eq!(
-        mark_fg(&mut app, "critical", '×', 120, 44),
-        theme.status_error.fg,
-        "a critical finding is an error"
-    );
-    assert_eq!(
-        mark_fg(&mut app, "major", '×', 120, 44),
-        theme.status_error.fg,
-        "a major finding is an error"
-    );
-    assert_eq!(
-        mark_fg(&mut app, "minor", '•', 120, 44),
-        theme.text.fg,
-        "a minor finding is ordinary text"
-    );
-}
-
-/// An old-shape verdict reads through the same mapping and is grouped by severity: its
-/// `blocking` items at their own level, else `major`, and its `suggestions` at their own level,
-/// else `minor`. Mutation: the review view keeps only a report that carries `findings`, so an
-/// old-shape verdict draws no group → this test fails.
-#[test]
-fn an_old_shape_review_renders_through_the_same_mapping() {
-    let fixture = Fixture::new("old-shape", &["commands", "review", "human"]);
-    fixture.write(&mut fixture.commands(true, None));
-    write_old_shape_review(
-        &fixture,
-        json!([{"level": "major", "file": "a.txt", "line": 2, "text": "[major] the second line is wrong"}]),
-        json!([{"level": "minor", "file": "a.txt", "line": 5, "text": "a nit"}, "another nit"]),
-    );
-    let mut app = fixture.app();
-    let text = screen(&mut app, 120, 44);
-    for needle in [
-        "│ major",
-        "× [major] a.txt:2 the second line is wrong",
-        "│ minor",
-        "• [minor] a.txt:5 a nit",
-        "• [minor] another nit",
-        "✓ it compiles",
-    ] {
-        assert!(text.contains(needle), "missing `{needle}`:\n{text}");
-    }
-    for absent in ["blocking", "suggestions"] {
-        assert!(
-            !text.contains(absent),
-            "the old group name `{absent}` is drawn:\n{text}"
-        );
-    }
 }
 
 #[test]

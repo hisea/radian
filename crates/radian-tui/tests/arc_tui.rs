@@ -2389,6 +2389,60 @@ fn the_attempts_tab_draws_nothing_for_a_verdict_with_no_findings() {
     }
 }
 
+/// The attempts tab's window counts the finding rows, not only the attempt rows: a verdict
+/// with more findings than the terminal holds can be scrolled to its last one with `j`, and
+/// `f` pins the tab to its end.
+#[test]
+fn the_attempts_tab_reaches_a_finding_below_the_terminal() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(&fixture, &task, 1, &[("commands", true, None)]);
+    let findings: Vec<Finding> = (0..40)
+        .map(|index| Finding {
+            severity: "minor".to_owned(),
+            file: Some(format!("src/f{index}.rs")),
+            line: Some(index + 1),
+            summary: format!("finding number {index}"),
+            // The first finding's trigger wraps, so the window must count its rows too.
+            trigger: if index == 0 {
+                "a long trigger that wraps across rows ".repeat(8)
+            } else {
+                format!("trigger for finding {index}")
+            },
+            pre_existing: false,
+        })
+        .collect();
+    write_review_findings(&fixture, &task, 1, findings);
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    let last = "• [minor] src/f39.rs:40 finding number 39";
+    let text = screen(&mut app, 120, 20);
+    assert!(
+        !text.contains(last),
+        "the last finding fits without scrolling:\n{text}"
+    );
+    // `j` walks every rendered row, the findings and their triggers included.
+    for _ in 0..200 {
+        app.on_key(&key(KeyCode::Char('j')));
+    }
+    let text = screen(&mut app, 120, 20);
+    assert!(
+        text.contains(last),
+        "the last finding is not reachable with `j`:\n{text}"
+    );
+    // `k` moves up from the clamped end, and `f` pins the tab to its end again.
+    app.on_key(&key(KeyCode::Char('k')));
+    app.on_key(&key(KeyCode::Char('f')));
+    let text = screen(&mut app, 120, 20);
+    assert!(
+        text.contains(last),
+        "the last finding is not reachable with `f`:\n{text}"
+    );
+}
+
 #[test]
 fn the_conversation_tab_renders_the_selected_attempts_worker_journal() {
     let fixture = Fixture::new();

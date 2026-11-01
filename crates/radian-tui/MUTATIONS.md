@@ -3444,17 +3444,18 @@ the source was restored from the backup.
 
 ## TK0266: the TUI lists a review verdict's findings by severity (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
-The summary frame draws one heading per severity that has findings, highest first, a
-`pre_existing` mark on a demoted finding and the trigger on its own indented row; the attempts
-tab draws the same list under an attempt's review verdict. An old-shape verdict reads through
-the same mapping on both. The mutation was applied to both review views the pages read
-(`crates/radian-arc/src/read.rs`: the `ReviewSummaryView` and `AttemptVerdict` constructions),
-the named tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test
-arc_tui` and `--test arc_merge`, and the file was restored from a copy under `.radian/mut/`
-(`cmp` found it identical).
+The attempts tab draws a review verdict's findings grouped by severity, highest first, a
+`pre_existing` mark on a demoted finding and the trigger on its own indented row; an old-shape
+verdict reads through the same mapping. The tab's window counts the finding rows it draws, so a
+finding below the fold is reachable with `j`/`f`. The mutations were applied by hand to the
+`AttemptVerdict` construction in `crates/radian-arc/src/read.rs` and to `draw_attempts` in
+`crates/radian-tui/src/arc/render.rs`, the named tests ran with `cargo nextest run -p radian-tui
+--locked --profile sandbox --test arc_tui -E 'test(…)'`, and each file was restored from a copy
+under `.radian/mut/` (`cmp` found it identical).
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0266-M3 | the review views drop an old-shape report's findings (`old_blocking.is_some()` builds an empty list), removing the old-shape mapping from the pages | `arc_tui::the_attempts_tab_renders_an_old_shape_review_through_the_same_mapping` (the attempt drew `✓ review` but no `major` or `minor` group) and `arc_merge::an_old_shape_review_renders_through_the_same_mapping` (the page drew `✓ it compiles` but no group) | ✅ 2 failed |
+| TK0266-M3 | `AttemptVerdict::findings` drops an old-shape report's findings (`filter(\|report\| report.old_blocking.is_none())`), removing the old-shape mapping from the page | `arc_tui::the_attempts_tab_renders_an_old_shape_review_through_the_same_mapping` (the attempt drew `✓ review` but no `major` or `minor` group) | ✅ 1 failed |
+| TK0266-M4 | `draw_attempts` draws the first `visible` rows and ignores `attempt_scroll` (`rows.into_iter().take(visible)`), so the window no longer reaches what the row scroll counts | `arc_tui::the_attempts_tab_reaches_a_finding_below_the_terminal` (the last finding stayed clipped below the fifth `minor` row) | ✅ 1 failed |
 
-1/1 caught.
+2/2 caught.
