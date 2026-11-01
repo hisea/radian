@@ -433,12 +433,16 @@ impl ReviewRun<'_> {
         main_sha: &str,
     ) -> Result<(String, String), GateError> {
         let base = super::git::ok(checkout, &["merge-base", main_sha, sha])?;
+        // Rename detection is forced, as the `commands` stage's diffstat forces it: a rename
+        // is one file here too, so the increment this review reads is the increment
+        // `diffstat.json` records (ADR 0048 decision 10).
         let own_diff = super::git::ok(
             checkout,
             &[
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
+                "-M",
                 &format!("{base}..{sha}"),
             ],
         )?;
@@ -468,9 +472,11 @@ impl ReviewRun<'_> {
                     checkout,
                     &["log", "--no-decorate", "--format=%h %s", &range],
                 )?;
+                // Forced rename detection, as in `own_diff` and in the recorded increment:
+                // a pure rename changes no line of either diff, so it is not an increment.
                 let rework = super::git::ok(
                     checkout,
-                    &["diff", "--no-ext-diff", "--no-textconv", &range],
+                    &["diff", "--no-ext-diff", "--no-textconv", "-M", &range],
                 )?;
                 // The increment is the rework's own new lines that the task's own diff also
                 // has: a line that came in with a merge of main is not in the task's own diff

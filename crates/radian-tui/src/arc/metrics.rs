@@ -164,10 +164,13 @@ pub fn draw(
     }
 }
 
-/// One styled piece of a metrics row. A `weak` piece is a value no record reported.
+/// One styled piece of a metrics row. A `weak` piece is a value no record reported, and a
+/// `missing_tail` draws a weak `-` after reported text: `ctx 83K/-` reports the peak and not
+/// the window.
 struct Cell {
     text: String,
     weak: bool,
+    missing_tail: bool,
 }
 
 impl Cell {
@@ -175,6 +178,16 @@ impl Cell {
         Self {
             text: text.into(),
             weak: false,
+            missing_tail: false,
+        }
+    }
+
+    /// A reported value followed by one the record did not report: `ctx 83K/-`.
+    fn reported_with_missing_tail(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            weak: false,
+            missing_tail: true,
         }
     }
 
@@ -182,6 +195,7 @@ impl Cell {
         Self {
             text: "-".to_owned(),
             weak: true,
+            missing_tail: false,
         }
     }
 
@@ -189,6 +203,7 @@ impl Cell {
         Self {
             text: text.into(),
             weak: true,
+            missing_tail: false,
         }
     }
 
@@ -301,7 +316,7 @@ fn context_part(metrics: Option<&Value>) -> Cell {
             format_tokens(peak),
             format_tokens(window)
         )),
-        None => Cell::reported(format!("ctx {}/-", format_tokens(peak))),
+        None => Cell::reported_with_missing_tail(format!("ctx {}/", format_tokens(peak))),
     }
 }
 
@@ -446,23 +461,21 @@ fn detail_rows(run: &RunMetrics, content: usize, theme: &Theme) -> Vec<Line<'sta
                     "  ",
                     vec![
                         Cell::reported(name.clone()),
-                        Cell::reported(calls(tool).to_string()),
-                        Cell::reported(format_tokens(
+                        Cell::optional(calls(tool).map(|count| count.to_string())),
+                        Cell::optional(
                             tool.get("result_bytes")
                                 .and_then(Value::as_u64)
-                                .unwrap_or(0),
-                        )),
-                        Cell::reported(
+                                .map(format_tokens),
+                        ),
+                        Cell::optional(
                             tool.get("failed")
                                 .and_then(Value::as_u64)
-                                .unwrap_or(0)
-                                .to_string(),
+                                .map(|count| count.to_string()),
                         ),
-                        Cell::reported(
+                        Cell::optional(
                             tool.get("denied")
                                 .and_then(Value::as_u64)
-                                .unwrap_or(0)
-                                .to_string(),
+                                .map(|count| count.to_string()),
                         ),
                     ],
                     content,
@@ -545,6 +558,9 @@ fn cells_line(indent: &str, cells: Vec<Cell>, content: usize, theme: &Theme) -> 
             spans.push(Span::styled("  ", theme.hint));
         }
         spans.push(Span::styled(cell.text, cell_style(cell.weak, theme)));
+        if cell.missing_tail {
+            spans.push(Span::styled("-", theme.hint));
+        }
     }
     Line::from(fit_spans(spans, content))
 }
@@ -573,6 +589,9 @@ fn push_parts(spans: &mut Vec<Span<'static>>, parts: &mut Vec<Cell>, theme: &The
     for cell in parts.drain(..) {
         spans.push(Span::styled(" · ", theme.hint));
         spans.push(Span::styled(cell.text, cell_style(cell.weak, theme)));
+        if cell.missing_tail {
+            spans.push(Span::styled("-", theme.hint));
+        }
     }
 }
 
@@ -582,6 +601,7 @@ fn cell_part(label: &str, value: Option<String>) -> Cell {
         None => Cell {
             text: format!("{label} -"),
             weak: true,
+            missing_tail: false,
         },
     }
 }
@@ -608,8 +628,8 @@ fn string(value: &Value, name: &str) -> Option<String> {
     value.get(name)?.as_str().map(str::to_owned)
 }
 
-fn calls(tool: &Value) -> u64 {
-    tool.get("calls").and_then(Value::as_u64).unwrap_or(0)
+fn calls(tool: &Value) -> Option<u64> {
+    tool.get("calls").and_then(Value::as_u64)
 }
 
 /// `seconds` as the frame's whole-second duration: `15s`, `1m00s`.

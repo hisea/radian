@@ -23,9 +23,11 @@
 //!   and a denied call is not also counted in `failed`.
 //! - `models`: the route each request ran under, in first-use order. The route is the
 //!   configured provider name, never the adapter kind: `SessionCreated.config_snapshot`
-//!   carries it in `provider_id`, or nested as `model.provider`/`model.model`, or, for the
-//!   TUI and older records, directly in the top-level `provider`/`model`; every later
-//!   `ConfigChanged.change.model.provider`/`.model` switches it.
+//!   carries it in `provider_id`, or nested as `model.provider`/`model.model`, and the TUI
+//!   writes it directly in the top-level `provider`/`model`; every later
+//!   `ConfigChanged.change.model.provider`/`.model` switches it. An older exec snapshot that
+//!   predates `provider_id` carries only the adapter kind in `provider`, which is then the best
+//!   available answer.
 //! - `request_log`: one entry per request, with `latency_ms` from the previous journal
 //!   record's `ts` to the usage record's `ts`, cut at 500 entries
 //!   (`request_log_truncated` then says so).

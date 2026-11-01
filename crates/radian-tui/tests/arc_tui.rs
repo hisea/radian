@@ -5579,3 +5579,125 @@ fn the_compaction_cell_shows_its_count_time_and_share() {
         "a run with no compaction draws no time:\n{text}"
     );
 }
+
+/// A run that reported its peak context but no context window draws the peak and a weak `-`
+/// for the window. Mutation: draw the missing window as reported text.
+#[test]
+fn a_missing_context_window_draws_the_dash_weak() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "peak_context": 83_000,
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let terminal = render(&mut app, 140, 40);
+    let text = rows(&terminal).join("\n");
+    assert!(text.contains("ctx 83K/-"), "the peak is drawn:\n{text}");
+    let (row, column) = fg_of(&terminal, "ctx 83K/-");
+    let dash = column + u16::try_from("ctx 83K/".chars().count()).expect("a short prefix");
+    assert_eq!(
+        fg(&terminal, row, dash),
+        app.theme.hint.fg,
+        "the unreported window is weak:\n{text}"
+    );
+    assert_ne!(
+        fg(&terminal, row, column + 4),
+        app.theme.hint.fg,
+        "the reported peak is not weak:\n{text}"
+    );
+}
+
+/// A tool row whose stored object lacks `result_bytes`, `failed` or `denied` draws a weak `-`
+/// in each of those columns instead of a reported `0`. Mutation: `unwrap_or(0)` in the table.
+#[test]
+fn a_tool_row_with_missing_counters_draws_weak_dashes() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "tools": {"browser": {"calls": 3}},
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    let terminal = render(&mut app, 120, 40);
+    let text = rows(&terminal).join("\n");
+    assert!(
+        text.contains("browser  3  -  -  -"),
+        "the unreported counters are dashes:\n{text}"
+    );
+    let (row, column) = fg_of(&terminal, "browser  3  -  -  -");
+    let first_dash =
+        column + u16::try_from("browser  3  ".chars().count()).expect("a short prefix");
+    assert_eq!(
+        fg(&terminal, row, first_dash),
+        app.theme.hint.fg,
+        "the missing bytes are weak:\n{text}"
+    );
+    assert_eq!(
+        fg(&terminal, row, first_dash + 3),
+        app.theme.hint.fg,
+        "the missing failed count is weak:\n{text}"
+    );
+}
+
+/// Leaving the metrics tab closes its open detail, so `Esc` on another tab returns from the
+/// task page instead of consuming a detail no tab draws. Mutation: `Tab` assigns `page.tab`
+/// directly and leaves `metric_open` set.
+#[test]
+fn leaving_the_metrics_tab_closes_the_open_detail() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "request_log": [request("2026-01-01T00:00:01Z", "chat", 1)],
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    assert!(
+        app.task.as_ref().unwrap().metric_open,
+        "the detail is open on its own tab"
+    );
+
+    assert_eq!(app.on_key(&key(KeyCode::Tab)), ArcKey::Redraw);
+    assert!(
+        !app.task.as_ref().unwrap().metric_open,
+        "leaving the tab closes its detail"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
+    assert_eq!(
+        app.page,
+        radian_tui::arc::Page::Plans,
+        "Esc returns from the task page"
+    );
+}

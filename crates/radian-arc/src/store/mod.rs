@@ -1143,6 +1143,64 @@ impl Store {
         Ok(version)
     }
 
+    /// [`Store::change_plan`] that also drops the queue waits of the plan's tasks under the
+    /// same lock, when the change leaves the plan at `auto` `off` (ADR 0048 decision 13).
+    ///
+    /// A plan at `off` starts nothing, so a task that had begun a queue wait loses it and a
+    /// later resume begins a fresh one. Doing that under the plan write's lock means a
+    /// scheduling pass can neither read the old level and write a record after the clear nor
+    /// have this process die between the two and leave a record behind: the record write takes
+    /// the same lock, and the clear runs before the plan write, so a crash in between leaves
+    /// the plan at its old level with no record rather than a stale record a later resume
+    /// would consume.
+    pub fn change_plan_clearing_eligible(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut model::PlanFile) -> Result<(), Error>,
+    ) -> Result<u64, Error> {
+        let _lock = self.lock_state()?;
+        let loaded = self.load_plan(id)?;
+        require_unchanged(id, loaded.changed_outside_arc)?;
+        let mut item = loaded.item;
+        change(&mut item)?;
+        self.clear_eligible_of(&item);
+        let version = self.next_version(Kind::Plan, id);
+        self.write_item(Kind::Plan, id, &item.to_text(), version)?;
+        Ok(version)
+    }
+
+    /// [`Store::change_plan_clearing_eligible`] for a plan a command may change: a cancelled
+    /// plan is refused under the same lock, before `change` runs (ADR 0048 decisions 3 and 9).
+    pub fn change_open_plan_clearing_eligible(
+        &self,
+        id: &str,
+        change: impl FnOnce(&mut model::PlanFile) -> Result<(), Error>,
+    ) -> Result<u64, Error> {
+        let _lock = self.lock_state()?;
+        let view = self.plan_view(id)?;
+        require_unchanged(id, view.plan.changed_outside_arc)?;
+        if view.is_cancelled() {
+            return Err(cancelled_plan(&view.plan.item.id));
+        }
+        let mut item = view.plan.item;
+        change(&mut item)?;
+        self.clear_eligible_of(&item);
+        let version = self.next_version(Kind::Plan, id);
+        self.write_item(Kind::Plan, id, &item.to_text(), version)?;
+        Ok(version)
+    }
+
+    /// Drops the queue waits of every task of `plan` when it no longer starts work, for a
+    /// caller that holds `state.lock` (ADR 0048 decision 13).
+    fn clear_eligible_of(&self, plan: &model::PlanFile) {
+        if plan.auto != "off" {
+            return;
+        }
+        for task in &plan.tasks {
+            self::attempt_ops::clear_eligible_at(self, task);
+        }
+    }
+
     /// [`Store::change_plan`] for a plan a command may change: a plan that is cancelled
     /// ([`Store::plan_is_cancelled`], its stored `status` or its tasks) is refused under the
     /// same lock, before `change` runs, because a cancelled plan is final (ADR 0048 decisions

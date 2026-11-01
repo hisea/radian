@@ -470,17 +470,18 @@ fn write_claim_queue(store: &Store, task: &str, attempt: u32) -> Result<(), Erro
 /// the wait. A record the claim marked `0` keeps `0`, one the claim left without a wait stays
 /// without one, and a missing file (an attempt claimed before `queue.json` existed) is left
 /// alone (ADR 0048 decision 13).
+///
+/// The file is bookkeeping beside the attempt, never part of it: a file that cannot be read
+/// (a directory in its place, a permission the wrapper lacks) is left alone rather than
+/// failing an attempt that otherwise could run. A write that fails after a successful read is
+/// still an error, because the run directory itself is then unusable.
 pub fn complete_queue_record(run_dir: &Path, started_at: &str) -> Result<(), Error> {
     let path = run_dir.join(QUEUE_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(Error::Failed(format!(
-                "cannot read {}: {error}",
-                path.display()
-            )));
-        }
+        // `NotFound` is an attempt claimed before `queue.json` existed; any other read error
+        // leaves an unreadable record as it is, and the attempt goes on without a wait.
+        Err(_) => return Ok(()),
     };
     let mut record = match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(record)) => record,
@@ -499,18 +500,6 @@ pub fn complete_queue_record(run_dir: &Path, started_at: &str) -> Result<(), Err
         .map_err(|error| Error::Failed(format!("cannot encode the queue record: {error}")))?;
     fs::write(&path, format!("{text}\n"))
         .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
-}
-
-/// Drops the eligibility records of every task of a plan that stopped starting work, so a later
-/// resume begins each wait afresh instead of carrying the time its earlier startability period
-/// began (ADR 0048 decision 13). A plan that does not read clears nothing.
-pub fn clear_plan_eligible(store: &Store, plan: &str) {
-    let Ok(loaded) = store.load_plan(plan) else {
-        return;
-    };
-    for task in &loaded.item.tasks {
-        clear_eligible_at(store, task);
-    }
 }
 
 /// The whole seconds one attempt waited for a free worker slot, from its `queue.json`: `None`
@@ -1274,18 +1263,13 @@ pub fn apply(
     }
     // A plan budget pauses the whole plan: its auto level goes to `off` in its own
     // transaction, after the task lock is released. Its tasks' queue waits start over (ADR 0048
-    // decision 13).
+    // decision 13); the store clears them under the same lock as the write.
     if pause_plan {
         let plan_id = store.load_task(task_id)?.item.plan;
-        if store
-            .change_plan(&plan_id, |plan| {
-                plan.auto = "off".to_owned();
-                Ok(())
-            })
-            .is_ok()
-        {
-            clear_plan_eligible(store, &plan_id);
-        }
+        let _ = store.change_plan_clearing_eligible(&plan_id, |plan| {
+            plan.auto = "off".to_owned();
+            Ok(())
+        });
     }
     Ok(applied)
 }
@@ -1695,15 +1679,10 @@ pub fn charge_review_cost(
     };
     if pause_plan {
         let plan_id = store.load_task(task_id)?.item.plan;
-        if store
-            .change_plan(&plan_id, |plan| {
-                plan.auto = "off".to_owned();
-                Ok(())
-            })
-            .is_ok()
-        {
-            clear_plan_eligible(store, &plan_id);
-        }
+        let _ = store.change_plan_clearing_eligible(&plan_id, |plan| {
+            plan.auto = "off".to_owned();
+            Ok(())
+        });
     }
     Ok(paused)
 }
@@ -2032,7 +2011,7 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
     let dir = run_dir(store, task_id, task.attempt);
     write_pause_record(&dir, &record);
     let plan_id = plan.item.id.clone();
-    let changed = store.change_plan(&plan_id, |plan| {
+    let changed = store.change_plan_clearing_eligible(&plan_id, |plan| {
         plan.auto = "off".to_owned();
         Ok(())
     });
@@ -2043,8 +2022,8 @@ pub fn record_auto_rework(store: &Store, task_id: &str) -> Result<Option<Paused>
     write_pause_record(&dir, &record);
     changed?;
     // The plan starts nothing at `off`: a ready task of it that had begun a queue wait loses it,
-    // so a later resume begins a fresh one (ADR 0048 decision 13).
-    clear_plan_eligible(store, &plan_id);
+    // so a later resume begins a fresh one (ADR 0048 decision 13). The store clears it under
+    // the same lock as the write.
     Ok(Some(Paused {
         task: task_id.to_owned(),
         plan: plan_id,

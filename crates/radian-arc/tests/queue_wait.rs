@@ -598,3 +598,140 @@ fn a_task_skipped_only_by_the_machine_cap_gets_a_wait_record() {
         "the machine-wide cap is a skip path that begins the wait"
     );
 }
+
+/// Review, item 1: an attempt that ends before its worker starts still reports the wait it
+/// did. A moved `work/<task>` ref refuses the attempt at the start check; the claim's
+/// `queue.json` must carry the wait rather than leaving `queue_wait_secs` absent. Mutation:
+/// complete the record only on the path that starts a worker.
+#[test]
+fn an_attempt_refused_before_its_worker_still_reports_its_wait() {
+    let repo = Repo::new("queue-wait-refused");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "refused");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+
+    pass(&store);
+    let first = read_json(&eligible(&repo, &waited));
+    let eligible_at = utc(first["eligible_at"].as_str().expect("eligible_at"));
+
+    release(&store, &blocker);
+    let claim = attempt_ops::claim(&store, &waited).expect("the waited task claims");
+    // The branch tip the previous attempt recorded, moved outside this task: the wrapper
+    // refuses the attempt before its worker starts.
+    let attempts = repo.arc().join("attempts").join(&waited);
+    fs::create_dir_all(&attempts).expect("the task's attempt directory");
+    fs::write(attempts.join("last_head"), format!("{}\n", "0".repeat(40))).expect("the moved head");
+    // The wrapper's setup after the claim is part of the wait; make it visible.
+    std::thread::sleep(Duration::from_millis(1200));
+
+    let args = work_args(
+        &waited,
+        claim.attempt,
+        &claim.token,
+        &["--flow", "default", "--command", "[\"true\"]"],
+        &[],
+    );
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = repo.work(&refs, "the brief\n");
+    assert_eq!(run.code, 1, "the moved ref refuses the attempt: {run:?}");
+    assert!(
+        run.stdout.contains("moved outside this task"),
+        "the refusal is the moved ref: {run:?}"
+    );
+
+    let record = read_json(&queue(&repo, &waited, claim.attempt));
+    assert!(
+        record.get("eligible_at").is_some(),
+        "the claim kept the wait's start: {record}"
+    );
+    let started_text = record["started_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the refusal records when it ended: {record}"));
+    let started = utc(started_text);
+    let wait = record["queue_wait_secs"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the refusal reports the wait: {record}"));
+    assert_eq!(
+        wait,
+        u64::try_from((started - eligible_at).num_seconds()).unwrap_or(0),
+        "the wait is what it queued: {record}"
+    );
+    assert!(wait >= 1, "the post-claim setup is part of it: {record}");
+
+    let metrics = read::attempt_metrics(&store, &waited, claim.attempt).expect("the metrics read");
+    assert_eq!(metrics.queue_wait_secs, Some(wait));
+    let text = cli::show_text(&store, &waited).expect("show succeeds");
+    assert!(
+        !text.contains("queue_wait_secs=-"),
+        "show reports the wait, not `-`: {text}"
+    );
+}
+
+/// Review, item 2: an unreadable `queue.json` is bookkeeping, not the attempt. A directory in
+/// its place must not stop the wrapper before the worker starts. Mutation: propagate the read
+/// error again.
+#[test]
+fn an_unreadable_queue_record_does_not_fail_the_attempt() {
+    let repo = Repo::new("queue-wait-unreadable");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "unreadable");
+    let task = add_task(&store, &plan, "work", &[]);
+    confirm_run(&store, &plan);
+    let claim = attempt_ops::claim(&store, &task).expect("the task claims");
+    let path = queue(&repo, &task, claim.attempt);
+    fs::remove_file(&path).expect("the claim's record");
+    fs::create_dir_all(&path).expect("a directory in its place");
+
+    let args = work_args(
+        &task,
+        claim.attempt,
+        &claim.token,
+        &["--flow", "default", "--command", "[\"true\"]"],
+        &[],
+    );
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = repo.work(&refs, "the brief\n");
+    assert!(
+        repo.run_dir(&task, claim.attempt)
+            .join("execution.json")
+            .is_file(),
+        "the worker started although the queue record could not be read: {run:?}"
+    );
+    assert!(
+        !run.stderr.contains("cannot read"),
+        "the unreadable record is not an error: {run:?}"
+    );
+}
+
+/// Review, item 3: the pass writes a wait record under `state.lock`, the lock an owner's `auto`
+/// `off` and arc's own budget and automatic-rework pauses hold while they write the plan and
+/// drop its waits, so a pass that read the old level cannot recreate a record after the clear.
+/// Mutation: write the record without taking the lock.
+#[test]
+fn a_pass_waits_for_state_lock_before_writing_a_wait_record() {
+    let repo = Repo::new("queue-wait-lock");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "lock");
+    let blocker = add_task(&store, &plan, "blocker", &[]);
+    let waited = add_task(&store, &plan, "waited", &[]);
+    confirm_run(&store, &plan);
+    claim_blocker(&store, &blocker);
+
+    let lock = store.lock_state().expect("the test takes the lock");
+    let shadow = store.clone();
+    let handle = std::thread::spawn(move || pass(&shadow));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !eligible(&repo, &waited).exists(),
+        "the pass wrote a wait record while a plan change held state.lock"
+    );
+    drop(lock);
+    handle.join().expect("the pass finishes");
+    assert!(
+        eligible(&repo, &waited).is_file(),
+        "the pass writes the record once it holds the lock"
+    );
+}
