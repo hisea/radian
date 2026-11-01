@@ -28,6 +28,7 @@ Pass `--list` to print this workspace sessions and exit.
 Pass `--pick` to open the picker before opening a session.
 Type `/sessions` to list recent sessions inside the interface.
 Type `/sessions <query>` to search message text.
+Each project also keeps a `SESSIONS.md` index of ended sessions for the model; see `memory`.
 Type `/fork` to fork at the last turn boundary.
 Run `radian exec --fork <id>` to fork from the command line.
 Add `--at <seq>` to fork at an exact sequence number.

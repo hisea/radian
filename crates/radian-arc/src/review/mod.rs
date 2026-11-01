@@ -84,13 +84,14 @@ pub const REVIEW_RETRY_AFTER_MAX_SECS: u64 = 6 * 60 * 60;
 pub const REVIEW_PROGRAM_ENV: &str = "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM";
 
 /// The failing findings of a review verdict: at or above its `fix_level`, not `pre_existing`;
-/// for a verdict that failed with `review_blocking`, every item of its old `blocking` list,
-/// whatever its level (ADR 0048 decision 10).
+/// for a verdict whose report is in the old `blocking` / `suggestions` shape, every item of
+/// its old `blocking` list, whatever its level (ADR 0048 decision 10).
 fn failing_findings(verdict: &Verdict) -> Vec<Finding> {
     verdict.review_failing().into_iter().cloned().collect()
 }
 
-/// The rest of a review verdict's findings: below its `fix_level`, or `pre_existing`.
+/// The rest of a review verdict's findings: below its `fix_level`, or `pre_existing`; for a
+/// verdict whose report is in the old shape, its `suggestions`, whatever their level.
 fn other_findings(verdict: &Verdict) -> Vec<Finding> {
     verdict.review_rest().into_iter().cloned().collect()
 }

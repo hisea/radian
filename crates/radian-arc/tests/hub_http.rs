@@ -49,10 +49,17 @@ struct Hub {
 impl Hub {
     /// Starts `radian hub --port 0` and reads the bound port from the first stdout line.
     fn start(home: &Path) -> Self {
+        Self::start_with(home, &[])
+    }
+
+    /// [`Hub::start`] with extra environment variables, which is how the event-stream tests
+    /// shorten the poll and keep-alive intervals.
+    fn start_with(home: &Path, envs: &[(&str, &str)]) -> Self {
         fs::create_dir_all(home).expect("the hub home is creatable");
         let stderr_path = home.join("hub.stderr.log");
         let stderr = fs::File::create(&stderr_path).expect("the hub stderr file is creatable");
-        let mut child = Command::new(radian_bin())
+        let mut command = Command::new(radian_bin());
+        command
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
@@ -60,9 +67,11 @@ impl Hub {
             .args(["hub", "--port", "0"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .expect("radian hub starts");
+            .stderr(Stdio::from(stderr));
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("radian hub starts");
         let stdout = child.stdout.take().expect("the hub has stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -86,6 +95,14 @@ impl Hub {
 
     fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Stops the hub with SIGTERM and waits for it, so an event stream sees the connection
+    /// end.
+    fn terminate(&mut self) -> std::process::ExitStatus {
+        let result = unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        assert_eq!(result, 0, "SIGTERM reaches the hub");
+        self.child.wait().expect("the hub exits")
     }
 
     fn token(&self) -> String {
@@ -1306,5 +1323,488 @@ fn the_verdicts_route_reads_the_newest_attempts_verdicts() {
     assert_eq!(
         plan_only.json(),
         serde_json::json!({"error": format!("no task `{plan}`")})
+    );
+}
+
+// ---- the event stream ---------------------------------------------------------------------
+
+/// The hub's event stream as a client sees it: the status and headers are checked when it
+/// opens, then each line of the chunked body is decoded as it arrives.
+struct EventStream {
+    reader: BufReader<TcpStream>,
+    pending: Vec<u8>,
+    done: bool,
+}
+
+impl EventStream {
+    /// Opens `GET /v1/events` with the hub's token and checks the status line and content
+    /// type before returning the body reader.
+    fn open(hub: &Hub) -> Self {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", hub.port)).expect("the hub accepts a connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("a read timeout is settable");
+        let request = format!(
+            "GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\r\n",
+            hub.port,
+            hub.token()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("the request is written");
+        let mut reader = BufReader::new(stream);
+        let mut status = String::new();
+        reader
+            .read_line(&mut status)
+            .expect("the event response's status line reads");
+        assert!(status.contains(" 200 "), "the stream opens: {status:?}");
+        let mut event_stream = false;
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("the event response's header block reads");
+            if line.is_empty() || line == "\r\n" || line == "\n" {
+                break;
+            }
+            let header = line.to_ascii_lowercase();
+            if header.starts_with("content-type:") {
+                event_stream = header.contains("text/event-stream");
+            }
+        }
+        assert!(event_stream, "the content type is text/event-stream");
+        Self {
+            reader,
+            pending: Vec::new(),
+            done: false,
+        }
+    }
+
+    /// Reads one transfer-coding chunk into `pending`; `false` at the end of the body.
+    fn fill(&mut self) -> bool {
+        if self.done {
+            return false;
+        }
+        loop {
+            let mut size_line = String::new();
+            match self.reader.read_line(&mut size_line) {
+                Ok(0) => {
+                    self.done = true;
+                    return false;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the stream's chunk header reads: {error}"),
+            }
+            let text = size_line.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let size = usize::from_str_radix(text, 16)
+                .unwrap_or_else(|_| panic!("the chunk size is hex: {text:?}"));
+            if size == 0 {
+                loop {
+                    let mut line = String::new();
+                    match self.reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) => panic!("the stream's trailer reads: {error}"),
+                    }
+                    if line.is_empty() || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                self.done = true;
+                return false;
+            }
+            let mut chunk = vec![0u8; size];
+            self.reader
+                .read_exact(&mut chunk)
+                .expect("a whole chunk arrives");
+            let mut ending = [0u8; 2];
+            self.reader
+                .read_exact(&mut ending)
+                .expect("the chunk's CRLF arrives");
+            self.pending.extend(chunk);
+            return true;
+        }
+    }
+
+    /// The next body line without its ending, or `None` at the end of the stream.
+    fn line(&mut self) -> Option<String> {
+        loop {
+            if let Some(at) = self.pending.iter().position(|byte| *byte == b'\n') {
+                let bytes: Vec<u8> = self.pending.drain(..=at).collect();
+                let mut text = String::from_utf8(bytes).expect("the stream is UTF-8");
+                text.pop();
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+                return Some(text);
+            }
+            if !self.fill() {
+                if self.pending.is_empty() {
+                    return None;
+                }
+                let bytes = std::mem::take(&mut self.pending);
+                let mut text = String::from_utf8(bytes).expect("the stream is UTF-8");
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+                return Some(text);
+            }
+        }
+    }
+
+    /// The next `event: transition` and its JSON data, skipping keep-alive comments.
+    fn event(&mut self) -> Value {
+        loop {
+            let line = self
+                .line()
+                .expect("the stream carries an event before it ends");
+            if line == "event: transition" {
+                let data = self
+                    .line()
+                    .expect("the event has a data line")
+                    .strip_prefix("data: ")
+                    .expect("the event's data line starts with `data: `")
+                    .to_owned();
+                assert_eq!(
+                    self.line().as_deref(),
+                    Some(""),
+                    "an event ends with a blank line"
+                );
+                return serde_json::from_str(&data)
+                    .unwrap_or_else(|error| panic!("the event data is JSON ({error}): {data}"));
+            }
+            assert!(
+                !line.starts_with("data:"),
+                "a data line without its event: {line:?}"
+            );
+        }
+    }
+
+    /// Reads until one keep-alive comment arrives, failing on any event in between.
+    fn keep_alive(&mut self) {
+        self.keep_alives(1);
+    }
+
+    /// Reads until `count` keep-alive comments arrive, failing on any event in between.
+    fn keep_alives(&mut self, count: usize) {
+        let mut seen = 0;
+        while seen < count {
+            let line = self.line().expect("the stream keeps itself alive");
+            if line == ": keep-alive" {
+                seen += 1;
+            } else if line.is_empty() {
+                // The blank line that ends the previous event or keep-alive frame.
+            } else {
+                panic!("expected a keep-alive comment, got {line:?}");
+            }
+        }
+    }
+}
+
+/// A hub whose event poll and keep-alive run every second: long enough that a test sees real
+/// intervals, short enough that a transition arrives without a five-second wait.
+fn fast_hub(home: &Path) -> Hub {
+    Hub::start_with(
+        home,
+        &[
+            ("RADIAN_HUB_EVENTS_POLL_SECS", "1"),
+            ("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS", "1"),
+        ],
+    )
+}
+
+/// A plan with one task in `review.awaiting_human`, ready for a CLI reject.
+fn plan_with_task_in_review(store: &Store, slug: &str) -> (String, String) {
+    let (plan, task) = add_task(store, slug, "the event task");
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "awaiting_human".to_owned();
+            task.attempt = 1;
+            Ok(())
+        })
+        .expect("the task moves to review");
+    (plan, task)
+}
+
+/// [`plan_with_task_in_review`]'s task id.
+fn task_in_review(store: &Store, slug: &str) -> String {
+    plan_with_task_in_review(store, slug).1
+}
+
+/// The owner's confirm of a draft plan through the CLI: a plan `status` event.
+fn confirm_plan(repo: &Repo, plan: &str) {
+    let output = repo.radian(&["arc", "confirm", plan]);
+    assert_eq!(output.code, 0, "confirm {plan}: {}", output.stderr);
+}
+
+/// The owner's reject through the CLI: `review.awaiting_human` -> `review.rework_pending`, a
+/// transition the channel sends.
+fn reject(repo: &Repo, task: &str) {
+    let output = repo.radian(&["arc", "reject", task, "--note", "the event note"]);
+    assert_eq!(output.code, 0, "reject {task}: {}", output.stderr);
+}
+
+/// The owner's cancel through the CLI: `review.rework_pending` -> `failed.cancelled`, a
+/// transition the channel sends.
+fn cancel(repo: &Repo, task: &str) {
+    let output = repo.radian(&["arc", "cancel", task]);
+    assert_eq!(output.code, 0, "cancel {task}: {}", output.stderr);
+}
+
+/// A task's `state.phase` in a `list --json` array, found by id at any depth.
+fn list_phase(list: &Value, task: &str) -> Option<String> {
+    match list {
+        Value::Array(items) => items.iter().find_map(|item| list_phase(item, task)),
+        Value::Object(map) => {
+            if map.get("id").and_then(Value::as_str) == Some(task) {
+                let state = map.get("state").and_then(Value::as_str)?;
+                let phase = map.get("phase").and_then(Value::as_str)?;
+                return Some(format!("{state}.{phase}"));
+            }
+            map.values().find_map(|value| list_phase(value, task))
+        }
+        _ => None,
+    }
+}
+
+fn task_event(repo: &str, task: &str, previous: &str, value: &str) -> Value {
+    serde_json::json!({
+        "repo": repo,
+        "kind": "task",
+        "id": task,
+        "field": "state",
+        "previous": previous,
+        "value": value,
+    })
+}
+
+fn plan_event(repo: &str, plan: &str, field: &str, previous: &str, value: &str) -> Value {
+    serde_json::json!({
+        "repo": repo,
+        "kind": "plan",
+        "id": plan,
+        "field": field,
+        "previous": previous,
+        "value": value,
+    })
+}
+
+// ---- edge case 1 -------------------------------------------------------------------------
+
+#[test]
+fn one_transition_in_each_repository_arrives_with_its_repository_and_the_channels_fields() {
+    let a = Repo::new("hub-events-one-a");
+    let b = Repo::new("hub-events-one-b");
+    let task_a = task_in_review(&arc_store(&a), "one");
+    let (plan_b, _task_b) = plan_with_task_in_review(&arc_store(&b), "one");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    register(&home, "b", &b);
+    let hub = fast_hub(&home);
+    let mut stream = EventStream::open(&hub);
+    stream.keep_alive();
+
+    reject(&a, &task_a);
+    confirm_plan(&b, &plan_b);
+
+    assert_eq!(
+        stream.event(),
+        task_event(
+            "a",
+            &task_a,
+            "review.awaiting_human",
+            "review.rework_pending"
+        )
+    );
+    assert_eq!(
+        stream.event(),
+        plan_event("b", &plan_b, "status", "draft", "confirmed")
+    );
+}
+
+// ---- edge case 2 -------------------------------------------------------------------------
+
+#[test]
+fn a_transition_the_channel_does_not_send_produces_no_event() {
+    let a = Repo::new("hub-events-quiet");
+    let store = arc_store(&a);
+    let task = task_in_review(&store, "quiet");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+    let mut stream = EventStream::open(&hub);
+    stream.keep_alive();
+
+    // `doing.running` -> `review.verifying` is outside the closed list. Both writes are the
+    // same store transaction a gate's progress uses; the wait lets the poller observe the
+    // running phase itself, not just its departure.
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Doing;
+            task.phase = "running".to_owned();
+            Ok(())
+        })
+        .expect("the task runs");
+    stream.keep_alives(2);
+    store
+        .change_task(&task, |task| {
+            task.state = TaskState::Review;
+            task.phase = "verifying".to_owned();
+            Ok(())
+        })
+        .expect("the task verifies");
+
+    // Three keep-alives cover more than one poll; an event would have been a line of its own.
+    stream.keep_alives(3);
+}
+
+// ---- edge case 3 -------------------------------------------------------------------------
+
+#[test]
+fn a_client_that_connects_after_a_transition_gets_no_replay_and_the_lists_show_it() {
+    let a = Repo::new("hub-events-replay");
+    let store = arc_store(&a);
+    let task = task_in_review(&store, "replay");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+
+    // The transition happens before any client connects.
+    reject(&a, &task);
+
+    let mut stream = EventStream::open(&hub);
+    // No replay: the baseline is the already-rejected state, so only keep-alives arrive.
+    stream.keep_alives(2);
+
+    // The lists show the transition the stream did not send.
+    let list = hub.authorized("GET", "/v1/repos/a/items").json();
+    assert_eq!(
+        list_phase(&list, &task).as_deref(),
+        Some("review.rework_pending")
+    );
+
+    // The first event is the next transition, not the one before the connection.
+    cancel(&a, &task);
+    assert_eq!(
+        stream.event(),
+        task_event("a", &task, "review.rework_pending", "failed.cancelled")
+    );
+}
+
+// ---- edge case 4 -------------------------------------------------------------------------
+
+#[test]
+fn two_connected_clients_each_receive_the_same_event_once() {
+    let a = Repo::new("hub-events-two-clients");
+    let store = arc_store(&a);
+    let task = task_in_review(&store, "two-clients");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+    let mut one = EventStream::open(&hub);
+    let mut two = EventStream::open(&hub);
+    one.keep_alive();
+    two.keep_alive();
+
+    reject(&a, &task);
+
+    let expected = task_event("a", &task, "review.awaiting_human", "review.rework_pending");
+    assert_eq!(one.event(), expected);
+    assert_eq!(two.event(), expected);
+    // Each stream sends it once: the next line each holds is a keep-alive.
+    one.keep_alive();
+    two.keep_alive();
+}
+
+// ---- edge case 5 -------------------------------------------------------------------------
+
+#[test]
+fn an_event_stream_without_a_token_is_401_and_no_stream() {
+    let a = Repo::new("hub-events-token");
+    arc_store(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+
+    let response = hub.request("GET", "/v1/events", None);
+    assert_eq!(response.status, 401);
+    assert_eq!(response.body, b"{}".to_vec());
+}
+
+// ---- edge case 6 -------------------------------------------------------------------------
+
+#[test]
+fn an_idle_stream_sends_a_keep_alive_comment() {
+    let a = Repo::new("hub-events-keep-alive");
+    let store = arc_store(&a);
+    let _task = task_in_review(&store, "keep-alive");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+    let mut stream = EventStream::open(&hub);
+
+    stream.keep_alive();
+}
+
+// ---- edge case 7 -------------------------------------------------------------------------
+
+#[test]
+fn a_stream_ends_when_the_hub_is_stopped() {
+    let a = Repo::new("hub-events-sigterm");
+    let store = arc_store(&a);
+    let _task = task_in_review(&store, "sigterm");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let mut hub = fast_hub(&home);
+    let mut stream = EventStream::open(&hub);
+    stream.keep_alive();
+
+    hub.terminate();
+
+    // The client's read reaches the end of the body without a protocol error; a last
+    // keep-alive that was already in flight is fine.
+    while let Some(line) = stream.line() {
+        assert!(
+            !line.starts_with("event: transition"),
+            "no event after the stop: {line:?}"
+        );
+    }
+}
+
+// ---- edge case 9 -------------------------------------------------------------------------
+
+#[test]
+fn a_repository_added_while_a_client_is_connected_sends_on_the_same_stream() {
+    let a = Repo::new("hub-events-late-a");
+    let b = Repo::new("hub-events-late-b");
+    arc_store(&a);
+    let task_b = task_in_review(&arc_store(&b), "late");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+    let mut stream = EventStream::open(&hub);
+    stream.keep_alive();
+
+    register(&home, "b", &b);
+    // Three intervals is more than enough for the stream to re-read the registry and take
+    // b's baseline; the keep-alives prove the stream is still running.
+    stream.keep_alives(3);
+
+    reject(&b, &task_b);
+    let event = stream.event();
+    assert_eq!(event["repo"], "b");
+    assert_eq!(
+        event,
+        task_event(
+            "b",
+            &task_b,
+            "review.awaiting_human",
+            "review.rework_pending"
+        )
     );
 }

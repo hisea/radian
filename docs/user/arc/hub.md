@@ -122,8 +122,8 @@ They change on their own: a route can be added without touching a plan or task f
 
 ## Routes
 
-The read routes take `GET`; the owner actions take `POST` (see [Owner actions](#owner-actions)).
-Every response body is `application/json`; a `204` has no body.
+The read routes and the event stream take `GET`; the owner actions take `POST` (see [Owner actions](#owner-actions)).
+Every body is `application/json` except [the event stream](#the-event-stream), which is `text/event-stream`; a `204` has no body.
 The list and show bodies are exactly the bytes `radian arc list --json` and `radian arc show --json` print in that repository, so a field the CLI gains appears on the route too.
 
 A request without a valid bearer token is `401` with `{}` before any route runs.
@@ -142,7 +142,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/items/<task>/verdicts` | `GET` | One array for the newest attempt, in the order `commands`, `mutation`, `review`, `ci`, `human`, `integration`; each entry has `stage` (string), `result` (`pass` or `fail`), `reason` (string or `null`), `path` (string, the verdict file), and `verdict` (the verdict's JSON). | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`. | `200`, `401`, `404` |
-| `/v1/events` | `GET` | The event stream. Until it is built this route is `404`. | `404`, `401` |
+| `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
 `<path>` in the last read route is percent-encoded, so a file whose name contains `/` stays one path.
@@ -187,6 +187,63 @@ There is no second confirmation in the API: `merge`, `reject`, `auto` at level `
 
 `start` and `reset-budget` are not routes.
 Any other action name is `404` with `{"error": "no such route"}`, and `GET` on a write route is `405`.
+
+## The event stream
+
+`GET /v1/events` is a server-sent-event stream of every state change in every registered repository.
+It needs the bearer token like every route and answers `Content-Type: text/event-stream`.
+
+Each change is one event:
+
+```
+event: transition
+data: {"repo":"radian","kind":"task","id":"TK0001-x","field":"state","previous":"review.awaiting_human","value":"review.rework_pending"}
+
+```
+
+| Key | Value |
+|---|---|
+| `repo` | The repository's registry name. |
+| `kind` | `task` or `plan`. |
+| `id` | The task's or plan's id. |
+| `field` | `state` for a task; `status` or `paused` for a plan. |
+| `previous` | The old value. |
+| `value` | The new value. |
+
+A task event's `previous` and `value` are `<state>.<phase>`; `previous` is `new` for a task the stream's first read did not have.
+A plan event carries the same `field`, `previous` and `value` the MCP channel sends.
+The changes are the closed list [the MCP channel](mcp.md#the-claude-experimental-flag) sends: every other change sends nothing.
+
+While nothing happens the stream carries one `: keep-alive` comment line every 15 seconds.
+An event has no id, and the stream does not replay: a client that reconnects first reads the routes above again, then follows the stream.
+The stream ends when the client disconnects or the hub stops.
+
+## Notifications
+
+A lock-screen notification is a [`[hooks]`](hooks.md#hooks) command, not something the hub sends.
+The hook runs in the scheduling loop, so the notification is sent whether or not a client is connected.
+These two `after_awaiting_human` lines send only the repository name (the directory name), the task id and the phase: no title, no brief and no diff.
+
+ntfy:
+
+```toml
+[hooks]
+after_awaiting_human = [
+  "curl -s -d \"$(basename \"$PWD\") $ARC_TASK $ARC_STATE\" https://ntfy.sh/<your-topic>",
+]
+```
+
+Bark:
+
+```toml
+[hooks]
+after_awaiting_human = [
+  "curl -s \"https://api.day.app/<device-key>/$(basename \"$PWD\")/$ARC_TASK%20$ARC_STATE\"",
+]
+```
+
+`after_proposed`, `after_rework` and `after_fail` are the other points a notification usually watches.
+The client opens the task over the hub for the title, the brief and the diff.
 
 ## The loop
 

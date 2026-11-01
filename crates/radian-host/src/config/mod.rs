@@ -146,6 +146,9 @@ pub struct MemoryConfig {
     pub index_max_lines: Option<u64>,
     /// `[memory] index_max_bytes`: the per-index byte cap. `None` means the default (25600).
     pub index_max_bytes: Option<u64>,
+    /// `[memory] sessions_index_max_lines`: how many lines a project's session index keeps.
+    /// `None` means the default (1000).
+    pub sessions_index_max_lines: Option<u64>,
 }
 
 impl MemoryConfig {
@@ -158,6 +161,9 @@ impl MemoryConfig {
             scopes: self.scopes.clone().unwrap_or(defaults.scopes),
             index_max_lines: self.index_max_lines.unwrap_or(defaults.index_max_lines),
             index_max_bytes: self.index_max_bytes.unwrap_or(defaults.index_max_bytes),
+            sessions_index_max_lines: self
+                .sessions_index_max_lines
+                .unwrap_or(defaults.sessions_index_max_lines),
         }
     }
 }
@@ -718,6 +724,16 @@ fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), C
                     path,
                     "memory.index_max_bytes",
                     "a positive integer",
+                ));
+            }
+            ("sessions_index_max_lines", Value::Integer(lines)) if *lines >= 1 => {
+                config.memory.sessions_index_max_lines = Some(*lines as u64);
+            }
+            ("sessions_index_max_lines", _) => {
+                return Err(wrong_type(
+                    path,
+                    "memory.sessions_index_max_lines",
+                    "an integer of 1 or more",
                 ));
             }
             // ADR 0008 migration: the old injection table is retired. Every key it sets is
@@ -2135,6 +2151,7 @@ future_option = "alpha"
             "memory.scopes",
             "memory.index_max_lines",
             "memory.index_max_bytes",
+            "memory.sessions_index_max_lines",
             "shell",
             "tui.theme",
             "tui.colors",
@@ -2649,6 +2666,14 @@ future_option = "alpha"
                 empty.memory.injection().index_max_bytes.to_string(),
             ),
             (
+                "memory.sessions_index_max_lines",
+                empty
+                    .memory
+                    .injection()
+                    .sessions_index_max_lines
+                    .to_string(),
+            ),
+            (
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
             ),
@@ -2687,5 +2712,22 @@ future_option = "alpha"
                 "{key} row misses its default {default}: {lines:?}"
             );
         }
+    }
+
+    /// Edge 10: a session-index cap of 0 is a config error that names the key and the
+    /// minimum of 1.
+    #[test]
+    fn sessions_index_max_lines_zero_is_refused_naming_the_minimum() {
+        let error =
+            parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 0\n").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("memory.sessions_index_max_lines"),
+            "{message}"
+        );
+        assert!(message.contains("1 or more"), "{message}");
+        let config =
+            parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 7\n").unwrap();
+        assert_eq!(config.memory.injection().sessions_index_max_lines, 7);
     }
 }

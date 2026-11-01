@@ -161,9 +161,11 @@ pub struct StageView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReviewSummaryView {
     pub summary: String,
-    /// The failing findings: at or above the verdict's `fix_level`, not `pre_existing`.
+    /// The failing findings: at or above the verdict's `fix_level`, not `pre_existing`; for a
+    /// report in the old `blocking` / `suggestions` shape, its old `blocking` items.
     pub blocking: Vec<String>,
-    /// The rest: below the `fix_level`, or `pre_existing`.
+    /// The rest: below the `fix_level`, or `pre_existing`; for a report in the old shape, its
+    /// old `suggestions`.
     pub suggestions: Vec<String>,
     pub verified: Vec<String>,
 }
