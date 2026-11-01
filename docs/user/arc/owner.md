@@ -6,6 +6,8 @@ description: The owner's commands: confirm, auto, priority, pause, merge and rej
 
 Your decisions about a plan and a task.
 
+These same actions are also routes on the hub's HTTP API; see [the hub's owner actions](hub.md#owner-actions).
+
 ## `radian arc confirm <ID>`
 
 `confirm` is your action: it accepts a draft plan, or a task arc or the lead proposed.

@@ -717,6 +717,16 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
     // a turn that starts after it cannot leak in. `estimated` is false: every call of a turn
     // this process ran was priced as it arrived (ADR 0027).
     let summary = super::jsonl::summarize_turn(session.journal_path(), &turn);
+    // The same turn range as `cost` and `text`, plus that turn's own live retry count and the
+    // window this process resolved (ADR 0049 §6). Retries are counted per turn in the ledger,
+    // so an earlier prompt's retries never reach this answer.
+    let retries = ledger.retries(&turn);
+    let metrics = match state.events() {
+        Some(events) => {
+            super::metrics::for_turn(session.journal_path(), &turn, retries, events.window())
+        }
+        None => super::metrics::for_turn(session.journal_path(), &turn, retries, None),
+    };
     let cost = summary.fee_micros.map(|micros| {
         json!({
             "micros": micros,
@@ -727,6 +737,7 @@ async fn prompt_turn(state: &Arc<State>, params: Value) -> Result<Value, (i64, S
     let mut radian = json!({
         "cost": cost,
         "text": summary.last_text,
+        "metrics": metrics.to_value(),
     });
     if let Some(error) = ledger.error(&turn) {
         radian["error"] = Value::String(error);

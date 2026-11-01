@@ -285,6 +285,7 @@ not (
   | test(=trust_flags_override_without_writing)
   | test(=turn_timeout_ends_the_turn)
   | test(=two_processes_get_different_generated_session_ids)
+  | test(=two_retries_are_reported_from_the_live_stream)
   | test(=typing_exit_leaves_even_though_stdin_is_still_open)
   | test(=usage_errors_exit_two)
   | test(=waiting_on_a_running_job_does_not_continue)

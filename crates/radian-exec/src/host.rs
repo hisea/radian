@@ -288,6 +288,9 @@ pub(crate) async fn open_host_session(
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
                 "provider": setup.provider.as_str(),
+                // The configured route name (ADR 0026 D10): `run_metrics.models` reports this,
+                // never the adapter kind above, and a fresh run has no `ConfigChanged` to fix it.
+                "provider_id": setup.provider_id.clone(),
                 "model": model_name,
                 // ADR 0043 1a: the tier the session started in. A child records it here, so
                 // `SessionCreated` answers "which tier did the parent give me?" without asking
