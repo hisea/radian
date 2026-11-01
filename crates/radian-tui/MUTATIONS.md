@@ -3551,3 +3551,19 @@ restored from a copy under `.radian/`, which `cmp` found identical.
 | TK0296-M3 | the total row is pushed after the attempts again | `arc_tui::the_metrics_tab_of_old_records_leaves_the_dashes_out` (the total was not the first row) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0298: the metrics tab's plain rows and its predate note (2026-11-01, branch `work/TK0298-task-metrics-followups-2`)
+
+A run with no drawable counter keeps the route and fee it reported, and the total's `runs predate
+metrics` counts exactly the plain rows and is singular for one. Each mutation was applied by hand
+to `crates/radian-tui/src/arc/metrics.rs`, the named `arc_tui` test ran with `cargo nextest run -p
+radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored
+from a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0298-M1 | `push_run` takes the two-row shape whenever `metrics` is present, even when `counter_items` is empty | `arc_tui::a_run_with_no_drawable_counter_draws_one_plain_row` (the row read no `no token metrics recorded`) | ✅ 1 failed |
+| TK0298-M2 | `run_plain_line` drops the route and cost the record reported | `arc_tui::a_run_without_a_drawable_counter_still_draws_its_route_and_cost` (no row carried the fee, so the fee-only run had no cost) | ✅ 1 failed |
+| TK0298-M3 | `total_line` counts `unreported_runs` again and does not pluralize | `arc_tui::only_a_run_with_no_drawable_counter_predates_metrics` (the total did not read `1 run predates metrics`) | ✅ 1 failed |
+
+3/3 caught.

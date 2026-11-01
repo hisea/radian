@@ -5,9 +5,11 @@
 //! review findings. Every stage row shares one layout: a label column, a right-aligned duration
 //! column and the detail. The counters decide the run's shape: a run that reported a counter takes
 //! two rows, the route and cost then its labelled counters, and a record with no counter to draw
-//! (no metrics at all, or only a fee or a cache write) is one plain row. A value a record did not
-//! report is left out rather than drawn as `-`; the one exception is the context window
-//! (`ctx 83K/-`), whose missing window is a weak `-`.
+//! (no metrics at all, or only a fee, a model or a cache write) is one plain row that still names
+//! the route and cost the record reported. The total's `runs predate metrics` note counts exactly
+//! the runs drawn as that plain row. A value a record did not report is left out rather than drawn
+//! as `-`; the one exception is the context window (`ctx 83K/-`), whose missing window is a weak
+//! `-`.
 //! `j`/`k` move the `❯` over the run rows, `Enter` opens the selected run's tool table and request
 //! log below its last row, and `Esc` closes that detail before it leaves the page.
 //!
@@ -105,9 +107,21 @@ pub fn draw(
         let mut run_rows: Vec<usize> = Vec::with_capacity(run_count(metrics));
         let mut run_last: Vec<usize> = Vec::with_capacity(run_count(metrics));
         let mut index = 0;
+        let plain_runs = metrics
+            .attempts
+            .iter()
+            .flat_map(|attempt| std::iter::once(&attempt.worker).chain(attempt.reviews.iter()))
+            .filter(|run| run_items(run).is_empty())
+            .count();
         rows.push(rail(
             theme,
-            total_line(&metrics.total, metrics.attempts.len(), content, theme),
+            total_line(
+                &metrics.total,
+                metrics.attempts.len(),
+                plain_runs,
+                content,
+                theme,
+            ),
         ));
         rows.push(rail(theme, Line::default()));
         let attempts = metrics.attempts.len();
@@ -335,11 +349,7 @@ fn push_run(
     theme: &Theme,
 ) -> (usize, usize) {
     let first = rows.len();
-    let items = run
-        .metrics
-        .as_ref()
-        .map(|metrics| counter_items(metrics, run.wall_secs))
-        .unwrap_or_default();
+    let items = run_items(run);
     let Some(metrics) = run.metrics.as_ref().filter(|_| !items.is_empty()) else {
         rows.push(rail(
             theme,
@@ -397,7 +407,9 @@ fn run_first_line(
     Line::from(fit_spans(spans, layout.content))
 }
 
-/// A run that reported nothing: the label, the wall time when known and one weak detail.
+/// A run with no counter to draw: the label, the wall time when known, the route and cost the
+/// record reported, and one weak `no token metrics recorded`. A record with no metrics at all draws
+/// no route, even when its `exec_args` name one: the row says only that it reported nothing.
 fn run_plain_line(
     run: &RunMetrics,
     label: &str,
@@ -405,7 +417,23 @@ fn run_plain_line(
     layout: &Layout,
     theme: &Theme,
 ) -> Line<'static> {
-    let spans = vec![
+    let mut detail: Vec<Span<'static>> = Vec::new();
+    if let Some(metrics) = run.metrics.as_ref() {
+        if let Some(model) = model_text(run) {
+            detail.push(Span::styled(model, theme.text));
+        }
+        if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_cost) {
+            if !detail.is_empty() {
+                detail.push(Span::styled(" · ", theme.hint));
+            }
+            detail.push(Span::styled(cost, theme.text));
+        }
+    }
+    if !detail.is_empty() {
+        detail.push(Span::styled(" · ", theme.hint));
+    }
+    detail.push(Span::styled("no token metrics recorded", theme.hint));
+    let mut spans = vec![
         marker(selected, theme),
         Span::styled(
             pad_label(label, layout.label_width),
@@ -417,8 +445,8 @@ fn run_plain_line(
         ),
         Span::styled(duration_cell(run.wall_secs.map(seconds)), theme.text),
         Span::raw(" ".repeat(DETAIL_GAP)),
-        Span::styled("no token metrics recorded", theme.hint),
     ];
+    spans.extend(detail);
     Line::from(fit_spans(spans, layout.content))
 }
 
@@ -435,6 +463,15 @@ fn marker(selected: bool, theme: &Theme) -> Span<'static> {
 fn duration_cell(duration: Option<String>) -> String {
     let text = duration.map_or_else(String::new, |text| cut(&text, DURATION_WIDTH));
     format!("{text:>width$}", width = DURATION_WIDTH)
+}
+
+/// The counters of a run's second row; empty when the run has no metrics or no counter the row
+/// draws, and the run then takes the one plain row.
+fn run_items(run: &RunMetrics) -> Vec<Item> {
+    run.metrics
+        .as_ref()
+        .map(|metrics| counter_items(metrics, run.wall_secs))
+        .unwrap_or_default()
 }
 
 /// The run's second row: every counter it reported, each with its label. A counter the run did
@@ -562,11 +599,12 @@ fn counter_lines(items: &[Item], layout: &Layout, theme: &Theme) -> Vec<Line<'st
 }
 
 /// The total row over every attempt: `N attempts`, the cost (`total_cost_usd`, rework included),
-/// the wall time, the queue wait, the request and token sums, then the runs that reported nothing.
-/// A part no record reported is left out.
+/// the wall time, the queue wait, the request and token sums, then the runs drawn as the one plain
+/// row. A part no record reported is left out.
 fn total_line(
     total: &MetricsTotal,
     attempts: usize,
+    plain_runs: usize,
     content: usize,
     theme: &Theme,
 ) -> Line<'static> {
@@ -611,12 +649,14 @@ fn total_line(
         }
         spans.push(Span::styled(part, theme.text));
     }
-    if total.unreported_runs > 0 {
+    if plain_runs > 0 {
+        let note = if plain_runs == 1 {
+            "1 run predates metrics".to_owned()
+        } else {
+            format!("{plain_runs} runs predate metrics")
+        };
         spans.push(Span::styled(" · ", theme.hint));
-        spans.push(Span::styled(
-            format!("{} runs predate metrics", total.unreported_runs),
-            theme.hint,
-        ));
+        spans.push(Span::styled(note, theme.hint));
     }
     Line::from(fit_spans(spans, content))
 }
