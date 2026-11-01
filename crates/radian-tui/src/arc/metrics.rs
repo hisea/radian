@@ -3,9 +3,11 @@
 //! The total row over every attempt opens the list, then one attempt header per attempt, newest
 //! first, with one row per run (`worker`, `review 1`, `review 2`) and the attempt's gate rows and
 //! review findings. Every stage row shares one layout: a label column, a right-aligned duration
-//! column and the detail. A run that reported metrics takes two rows: the route and cost, then its
-//! labelled counters. A value a record did not report is left out rather than drawn as `-`; the
-//! one exception is the context window (`ctx 83K/-`), whose missing window is a weak `-`.
+//! column and the detail. The counters decide the run's shape: a run that reported a counter takes
+//! two rows, the route and cost then its labelled counters, and a record with no counter to draw
+//! (no metrics at all, or only a fee or a cache write) is one plain row. A value a record did not
+//! report is left out rather than drawn as `-`; the one exception is the context window
+//! (`ctx 83K/-`), whose missing window is a weak `-`.
 //! `j`/`k` move the `❯` over the run rows, `Enter` opens the selected run's tool table and request
 //! log below its last row, and `Esc` closes that detail before it leaves the page.
 //!
@@ -320,8 +322,10 @@ fn attempt_header(attempt: &AttemptMetrics, content: usize, theme: &Theme) -> Li
     ])
 }
 
-/// Draws one run: two rows when it reported metrics, one when it did not. Returns the rows its
-/// first and last line take, so the selection and its detail land on the right lines.
+/// Draws one run: two rows when it reported a counter the second row can draw, one when it did
+/// not. The classification and the second row come from the same counter list, so a run drawn as a
+/// metrics run always has its counter row. Returns the rows its first and last line take, so the
+/// selection and its detail land on the right lines.
 fn push_run(
     rows: &mut Vec<Line<'static>>,
     run: &RunMetrics,
@@ -331,7 +335,12 @@ fn push_run(
     theme: &Theme,
 ) -> (usize, usize) {
     let first = rows.len();
-    let Some(metrics) = run.metrics.as_ref().filter(|metrics| reported_any(metrics)) else {
+    let items = run
+        .metrics
+        .as_ref()
+        .map(|metrics| counter_items(metrics, run.wall_secs))
+        .unwrap_or_default();
+    let Some(metrics) = run.metrics.as_ref().filter(|_| !items.is_empty()) else {
         rows.push(rail(
             theme,
             run_plain_line(run, label, selected, layout, theme),
@@ -343,12 +352,9 @@ fn push_run(
         run_first_line(run, metrics, label, selected, layout, theme),
     ));
     let mut last = first;
-    let items = counter_items(metrics, run.wall_secs);
-    if !items.is_empty() {
-        for line in counter_lines(&items, layout, theme) {
-            rows.push(rail(theme, line));
-            last = rows.len() - 1;
-        }
+    for line in counter_lines(&items, layout, theme) {
+        rows.push(rail(theme, line));
+        last = rows.len() - 1;
     }
     (first, last)
 }
@@ -424,38 +430,16 @@ fn marker(selected: bool, theme: &Theme) -> Span<'static> {
     }
 }
 
-/// A duration right-aligned in the duration column, or the column's blanks when unreported.
+/// A duration right-aligned in the duration column, cut to it when it is longer (`1000h00m`).
+/// The column stays exactly [`DURATION_WIDTH`] cells, so the detail column never shifts.
 fn duration_cell(duration: Option<String>) -> String {
-    duration.map_or_else(
-        || " ".repeat(DURATION_WIDTH),
-        |text| format!("{text:>width$}", width = DURATION_WIDTH),
-    )
-}
-
-/// Whether the run reported anything the tab draws. A run whose `Result` carried no `metrics` has
-/// none; an empty object has none either.
-fn reported_any(metrics: &Value) -> bool {
-    [
-        "requests",
-        "input_uncached",
-        "cache_read",
-        "cache_write",
-        "output",
-        "reasoning",
-        "fee_micros",
-        "peak_context",
-        "context_window",
-        "compactions",
-        "max_tokens_responses",
-        "model_errors",
-        "retries",
-    ]
-    .iter()
-    .any(|name| counter(Some(metrics), name).is_some())
+    let text = duration.map_or_else(String::new, |text| cut(&text, DURATION_WIDTH));
+    format!("{text:>width$}", width = DURATION_WIDTH)
 }
 
 /// The run's second row: every counter it reported, each with its label. A counter the run did
-/// not report is left out; the unresolved context window keeps a weak `-`.
+/// not report is left out; the unresolved context window keeps a weak `-`. This list also decides
+/// whether the run takes a second row at all: an empty list draws the one plain row.
 fn counter_items(metrics: &Value, wall_secs: Option<f64>) -> Vec<Item> {
     let metrics = Some(metrics);
     let mut items = Vec::new();
@@ -1104,6 +1088,38 @@ mod tests {
         assert_eq!(
             compaction_item(0, Some(&none), Some(60.0)).text,
             "compactions 0"
+        );
+    }
+
+    /// The duration column is exactly seven cells: a longer duration is cut rather than pushing
+    /// the detail column right.
+    #[test]
+    fn a_duration_longer_than_the_column_is_cut_to_it() {
+        let cell = duration_cell(Some("1000h00m".to_owned()));
+        assert_eq!(cell.width(), DURATION_WIDTH, "{cell:?}");
+        assert!(cell.ends_with('…'), "{cell:?}");
+
+        let layout = Layout {
+            label_width: 6,
+            content: 120,
+        };
+        let line = stage_line(
+            "worker",
+            Some("1000h00m".to_owned()),
+            "detail",
+            &layout,
+            &Theme::default(),
+        );
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        let detail = text.find("detail").expect("the detail is drawn");
+        assert_eq!(
+            text[..detail].width(),
+            layout.detail_col(),
+            "the detail stays in its column: {text:?}"
         );
     }
 

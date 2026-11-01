@@ -6224,6 +6224,64 @@ fn the_selection_skips_a_runs_second_row_and_opens_the_detail_below_it() {
     );
 }
 
+/// A record whose metrics carry only a field the tab draws no counter for (a fee, or a cache
+/// write) must not look like a run that reported metrics: it draws the one plain row, and the
+/// reader's `predate metrics` note agrees with it. Mutation: classify a run by `fee_micros` or
+/// `cache_write` while the counters draw none, so the first row promises a second that never
+/// comes.
+#[test]
+fn a_run_with_no_drawable_counter_draws_one_plain_row() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"fee_micros": 0})),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        Some(json!({"cache_write": 123})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let workers: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.contains("worker"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(workers.len(), 2, "one row per run:\n{text}");
+    for index in workers {
+        assert!(
+            rows[index].contains("no token metrics recorded"),
+            "a run with no counter draws the plain row:\n{text}"
+        );
+        assert!(
+            !rows[index].contains('$'),
+            "the plain row draws no cost:\n{text}"
+        );
+        let next = rows[index + 1];
+        assert!(
+            !next.contains("req") && !next.contains("cache") && !next.contains("123"),
+            "no second row follows it:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("1 runs predate metrics"),
+        "the fee-only run is the one the reader counts as predating metrics:\n{text}"
+    );
+}
+
 /// A narrow frame caps the label column at 16 columns and keeps the duration column aligned.
 #[test]
 fn a_narrow_metrics_frame_keeps_the_columns_aligned() {
