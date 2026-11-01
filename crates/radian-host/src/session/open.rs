@@ -18,7 +18,10 @@ use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQue
 use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
-use crate::memory::{MemoryHooks, MemoryInjection, MemoryService, MemoryTouch};
+use crate::memory::{
+    MemoryHooks, MemoryInjection, MemoryService, MemoryTouch, MemoryWriteGuard,
+    journal_has_mcp_result,
+};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -246,6 +249,14 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
+    // ADR 0021 invariant 4: the write guards. A resumed session counts an MCP tool result its
+    // committed journal recorded, so the first memory write after the resume is refused too.
+    let memory_guard = memory.as_ref().map(|service| {
+        let polluted = parsed
+            .as_ref()
+            .is_some_and(|parsed| journal_has_mcp_result(parsed.events()));
+        MemoryWriteGuard::new(service, polluted)
+    });
     // ADR 0027: the journal records each call's fee, computed at the
     // price in force when the call ran, so a resume does not have to re-price history with
     // whatever the catalog says later. The writer asks this closure per usage record; it
@@ -461,6 +472,9 @@ pub async fn open_session(
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
     if let Some(touch) = memory_touch {
         tools = tools.with_memory_touch(touch);
+    }
+    if let Some(guard) = memory_guard {
+        tools = tools.with_memory_guard(guard);
     }
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the

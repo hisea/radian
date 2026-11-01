@@ -43,7 +43,10 @@ Linux masks the directory into a throw-away tmpfs — while `full` runs no sandb
 set is inert; the deny set itself is unchanged (ADR 0020). The `memory_search` allow rule
 (ADR 0021 D7) stays in both tiers: no tool registers that name any more, so the rule is inert
 and kept only as defence in depth. See `with_memory_root` and
-the edge-case tests in `src/profile.rs`.
+the edge-case tests in `src/profile.rs`. Permission is not the last word: the host's memory
+write guards (ADR 0021 invariant 4) may refuse a write this rule allows — after an MCP tool
+result, or for content that looks like a secret — and they never grant a write this layer
+denies.
 
 Removed tool names are refused as unknown tools: there is no alias mapping, so a rule
 written against `git_diff`, `list` or another removed name matches only that literal name

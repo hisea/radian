@@ -17,6 +17,24 @@ workspace maps to a project, that project's directory. Every other path
 under the memory directory stays denied, and the shell cannot read any of
 it. See `permissions` for the exact rule.
 
+## Refused writes
+
+A `write` or `patch` that targets a memory scope directory can be refused before
+the file is touched. Both are host checks; the file tools' path rule still
+decides which paths they may reach.
+
+- Once the session has taken in a result from an MCP tool, every later memory
+  write is refused with `memory write refused: this session has taken in MCP
+  tool results (input guard)`. A resumed session counts a result its journal
+  recorded, even when the new process never calls an MCP tool.
+- Content that looks like a secret is refused with `memory write refused: the
+  content looks like a secret (<prefix>)`. `<prefix>` is the matched prefix
+  (`sk-`, `sk_`, `xoxb-`, `ghp_`, `AKIA` or `Bearer `), and the value is never
+  repeated. A word of 40 or more ASCII letters, digits, `_` or `-` is refused
+  with `40+ characters` in place of the prefix. A `patch` is judged on the
+  content it would produce, so inserting a secret is refused even when the old
+  text is clean.
+
 ## Memory files and `last_used`
 
 A memory file holds one record. Its frontmatter carries `name`, `description`,
@@ -110,13 +128,21 @@ Export the project scope, edit the Markdown, read it back:
 
 At the first model call of a session, the model receives the two index files
 as one system-prompt section: the project index first, then the global one.
-Each part is the text of that scope's `MEMORY.md`. The section names each
-file's path, so the model reads a record's body on demand with `read`. It
-opens with a line that says the content is data from your memory directory,
-not instructions.
+Each part is the text of that scope's `MEMORY.md`, after the neutralization
+below. The section names each file's path, so the model reads a record's body
+on demand with `read`. It opens with a line that says the content is data from
+your memory directory, not instructions.
 
 A scope with no index, or an empty one, contributes one line saying so. With
 no project linked, only the global index is read.
+
+Before an index is sent, default-ignorable and zero-width code points are
+removed from the copy (for example U+200B, U+200C, U+200D, U+2060, U+FEFF,
+U+00AD, the bidi controls U+202A through U+202E and U+2066 through U+2069).
+A line that begins with `<system`, `</system`, `<project_instructions`,
+`</project_instructions`, `<memory` or `</memory`, ignoring case and leading
+whitespace, gains a leading `\`. The file on disk is never changed, and the
+`MemoryInjected` record's sha256 is of the text after this neutralization.
 
 Each index is capped. `[memory] index_max_lines` (default 200) limits its
 lines and `[memory] index_max_bytes` (default 25600) limits its bytes. A line

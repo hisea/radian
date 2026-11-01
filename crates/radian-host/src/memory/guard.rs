@@ -1,0 +1,378 @@
+//! The memory write guards (ADR 0021 invariant 4): the input guard and the secret guard.
+//!
+//! Both are **host decisions**, not permission rules, and both run before the file tool is
+//! called, so a refused write touches no byte:
+//!
+//! - **Input guard**: once this session has taken in a result from an MCP tool, every `write`
+//!   or `patch` whose canonical target is a memory scope directory is refused. The flag is
+//!   per process; a resumed session starts with it set when its committed journal holds a
+//!   settled MCP tool call ([`journal_has_mcp_result`]).
+//! - **Secret guard**: the content (for `patch`, the content the edit would produce and each
+//!   inserted replacement) runs through the ADR 0008 §3.2 rule-2 heuristic in
+//!   [`crate::config`]. A hit refuses the write and names the matched prefix, never the value.
+//!
+//! The scope directories are the same ones the file tools may reach (ADR 0039 decision 4);
+//! the whole `memory/` tree is not covered, so this guard can never refuse a write the tools
+//! could not make anyway.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use radian_core::{ToolCall, ToolFailure};
+use radian_session::{EventData, SessionEvent};
+use serde_json::Value;
+
+use super::service::MemoryService;
+
+/// The input guard's refusal, word for word (ADR 0021 invariant 4).
+pub const INPUT_GUARD: &str =
+    "memory write refused: this session has taken in MCP tool results (input guard)";
+
+/// The secret guard's refusal prefix; the matched prefix follows in parentheses.
+pub const SECRET_GUARD: &str = "memory write refused: the content looks like a secret";
+
+/// What the secret guard names for the 40-character half of the heuristic, which has no
+/// prefix of its own.
+pub const LONG_TOKEN: &str = "40+ characters";
+
+/// The shared state of one session's memory write guards.
+#[derive(Clone)]
+pub struct MemoryWriteGuard {
+    workspace: PathBuf,
+    /// The canonical scope directories: `global`, then this workspace's project when linked.
+    roots: Vec<PathBuf>,
+    /// Set once this process has seen an MCP tool result (or a resume read one from the
+    /// journal).
+    polluted: Arc<AtomicBool>,
+}
+
+impl MemoryWriteGuard {
+    /// Builds the guard from the same service that owns the file tools' memory roots.
+    /// `polluted` is the resumed session's journal answer; a fresh session passes `false`.
+    pub fn new(service: &MemoryService, polluted: bool) -> Self {
+        let roots = service
+            .file_scope_roots()
+            .into_iter()
+            .map(|(_, dir)| canonical_existing_prefix(&dir))
+            .collect();
+        Self {
+            workspace: service.workspace().to_path_buf(),
+            roots,
+            polluted: Arc::new(AtomicBool::new(polluted)),
+        }
+    }
+
+    /// Records that an MCP tool call settled. The input guard refuses memory writes from this
+    /// point on; an error result counts too, because the session has still heard from an
+    /// outside tool.
+    pub fn note_mcp_result(&self) {
+        self.polluted.store(true, Ordering::SeqCst);
+    }
+
+    /// Checks one call before the built-in tools see it. A write or patch outside a memory
+    /// scope, and every other tool, pass through untouched.
+    pub fn check(&self, call: &ToolCall) -> Result<(), ToolFailure> {
+        if !matches!(call.name.as_str(), "write" | "patch") {
+            return Ok(());
+        }
+        let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
+            // Malformed arguments belong to the tool's own parser.
+            return Ok(());
+        };
+        let target = self.resolve(path);
+        if !self.is_memory(&target) {
+            return Ok(());
+        }
+        if self.polluted.load(Ordering::SeqCst) {
+            return Err(ToolFailure::new("memory_write_refused", INPUT_GUARD));
+        }
+
+        let refuse = |prefix: &'static str| {
+            ToolFailure::new("memory_write_refused", format!("{SECRET_GUARD} ({prefix})"))
+        };
+        if call.name == "write" {
+            if let Some(content) = call.arguments.get("content").and_then(Value::as_str)
+                && let Some(prefix) = secret_hit(content)
+            {
+                return Err(refuse(prefix));
+            }
+            return Ok(());
+        }
+        // The result content is the rule (ADR 0021 invariant 4). The file may not exist or
+        // the edit may use the patch tool's normalising match, so the inserted text is
+        // checked on its own as well: either way, a secret cannot be written.
+        for content in patch_new_texts(&call.arguments) {
+            if let Some(prefix) = secret_hit(&content) {
+                return Err(refuse(prefix));
+            }
+        }
+        if let Some(result) = patch_result_content(&target, &call.arguments)
+            && let Some(prefix) = secret_hit(&result)
+        {
+            return Err(refuse(prefix));
+        }
+        Ok(())
+    }
+
+    /// Whether a canonical target lies in one of the scope directories.
+    fn is_memory(&self, target: &Path) -> bool {
+        self.roots.iter().any(|root| target.starts_with(root))
+    }
+
+    /// The path as the file tool resolves it: `~` expanded, a relative path against the
+    /// workspace, then canonicalized as far as it exists (a `write` target need not exist).
+    fn resolve(&self, path: &str) -> PathBuf {
+        let expanded = if path == "~" {
+            crate::home::user_home().unwrap_or_default()
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            crate::home::user_home()
+                .map(|home| home.join(rest))
+                .unwrap_or_else(|| PathBuf::from(path))
+        } else {
+            PathBuf::from(path)
+        };
+        let joined = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.workspace.join(expanded)
+        };
+        canonical_existing_prefix(&joined)
+    }
+}
+
+/// Whether a settled tool call in `events` went to an MCP server (the resume half of the
+/// input guard). MCP aliases are `server__tool` (ADR: `agent_extensions::tool_alias`), and no
+/// built-in name contains `__`.
+pub fn journal_has_mcp_result(events: &[SessionEvent]) -> bool {
+    let mut names: HashMap<&str, &str> = HashMap::new();
+    for event in events {
+        match &event.data {
+            EventData::ToolExecutionStarted { call_id, name, .. } => {
+                names.insert(call_id.as_str(), name.as_str());
+            }
+            EventData::ToolExecutionSettled { call_id, .. }
+                if names
+                    .get(call_id.as_str())
+                    .is_some_and(|name| is_mcp_tool_name(name)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a tool name is an MCP alias (`server__tool`).
+pub fn is_mcp_tool_name(name: &str) -> bool {
+    name.contains("__")
+}
+
+/// The heuristic over a memory body: the whole text and every whitespace-separated token. A
+/// token is the memory-content analog of a configuration value; scanning the whole text as
+/// well keeps a bare secret at the start of the file caught exactly as before.
+fn secret_hit(text: &str) -> Option<&'static str> {
+    for candidate in std::iter::once(text).chain(text.split_whitespace()) {
+        if let Some(prefix) = crate::config::secret_prefix(candidate) {
+            return Some(prefix);
+        }
+    }
+    if std::iter::once(text)
+        .chain(text.split_whitespace())
+        .any(crate::config::is_long_random)
+    {
+        return Some(LONG_TOKEN);
+    }
+    None
+}
+
+/// Every replacement string a `patch` call inserts, from the legacy `new` or the `edits`
+/// array. Malformed arguments are left to the tool's parser.
+fn patch_new_texts(arguments: &Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    if let Some(new) = arguments.get("new").and_then(Value::as_str) {
+        texts.push(new.to_owned());
+    }
+    if let Some(edits) = arguments.get("edits").and_then(Value::as_array) {
+        for edit in edits {
+            if let Some(new) = edit.get("new").and_then(Value::as_str) {
+                texts.push(new.to_owned());
+            }
+        }
+    }
+    texts
+}
+
+/// The content a `patch` call would produce, when the file and the exact matches allow the
+/// computation. This is a conservative superset of the tool's own normalising match: a miss
+/// only means the inserted text is checked on its own instead.
+fn patch_result_content(path: &Path, arguments: &Value) -> Option<String> {
+    // The patch tool refuses a non-regular file and a file over its byte cap; do not read
+    // either here (a fifo would block, a huge file would allocate before the tool's own
+    // check). The inserted text is still checked on its own in that case.
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file()
+        || metadata.len() > radian_coding::Limits::default().max_patch_bytes as u64
+    {
+        return None;
+    }
+    let mut text = std::fs::read_to_string(path).ok()?;
+    let mut edits: Vec<(String, String, bool)> = Vec::new();
+    if let (Some(old), Some(new)) = (
+        arguments.get("old").and_then(Value::as_str),
+        arguments.get("new").and_then(Value::as_str),
+    ) {
+        edits.push((
+            old.to_owned(),
+            new.to_owned(),
+            arguments
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ));
+    }
+    if let Some(array) = arguments.get("edits").and_then(Value::as_array) {
+        for edit in array {
+            let (Some(old), Some(new)) = (
+                edit.get("old").and_then(Value::as_str),
+                edit.get("new").and_then(Value::as_str),
+            ) else {
+                return None;
+            };
+            edits.push((
+                old.to_owned(),
+                new.to_owned(),
+                edit.get("replace_all")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ));
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    for (old, new, replace_all) in edits {
+        if old.is_empty() || !text.contains(&old) {
+            return None;
+        }
+        text = if replace_all {
+            text.replace(&old, &new)
+        } else {
+            text.replacen(&old, &new, 1)
+        };
+    }
+    Some(text)
+}
+
+/// `std::fs::canonicalize` as far as the path exists, with the missing tail normalized
+/// lexically. A symlink is followed when the component exists; a `..` in the tail pops.
+fn canonical_existing_prefix(path: &Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&current) {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                match part.to_str() {
+                    Some("..") => {
+                        out.pop();
+                    }
+                    Some(".") => {}
+                    _ => out.push(part.clone()),
+                }
+            }
+            return out;
+        }
+        let Some(name) = current.file_name().map(|name| name.to_os_string()) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent.to_path_buf();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::test_support::TempDir;
+
+    fn guard(label: &str) -> (TempDir, MemoryWriteGuard, PathBuf) {
+        let dir = TempDir::with_label("radian-memory-guard", label);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        let guard = MemoryWriteGuard::new(&service, false);
+        (dir, guard, root)
+    }
+
+    fn call(name: &str, path: &Path, content: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: json!({"path": path.to_str().unwrap(), "content": content}),
+        }
+    }
+
+    #[test]
+    fn an_mcp_result_refuses_the_next_memory_write_and_nothing_else() {
+        let (dir, guard, root) = guard("input");
+        let memory = root.join("global/x.md");
+        let workspace = dir.join("ws/out.md");
+        assert!(guard.check(&call("write", &memory, "note\n")).is_ok());
+        guard.note_mcp_result();
+        let refusal = guard
+            .check(&call("write", &memory, "note\n"))
+            .expect_err("the input guard refuses");
+        assert_eq!(refusal.message, INPUT_GUARD);
+        assert!(
+            guard.check(&call("write", &workspace, "note\n")).is_ok(),
+            "a workspace write is not a memory write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge case 4's message half: the matched prefix is named, the value never is.
+    #[test]
+    fn a_secret_refusal_names_the_prefix_and_not_the_value() {
+        let (dir, guard, root) = guard("secret");
+        let memory = root.join("global/x.md");
+        let refusal = guard
+            .check(&call("write", &memory, "sk-abcdefghijklmnopqrst\n"))
+            .expect_err("the secret guard refuses");
+        assert!(refusal.message.contains("(sk-)"), "{}", refusal.message);
+        assert!(!refusal.message.contains("abcdefghijklmnopqrst"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prefix_inside_a_word_is_not_a_secret() {
+        let (dir, guard, root) = guard("word");
+        let memory = root.join("global/x.md");
+        assert!(
+            guard
+                .check(&call(
+                    "write",
+                    &memory,
+                    "the musk-abcdefghijklmnopqrst note\n"
+                ))
+                .is_ok(),
+            "the heuristic matches at the start of a token only"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mcp_alias_is_recognised_by_its_double_underscore() {
+        assert!(is_mcp_tool_name("fx__echo"));
+        assert!(!is_mcp_tool_name("read"));
+        assert!(!is_mcp_tool_name("ask_user"));
+    }
+}

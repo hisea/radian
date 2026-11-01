@@ -8428,6 +8428,226 @@ async fn an_invalid_utf8_index_warns_and_the_session_starts() {
     );
 }
 
+// ---------- memory write guards (ADR 0021 invariant 4) ----------
+
+/// The `radian exec` arguments for one memory session with the MCP fixture attached.
+fn memory_mcp_args(
+    env: &MemoryEnv,
+    server: &MockServer,
+    session: &str,
+    prompt: &str,
+    mcp: &Path,
+) -> Vec<String> {
+    let mut args = memory_args(env, server, session, Some(prompt), None);
+    args.push("--mcp-config".to_owned());
+    args.push(mcp.to_string_lossy().into_owned());
+    args
+}
+
+async fn run_memory_mcp_session(
+    env: &MemoryEnv,
+    server: &MockServer,
+    session: &str,
+    prompt: &str,
+    mcp: &Path,
+) -> (i32, String, String) {
+    let args = memory_mcp_args(env, server, session, prompt, mcp);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    feed_and_wait(spawn_radian(&refs, &memory_envs(env)), "").await
+}
+
+/// Edge case 1: one MCP result makes every later memory write be refused; the same write
+/// before the MCP call succeeds. The refused call touches no byte.
+#[tokio::test]
+async fn a_memory_write_is_refused_after_an_mcp_result_and_allowed_before() {
+    let env = MemoryEnv::sandboxed("guard-input");
+    let log = env.dir.join("fixture.log");
+    let mcp = mcp_config(&env.dir, &log);
+    let file = env.home.join("memory/global/x.md");
+    let write = |content: &str| serde_json::json!({"path": file, "content": content}).to_string();
+
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", &write("before\n")),
+        tool_reply("c2", "fx__echo", ECHO_CALL),
+        tool_reply("c3", "write", &write("after\n")),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, stdout, stderr) =
+        run_memory_mcp_session(&env, &server, "guard-input", "remember", &mcp).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+
+    let first = tool_result_for(&server, 1, "c1");
+    assert!(
+        !first.contains("refused"),
+        "the write before MCP runs: {first}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "before\n",
+        "the refused second write changed nothing"
+    );
+    let refused = tool_result_for(&server, 3, "c3");
+    assert!(
+        refused.contains(radian_host::memory::INPUT_GUARD),
+        "the input guard names itself: {refused}"
+    );
+}
+
+/// Edge case 2: a workspace path is not a memory path, so an MCP result does not affect it.
+#[tokio::test]
+async fn a_workspace_write_after_an_mcp_result_is_unaffected() {
+    let env = MemoryEnv::sandboxed("guard-workspace");
+    let log = env.dir.join("fixture.log");
+    let mcp = mcp_config(&env.dir, &log);
+    let file = env.ws.join("after-mcp.txt");
+    let write = serde_json::json!({"path": file, "content": "WORKSPACE-AFTER-MCP\n"}).to_string();
+
+    let server = MockServer::start(vec![
+        tool_reply("c1", "fx__echo", ECHO_CALL),
+        tool_reply("c2", "write", &write),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, stdout, stderr) =
+        run_memory_mcp_session(&env, &server, "guard-workspace", "go", &mcp).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "WORKSPACE-AFTER-MCP\n",
+        "a workspace write keeps working"
+    );
+    let result = tool_result_for(&server, 2, "c2");
+    assert!(!result.contains("refused"), "{result}");
+}
+
+/// Edge case 3: a resumed session whose committed journal holds an MCP tool result refuses
+/// its first memory write, even though this process never called an MCP tool.
+#[tokio::test]
+async fn a_resumed_session_counts_an_mcp_result_and_refuses_the_first_memory_write() {
+    let env = MemoryEnv::sandboxed("guard-resume");
+    let log = env.dir.join("fixture.log");
+    let mcp = mcp_config(&env.dir, &log);
+    let server = MockServer::start(vec![
+        tool_reply("c1", "fx__echo", ECHO_CALL),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, _, stderr) = run_memory_mcp_session(&env, &server, "guard-resume", "go", &mcp).await;
+    assert_eq!(code, 0, "{stderr}");
+    // The first process settled an MCP call; the journal is the host's record of it.
+    let session = radian_session::Session::open(env.sessions.join("guard-resume.jsonl")).unwrap();
+    assert!(
+        session.events().iter().any(|event| matches!(
+            &event.data,
+            radian_session::EventData::ToolExecutionSettled { .. }
+        )),
+        "the journal holds the MCP result"
+    );
+
+    let file = env.home.join("memory/global/x.md");
+    let write = serde_json::json!({"path": &file, "content": "after-resume\n"}).to_string();
+    let server =
+        MockServer::start(vec![tool_reply("w1", "write", &write), text_reply("done")]).await;
+    let mut args = memory_args(&env, &server, "unused", Some("write"), None);
+    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
+    args[at] = "--resume".to_owned();
+    args[at + 1] = "guard-resume".to_owned();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(!file.exists(), "the refused write created no file");
+    let refused = tool_result_for(&server, 1, "w1");
+    assert!(
+        refused.contains(radian_host::memory::INPUT_GUARD),
+        "the resumed process counts the journal's MCP result: {refused}"
+    );
+}
+
+/// Edge case 4: content with a secret prefix is refused, the message names the prefix and
+/// never the value; the same prefix inside a word is accepted by the heuristic.
+#[tokio::test]
+async fn a_secret_in_a_memory_write_is_refused_and_a_prefix_inside_a_word_is_allowed() {
+    let env = MemoryEnv::sandboxed("guard-secret");
+    let bad = env.home.join("memory/global/bad.md");
+    let good = env.home.join("memory/global/good.md");
+    let write = |path: &Path, content: &str| {
+        serde_json::json!({"path": path, "content": content}).to_string()
+    };
+
+    let server = MockServer::start(vec![
+        tool_reply("c1", "write", &write(&bad, "sk-abcdefghijklmnopqrst\n")),
+        tool_reply(
+            "c2",
+            "write",
+            &write(&good, "the musk-abcdefghijklmnopqrst note\n"),
+        ),
+        text_reply("done"),
+    ])
+    .await;
+    let (code, stdout, stderr) =
+        run_memory_session(&env, &server, "guard-secret", "remember", None).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(!bad.exists(), "the refused write created no file");
+    assert_eq!(
+        std::fs::read_to_string(&good).unwrap(),
+        "the musk-abcdefghijklmnopqrst note\n",
+        "a prefix inside a word is not a secret"
+    );
+    let refused = tool_result_for(&server, 1, "c1");
+    assert!(
+        refused.contains("memory write refused: the content looks like a secret (sk-)"),
+        "the refusal names the prefix: {refused}"
+    );
+    assert!(
+        !refused.contains("abcdefghijklmnopqrst"),
+        "the refusal never repeats the value: {refused}"
+    );
+}
+
+/// Edge case 5: a patch that would insert a secret into an existing memory file is refused
+/// before the file is touched.
+#[tokio::test]
+async fn a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged() {
+    let env = MemoryEnv::sandboxed("guard-patch");
+    let file = env.home.join("memory/global/note.md");
+    let before = "---\nname: note\ndescription: a note\ntype: project\nsource: model\n\
+                  created: 2026-01-01T00:00:00Z\nmodified: 2026-01-01T00:00:00Z\n---\nsafe\n";
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, before).unwrap();
+
+    let patch = serde_json::json!({
+        "path": &file,
+        "old": "safe",
+        "new": "sk-abcdefghijklmnopqrst",
+    })
+    .to_string();
+    let server =
+        MockServer::start(vec![tool_reply("c1", "patch", &patch), text_reply("done")]).await;
+    let (code, stdout, stderr) =
+        run_memory_session(&env, &server, "guard-patch", "remember", None).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        before,
+        "the refused patch left every byte alone"
+    );
+    let refused = tool_result_for(&server, 1, "c1");
+    assert!(
+        refused.contains("memory write refused: the content looks like a secret (sk-)"),
+        "the patch is judged on the content it would produce: {refused}"
+    );
+    assert!(
+        !refused.contains("abcdefghijklmnopqrst"),
+        "the refusal never repeats the value: {refused}"
+    );
+}
+
 #[tokio::test]
 async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;

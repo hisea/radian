@@ -925,13 +925,21 @@ fn check_no_plaintext(
 }
 
 /// The heuristic of ADR 0008 §3.2 rule 2, byte-for-byte the reference checker's.
-fn looks_like_secret(text: &str) -> bool {
-    if SECRET_PREFIXES
+pub(crate) fn looks_like_secret(text: &str) -> bool {
+    secret_prefix(text).is_some() || is_long_random(text)
+}
+
+/// The rule-2 prefix `text` starts with, if any. The memory write guard names this prefix
+/// and never the value (ADR 0021 invariant 4).
+pub(crate) fn secret_prefix(text: &str) -> Option<&'static str> {
+    SECRET_PREFIXES
         .iter()
-        .any(|prefix| text.starts_with(prefix))
-    {
-        return true;
-    }
+        .copied()
+        .find(|prefix| text.starts_with(prefix))
+}
+
+/// The rule-2 long-token half: 40 or more ASCII alphanumerics, `_` or `-`, nothing else.
+pub(crate) fn is_long_random(text: &str) -> bool {
     text.len() >= 40
         && text
             .bytes()

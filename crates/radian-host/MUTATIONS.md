@@ -1942,3 +1942,18 @@ test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 | TK0271-M1 | the line cap is off by one (`taken > max_lines` instead of `taken >= max_lines`) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (line-201 was injected) |
 | TK0271-M2 | the rewrite notice is returned on every call (the `notices_sent` guard is removed) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (the third call got a second notice) |
 | TK0271-M3 | global is selected before project (`selected` push order swapped) | ✅ 1 failed (rc=100) | `memory::injection::tests::two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte` (the global section came first) |
+
+## TK0276: memory write guards and index neutralization (2026-10-31)
+
+Branch `work/TK0276-memory-write-hardening`. Each mutation was applied in place, the `radian`
+binary rebuilt where the CLI test needed it (`cargo build -p radian-tui --bin radian`, the CLI
+tests refuse a stale one), and the named tests run with `cargo nextest run -p radian-host
+-p radian-exec --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`. Each source was
+restored from `.radian/tools.rs.bak`, `.radian/guard.rs.bak` or `.radian/injection.rs.bak` (`cmp`
+empty).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0276-M1 | the input guard's flag is never set (the `guard.note_mcp_result()` call removed from the MCP branch) | ✅ 1 failed (rc=100) | `cli::a_memory_write_is_refused_after_an_mcp_result_and_allowed_before` (the write after the MCP result changed the file to `after\n`) |
+| TK0276-M2 | the secret guard covers `write` only (the `patch` branch skips its content and inserted text) | ✅ 1 failed (rc=100) | `cli::a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged` (the file gained `sk-abcdefghijklmnopqrst`) |
+| TK0276-M3 | U+FEFF stays in place (`0xFEFF` removed from `is_default_ignorable`) | ✅ 1 failed (rc=100) | `memory::injection::tests::invisible_characters_and_a_fake_marker_are_neutralized_before_injection` (the injected line kept the byte-order mark) |
