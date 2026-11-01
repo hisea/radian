@@ -1198,6 +1198,15 @@ fn attempt_cost(store: &Store, task: &str, attempt: u32) -> AttemptCost {
     }
 }
 
+/// The cost one attempt added, in US dollars, as the task's counters see it: the radian
+/// worker's prompt-turn fee, or a command worker's session delta (ADR 0048 decision 12).
+/// `None` when the worker reported no cost, which is not the same as a reported zero.
+#[must_use]
+pub fn attempt_added_cost(store: &Store, task: &str, attempt: u32) -> Option<f64> {
+    let cost = attempt_cost(store, task, attempt);
+    cost.known.then_some(cost.cost_usd)
+}
+
 /// The worker session of one attempt. A reader takes the first record that names one: the
 /// wrapper's `execution.json`, the wrapper's `identity.json`, then the claim's `start.json`
 /// (ADR 0048 decision 4). `None` only when none of them does: an old attempt, or a worker-less

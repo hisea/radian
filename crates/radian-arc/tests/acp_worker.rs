@@ -142,6 +142,76 @@ fn update_of(line: &Value) -> Option<&Value> {
         .flatten()
 }
 
+/// A flow's `acp` agent reports no `_meta.radian`, so its attempt's worker run has no
+/// metrics and no model route; `show` prints `-` for every model field, and still prints the
+/// wall time and the `commands` stage's times.
+#[test]
+fn an_acp_worker_attempt_reports_no_metrics_and_show_prints_the_times() {
+    let repo = Repo::new("acp-metrics");
+    let store = setup(&repo);
+    let plan = add_plan(&store, "acp");
+    let task = add_task(&store, &plan, "metrics", None);
+    plan_ops::confirm(&store, &plan).expect("confirm the plan");
+    let agent = fake_agent(&repo);
+    set_flow_acp(&repo, "default", &agent, &["--write-file", "image.txt"]);
+    tune(
+        &repo,
+        "[flows.default]\nacp = [",
+        "[flows.default]\ncommit_dirty = true\nacp = [",
+    );
+    tune(&repo, "\ncommands = []", "\ncommands = [\"true\"]");
+
+    let run = repo.radian(&["arc", "start", task.as_str()]);
+    assert_eq!(run.code, 0, "start failed: {}", run.stderr);
+
+    let shown = radian_arc::store::cli::show_json(&store, &task).expect("show --json");
+    let attempt = &shown["metrics"]["attempts"][0];
+    assert!(
+        attempt["worker"]["metrics"].is_null(),
+        "a flow's ACP agent reports no `_meta.radian`: {shown}"
+    );
+    assert!(attempt["worker"]["provider"].is_null(), "{shown}");
+    assert!(attempt["worker"]["model"].is_null(), "{shown}");
+    assert!(
+        attempt["worker"]["started_at"].as_str().is_some(),
+        "the started time is reported: {shown}"
+    );
+    assert!(
+        attempt["worker"]["ended_at"].as_str().is_some(),
+        "the ended time is reported: {shown}"
+    );
+    assert!(
+        attempt["worker"]["wall_secs"].as_f64().is_some(),
+        "the wall time is reported: {shown}"
+    );
+    assert!(
+        !attempt["commands"].as_array().expect("a list").is_empty(),
+        "the commands stage ran: {shown}"
+    );
+
+    let text = radian_arc::store::cli::show_text(&store, &task).expect("show");
+    let worker = text
+        .lines()
+        .find(|line| line.contains(" worker: "))
+        .expect("the worker line");
+    assert!(
+        worker.contains(
+            "model=- requests=- input_uncached=- cache_read=- cache_hit=- output=- \
+             reasoning=- cost=- wall="
+        ),
+        "every model field prints `-`: {worker}"
+    );
+    assert!(
+        !worker.contains("wall=-"),
+        "the wall time is reported: {worker}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains(" command: duration_ms=")),
+        "the command time prints: {text}"
+    );
+}
+
 /// `end_turn` with a file written and `commit_dirty = true`: the attempt passes, the branch has
 /// the commit, `result.jsonl` holds the updates and both permission pairs, and `start.json`
 /// names the ACP worker (ADR 0048 decision 7).

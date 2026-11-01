@@ -7,7 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use super::gate::{Finding, Stage, Verdict};
+use serde::Serialize;
+use serde_json::Value;
+
+use super::gate::{Finding, ReviewRunRecord, Stage, Verdict};
 use super::store::attempt_ops;
 use super::store::config::IntegrationStyle;
 use super::store::model::{TaskFile, TaskState};
@@ -213,6 +216,117 @@ pub struct AttemptView {
     pub verdicts: Vec<AttemptVerdict>,
 }
 
+/// One run's metrics: an attempt's worker run, or one `radian exec` run of its `review` stage
+/// (ADR 0048 decision 10). A field is `None` when the run reported nothing for it; a run whose
+/// `Result` carried no `metrics` has `metrics` `None` too.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RunMetrics {
+    /// The review run's number, from 1. `None` for the attempt's worker run.
+    pub run: Option<u32>,
+    /// The session the run used, when its records name one.
+    pub session_id: Option<String>,
+    /// When the run started, RFC 3339 in UTC.
+    pub started_at: Option<String>,
+    /// When the run ended, RFC 3339 in UTC; `None` while it still runs.
+    pub ended_at: Option<String>,
+    /// The wall-clock seconds between `started_at` and `ended_at`.
+    pub wall_secs: Option<f64>,
+    /// The provider the run's model route named: the first `metrics.models` entry, else the
+    /// `--provider` of the run's `exec_args`.
+    pub provider: Option<String>,
+    /// The model the run's model route named, by the same rule as `provider`.
+    pub model: Option<String>,
+    /// The run's `Result.metrics` object (ADR 0044 §2), as the run reported it.
+    pub metrics: Option<Value>,
+}
+
+/// One command a `commands` stage ran, as `show` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommandMetric {
+    /// The command line as the profile wrote it.
+    pub line: String,
+    /// Its wall-clock duration.
+    pub duration_ms: u64,
+}
+
+/// The number of changed files and of added and removed lines of one range, from
+/// `diffstat.json` (ADR 0048 decision 10). A binary file counts as a changed file with no line
+/// counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiffStatView {
+    pub files: u64,
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// One attempt's numbers, as `radian arc show` and the arc TUI read them (ADR 0048
+/// decisions 7, 10 and 12). Every part a missing or torn file would fill is `None`: a missing
+/// file is not an error.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AttemptMetrics {
+    /// The attempt number.
+    pub attempt: u32,
+    /// The attempt id, `<task>-<attempt>`.
+    pub attempt_id: String,
+    /// The attempt's worker run: its metrics, times, wall seconds and model route.
+    pub worker: RunMetrics,
+    /// Every `radian exec` run of the attempt's `review` stage, in order. Empty for a review
+    /// verdict written before `runs` existed or a stage that ran no session.
+    pub reviews: Vec<RunMetrics>,
+    /// The `review` stage's wall-clock seconds, from its verdict's `started_at` and `ended_at`.
+    pub review_wall_secs: Option<f64>,
+    /// The `commands` stage's commands, in order.
+    pub commands: Vec<CommandMetric>,
+    /// The `integration` stage's wall-clock seconds, from its verdict.
+    pub integration_wall_secs: Option<f64>,
+    /// The task's own change, as the `commands` stage recorded it.
+    pub diff: Option<DiffStatView>,
+    /// A rework round's own change, as the `commands` stage recorded it; `None` for a first
+    /// attempt and for an attempt the commands stage did not run.
+    pub increment: Option<DiffStatView>,
+    /// The cost this attempt added to the task's counters, in US dollars; `None` when its
+    /// worker reported no cost.
+    pub cost_usd: Option<f64>,
+    /// The attempt's review stage's summed cost, in US dollars; `None` when no run reported
+    /// one.
+    pub review_cost_usd: Option<f64>,
+}
+
+/// The sums over every run of a task's attempts, in `task_metrics`.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct MetricsTotal {
+    /// The reported requests, summed.
+    pub requests: Option<u64>,
+    /// The reported uncached input tokens, summed.
+    pub input_uncached: Option<u64>,
+    /// The reported cache-read tokens, summed.
+    pub cache_read: Option<u64>,
+    /// The reported cache-write tokens, summed.
+    pub cache_write: Option<u64>,
+    /// The reported output tokens, summed.
+    pub output: Option<u64>,
+    /// The reported reasoning tokens, summed.
+    pub reasoning: Option<u64>,
+    /// The reported fee, summed, in micros of a US dollar.
+    pub fee_micros: Option<u64>,
+    /// The reported wall seconds, summed.
+    pub wall_secs: Option<f64>,
+    /// The cost the task's attempts added, in US dollars, summed over the attempts that
+    /// reported one.
+    pub total_cost_usd: Option<f64>,
+    /// How many runs reported nothing: no metrics at all, or no request and no token count.
+    pub unreported_runs: u64,
+}
+
+/// Every attempt of one task, with the sums over their runs (ADR 0048 decisions 7, 10 and 12).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TaskMetrics {
+    /// Every attempt, oldest first.
+    pub attempts: Vec<AttemptMetrics>,
+    /// The sums over all runs that reported a field.
+    pub total: MetricsTotal,
+}
+
 /// The stages in the order a row names them: the profile's list, then `integration`, which
 /// always runs at merge.
 const STAGE_ORDER: [Stage; 6] = [
@@ -373,6 +487,341 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
     }
     attempts.sort_by_key(|attempt| attempt.attempt);
     Ok(attempts)
+}
+
+/// One attempt's metrics (ADR 0048 decisions 7, 10 and 12): its worker run, every `review`
+/// run, the `commands` and `integration` stage times, the recorded diff and increment, and the
+/// attempt's and review's costs. Each part comes from a file; a missing or torn file reads as
+/// not reported and is not an error.
+///
+/// # Errors
+///
+/// A directory that exists but cannot be read.
+pub fn attempt_metrics(store: &Store, task: &str, attempt: u32) -> Result<AttemptMetrics, Error> {
+    let run_dir = attempt_ops::run_dir(store, task, attempt);
+    let verdicts = run_dir.join("verdicts");
+    let review = read_verdict(&verdicts.join("review.json"));
+    let review_cost_usd = review
+        .as_ref()
+        .and_then(|verdict| verdict.review_cost_micros)
+        .map(|micros| micros as f64 / 1_000_000.0);
+    let (diff, increment) = diffstat(&run_dir);
+    Ok(AttemptMetrics {
+        attempt,
+        attempt_id: format!("{task}-{attempt}"),
+        worker: worker_run(store, task, attempt),
+        reviews: review.as_ref().map(review_runs).unwrap_or_default(),
+        review_wall_secs: review
+            .as_ref()
+            .and_then(|verdict| interval_secs(&verdict.started_at, &verdict.ended_at)),
+        commands: command_metrics(&verdicts.join("commands.json")),
+        integration_wall_secs: read_verdict(&verdicts.join("integration.json"))
+            .and_then(|verdict| interval_secs(&verdict.started_at, &verdict.ended_at)),
+        diff,
+        increment,
+        cost_usd: attempt_ops::attempt_added_cost(store, task, attempt),
+        review_cost_usd,
+    })
+}
+
+/// Every attempt of `task` and the sums over its runs (ADR 0048 decisions 7, 10 and 12).
+/// `total` sums each field over the runs that reported it, so a counter no run reported stays
+/// `None` rather than becoming 0; `unreported_runs` counts the runs that reported no request
+/// and no token count.
+///
+/// # Errors
+///
+/// A directory that exists but cannot be read.
+pub fn task_metrics(store: &Store, task: &str) -> Result<TaskMetrics, Error> {
+    let mut attempts = Vec::new();
+    let mut total = MetricsTotal::default();
+    for attempt in attempt_numbers(store, task) {
+        let metrics = attempt_metrics(store, task, attempt)?;
+        add_run(&mut total, &metrics.worker);
+        for run in &metrics.reviews {
+            add_run(&mut total, run);
+        }
+        add_cost(&mut total.total_cost_usd, metrics.cost_usd);
+        add_cost(&mut total.total_cost_usd, metrics.review_cost_usd);
+        attempts.push(metrics);
+    }
+    Ok(TaskMetrics { attempts, total })
+}
+
+/// The attempt numbers that have a run directory or a host-local record, oldest first. A
+/// running attempt has both; a claimed attempt whose wrapper has not started has the record.
+fn attempt_numbers(store: &Store, task: &str) -> Vec<u32> {
+    let mut numbers = std::collections::BTreeSet::new();
+    for (root, parse) in [
+        (store.root().join("runs").join(task).join("attempts"), true),
+        (store.root().join("attempts").join(task), false),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let number = if parse {
+                attempt_number(task, &name)
+            } else {
+                name.parse().ok()
+            };
+            if let Some(number) = number {
+                numbers.insert(number);
+            }
+        }
+    }
+    numbers.into_iter().collect()
+}
+
+/// The attempt's worker run: `metrics` from the last `Result` line, the times from
+/// `execution.json` (the claim's or the wrapper's `started_at` while it still runs), and the
+/// model route from `metrics.models`, else the run's recorded `exec_args`.
+fn worker_run(store: &Store, task: &str, attempt: u32) -> RunMetrics {
+    let run_dir = attempt_ops::run_dir(store, task, attempt);
+    let attempt_dir = attempt_ops::attempt_dir(store, task, attempt);
+    let result = last_result_line(&run_dir.join("result.jsonl"));
+    let execution = read_json(&run_dir.join("execution.json"));
+    let identity = read_json(&attempt_dir.join("identity.json"));
+    let start = read_json(&attempt_dir.join(attempt_ops::START_FILE));
+    let field = |name: &str| {
+        execution
+            .as_ref()
+            .and_then(|value| string_field(value, name))
+            .or_else(|| {
+                identity
+                    .as_ref()
+                    .and_then(|value| string_field(value, name))
+            })
+            .or_else(|| start.as_ref().and_then(|value| string_field(value, name)))
+    };
+    let started_at = field("started_at");
+    let ended_at = execution
+        .as_ref()
+        .and_then(|value| string_field(value, "ended_at"));
+    let metrics = result
+        .as_ref()
+        .and_then(|value| value.get("metrics"))
+        .filter(|metrics| !metrics.is_null())
+        .cloned();
+    let exec_args = execution
+        .as_ref()
+        .and_then(|value| string_list(value, "exec_args"));
+    let (provider, model) = provider_model(metrics.as_ref(), exec_args.as_deref());
+    RunMetrics {
+        run: None,
+        session_id: field("session_id"),
+        wall_secs: interval_secs_opt(&started_at, &ended_at),
+        started_at,
+        ended_at,
+        provider,
+        model,
+        metrics,
+    }
+}
+
+/// Every `radian exec` run of a review verdict, in order.
+fn review_runs(verdict: &Verdict) -> Vec<RunMetrics> {
+    let exec_args = verdict
+        .review_settings
+        .as_ref()
+        .map(|settings| settings.exec_args_values.clone())
+        .unwrap_or_default();
+    verdict
+        .runs
+        .iter()
+        .map(|record: &ReviewRunRecord| {
+            let (provider, model) = provider_model(record.metrics.as_ref(), Some(&exec_args));
+            RunMetrics {
+                run: Some(record.run),
+                session_id: Some(record.session_id.clone()),
+                started_at: Some(record.started_at.clone()),
+                ended_at: Some(record.ended_at.clone()),
+                wall_secs: interval_secs(&record.started_at, &record.ended_at),
+                provider,
+                model,
+                metrics: record.metrics.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The model route a run used: the first `metrics.models` entry, else the `--provider` and
+/// `--model` values of its `exec_args`, else not reported.
+fn provider_model(
+    metrics: Option<&Value>,
+    exec_args: Option<&[String]>,
+) -> (Option<String>, Option<String>) {
+    if let Some(first) = metrics
+        .and_then(|metrics| metrics.get("models"))
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+    {
+        let provider = first
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let model = first
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if provider.is_some() || model.is_some() {
+            return (provider, model);
+        }
+    }
+    let Some(args) = exec_args else {
+        return (None, None);
+    };
+    (flag_value(args, "--provider"), flag_value(args, "--model"))
+}
+
+/// The value of a `--name value` or `--name=value` argument. The last spelling wins, as the
+/// parser's does.
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    let mut value = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == name {
+            value = args.next().cloned();
+        } else if let Some(rest) = arg.strip_prefix(&format!("{name}=")) {
+            value = Some(rest.to_owned());
+        }
+    }
+    value
+}
+
+/// The commands of a `commands` verdict, in order.
+fn command_metrics(path: &Path) -> Vec<CommandMetric> {
+    read_json(path)
+        .as_ref()
+        .and_then(|value| value.get("commands"))
+        .and_then(Value::as_array)
+        .map(|commands| {
+            commands
+                .iter()
+                .filter_map(|command| {
+                    Some(CommandMetric {
+                        line: command.get("line")?.as_str()?.to_owned(),
+                        duration_ms: command.get("duration_ms")?.as_u64()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `diffstat.json` an attempt's `commands` stage wrote: its `diff` and `increment`. A
+/// missing or torn file is `(None, None)`.
+fn diffstat(run_dir: &Path) -> (Option<DiffStatView>, Option<DiffStatView>) {
+    let Some(value) = read_json(&run_dir.join("diffstat.json")) else {
+        return (None, None);
+    };
+    let stat = |value: &Value| -> Option<DiffStatView> {
+        Some(DiffStatView {
+            files: value.get("files")?.as_u64()?,
+            added: value.get("added")?.as_u64()?,
+            removed: value.get("removed")?.as_u64()?,
+        })
+    };
+    (
+        value.get("diff").and_then(stat),
+        value.get("increment").and_then(stat),
+    )
+}
+
+/// One verdict of an attempt, when the file exists and parses.
+fn read_verdict(path: &Path) -> Option<Verdict> {
+    Verdict::read(path).ok()
+}
+
+/// A JSON file, when it exists and parses. A torn file reads as absent.
+fn read_json(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The last `Result` record of a jsonl stream, when the stream has one.
+fn last_result_line(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        (value.get("type").and_then(Value::as_str) == Some("Result")).then_some(value)
+    })
+}
+
+/// A string field of a JSON object.
+fn string_field(value: &Value, name: &str) -> Option<String> {
+    value.get(name).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// A list of strings from a JSON object.
+fn string_list(value: &Value, name: &str) -> Option<Vec<String>> {
+    value
+        .get(name)?
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The wall-clock seconds between two RFC 3339 stamps, when both parse.
+fn interval_secs(started_at: &str, ended_at: &str) -> Option<f64> {
+    let millis = duration_ms(started_at, ended_at)?;
+    Some(millis as f64 / 1000.0)
+}
+
+/// [`interval_secs`] for two optional stamps.
+fn interval_secs_opt(started_at: &Option<String>, ended_at: &Option<String>) -> Option<f64> {
+    interval_secs(started_at.as_deref()?, ended_at.as_deref()?)
+}
+
+/// Adds one run's reported fields to the task's sums. A run with no metrics, no request and no
+/// token count is counted as one that reported nothing.
+fn add_run(total: &mut MetricsTotal, run: &RunMetrics) {
+    let Some(metrics) = run.metrics.as_ref() else {
+        total.unreported_runs += 1;
+        return;
+    };
+    let requests = metrics.get("requests").and_then(Value::as_u64);
+    let input_uncached = metrics.get("input_uncached").and_then(Value::as_u64);
+    let cache_read = metrics.get("cache_read").and_then(Value::as_u64);
+    let cache_write = metrics.get("cache_write").and_then(Value::as_u64);
+    let output = metrics.get("output").and_then(Value::as_u64);
+    let reasoning = metrics.get("reasoning").and_then(Value::as_u64);
+    let fee_micros = metrics.get("fee_micros").and_then(Value::as_u64);
+    let reported = requests.is_some_and(|requests| requests > 0)
+        || input_uncached.is_some()
+        || cache_read.is_some()
+        || cache_write.is_some()
+        || output.is_some()
+        || reasoning.is_some();
+    if !reported {
+        total.unreported_runs += 1;
+    }
+    add_count(&mut total.requests, requests);
+    add_count(&mut total.input_uncached, input_uncached);
+    add_count(&mut total.cache_read, cache_read);
+    add_count(&mut total.cache_write, cache_write);
+    add_count(&mut total.output, output);
+    add_count(&mut total.reasoning, reasoning);
+    add_count(&mut total.fee_micros, fee_micros);
+    if let Some(seconds) = run.wall_secs {
+        total.wall_secs = Some(total.wall_secs.unwrap_or(0.0) + seconds);
+    }
+}
+
+/// Adds one reported count, leaving the sum `None` while no run has reported the field.
+fn add_count(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0).saturating_add(value));
+    }
+}
+
+/// Adds one reported cost, leaving the sum `None` while no attempt has reported one.
+fn add_cost(total: &mut Option<f64>, value: Option<f64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0.0) + value);
+    }
 }
 
 /// The change a task is responsible for.
@@ -1047,7 +1496,7 @@ fn diff_range(repo: &Path, base: &str, head: &str) -> Result<TaskDiff, Error> {
 
 /// The `--numstat -z` records as `(path, added, removed)`. A rename's new path follows its old
 /// one as a bare field. A binary file's `-` counts read as `0`.
-fn numstat_entries(text: &str) -> Vec<(String, usize, usize)> {
+pub(crate) fn numstat_entries(text: &str) -> Vec<(String, usize, usize)> {
     let mut files: Vec<(String, usize, usize)> = Vec::new();
     let mut rename_from: Option<usize> = None;
     for record in text.split('\0').filter(|record| !record.is_empty()) {

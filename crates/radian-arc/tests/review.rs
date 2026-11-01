@@ -4559,6 +4559,7 @@ fn review_verdict_at(
         review_model_error: None,
         review_pre_existing: None,
         review_settings: settings,
+        runs: Vec::new(),
         profile: Some("default".to_owned()),
         integration_style: None,
     }
@@ -6769,6 +6770,7 @@ fn a_minor_fix_level_collects_only_pre_existing_findings() {
             reviewer: "default".to_owned(),
             fix_level: "minor".to_owned(),
             exec_args: "worker.exec_args".to_owned(),
+            exec_args_values: Vec::new(),
             timeout_secs: 900,
             timeout: "gate.reviewers.default.timeout_secs".to_owned(),
         }),
@@ -8620,6 +8622,7 @@ fn an_old_shape_review_json_reads_back_and_show_prints_its_items() {
         review_model_error: None,
         review_pre_existing: None,
         review_settings: None,
+        runs: Vec::new(),
         profile: Some("default".to_owned()),
         integration_style: None,
     };
@@ -8944,9 +8947,11 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
             reviewer: "default".to_owned(),
             fix_level: "minor".to_owned(),
             exec_args: "gate.review.exec_args".to_owned(),
+            exec_args_values: Vec::new(),
             timeout_secs: 0,
             timeout: "gate.review.timeout_secs".to_owned(),
         }),
+        runs: Vec::new(),
         profile: Some("default".to_owned()),
         integration_style: None,
     };
@@ -9037,5 +9042,70 @@ fn an_old_review_blocking_verdict_keeps_a_minor_blocking_item_failing() {
     assert!(
         beside.pre_existing,
         "the old suggestion anchored a window: {report:?}"
+    );
+}
+
+/// Every run of a review stage records its own entry: the unusable first run and the usable
+/// second one, in order, each with its session, times and `Result.run_metrics`. The reader
+/// lists both and `show --json` reports both under the attempt's review runs. Mutation: keep
+/// only the last run and this test sees one entry.
+#[test]
+fn each_review_run_records_its_own_metrics_and_times() {
+    let fixture = Fixture::new("review-runs");
+    fixture.add_review_stage();
+    let head = fixture.publish(&fixture.base.clone(), "feature.txt", "feature\n");
+    fixture.set_verifying(&head);
+    let fake = FakeReview::new(
+        "review-runs-fake",
+        &[
+            garbage(),
+            review_message("the change adds feature.txt", &[], &[]),
+        ],
+        0,
+    );
+    fixture.verifying_with_review(&head, fake.program());
+
+    let verdict = fixture.verdict(&fixture.attempt_label(), Stage::Review);
+    assert_eq!(verdict.runs.len(), 2, "both runs are recorded: {verdict:?}");
+    assert_eq!(verdict.runs[0].run, 1);
+    assert_eq!(verdict.runs[1].run, 2);
+    assert_eq!(
+        verdict.runs[0].metrics.as_ref().expect("first metrics")["requests"],
+        json!(1)
+    );
+    assert_eq!(
+        verdict.runs[1].metrics.as_ref().expect("second metrics")["requests"],
+        json!(2)
+    );
+    assert!(
+        verdict.runs.iter().all(|run| !run.session_id.is_empty()),
+        "each run names its session: {verdict:?}"
+    );
+    assert!(
+        verdict
+            .runs
+            .iter()
+            .all(|run| run.started_at <= run.ended_at),
+        "each run has its own times: {verdict:?}"
+    );
+
+    let metrics =
+        radian_arc::read::attempt_metrics(&fixture.store, &fixture.task, 1).expect("metrics");
+    assert_eq!(metrics.reviews.len(), 2, "the reader lists both runs");
+    assert_eq!(metrics.reviews[0].run, Some(1));
+    assert_eq!(metrics.reviews[1].run, Some(2));
+    assert!(
+        metrics.reviews.iter().all(|run| run.wall_secs.is_some()),
+        "each review run has a wall time: {metrics:?}"
+    );
+    let shown =
+        radian_arc::store::cli::show_json(&fixture.store, &fixture.task).expect("show --json");
+    assert_eq!(
+        shown["metrics"]["attempts"][0]["reviews"]
+            .as_array()
+            .expect("a list")
+            .len(),
+        2,
+        "{shown}"
     );
 }

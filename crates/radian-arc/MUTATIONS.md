@@ -2035,3 +2035,22 @@ and the file was restored from a copy under `.radian/tmp/`, which `cmp` found id
 | TK0291-M1 | `review_failing` / `review_rest` dispatch on `self.reason == Some(REVIEW_BLOCKING)` again, so a passing old verdict's `major` suggestion is decided by `fix_level` | `gate::review::tests::a_passing_old_verdicts_major_suggestion_stays_in_the_rest` (the `major` suggestion was returned as failing) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0288: an attempt's metrics and show (2026-11-01, branch `work/TK0288-arc-attempt-metrics-and-show`)
+
+The wrapper copies a radian run's `_meta.radian.metrics` to `Result.metrics`, the review stage
+records one `runs` entry per `radian exec` run, the `commands` stage records the attempt's
+`diffstat.json`, and `attempt_metrics`/`task_metrics` read them for `radian arc show`. Each
+mutation was applied by hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test <binary> -E 'test(<name>)'`
+(a `work` test first rebuilt `radian` with `cargo build -p radian-tui --bin radian`), and the
+file was restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0288-M1 | `apply_radian_meta` ignores `radian.metrics`, so the attempt's `Result` has none | `work::a_radian_workers_result_metrics_reach_show` (the `Result` read `{"cost":null,"outcome":"completed","text":"done","type":"Result"}`, left `Null`, right `3`) | ✅ 1 failed |
+| TK0288-M2 | the review loop clears `runs` before each push, so only the last run is kept | `review::each_review_run_records_its_own_metrics_and_times` (the verdict had one `ReviewRunRecord { run: 2, … }`, left `1`, right `2`) | ✅ 1 failed |
+| TK0288-M3 | a rework's `increment` uses the whole-task diff instead of the increment the review reads | `commands::the_increment_covers_only_the_rework_change` (increment `{files: 2, added: 2}`, left `2`, right `1`) | ✅ 1 failed |
+| TK0288-M4 | `add_count` writes `Some(0 + value.unwrap_or(0))`, so a field no run reported becomes `0` | `metrics::the_totals_sum_only_reported_fields_and_count_unreported_runs` (`reasoning` was `Some(0)`, expected `None`) | ✅ 1 failed |
+
+4/4 caught.

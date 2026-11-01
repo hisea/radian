@@ -50,8 +50,8 @@ use super::error::GateError;
 use super::exclusive::SlotLock;
 use super::integration::candidate_for;
 use super::verdict::{
-    Finding, REVIEW_LEVELS, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION, Verdict,
-    VerdictResult, attempt_dir, now_utc, verdict_path,
+    Finding, REVIEW_LEVELS, ReviewReport, ReviewRunRecord, ReviewSettings, VERDICT_SCHEMA_VERSION,
+    Verdict, VerdictResult, attempt_dir, now_utc, verdict_path,
 };
 
 /// The prefix of the review stage's slot locks under `gates/`: `review-0.lock` …
@@ -289,6 +289,7 @@ impl ReviewRun<'_> {
         })?;
 
         let mut sessions = Vec::new();
+        let mut runs: Vec<ReviewRunRecord> = Vec::new();
         let mut cost: Option<u64> = None;
         let mut report = None;
         let mut pre_existing = None;
@@ -320,14 +321,26 @@ impl ReviewRun<'_> {
                         &prompt,
                         &log_dir,
                     )?;
-                    sessions.push(
-                        ran.result
+                    let used_session = ran
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("session_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(&session_id)
+                        .to_owned();
+                    sessions.push(used_session.clone());
+                    runs.push(ReviewRunRecord {
+                        run,
+                        session_id: used_session,
+                        started_at: ran.started_at.clone(),
+                        ended_at: ran.ended_at.clone(),
+                        metrics: ran
+                            .result
                             .as_ref()
-                            .and_then(|result| result.get("session_id"))
-                            .and_then(Value::as_str)
-                            .unwrap_or(&session_id)
-                            .to_owned(),
-                    );
+                            .and_then(|result| result.get("run_metrics"))
+                            .filter(|metrics| !metrics.is_null())
+                            .cloned(),
+                    });
                     if let Some(micros) = ran.result.as_ref().and_then(cost_micros) {
                         cost = Some(cost.unwrap_or(0).saturating_add(micros));
                     }
@@ -395,6 +408,7 @@ impl ReviewRun<'_> {
             review_model_error: model_error,
             review_pre_existing: pre_existing,
             review_settings: Some(self.settings.clone()),
+            runs,
             profile: Some(self.profile.to_owned()),
             integration_style: None,
         };
@@ -588,6 +602,7 @@ impl ReviewRun<'_> {
             // Its own process group, so a timeout reaches every child the session started.
             command.process_group(0);
         }
+        let started_at = now_utc();
         let mut child = command.spawn().map_err(|source| GateError::Spawn {
             program: program.display().to_string(),
             source,
@@ -631,6 +646,8 @@ impl ReviewRun<'_> {
             timed_out,
             exit_code: status.code(),
             result: last_result(&output_path),
+            started_at,
+            ended_at: now_utc(),
         })
     }
 }
@@ -660,6 +677,10 @@ struct Ran {
     exit_code: Option<i32>,
     /// The last `Result` line of its jsonl stream.
     result: Option<Value>,
+    /// When the stage started the session, RFC 3339 in UTC.
+    started_at: String,
+    /// When the session's process ended, RFC 3339 in UTC.
+    ended_at: String,
 }
 
 /// The report of a run that ended `completed` with exit `0` and a parsable block. Every
@@ -1063,6 +1084,35 @@ fn increment_diff(own_diff: &str, increment: &BTreeSet<(String, u32)>) -> String
     } else {
         out
     }
+}
+
+/// The size of the increment diff as `(files, added, removed)`: the same diff the rework
+/// prompt holds, so the number `show` prints is the change the session was asked to review
+/// (ADR 0048 decision 10). A file with no increment hunk is left out, and a rework that
+/// changed no line of the task's own diff is `(0, 0, 0)`.
+pub(crate) fn increment_stat(own_diff: &str, rework: &str) -> (u64, u64, u64) {
+    let own_lines = new_side_lines(own_diff);
+    let increment: BTreeSet<(String, u32)> = new_side_lines(rework)
+        .intersection(&own_lines)
+        .cloned()
+        .collect();
+    let diff = increment_diff(own_diff, &increment);
+    let mut files = 0u64;
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    for file in parse_diff(&diff) {
+        files += 1;
+        for hunk in &file.hunks {
+            for line in &hunk.body {
+                if line.starts_with('+') {
+                    added += 1;
+                } else if line.starts_with('-') {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    (files, added, removed)
 }
 
 /// The path-like argument `arg` is or sets, if it is one the stage owns. A long flag matches
@@ -1837,6 +1887,7 @@ mod tests {
                 reviewer: "default".to_owned(),
                 fix_level: "major".to_owned(),
                 exec_args: "gate.review.exec_args".to_owned(),
+                exec_args_values: Vec::new(),
                 timeout_secs: 0,
                 timeout: "gate.review.timeout_secs".to_owned(),
             },

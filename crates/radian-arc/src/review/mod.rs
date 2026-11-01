@@ -822,6 +822,10 @@ fn run_stage(
     review_program: Option<&Path>,
 ) -> Result<Verdict, Error> {
     let task = &plan.task;
+    // A review that follows an earlier one of this task is a rework round: the stage reviews
+    // the increment and judges the items arc moved (ADR 0048 decision 10). The commands stage
+    // records that same increment's size for the attempt.
+    let earlier = previous_review(store, &task.id, &plan.label);
     match spec.stage {
         Stage::Commands => CommandRun {
             repository: store.repo(),
@@ -832,6 +836,7 @@ fn run_stage(
             main_ref: &plan.main_ref,
             commands: &plan.profile.commands,
             profile: &plan.profile_name,
+            previous_sha: earlier.as_ref().map(|(_, verdict)| verdict.sha.clone()),
             timeout: plan.config.gate.command_timeout(),
         }
         .run()
@@ -847,9 +852,6 @@ fn run_stage(
                     plan.profile_name, plan.profile.reviewer, plan.profile.reviewer
                 )));
             };
-            // A review that follows an earlier one of this task is a rework round: the stage
-            // reviews the increment and judges the items arc moved (ADR 0048 decision 10).
-            let earlier = previous_review(store, &task.id, &plan.label);
             // A first review is a review stage run when no earlier attempt of the task has a
             // review verdict; only it reads the reviewer's `first` keys (ADR 0048 decision 10).
             let first = earlier.is_none();
@@ -877,6 +879,7 @@ fn run_stage(
                     .clone()
                     .unwrap_or_else(|| reviewer.fix_level.clone()),
                 exec_args: choice.exec_args_key.clone(),
+                exec_args_values: choice.exec_args.to_vec(),
                 timeout_secs: choice.timeout_secs,
                 timeout: choice.timeout_key.clone(),
             };
