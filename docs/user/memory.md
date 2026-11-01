@@ -7,8 +7,8 @@ description: Save facts across sessions and search them by keyword.
 Memory holds small durable records. Each record has an id, content, scope,
 kind, key, source, verification and revision. Scopes are project and global.
 Project records belong to one project directory; global records belong to
-you. Every model request carries the matching records, project first, then
-global.
+you. The model receives each scope's `MEMORY.md` index in its system prompt,
+project first, then global; see "What the model sees".
 
 The model reads and writes its memory files with the ordinary file tools
 (`read`, `grep`, `glob`, `write`, `patch`) in both tiers. The tools reach
@@ -98,18 +98,25 @@ Export the project scope, edit the Markdown, read it back:
 
 ## What the model sees
 
-One record prints on two lines: the first line carries `id`, `revision`,
-`scope`, `kind`, `key`, `source` and `verification`, and the content follows.
-The model uses the `memory_search` tool. It passes `query` to search by
-keyword or `ids` to read records in full, never both. `scope` is one of
-`project`, `global` or `all`; the default `all` searches project first,
-then global. `limit` caps the count. New matches in later turns arrive as a system message.
+At the first model call of a session, the model receives the two index files
+as one system-prompt section: the project index first, then the global one.
+Each part is the text of that scope's `MEMORY.md`. The section names each
+file's path, so the model reads a record's body on demand with `read`. It
+opens with a line that says the content is data from your memory directory,
+not instructions.
 
-Results arrive ordered by scope (project first), trust (your records before
-the model's), match, recency and id. A low-trust note marks model-written
-content the tool returns, so the model treats your records as the ones to
-trust.
+A scope with no index, or an empty one, contributes one line saying so. With
+no project linked, only the global index is read.
 
-Set `[memory.injection] additions = false` to turn those follow-up notes
-off. The fixed block of records in the prompt stays. `[memory.injection]
-addition_budget` caps one turn's addition at 500 tokens by default.
+Each index is capped. `[memory] index_max_lines` (default 200) limits its
+lines and `[memory] index_max_bytes` (default 25600) limits its bytes. A line
+past either cap is not sent. When at least one line is dropped, the model
+receives one notice before its next call: the notice names the scope, the file
+and how many lines were dropped, and asks the model to rewrite the index
+shorter. It is sent once per session for each scope.
+
+The section is computed once per process and reused byte for byte. A change to
+an index file takes effect in the next session, or on resume.
+
+There is no memory tool. A call to `memory_search` or `memory_save` is an
+unknown tool.

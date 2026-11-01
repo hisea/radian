@@ -125,8 +125,8 @@ pub struct SessionSetup {
     /// the named ones in the catalog, and a name discovery did not find is reported at spawn,
     /// never a failure.
     pub skills_allow: Option<Vec<String>>,
-    /// The memory injection configuration (ADR 0021). The host builds it
-    /// from `[memory.injection]`; `InjectionConfig::default()` is the documented D6 table.
+    /// The memory index-injection configuration (ADR 0021 D6). The host builds it
+    /// from `[memory]`; `InjectionConfig::default()` is the documented defaults.
     pub memory_injection: InjectionConfig,
     /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
     pub subtree_files: bool,

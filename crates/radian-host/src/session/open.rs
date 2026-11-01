@@ -18,9 +18,7 @@ use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQue
 use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
-use crate::memory::{
-    MemoryHooks, MemoryInjection, MemoryService, MemoryTools, ScopeSelection, exceeds_budget,
-};
+use crate::memory::{MemoryHooks, MemoryInjection, MemoryService};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -180,25 +178,6 @@ pub async fn open_session(
     let memory = memory_root
         .as_ref()
         .map(|root| MemoryService::open(&workspace, root));
-    // ADR 0021 D7: `memory_search` mounts only when the Active records' estimated total
-    // exceeds the injection budget — what fits in the fixed block needs no search. The view
-    // is the fixed block's (Project when linked, then Global); the decision is once per
-    // session. A read failure warns and mounts nothing (invariant 2), never failing the open.
-    let memory_tools =
-        memory.as_ref().and_then(
-            |service| match service.list(ScopeSelection::Default, false) {
-                Ok(view) if exceeds_budget(&view, &injection_config) => {
-                    Some(MemoryTools::new(service.clone()))
-                }
-                Ok(_) => None,
-                Err(error) => {
-                    memory_warning(&format!(
-                        "memory read failed; `memory_search` is not mounted: {error}"
-                    ));
-                    None
-                }
-            },
-        );
     let memory_notice = memory_notice(&memory, &injection_config);
     radian_session::trace::took("open/memory", t0);
     let mcp_server_configs = servers.clone();
@@ -451,10 +430,16 @@ pub async fn open_session(
     // section is appended after the memory section, so the tuple below is ((perm, memory),
     // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
-    // ADR 0021: one injection object per session. The fixed block is computed once
-    // (by whichever of the two seams runs first) and the driver's per-turn seam appends later
-    // turns' new hits as one System message through the inbox's inject lane.
-    let injection = MemoryInjection::new(memory.clone(), injection_config, memory_warning);
+    // ADR 0021 D6: one injection object per session. The section is computed once per process
+    // (by whichever of the hook or a read-only host shape runs first), the hook sends any
+    // rewrite notice on the inject lane, and the first call writes the `MemoryInjected` record.
+    let injection = MemoryInjection::new(
+        memory.clone(),
+        injection_config,
+        memory_warning,
+        Some(Arc::clone(&journal)),
+        Some(Arc::clone(&inbox)),
+    );
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =
@@ -466,7 +451,7 @@ pub async fn open_session(
     if coding.is_none() {
         tool_presence = radian_coding::ToolPresence::NONE;
     }
-    let mut tools = HostTools::new(coding, memory_tools, mcp.clone())
+    let mut tools = HostTools::new(coding, mcp.clone())
         .with_tool_allow(tools_allow)
         .with_spec_sink(std::sync::Arc::clone(&spec_sink));
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
@@ -629,11 +614,6 @@ pub async fn open_session(
     // must not answer).
     driver.set_claim_hold(std::env::var_os("RADIAN_CLAIM_HOLD_FILE").map(std::path::PathBuf::from));
     driver.set_runtime_events(Arc::clone(&runtime_events));
-    // ADR 0021: the per-turn memory addition, placed in the inject lane
-    // after the user's turn is claimed and before its first model call.
-    driver.set_turn_additions(crate::memory::injection::addition_seam(Arc::clone(
-        &injection,
-    )));
     if let Some(budget_for) = budget_for.clone() {
         driver.set_budget_for(budget_for);
     }

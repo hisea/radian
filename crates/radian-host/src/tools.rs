@@ -1,9 +1,8 @@
-//! The combined tool provider: the built-in coding tools, the agent memory tools and the MCP
-//! servers, behind one `ToolProvider` so `Agent` still has a single provider type.
+//! The combined tool provider: the built-in coding tools and the MCP servers, behind one
+//! `ToolProvider` so `Agent` still has a single provider type.
 //!
-//! Built-in names (coding and memory) are checked first and may not collide with each other or
-//! with an MCP tool name; a collision fails `open_session` rather than silently shadowing one
-//! of them.
+//! Built-in names (coding) are checked first and may not collide with each other or with an MCP
+//! tool name; a collision fails `open_session` rather than silently shadowing one of them.
 
 use std::collections::HashSet;
 
@@ -14,13 +13,11 @@ use radian_core::{
 };
 
 use crate::goal::{GoalSession, GoalTools};
-use crate::memory::{MemorySession, MemoryTools};
 use crate::skills::tools::{SkillSession, SkillTools};
 use crate::subagent::{SubagentSession, SubagentTools};
 
 pub struct HostTools {
     coding: Option<CodingTools>,
-    memory: Option<MemoryTools>,
     /// `goal` (ADR 0047). Host-level like `ask_user`: mounted always, so the model's
     /// write end of the persistent goal exists in every session; without an active goal
     /// it answers `no_active_goal`.
@@ -48,14 +45,9 @@ pub struct HostTools {
 }
 
 impl HostTools {
-    pub fn new(
-        coding: Option<CodingTools>,
-        memory: Option<MemoryTools>,
-        mcp: McpToolProvider,
-    ) -> Self {
+    pub fn new(coding: Option<CodingTools>, mcp: McpToolProvider) -> Self {
         Self {
             coding,
-            memory,
             goal: None,
             ask: None,
             skills: None,
@@ -126,7 +118,6 @@ impl HostTools {
 
 pub struct HostSession {
     coding: Option<CodingSession>,
-    memory: Option<MemorySession>,
     goal: Option<GoalSession>,
     ask: Option<AskSession>,
     skills: Option<SkillSession>,
@@ -134,7 +125,6 @@ pub struct HostSession {
     mcp: McpSession,
     specs: Vec<ToolSpec>,
     coding_names: HashSet<String>,
-    memory_names: HashSet<String>,
     ask_names: HashSet<String>,
     skill_names: HashSet<String>,
     subagent_names: HashSet<String>,
@@ -155,10 +145,6 @@ impl ToolProvider for HostTools {
             ),
             None => None,
         };
-        let memory = match &self.memory {
-            Some(memory) => Some(memory.open_session().await?),
-            None => None,
-        };
         let goal = match &self.goal {
             Some(goal) => Some(goal.open_session().await?),
             None => None,
@@ -177,7 +163,6 @@ impl ToolProvider for HostTools {
         };
 
         let mut coding_names = HashSet::new();
-        let mut memory_names = HashSet::new();
         let mut ask_names = HashSet::new();
         let mut skill_names = HashSet::new();
         let mut subagent_names = HashSet::new();
@@ -186,12 +171,6 @@ impl ToolProvider for HostTools {
         if let Some(coding) = &coding {
             for spec in coding.tool_specs() {
                 coding_names.insert(spec.name.clone());
-                built_in_specs.push(spec.clone());
-            }
-        }
-        if let Some(memory) = &memory {
-            for spec in memory.tool_specs() {
-                memory_names.insert(spec.name.clone());
                 built_in_specs.push(spec.clone());
             }
         }
@@ -225,7 +204,6 @@ impl ToolProvider for HostTools {
         // govern them). The permission-layer `deny` for the same names is kept (defence depth).
         if self.tool_allow.is_some() {
             coding_names.retain(|name| self.allows(name));
-            memory_names.retain(|name| self.allows(name));
             ask_names.retain(|name| self.allows(name));
             skill_names.retain(|name| self.allows(name));
             subagent_names.retain(|name| self.allows(name));
@@ -239,7 +217,6 @@ impl ToolProvider for HostTools {
 
         Ok(HostSession {
             coding,
-            memory,
             goal,
             ask,
             skills,
@@ -247,7 +224,6 @@ impl ToolProvider for HostTools {
             mcp,
             specs,
             coding_names,
-            memory_names,
             ask_names,
             skill_names,
             subagent_names,
@@ -298,14 +274,6 @@ impl ToolSession for HostSession {
                     format!("`{}` has no goal session", call.name),
                 )),
             }
-        } else if self.memory_names.contains(&call.name) {
-            match &self.memory {
-                Some(memory) => memory.execute(call, cx).await,
-                None => Err(ToolFailure::new(
-                    "unknown_tool",
-                    format!("`{}` has no memory session", call.name),
-                )),
-            }
         } else if self.coding_names.contains(&call.name) {
             match &self.coding {
                 Some(coding) => coding.execute(call, cx).await,
@@ -331,7 +299,7 @@ impl ToolSession for HostSession {
     }
 }
 
-/// Merges the built-in specs (coding then memory) with the MCP specs, refusing a name that is
+/// Merges the built-in specs (coding) with the MCP specs, refusing a name that is
 /// defined twice — including two built-ins.
 ///
 /// Split out and public so the rule is testable on its own: with the current alias scheme

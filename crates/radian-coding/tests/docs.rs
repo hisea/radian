@@ -651,17 +651,7 @@ fn every_tool_name_appears_in_the_manual() {
         .collect::<Vec<_>>()
         .join("\n");
     for tool in [
-        "read",
-        "write",
-        "patch",
-        "glob",
-        "grep",
-        "shell",
-        "job",
-        "memory_search",
-        "ask_user",
-        "skill",
-        "subagent",
+        "read", "write", "patch", "glob", "grep", "shell", "job", "ask_user", "skill", "subagent",
     ] {
         assert!(
             all.contains(tool),
