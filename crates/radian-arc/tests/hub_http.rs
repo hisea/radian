@@ -308,9 +308,9 @@ fn setup(repo: &Repo) -> (Store, String, String) {
 /// Every regular file under `.radian/arc`, by its path relative to that directory.
 ///
 /// `runner.lock` is left out: it is not a state file, it carries the pid of whichever process
-/// last took it, and the CLI's wrapper takes it to run pending hooks. The hub, like the TUI,
-/// takes only `state.lock`, so its absence in the hub's copy is the rule, not a difference in
-/// what the action wrote.
+/// last took it, and the CLI's wrapper takes it to run pending hooks. The hub's scheduling loop
+/// holds it for its whole life, and a route action takes only `state.lock`, so its absence in
+/// either copy is the rule, not a difference in what the action wrote.
 fn arc_files(repo: &Repo) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -432,9 +432,11 @@ fn compare_files(left: &BTreeMap<String, Vec<u8>>, right: &BTreeMap<String, Vec<
     }
 }
 
-/// Takes `runner.lock` for a repository from the test process, so the CLI's owner command
-/// (which runs its pending hooks only when it can take the lock without waiting) leaves them
-/// for a loop, exactly as the hub route does. The lock is released when the file drops.
+/// Takes `runner.lock` for a repository from the test process. Held before a `radian hub`
+/// starts, it makes the hub only read that repository instead of running its pass, so a route
+/// test meets a store nothing else moves. For the CLI it means the owner command (which runs its
+/// pending hooks only when it can take the lock without waiting) leaves them for a loop, exactly
+/// as the hub route does. The lock is released when the file drops.
 fn hold_runner_lock(repo: &Repo) -> std::fs::File {
     let path = repo.arc().join("runner.lock");
     let file = std::fs::OpenOptions::new()
@@ -740,6 +742,7 @@ fn a_confirm_through_the_route_writes_the_cli_bytes_and_returns_its_text() {
     assert_eq!((&plan, &task), (&plan_b, &task_b), "the fixtures match");
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &plan, "confirm", "{}");
@@ -763,6 +766,7 @@ fn a_reject_with_an_empty_note_is_400_and_changes_nothing() {
     set_review(&store, &task);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -788,6 +792,7 @@ fn a_reject_with_a_note_writes_the_cli_rework_section() {
     set_review(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let note = "the tests do not cover the retry";
@@ -817,6 +822,7 @@ fn an_auto_level_outside_the_set_is_422_and_merge_is_200() {
     plan_ops::confirm(&sb, &plan_b).expect("the plan confirms");
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -857,6 +863,7 @@ fn a_merge_through_the_route_reaches_done_merged_and_a_doing_task_is_409() {
     );
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "merge", "{}");
@@ -898,6 +905,7 @@ fn a_merge_on_a_doing_task_is_409_with_the_cli_sentence_and_changes_nothing() {
     set_doing(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -925,6 +933,7 @@ fn every_action_on_a_held_state_lock_is_409_with_no_file_change() {
     let (_store, plan, task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     // Hold the repository's `state.lock` from this process, exactly as a test process does.
@@ -1048,6 +1057,7 @@ fn a_priority_through_the_route_is_the_cli_priority() {
     let (_sb, plan_b, _task_b) = setup(&b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &plan, "priority", r#"{"priority": "P1"}"#);
@@ -1069,6 +1079,7 @@ fn a_priority_outside_the_set_is_422_and_changes_nothing() {
     let (_store, plan, _task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -1097,6 +1108,7 @@ fn a_cancel_through_the_route_is_the_cli_cancel() {
     set_doing(&sb, &task_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "cancel", "{}");
@@ -1140,6 +1152,7 @@ fn a_reverify_whose_verification_refuses_returns_the_claims_line_and_its_error()
     set_attempt(&sb, &task_b, &base_b, &base_b);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
 
     let response = hub.post("a", &task, "reverify", "{}");
@@ -1186,6 +1199,7 @@ fn a_write_route_without_a_token_is_401_and_changes_nothing() {
     let (_store, plan, _task) = setup(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
@@ -1226,6 +1240,7 @@ fn a_body_over_the_limit_is_413_and_changes_nothing() {
     set_review(&store, &task);
     let home = hub_home(&a);
     register(&home, "a", &a);
+    let _read_only = hold_runner_lock(&a);
     let hub = Hub::start(&home);
     let before = arc_files(&a);
 
