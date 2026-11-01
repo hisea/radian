@@ -788,3 +788,59 @@ and the page was restored from `.radian/cli.md.bak`, which `cmp` found identical
 |---|---|---|---|
 | TK0297-M2 | the `--type` row drops `reference` from its value list | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing value reference`) |
 | TK0297-M3 | the `--type` row's `(default `user`)` becomes `(default `feedback`)` | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing default user`) |
+
+## TK0299: the request latency anchor (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`. The mutation anchors a usage record
+on the record immediately before it again (`previous_ts`, the old rule) instead of on the
+record before the request. It was applied to `src/metrics.rs`, the named test was run with
+`cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'`, and the source was restored from `.radian/metrics.rs.bak`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M1 | `usage` reads `previous_ts` as its start, so the anchor is any previous record again | ✅ 1 failed (rc=100) | `metrics::tests::a_first_request_latency_runs_from_the_turn_start` (`left: 50`, `right: 3050`) |
+
+## TK0299 rework: a response without usage, and a request right after a usage record (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 1. Two mutations
+target the anchor state: the first stops a response without a usage record from ending at the
+record after its assistant message, the second keeps the previous response's usage record from
+becoming the next request's anchor. Both were applied to `src/metrics.rs`, the named test was run
+with `cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(metrics::tests)'`, and the source was restored from `.radian/metrics.rs.bak`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M2 | a record after an assistant message with no usage record no longer moves the anchor (`response_open || anchor_ready` becomes `anchor_ready && !response_open`) | ✅ 1 failed (rc=100) | `metrics::tests::a_response_without_usage_ends_at_the_record_after_its_assistant_message` (`left: 15000`, `right: 5000`) |
+| TK0299-M3 | the usage-record branch no longer makes the usage record the next anchor | ✅ 1 failed (rc=100) | `metrics::tests::a_request_right_after_a_usage_record_anchors_on_it` (`left: 5000`, `right: 4000`) |
+
+## TK0299 rework 3: records written while a request is in flight (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 2. The first
+mutation makes every record move the anchor again (the generic `_` arm), which lets an
+`InboxEnqueued` or `BackgroundJobSettled` written while a response streams become that
+response's anchor. The second drops the turn's opening exemption, so the input message the
+turn writes after `TurnStarted` becomes the first request's anchor. Both were applied to
+`src/metrics.rs`, the named test was run with `cargo nextest run -p radian-exec --lib --locked
+--profile sandbox --no-fail-fast -E 'test(<name>)'`, and the source was restored from
+`.radian/metrics-r3.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M4 | the anchor match's `_` arm moves the anchor, so an in-flight `InboxEnqueued`/`BackgroundJobSettled` becomes the anchor again (`_ => {}` becomes `_ => self.move_anchor(ts)`) | ✅ 1 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) |
+| TK0299-M5 | `move_anchor` drops the turn's opening exemption (`anchor_ready && !opening` becomes `anchor_ready`), so the input `MessageAppended` moves the first anchor | ✅ 1 failed (rc=100) | `metrics::tests::the_turns_opening_input_keeps_the_turn_start_anchor` (`left: 2050`, `right: 3050`) |
+
+## TK0299 rework 4: a between-turns request after `TurnFinished` (2026-11-01)
+
+Branch `work/TK0299-request-latency-from-request-start`, rework after review 3. The mutation
+removes the `TurnFinished` arm from the anchor match, so a `/compact` the driver serves between
+turns is timed from the previous turn's last usage record instead of from the record written
+before its request. It was applied to `src/metrics.rs`, the named test was run with `cargo
+nextest run -p radian-exec --locked --profile sandbox -E 'test(<name>)'`, and the source was
+restored from `.radian/metrics-r4.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0299-M6 | the anchor match drops its `TurnFinished` arm, so a between-turns `/compact` anchors on the previous turn's last usage record | ✅ 1 failed (rc=100) | `metrics::tests::a_compaction_after_a_turn_anchors_on_the_turns_end` (`left: 64000`, `right: 60000`) |
