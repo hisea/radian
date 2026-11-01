@@ -1942,3 +1942,17 @@ test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 | TK0271-M1 | the line cap is off by one (`taken > max_lines` instead of `taken >= max_lines`) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (line-201 was injected) |
 | TK0271-M2 | the rewrite notice is returned on every call (the `notices_sent` guard is removed) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (the third call got a second notice) |
 | TK0271-M3 | global is selected before project (`selected` push order swapped) | ✅ 1 failed (rc=100) | `memory::injection::tests::two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte` (the global section came first) |
+
+## TK0278: the project session index file (2026-10-31)
+
+Branch `work/TK0278-session-index-file`. Each mutation was applied in place and the source restored
+from a copy under `.radian/mut/` (`cmp` empty). The host mutation ran with `cargo nextest run -p
+radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`; the two CLI
+mutations rebuilt `radian` (`cargo build -p radian-tui --bin radian`, the CLI tests refuse a stale
+one) and ran `cargo nextest run -p radian-exec --test cli ... -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0278-M1 | the same-id replacement is removed (`upsert_session_line` always pushes) | ✅ 2 failed (rc=100) | `memory::sessions::tests::a_second_line_for_the_same_session_replaces_the_first` (two lines) and `cli::a_resumed_session_replaces_its_line` (the resumed session's end left two lines) |
+| TK0278-M2 | the cap is off by one (`max_lines + 1`) | ✅ 1 failed (rc=100) | `memory::sessions::tests::the_cap_drops_the_oldest_lines_and_keeps_the_newest_last` (1001 lines kept) |
+| TK0278-M3 | the `SESSIONS.md` write refusal in `radian-coding` is removed | ✅ 1 failed (rc=100) | `cli::the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers` (the `write` succeeded and the index content changed) |

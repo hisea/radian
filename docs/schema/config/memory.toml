@@ -14,3 +14,4 @@ enabled = true
 scopes = ["project", "global"]
 index_max_lines = 200
 index_max_bytes = 25600
+sessions_index_max_lines = 1000

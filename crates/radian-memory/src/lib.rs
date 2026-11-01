@@ -31,7 +31,7 @@ pub use error::{MemoryError, PurgeStep};
 pub use event::MemoryEvent;
 pub use files::{
     DESCRIPTION_MAX, FileProvenance, FileStore, Frontmatter, IndexLine, ListEntry, NAME_MAX,
-    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, index_lines, migrate_log,
+    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, SESSIONS_INDEX_FILE, index_lines, migrate_log,
 };
 #[doc(hidden)]
 pub use log::set_open_hook;

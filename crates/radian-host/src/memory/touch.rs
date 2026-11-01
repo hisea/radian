@@ -88,6 +88,11 @@ impl MemoryTouch {
         let Some(file_name) = real.file_name().and_then(|name| name.to_str()) else {
             return;
         };
+        // The two host-maintained files are not records (ADR 0021 D3): reading one never
+        // changes it.
+        if file_name == radian_memory::SESSIONS_INDEX_FILE {
+            return;
+        }
         let Some(stem) = file_name.strip_suffix(".md") else {
             return;
         };
@@ -198,6 +203,23 @@ mod tests {
         touch.after_tool(&read_call(&index), true);
 
         assert_eq!(std::fs::read_to_string(&index).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge: the host-maintained session index is not a record.
+    #[test]
+    fn a_read_of_sessions_md_touches_nothing() {
+        let (dir, service, touch) = touch("sessions-index");
+        let project = service.project_id().unwrap();
+        let path = service
+            .files()
+            .sessions_index_path(&Scope::Project(project));
+        std::fs::write(&path, "- sid 2026-10-31T00:00:00Z . — a task\n").unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        touch.after_tool(&read_call(&path), true);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
