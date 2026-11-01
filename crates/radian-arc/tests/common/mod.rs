@@ -1129,7 +1129,7 @@ impl FakeReview {
              if [ ! -f \"$d/text-$n\" ]; then n={last}; fi\n\
              me=$(cat \"$d/model-error-$n.json\" 2>/dev/null || true)\n\
              if [ -n \"$me\" ]; then outcome=failed; else outcome=completed; fi\n\
-             printf '{{\"type\":\"Result\",\"session_id\":\"%s\",\"outcome\":\"%s\",\"cost\":{{\"micros\":2000}},\"text\":' \"$sid\" \"$outcome\"\n\
+             printf '{{\"type\":\"Result\",\"session_id\":\"%s\",\"outcome\":\"%s\",\"cost\":{{\"micros\":2000}},\"run_metrics\":{{\"requests\":%s,\"input_uncached\":%s,\"cache_read\":%s,\"output\":%s,\"reasoning\":null,\"fee_micros\":2000,\"models\":[]}},\"text\":' \"$sid\" \"$outcome\" \"$n\" \"$((n*100))\" \"$((n*10))\" \"$n\"\n\
              cat \"$d/text-$n\"\n\
              if [ -n \"$me\" ]; then printf ',\"model_error\":%s' \"$me\"; fi\n\
              printf '}}\\n'\n\

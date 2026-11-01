@@ -93,6 +93,19 @@ fn priced_reply(text: &str, prompt: u64, completion: u64) -> Reply {
     ])
 }
 
+/// A tool call that reports usage, so the run's metrics count the request that made it.
+fn priced_tool_reply(id: &str, name: &str, arguments: &str, prompt: u64, completion: u64) -> Reply {
+    Reply::sse(&[
+        agent_provider_openai_compatible::testing::chunk(
+            json!({"tool_calls": [{"index": 0, "id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}}]}),
+            None,
+        ),
+        agent_provider_openai_compatible::testing::chunk(json!({}), Some("tool_calls")),
+        json!({"choices": [], "usage": {"prompt_tokens": prompt, "completion_tokens": completion}}),
+    ])
+}
+
 /// Writes the catalog cache the worker's process prices its calls from: model `m` under the
 /// provider `--base-url` resolves to (`openai-compatible`), at $3/M input and $15/M output.
 fn write_priced_catalog(repo: &Repo) {
@@ -389,6 +402,81 @@ fn a_radian_workers_attempt_cost_is_the_meta_cost_of_its_run() {
     assert_eq!(stored.cost_usd, Some(0.0105));
     assert_eq!(stored.total_cost_usd, Some(0.0105));
     assert!(!stored.cost_unknown, "a reported cost is not unknown");
+}
+
+/// A radian worker's `_meta.radian.metrics` is copied to the attempt's `Result.metrics`, and
+/// `show --json` reports it under the attempt's worker run. Three model requests with usage
+/// make the run's `requests` 3. Mutation: drop the `metrics` copy in `apply_radian_meta` and
+/// both reads lose it.
+#[test]
+fn a_radian_workers_result_metrics_reach_show() {
+    use radian_arc::store::plan_ops;
+
+    let repo = Repo::new("metrics-meta");
+    Store::init(&repo.clone, false).expect("arc init");
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store
+        .add_plan("metrics", "A plan", "the request\n")
+        .expect("add a plan");
+    let task = store
+        .add_task(
+            &plan,
+            "worker",
+            "A task",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the brief\n",
+        )
+        .expect("add a task");
+    plan_ops::confirm(&store, &plan).expect("confirm the plan");
+    let mock = Mock::start(vec![
+        priced_tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": "echo change > change.txt && git add change.txt && git commit -m change"})
+                .to_string(),
+            100,
+            10,
+        ),
+        priced_tool_reply("c2", "read", &json!({"path": "change.txt"}).to_string(), 200, 20),
+        priced_reply("done", 300, 30),
+    ]);
+    let extra = model_args(mock.base_url());
+    tune(
+        &repo,
+        "exec_args = []",
+        &format!(
+            "exec_args = [{}]",
+            extra
+                .iter()
+                .map(|arg| format!("\"{arg}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+
+    let run = repo.radian(&["arc", "start", &task]);
+    assert_eq!(run.code, 0, "start: {}", run.stderr);
+
+    let result = last_result(&repo.run_dir(&task, 1).join("result.jsonl"));
+    assert_eq!(
+        result["metrics"]["requests"],
+        json!(3),
+        "the run made three requests: {result}"
+    );
+    assert_eq!(
+        result["metrics"]["input_uncached"],
+        json!(600),
+        "each request's usage is folded: {result}"
+    );
+
+    let shown = radian_arc::store::cli::show_json(&store, &task).expect("show --json");
+    assert_eq!(
+        shown["metrics"]["attempts"][0]["worker"]["metrics"]["requests"],
+        json!(3),
+        "show reports the worker run's metrics: {shown}"
+    );
 }
 
 /// While task B's worktree exists, task A's sandboxed worker moves B's ref back to the

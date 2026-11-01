@@ -18,6 +18,9 @@ not a separate program. This crate is its control plane, in these modules:
   owner's approval and merge, and reject.
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
+- `read` — the read-only views `radian arc show` and the arc TUI use: a task's attempts and
+  verdicts, its change, and its attempts' runs, times and costs (`attempt_metrics`,
+  `task_metrics`).
 
 Every git call of these modules is built in the private `git` module.
 
@@ -445,7 +448,7 @@ One run:
    brief. The worker runs in its own process group, so a SIGTERM reaches it and every child
    that stays in the group. Its stdout is the protocol; every `session/update` is written to
    `runs/<task>/attempts/<task>-<n>/result.jsonl` as a `{"type":"acp",…}` envelope,
-   followed by the wrapper's one `Result` line from `_meta.radian` (`text`, `cost`); its
+   followed by the wrapper's one `Result` line from `_meta.radian` (`text`, `cost`, `metrics`); its
    stderr is `stderr.log`; the attempt fields, the session id included, go to
    `execution.json`. A fresh attempt after the first gets a hand-off section in front of the
    brief (`## Where the previous attempt left off`): the newest earlier attempt's
@@ -593,8 +596,10 @@ re-serialized verdict. Unusable output (no block, a missing field, a `severity` 
 `REVIEW_LEVELS`, a timeout, a session error) runs the session once more; two unusable runs
 fail with `review_output`, or `review_timeout` when the last run timed out.
 The verdict records `review`, `review_session_ids`, `review_cost_micros`, `review_settings`
-(`round`, `reviewer`, the effective `fix_level`, the `exec_args` source key, `timeout_secs` and
-its source key) and, in a rework round, `review_pre_existing`.
+(`round`, `reviewer`, the effective `fix_level`, the `exec_args` source key and the session's
+own arguments as `exec_args_values`, `timeout_secs` and its source key), `runs` (one
+`{run, session_id, started_at, ended_at, metrics}` per `radian exec` run) and, in a rework
+round, `review_pre_existing`.
 
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)

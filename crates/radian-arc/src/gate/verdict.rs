@@ -486,11 +486,35 @@ pub struct ReviewSettings {
     /// `gate.reviewers.<name>.exec_args`, their `gate.review` legacy spellings, or
     /// `worker.exec_args`.
     pub exec_args: String,
+    /// The session's own arguments, so a reader can name the run's `--provider`/`--model`
+    /// when its metrics report no `models` (ADR 0048 decision 10). Absent on a verdict written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_args_values: Vec<String>,
     /// The wall-time limit of one session, in seconds.
     pub timeout_secs: u64,
     /// The config key `timeout_secs` came from: `gate.reviewers.<name>.first.timeout_secs`,
     /// `gate.reviewers.<name>.timeout_secs`, or their `gate.review` legacy spellings.
     pub timeout: String,
+}
+
+/// One `radian exec` run of a `review` stage (ADR 0048 decision 10): its session and the
+/// metrics of the `Result` line that ended it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRunRecord {
+    /// The run's number, from 1: the `run` in `<attempt id>-review-<run>`.
+    pub run: u32,
+    /// The session id the run used.
+    pub session_id: String,
+    /// When the run started, RFC 3339 in UTC.
+    pub started_at: String,
+    /// When the run ended, RFC 3339 in UTC.
+    pub ended_at: String,
+    /// The run's `Result.run_metrics`, in the shape ADR 0044 §2 lists. Absent when the run's
+    /// `Result` carried none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Value>,
 }
 
 /// The verdict of one stage for one commit.
@@ -562,6 +586,11 @@ pub struct Verdict {
     /// (ADR 0048 decision 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_settings: Option<ReviewSettings>,
+    /// A `review` verdict only: one entry per `radian exec` run, in order, with its session,
+    /// times and `Result.run_metrics` (ADR 0048 decision 10). Empty for another stage and for
+    /// a verdict written before the list existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ReviewRunRecord>,
     /// The gate profile the stage ran under (ADR 0048 decisions 10 and 15). Absent on a
     /// verdict written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,6 +633,7 @@ impl Verdict {
             review_model_error: None,
             review_pre_existing: None,
             review_settings: None,
+            runs: Vec::new(),
             profile: None,
             integration_style: None,
         }

@@ -196,6 +196,7 @@ impl IntegrationRun<'_> {
             review_model_error: None,
             review_pre_existing: None,
             review_settings: None,
+            runs: Vec::new(),
             profile: Some(self.profile.to_owned()),
             integration_style: Some(self.style),
         };

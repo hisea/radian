@@ -317,6 +317,7 @@ fn write_verdict(
         review_model_error: None,
         review_pre_existing: None,
         review_settings: None,
+        runs: Vec::new(),
         profile: Some("default".to_owned()),
         integration_style: None,
     };
