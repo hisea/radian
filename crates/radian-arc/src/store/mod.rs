@@ -756,6 +756,35 @@ impl Store {
         brief: &str,
         flow: Option<&str>,
     ) -> Result<String, Error> {
+        self.add_task_with_fix_level(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            flow,
+            None,
+        )
+    }
+
+    /// [`Store::add_task_opt`] with the task's own `review_fix_level`: `Some` writes the field
+    /// and `None` leaves it out, so the task uses the `fix_level` of the reviewer its gate
+    /// profile names (ADR 0048 decision 10).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_with_fix_level(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: Option<bool>,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+        review_fix_level: Option<&str>,
+    ) -> Result<String, Error> {
         self.add_task_in(
             plan_id,
             slug,
@@ -766,6 +795,7 @@ impl Store {
             brief,
             false,
             flow,
+            review_fix_level,
         )
     }
 
@@ -834,6 +864,34 @@ impl Store {
         brief: &str,
         flow: Option<&str>,
     ) -> Result<String, Error> {
+        self.add_task_proposed_with_fix_level(
+            plan_id,
+            slug,
+            title,
+            after,
+            allow_noop,
+            extra_stages,
+            brief,
+            flow,
+            None,
+        )
+    }
+
+    /// [`Store::add_task_proposed_opt`] with the task's own `review_fix_level` (ADR 0048
+    /// decision 10).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_proposed_with_fix_level(
+        &self,
+        plan_id: &str,
+        slug: &str,
+        title: &str,
+        after: Vec<String>,
+        allow_noop: Option<bool>,
+        extra_stages: Vec<String>,
+        brief: &str,
+        flow: Option<&str>,
+        review_fix_level: Option<&str>,
+    ) -> Result<String, Error> {
         self.add_task_in(
             plan_id,
             slug,
@@ -844,6 +902,7 @@ impl Store {
             brief,
             true,
             flow,
+            review_fix_level,
         )
     }
 
@@ -861,11 +920,15 @@ impl Store {
         brief: &str,
         allow_confirmed: bool,
         flow: Option<&str>,
+        review_fix_level: Option<&str>,
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_id(plan_id)?;
         check_stages(&extra_stages)?;
         check_flow(self, flow)?;
+        if let Some(level) = review_fix_level {
+            check_fix_level(level)?;
+        }
         let _lock = self.lock_state()?;
         let plan = self.load_plan(plan_id)?;
         require_unchanged(plan_id, plan.changed_outside_arc)?;
@@ -882,6 +945,7 @@ impl Store {
             brief,
             allow_confirmed,
             flow.map(str::to_owned),
+            review_fix_level.map(str::to_owned),
         )
     }
 
@@ -950,6 +1014,7 @@ impl Store {
             &brief,
             true,
             None,
+            None,
         )
         .map(Some)
     }
@@ -968,6 +1033,7 @@ impl Store {
         brief: &str,
         allow_confirmed: bool,
         flow: Option<String>,
+        review_fix_level: Option<String>,
     ) -> Result<String, Error> {
         check_new(slug, title)?;
         check_stages(&extra_stages)?;
@@ -994,6 +1060,7 @@ impl Store {
             brief,
         );
         task.flow = flow;
+        task.review_fix_level = review_fix_level;
         if proposed {
             task.enter(model::TaskState::Todo, model::PROPOSED_PHASE);
         }
@@ -1393,6 +1460,18 @@ pub(crate) fn check_stages(stages: &[String]) -> Result<(), Error> {
                 STAGE_NAMES.join(", ")
             )));
         }
+    }
+    Ok(())
+}
+
+/// The `review_fix_level` rule `add_task` and `update_task` share: the value is one of
+/// [`crate::gate::REVIEW_LEVELS`], and an error names every value (ADR 0048 decision 10).
+pub(crate) fn check_fix_level(level: &str) -> Result<(), Error> {
+    if !crate::gate::REVIEW_LEVELS.contains(&level) {
+        return Err(Error::Refused(format!(
+            "`review_fix_level` `{level}` is not one of {}",
+            crate::gate::REVIEW_LEVELS.join(", ")
+        )));
     }
     Ok(())
 }

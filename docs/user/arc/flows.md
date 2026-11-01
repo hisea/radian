@@ -65,7 +65,7 @@ A flow sets one worker line: `acp`, `command` or a non-empty `exec_args`, never 
 ## How a task picks its flow
 
 A task's [`flow` field](files.md#task-fields) names one `[flows.<name>]` section; a task whose file has no `flow` field runs `default`.
-`radian arc add task --flow <name>` and the MCP `add_task` tool set it when the task is created (see [`add task`](planning.md#radian-arc-add-task-plan-id-slug-slug-title-title-after-id-allow-noop-bool-stage-name-flow-name)).
+`radian arc add task --flow <name>` and the MCP `add_task` tool set it when the task is created (see [`add task`](planning.md#radian-arc-add-task-plan-id-slug-slug-title-title-after-id-allow-noop-bool-stage-name-flow-name-review-fix-level-level)).
 The field may change only before the task's first attempt; after that, a different worker is a new task with `supersedes`.
 `radian arc list` and the arc TUI show a task's flow only when the repository defines a flow other than `default`; a repository whose `config.toml` has no such flow prints no flow column, and the task page always names it (`flow default` when the file has none).
 

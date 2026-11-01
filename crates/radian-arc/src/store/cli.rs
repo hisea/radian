@@ -56,6 +56,9 @@ pub enum Command {
         allow_noop: Option<bool>,
         stages: Vec<String>,
         flow: Option<String>,
+        /// `--review-fix-level`: the task's own level a finding must reach to fail its review
+        /// rounds, one of `REVIEW_LEVELS`. `None` leaves the field out (ADR 0048 decision 10).
+        review_fix_level: Option<String>,
     },
     /// `radian arc list [--plan <id>] [--all] [--json]`. `--all` does not change the JSON.
     List {
@@ -114,6 +117,7 @@ pub fn run(command: &Command) -> u8 {
             allow_noop,
             stages,
             flow,
+            review_fix_level,
         } => add_task(
             plan,
             slug,
@@ -122,6 +126,7 @@ pub fn run(command: &Command) -> u8 {
             *allow_noop,
             stages,
             flow.as_deref(),
+            review_fix_level.as_deref(),
         )
         .map(emit),
         Command::List { plan, all, json } => list(plan.as_deref(), *all, *json).map(emit),
@@ -245,6 +250,7 @@ fn add_plan(slug: &str, title: &str) -> Result<String, Error> {
     Ok(format!("{id}\n"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_task(
     plan: &str,
     slug: &str,
@@ -253,10 +259,16 @@ fn add_task(
     allow_noop: Option<bool>,
     stages: &[String],
     flow: Option<&str>,
+    review_fix_level: Option<&str>,
 ) -> Result<String, Error> {
+    // An invalid level is refused before anything is read or written, naming every value it
+    // may hold (ADR 0048 decision 10).
+    if let Some(level) = review_fix_level {
+        super::check_fix_level(level)?;
+    }
     let store = open()?;
     let brief = stdin_text()?;
-    let id = store.add_task_opt(
+    let id = store.add_task_with_fix_level(
         plan,
         slug,
         title,
@@ -265,6 +277,7 @@ fn add_task(
         stages.to_vec(),
         &brief,
         flow,
+        review_fix_level,
     )?;
     Ok(format!("{id}\n"))
 }
@@ -677,6 +690,12 @@ pub fn show_text(store: &Store, id: &str) -> Result<String, Error> {
             field(&mut out, "allow_noop_source", item.allow_noop_source());
             field(
                 &mut out,
+                "review_fix_level",
+                item.effective_fix_level(&config),
+            );
+            field(&mut out, "review_fix_level_source", item.fix_level_source());
+            field(
+                &mut out,
                 "followup_pending",
                 &item.followup_pending.to_string(),
             );
@@ -928,6 +947,8 @@ fn task_json(
         "supersedes": item.supersedes,
         "allow_noop": item.effective_allow_noop(config),
         "allow_noop_source": item.allow_noop_source(),
+        "review_fix_level": item.effective_fix_level(config),
+        "review_fix_level_source": item.fix_level_source(),
         "followup_pending": item.followup_pending,
         "pending_hooks": item.pending_hooks,
         "pending_hook_states": item.pending_hook_states,
