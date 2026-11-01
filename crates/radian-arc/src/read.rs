@@ -290,6 +290,9 @@ pub struct AttemptMetrics {
     /// The attempt's review stage's summed cost, in US dollars; `None` when no run reported
     /// one.
     pub review_cost_usd: Option<f64>,
+    /// The whole seconds the task waited for a free worker slot before this attempt started,
+    /// from its `queue.json`; `None` when the attempt has no such file or it records no wait.
+    pub queue_wait_secs: Option<u64>,
 }
 
 /// The sums over every run of a task's attempts, in `task_metrics`.
@@ -314,6 +317,8 @@ pub struct MetricsTotal {
     /// The cost the task's attempts added, in US dollars, summed over the attempts that
     /// reported one.
     pub total_cost_usd: Option<f64>,
+    /// The queue wait the attempts reported, in whole seconds, summed.
+    pub queue_wait_secs: Option<u64>,
     /// How many runs reported nothing: no metrics at all, or no request and no token count.
     pub unreported_runs: u64,
 }
@@ -489,10 +494,10 @@ pub fn task_attempts(store: &Store, task: &str) -> Result<Vec<AttemptView>, Erro
     Ok(attempts)
 }
 
-/// One attempt's metrics (ADR 0048 decisions 7, 10 and 12): its worker run, every `review`
-/// run, the `commands` and `integration` stage times, the recorded diff and increment, and the
-/// attempt's and review's costs. Each part comes from a file; a missing or torn file reads as
-/// not reported and is not an error.
+/// One attempt's metrics (ADR 0048 decisions 7, 10, 12 and 13): its worker run, every `review`
+/// run, the `commands` and `integration` stage times, the recorded diff and increment, the
+/// attempt's and review's costs, and the queue wait it reported. Each part comes from a file; a
+/// missing or torn file reads as not reported and is not an error.
 ///
 /// # Errors
 ///
@@ -521,10 +526,11 @@ pub fn attempt_metrics(store: &Store, task: &str, attempt: u32) -> Result<Attemp
         increment,
         cost_usd: attempt_ops::attempt_added_cost(store, task, attempt),
         review_cost_usd,
+        queue_wait_secs: attempt_ops::read_queue_wait_secs(store, task, attempt),
     })
 }
 
-/// Every attempt of `task` and the sums over its runs (ADR 0048 decisions 7, 10 and 12).
+/// Every attempt of `task` and the sums over its runs (ADR 0048 decisions 7, 10, 12 and 13).
 /// `total` sums each field over the runs that reported it, so a counter no run reported stays
 /// `None` rather than becoming 0; `unreported_runs` counts the runs that reported no request
 /// and no token count.
@@ -543,6 +549,7 @@ pub fn task_metrics(store: &Store, task: &str) -> Result<TaskMetrics, Error> {
         }
         add_cost(&mut total.total_cost_usd, metrics.cost_usd);
         add_cost(&mut total.total_cost_usd, metrics.review_cost_usd);
+        add_count(&mut total.queue_wait_secs, metrics.queue_wait_secs);
         attempts.push(metrics);
     }
     Ok(TaskMetrics { attempts, total })

@@ -70,6 +70,13 @@ A ready task whose flow is full says `waiting for a free <flow> slot` (for examp
 A file that changed outside arc is skipped and named in the summary; it does not stop the loop.
 A plan whose budget or automatic-rework limit paused it is named with its reason.
 
+A task the pass finds startable but does not start begins a queue wait.
+It writes `runs/<task>/eligible_at.json` the first time a pass finds it startable and leaves it unstarted: a full [`limits.concurrency`](config.md#configtoml), a full [`flows.<name>.concurrency`](config.md#configtoml), the hub's machine-wide [`hub.concurrency`](config.md#configtoml) cap, or a claim another writer refused.
+The file is written once and never rewritten, so the wait keeps the first pass's time.
+The claim moves it into the attempt's `runs/<task>/attempts/<attempt id>/queue.json` as `queue_wait_secs` (whole seconds) beside `started_at`, and a `radian arc start` of a task with no such file writes `0`; a task that leaves `todo.ready` another way, or whose plan is paused, loses the file and starts a fresh wait when it returns (see [an attempt's queue wait](files.md#an-attempts-queue-wait)).
+The wait resolves to the pass interval: `hub.interval_secs` for the hub's loop, and one pass of a one-shot `radian arc run`.
+`radian arc show` prints it beside the worker's `wall`.
+
 `run` exits `0` when it ran to quiet, even when a task failed; `1` on a git or file error, `3` when the worker's `radian acp` line is rejected, and `4` when another process holds `runner.lock`. It never waits for the lock.
 
 ### `loop.log`

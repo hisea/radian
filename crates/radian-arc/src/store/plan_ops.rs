@@ -258,6 +258,13 @@ pub fn pause(store: &Store, plan: &str) -> Result<(), Error> {
         plan.auto = "off".to_owned();
         Ok(())
     })?;
+    // A paused plan starts nothing: a task that had begun a queue wait loses it, so a later
+    // resume starts a fresh one (ADR 0048 decision 13).
+    if let Ok(loaded) = store.load_plan(plan) {
+        for task in loaded.item.tasks {
+            super::attempt_ops::clear_eligible_at(store, &task);
+        }
+    }
     Ok(())
 }
 
@@ -410,6 +417,7 @@ pub fn update_task_with_flow(
     // command asks: the plan's `status`, or its tasks all `failed.cancelled`.
     store.refuse_cancelled(&store.load_task(task)?.item.plan)?;
     let now = utc_now();
+    let after_changed = after.is_some();
     store.change_task(task, |task_file| {
         if task_file.state != TaskState::Todo {
             if task_file.state == TaskState::Review {
@@ -473,6 +481,11 @@ pub fn update_task_with_flow(
         append_task_change(&mut task_file.body, &now, &changed);
         Ok(())
     })?;
+    // A new `after` list is a new startability question, so a wait that began under the old one
+    // starts over when the task is next skipped (ADR 0048 decision 13).
+    if after_changed {
+        super::attempt_ops::clear_eligible_at(store, task);
+    }
     Ok(())
 }
 

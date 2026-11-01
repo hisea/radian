@@ -2101,3 +2101,20 @@ file was restored from a copy under `.radian/mut/`, which `cmp` found identical.
 | TK0288-M6 | `metrics_text` skips a `diff` or `increment` line whose value is `None`, so an unreported value has no line | `metrics::the_text_block_prints_a_dash_for_an_unreported_diff_and_increment` (the text held neither `diff: -` nor `increment: -`) | ✅ 1 failed |
 
 6/6 caught.
+
+## TK0289: a task's queue wait (2026-11-01, branch `work/TK0289-arc-queue-wait`)
+
+A scheduling pass writes `runs/<task>/eligible_at.json` the first time it finds a startable task
+and does not start it, once and never rewritten; the claim moves the time into the attempt's
+`queue.json` and deletes the record; a task that leaves `todo.ready` another way, or whose plan is
+paused, loses it. Each mutation was applied by hand to the working file, the named test ran with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test queue_wait -E 'test(<name>)'`,
+and the file was restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0289-M1 | `record_eligible_at` drops the "return when the file exists" guard, so a second skipping pass rewrites the time | `queue_wait::a_second_skipping_pass_does_not_rewrite_the_record` (the second pass's record read the later time) | ✅ 1 failed |
+| TK0289-M2 | `plan_ops::pause` no longer clears the plan's eligibility records, so a paused plan keeps the wait it had | `queue_wait::a_paused_plan_drops_the_wait_and_does_not_begin_one` (the file survived the pause) | ✅ 1 failed |
+| TK0289-M3 | `write_queue_record` no longer deletes `eligible_at.json` after the claim | `queue_wait::a_rework_attempt_waits_again_and_gets_its_own_queue_record` (the record survived the claim) | ✅ 1 failed |
+
+3/3 caught.

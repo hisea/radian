@@ -19,8 +19,8 @@ not a separate program. This crate is its control plane, in these modules:
 - `work` — `radian arc work`, the trusted wrapper around one worker attempt. It is internal:
   arc runs it, a person does not.
 - `read` — the read-only views `radian arc show` and the arc TUI use: a task's attempts and
-  verdicts, its change, and its attempts' runs, times and costs (`attempt_metrics`,
-  `task_metrics`).
+  verdicts, its change, and its attempts' runs, times, queue waits and costs
+  (`attempt_metrics`, `task_metrics`).
 
 Every git call of these modules is built in the private `git` module.
 

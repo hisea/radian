@@ -1068,9 +1068,6 @@ fn start_ready(
     let config = store.config()?;
     let concurrency = u64::from(config.limits.concurrency.max(1));
     let mut doing = attempt_ops::doing_counts(store)?;
-    if doing.total >= concurrency {
-        return Ok(false);
-    }
     let mut claims: Vec<(Claim, model::TaskFile)> = Vec::new();
     for view in plans_in_claim_order(store)? {
         if doing.total >= concurrency {
@@ -1127,6 +1124,10 @@ fn start_ready(
             }
         }
     }
+    // Every start this pass could make is decided; a startable task it left unstarted starts
+    // its queue wait here, once (ADR 0048 decision 13). It never rewrites a record the first
+    // skip wrote, and a task this pass did start has no record.
+    record_queue_waits(store, &config, &claims)?;
     if claims.is_empty() {
         return Ok(false);
     }
@@ -1147,6 +1148,58 @@ fn start_ready(
         transitions.push(format!("{} started -> doing.running", claim.attempt_id));
     }
     Ok(true)
+}
+
+/// Records the queue wait of every task this pass found startable but did not start: the pass
+/// writes `runs/<task>/eligible_at.json` the first time a startable task is left unstarted, and
+/// never rewrites it (ADR 0048 decision 13). A task the pass did start is in `claims` and gets
+/// no record. A task that is not startable gets no record either.
+fn record_queue_waits(
+    store: &Store,
+    config: &crate::store::config::Config,
+    claims: &[(Claim, model::TaskFile)],
+) -> Result<(), Error> {
+    let now = plan_ops::utc_now();
+    for view in plans_in_claim_order(store)? {
+        if view.plan.changed_outside_arc
+            || view.plan.item.status != "confirmed"
+            || !matches!(view.plan.item.auto.as_str(), "run" | "merge")
+        {
+            continue;
+        }
+        for task in &view.tasks {
+            if claims.iter().any(|(claim, _)| claim.task == task.item.id) {
+                continue;
+            }
+            if task.changed_outside_arc || !startable(store, config, &task.item)? {
+                continue;
+            }
+            attempt_ops::record_eligible_at(store, &task.item.id, &now)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a scheduling pass could start `task` now, apart from a full concurrency slot: the
+/// task is `todo.ready`, every `after` task is merged, and its flow is defined (ADR 0048
+/// decision 13). A task held by `retry_at` or a budget is not `todo.ready` and so is not
+/// startable. The caller checks that the file did not change outside arc.
+fn startable(
+    store: &Store,
+    config: &crate::store::config::Config,
+    task: &model::TaskFile,
+) -> Result<bool, Error> {
+    if task.state != TaskState::Todo || task.phase != "ready" {
+        return Ok(false);
+    }
+    let flow = task
+        .flow
+        .as_deref()
+        .unwrap_or(crate::store::config::DEFAULT_FLOW);
+    if !config.flows.contains_key(flow) {
+        return Ok(false);
+    }
+    after_merged(store, task)
 }
 
 /// Merges every finished task of a plan at `auto` `merge`, in claim order. `true` when a task

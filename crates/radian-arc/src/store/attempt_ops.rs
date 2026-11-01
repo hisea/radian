@@ -48,6 +48,12 @@ pub const HEARTBEAT_FILE: &str = "heartbeat.json";
 /// file: it is bookkeeping that keeps the charge idempotent when a pass dies between the charge
 /// and the state move, like the conflict rework count.
 pub const REVIEW_COST_FILE: &str = "review_cost.json";
+/// The time the first scheduling pass found the task startable and did not start it, in the
+/// task's run directory. The claim turns it into the attempt's [`QUEUE_FILE`].
+pub const ELIGIBLE_AT_FILE: &str = "eligible_at.json";
+/// One attempt's queue wait, in the attempt's run directory: the eligibility time the claim
+/// found, its own start time and the whole seconds between them.
+pub const QUEUE_FILE: &str = "queue.json";
 
 /// The longest gap between two heartbeats: 15 seconds, or a third of the stall window when
 /// that is shorter.
@@ -355,6 +361,120 @@ pub fn attempt_dir(store: &Store, task: &str, attempt: u32) -> PathBuf {
         .join(attempt.to_string())
 }
 
+/// `runs/<task>/eligible_at.json`.
+pub fn eligible_at_path(store: &Store, task: &str) -> PathBuf {
+    store.root().join("runs").join(task).join(ELIGIBLE_AT_FILE)
+}
+
+/// What a claim found where the eligibility record should be.
+enum Eligible {
+    /// There is no file: the task was started by the pass that first found it startable.
+    Missing,
+    /// The file exists but does not read: the wait is not reported.
+    Torn,
+    /// The file reads and names a time.
+    At(String),
+}
+
+/// Reads the eligibility record without failing: a missing file and a torn one are both normal,
+/// because a pass can die between the two writes that make and consume it.
+fn read_eligible(store: &Store, task: &str) -> Eligible {
+    let path = eligible_at_path(store, task);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Eligible::Missing,
+        Err(_) => return Eligible::Torn,
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Eligible::Torn;
+    };
+    let Some(at) = value.get("eligible_at").and_then(Value::as_str) else {
+        return Eligible::Torn;
+    };
+    if chrono::DateTime::parse_from_rfc3339(at).is_err() {
+        return Eligible::Torn;
+    }
+    Eligible::At(at.to_owned())
+}
+
+/// Writes the first scheduling pass that found `task` startable and did not start it, once: an
+/// existing record is never rewritten, so the wait keeps its first time.
+pub fn record_eligible_at(store: &Store, task: &str, at: &str) -> Result<(), Error> {
+    let path = eligible_at_path(store, task);
+    if path.exists() {
+        return Ok(());
+    }
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(&json!({"eligible_at": at}))
+        .map_err(|error| Error::Failed(format!("cannot encode the eligibility record: {error}")))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))
+}
+
+/// Drops the eligibility record of a task that left the startable set, so a later return starts
+/// a fresh wait. A missing file is not an error.
+pub fn clear_eligible_at(store: &Store, task: &str) {
+    let _ = fs::remove_file(eligible_at_path(store, task));
+}
+
+/// The whole seconds from `eligible_at` to `started_at`, never negative. `None` when either
+/// time does not parse.
+fn queue_wait_secs(eligible_at: &str, started_at: &str) -> Option<u64> {
+    let from = chrono::DateTime::parse_from_rfc3339(eligible_at).ok()?;
+    let to = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let seconds = to.signed_duration_since(from).num_seconds();
+    Some(u64::try_from(seconds).unwrap_or(0))
+}
+
+/// Writes `queue.json` for a claimed attempt and consumes `eligible_at.json`. Called under the
+/// claim's `state.lock`, after the task file moved to `doing` and `start.json` was written.
+fn write_queue_record(
+    store: &Store,
+    task: &str,
+    attempt: u32,
+    started_at: &str,
+) -> Result<(), Error> {
+    let eligible = read_eligible(store, task);
+    let mut record = serde_json::Map::new();
+    record.insert("started_at".to_owned(), json!(started_at));
+    match eligible {
+        Eligible::Missing => {
+            record.insert("queue_wait_secs".to_owned(), json!(0));
+        }
+        Eligible::Torn => {}
+        Eligible::At(at) => {
+            if let Some(seconds) = queue_wait_secs(&at, started_at) {
+                record.insert("eligible_at".to_owned(), json!(at));
+                record.insert("queue_wait_secs".to_owned(), json!(seconds));
+            }
+        }
+    }
+    let path = run_dir(store, task, attempt).join(QUEUE_FILE);
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Failed(format!("{} has no directory", path.display())))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let text = serde_json::to_string_pretty(&Value::Object(record))
+        .map_err(|error| Error::Failed(format!("cannot encode the queue record: {error}")))?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| Error::Failed(format!("cannot write {}: {error}", path.display())))?;
+    clear_eligible_at(store, task);
+    Ok(())
+}
+
+/// The whole seconds one attempt waited for a free worker slot, from its `queue.json`: `None`
+/// when the attempt has no such file or the file records no wait.
+pub fn read_queue_wait_secs(store: &Store, task: &str, attempt: u32) -> Option<u64> {
+    let text = fs::read_to_string(run_dir(store, task, attempt).join(QUEUE_FILE)).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get("queue_wait_secs").and_then(Value::as_u64)
+}
+
 /// The wrapper's end record for one attempt, when it wrote one. The host-local `status.json`
 /// is the fallback: the wrapper writes both, and either proves the attempt ended.
 pub fn read_finish(store: &Store, task: &str, attempt: u32) -> Option<Finish> {
@@ -587,10 +707,11 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
     let dir = attempt_dir(store, task_id, number);
     fs::create_dir_all(&dir)
         .map_err(|error| Error::Failed(format!("cannot create {}: {error}", dir.display())))?;
+    let started_at = super::plan_ops::utc_now();
     let record = json!({
         "attempt_id": attempt_id,
         "token": token,
-        "started_at": super::plan_ops::utc_now(),
+        "started_at": started_at.clone(),
         // The session the claim decided on, so `show` and the arc TUI can open a running
         // worker's journal before the wrapper has written `identity.json` or
         // `execution.json` (ADR 0048 decision 4). The worker is here for the same reason: a
@@ -606,6 +727,10 @@ pub fn claim_by(store: &Store, task_id: &str, by: ClaimBy) -> Result<Claim, Erro
             dir.join(START_FILE).display()
         ))
     })?;
+    // The attempt's queue wait (ADR 0048 decision 13): the pass that first found the task
+    // startable but did not start it left its time in `runs/<task>/eligible_at.json`; the claim
+    // moves it here and deletes it. A task this claim is the first to find startable waits 0.
+    write_queue_record(store, task_id, number, &started_at)?;
     Ok(Claim {
         task: task_id.to_owned(),
         attempt: number,

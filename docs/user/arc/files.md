@@ -172,11 +172,13 @@ Everything arc stores for one repository is in `<repository>/.radian/arc/`:
 | `runs/<task>/gate.json.lock` | The lock a pass and the gate process take around a write or removal of `gate.json`. A pass reads the record under it before it names the process it started, so that record is never written back over the gate's `running` one, and a record a pass removes is not put back by a holder that already read it. |
 | `runs/<task>/auto_reverify.json` | The `(head_sha, remote target branch)` pairs a scheduling pass already re-verified for the task, and the text of the last `limits.max_auto_reverify` stop. |
 | `runs/<task>/conflict_rework.json` | How many conflict reworks arc has written for the task in a row. The lead's rework and an attempt that does not end in a conflict set it back to `0`. |
+| `runs/<task>/eligible_at.json` | The time the first scheduling pass found the task startable and did not start it: an object `{"eligible_at": "<RFC 3339 UTC time>"}`. It is written once and never rewritten; the claim turns it into that attempt's `queue.json` and deletes it. |
 | `runs/<task>/review_cost.json` | The attempt whose `review` stage cost arc already added to the task's counters, with the `cost_after` and `total_after` counters that charge produced. A pass that dies between the charge and the state move therefore neither loses nor doubles the review: an application whose task counters do not carry the recorded charge adds it again. |
 | `runs/<task>/hooks/<point>-NN.log` | One hook command's stdout and stderr, where `NN` is the command's position in the point's list from 1 (`after_merge-01.log`). A point with `[]`, or one whose commands never started, has no file. |
 | `runs/<task>/attempts/<attempt id>/verdicts/` | One gate verdict per stage (`commands.json`, `human.json`, `integration.json`, …), the last verify/merge reason (`review.json`), and an owner's reject note (`reject.md`). A `review` verdict's `review_settings` names the `reviewer` it used and the effective `fix_level`, beside the `round`, the `exec_args` source key and the session's own arguments as `exec_args_values`, and `timeout_secs` with its source key. A `review` verdict's `runs` lists each review run's session, times and metrics (see [an attempt's metrics](#an-attempts-metrics)). |
 | `runs/<task>/attempts/<attempt id>/profile.json` | The gate profile that attempt's verification ran under: its name, stages, `before_attempt`, `commands` and `reviewer`. A merge of that attempt reads it, so a flow removed or a [`gate_profile`](config.md#configtoml) changed after the gate ran does not change how its verdicts are approved and integrated. Its old `key_commands` still reads, but integration uses the current [`integration.key_commands`](config.md#configtoml), never it. A verdict written before the file existed leaves it absent, and the merge resolves the flow's profile then. |
 | `runs/<task>/attempts/<attempt id>/logs/` | One log per gate command (`commands-01.log`, `integration-01.log`, …). |
+| `runs/<task>/attempts/<attempt id>/queue.json` | One attempt's queue wait: `eligible_at` (RFC 3339 UTC time, absent when no `eligible_at.json` existed), `started_at` (RFC 3339 UTC time, the claim's time) and `queue_wait_secs` (integer whole seconds, `0` when no `eligible_at.json` existed, absent when the file could not be read). An attempt from before the file existed has none. |
 | `runs/<task>/attempts/<attempt id>/merge-command.log` | The stdout and stderr of the [`integration.command`](config.md#configtoml) merge command; each run of the command overwrites it. |
 | `attempts/<task>/…` | The host-local attempt records: `base_sha`, `last_head`, and per attempt `start.json`, `identity.json`, `status.json`, `heartbeat.json`. |
 | `attempts/<task>/state/` | The directory a command worker receives as [`ARC_STATE_DIR`](worker.md#another-agent-as-the-worker): outside the worktree, kept across the task's attempts. The command may keep its own state there. |
@@ -201,6 +203,31 @@ Its last `Result` line carries `metrics` for the `radian` worker: the object `ra
 `runs/<task>/attempts/<attempt id>/diffstat.json` is written by the `commands` stage: `diff` and, for an attempt after the first, `increment`, each an object `{files, added, removed}` (integers: the number of changed files, of added lines and of removed lines). `diff` covers the merge base of the remote target branch and the attempt's head to that head, the range the `review` stage reads; `increment` covers the rework's own change, the range a rework review reads. A binary file counts as a file with `0` added and `0` removed lines, and a rename counts as one file with `0` added and `0` removed lines: rename detection is forced, so neither count depends on the repository's `diff.renames` setting. A missing or torn file is not reported.
 
 A `review` verdict's `runs` is a list, one entry per `radian exec` run in order: `run` (integer, from 1), `session_id` (string), `started_at` and `ended_at` (RFC 3339 UTC), and `metrics` (that run's `Result.run_metrics` object, absent when its result carried none). A verdict written before the list existed reads it as empty. The verdict's `review_settings` also carries `exec_args_values`, the session's own `radian exec` arguments (a list of strings).
+
+### An attempt's queue wait
+
+`runs/<task>/eligible_at.json` records when a task first waited for a free worker slot.
+A scheduling pass finds a task startable when it is `todo.ready`, every `after` task is merged, its plan is `confirmed` and not paused, and it is not held by `retry_at` or a budget.
+The first pass that finds the task startable but does not start it writes the file, an object with one key:
+
+| Key | Type | Unit | What it holds |
+|---|---|---|---|
+| `eligible_at` | string | RFC 3339 UTC time | The pass's time. |
+
+The pass writes the file once and never rewrites it, so the wait begins at the first pass that found the task startable. A task the same pass started waits `0` and gets no file. A full [`limits.concurrency`](config.md#configtoml), a full [`flows.<name>.concurrency`](config.md#configtoml), the hub's machine-wide [`hub.concurrency`](config.md#configtoml) cap, and a claim another writer refused are the ways a startable task stays unstarted. A task that leaves `todo.ready` another way (a cancel, an `update_task` that changes its `after` list) or whose plan is paused deletes the file, so a later return starts a fresh wait.
+
+The claim that starts the attempt moves the time into `runs/<task>/attempts/<attempt id>/queue.json` and deletes `eligible_at.json`.
+That object holds:
+
+| Key | Type | Unit | What it holds |
+|---|---|---|---|
+| `eligible_at` | string | RFC 3339 UTC time | The time from `eligible_at.json`; absent when no such file existed. |
+| `started_at` | string | RFC 3339 UTC time | The claim's time, the attempt's start. |
+| `queue_wait_secs` | integer | whole seconds, `0` or more | `started_at` minus `eligible_at`, never below `0`; `0` when no `eligible_at.json` existed; absent when the file could not be read. |
+
+The resolution is the scheduling loop's pass interval: the wait is measured in passes, so a one-shot `radian arc run` resolves it to that pass and the hub's loop to [`hub.interval_secs`](config.md#configtoml).
+`radian arc show` prints the value on the attempt's `worker` line as `queue_wait_secs`, beside `wall`; an attempt from before `queue.json` existed prints `-` (see [`radian arc show`](planning.md#radian-arc-show-id-json)).
+A `radian arc start` of a task with no `eligible_at.json` writes `queue_wait_secs` `0`.
 
 Every change is one transaction under `state.lock`:
 take the lock (waiting up to 5 seconds, then exit `4`), compare the file with the ledger, write a temporary file, flush it to disk, rename it over the old one, flush the directory, record the new version and hash in the ledger, release.

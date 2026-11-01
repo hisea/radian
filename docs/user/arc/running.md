@@ -25,6 +25,7 @@ Before it reconciles, claims or verifies anything, `start` checks the worker lin
 Without `[worker] command`, it parses the line the worker would get: the wrapper's fixed `radian acp` arguments plus `[worker] exec_args`.
 A line `radian acp` would reject, or one that repeats an argument the wrapper sets, refuses the command with exit `3` and the parser's own message, names `worker.exec_args`, claims nothing, and changes no file.
 With `[worker] command` set, arc checks instead that the program resolves (see [Another agent as the worker](worker.md#another-agent-as-the-worker)); a program that does not resolve refuses the command the same way, naming `worker.command` and the program. A flow's `acp` or `command` program is checked the same way and named by its own key.
+An attempt `start` claims with no `runs/<task>/eligible_at.json` writes `queue_wait_secs` `0` to its `queue.json`; the wait a scheduling pass measures is in [an attempt's queue wait](files.md#an-attempts-queue-wait).
 
 Before it claims anything it reconciles every task in `doing` (see [Reconcile](gate.md#reconcile)) and moves a `todo.retry_wait` task whose `retry_at` has passed back to `todo.ready`.
 

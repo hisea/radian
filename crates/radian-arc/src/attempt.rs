@@ -563,7 +563,11 @@ fn cancel_plan_tasks(store: &Store, task_ids: &[String]) -> Result<Vec<Canceled>
 
 /// One task's cancel, after the caller's reconcile: the task form of [`cancel_any`].
 fn cancel_task(store: &Store, task_id: &str) -> Result<Canceled, Error> {
-    cancel_task_once(store, task_id, true)
+    let canceled = cancel_task_once(store, task_id, true)?;
+    // The task left `todo.ready` for good: its queue wait starts over if it ever returns
+    // (ADR 0048 decision 13).
+    attempt_ops::clear_eligible_at(store, task_id);
+    Ok(canceled)
 }
 
 /// [`cancel_task`], with `again` naming whether a task the read found `todo` may be cancelled

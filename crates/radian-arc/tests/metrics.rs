@@ -330,3 +330,66 @@ fn a_torn_diffstat_reads_as_not_reported_and_show_succeeds() {
         "show --json exits 0 with a torn diffstat"
     );
 }
+
+/// Edge 7: an attempt directory from before `queue.json` existed reports no queue wait, and
+/// `show` prints `-` beside the worker's wall time. Mutation: require `queue.json` and an old
+/// attempt fails to read.
+#[test]
+fn an_attempt_without_queue_json_reports_no_queue_wait() {
+    let fixture = Fixture::new("no-queue");
+    write_json_at(
+        &fixture.run_dir(1).join("execution.json"),
+        &json!({
+            "session_id": "s",
+            "started_at": "2026-01-01T00:00:00Z",
+            "ended_at": "2026-01-01T00:00:03Z",
+        }),
+    );
+
+    let metrics = read::attempt_metrics(&fixture.store, &fixture.task, 1).expect("metrics");
+    assert_eq!(metrics.queue_wait_secs, None);
+
+    let id = format!("{}-1", fixture.task);
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    assert!(
+        text.contains(&format!("attempt {id} worker:")),
+        "the worker line prints: {text}"
+    );
+    assert!(
+        text.contains("queue_wait_secs=-"),
+        "an attempt without queue.json prints `-`: {text}"
+    );
+    let shown = cli::show_json(&fixture.store, &fixture.task).expect("show --json");
+    assert_eq!(
+        shown["metrics"]["attempts"][0]["queue_wait_secs"],
+        json!(null),
+        "an attempt without queue.json reports none: {shown}"
+    );
+}
+
+/// The task's total sums the queue waits the attempts reported, and a field no attempt
+/// reported stays `null`.
+#[test]
+fn the_task_total_sums_the_reported_queue_waits() {
+    let fixture = Fixture::new("queue-total");
+    for (attempt, wait) in [(1_u32, 2_u64), (2, 3)] {
+        write_json_at(
+            &fixture.run_dir(attempt).join("queue.json"),
+            &json!({
+                "eligible_at": "2026-01-01T00:00:00Z",
+                "started_at": "2026-01-01T00:00:02Z",
+                "queue_wait_secs": wait,
+            }),
+        );
+    }
+
+    let metrics = read::task_metrics(&fixture.store, &fixture.task).expect("metrics");
+    assert_eq!(metrics.attempts.len(), 2);
+    assert_eq!(metrics.attempts[0].queue_wait_secs, Some(2));
+    assert_eq!(metrics.attempts[1].queue_wait_secs, Some(3));
+    assert_eq!(metrics.total.queue_wait_secs, Some(5));
+
+    let empty = Fixture::new("queue-total-empty");
+    let metrics = read::task_metrics(&empty.store, &empty.task).expect("metrics");
+    assert_eq!(metrics.total.queue_wait_secs, None);
+}

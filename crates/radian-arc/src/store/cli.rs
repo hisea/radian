@@ -864,7 +864,14 @@ fn metrics_text(out: &mut String, metrics: &crate::read::TaskMetrics) {
     out.push_str("metrics:\n");
     for attempt in &metrics.attempts {
         let id = &attempt.attempt_id;
-        out.push_str(&run_line(id, "worker", &attempt.worker));
+        // The worker line also carries the attempt's queue wait, beside its wall time
+        // (ADR 0048 decision 13). An attempt without `queue.json` prints `-`.
+        let worker = run_line(id, "worker", &attempt.worker);
+        out.push_str(worker.trim_end_matches('\n'));
+        out.push_str(&format!(
+            " queue_wait_secs={}\n",
+            optional_number(attempt.queue_wait_secs)
+        ));
         for run in &attempt.reviews {
             let label = run
                 .run
