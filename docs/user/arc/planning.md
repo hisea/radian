@@ -82,7 +82,7 @@ Reads the request text from stdin to end of input, writes `plans/<id>.md`, and p
 The body is the request text, then a `## Change records` section.
 A confirmed plan may only gain change records there; the request text itself is never rewritten.
 
-### `radian arc add task --plan <ID> --slug <SLUG> --title <TITLE> [--after <ID>]... [--allow-noop [BOOL]] [--stage <NAME>]... [--flow <NAME>]`
+### `radian arc add task --plan <ID> --slug <SLUG> --title <TITLE> [--after <ID>]... [--allow-noop [BOOL]] [--stage <NAME>]... [--flow <NAME>] [--review-fix-level <LEVEL>]`
 
 Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the id to the plan's `tasks` list, and prints the id.
 
@@ -95,6 +95,7 @@ Reads the brief from stdin to end of input, writes `tasks/<id>.md`, appends the 
 | `--allow-noop` | `BOOL` | The task's own `allow_noop`: whether it may deliver no change on purpose. The flag alone means `true`; `--allow-noop false` sets an explicit `false`. Without the flag the field is not written, so the task uses its flow's [`flows.<name>.allow_noop`](config.md#configtoml). |
 | `--stage` | `NAME` | An extra gate stage to run for this task. Repeat the flag. The value is `commands`, `mutation`, `review`, `ci`, or `human`. |
 | `--flow` | `NAME` | The flow whose worker every attempt starts: a `[flows.<name>]` section of `config.toml` ([the flow rows](config.md#flows)). Default: `default`. A name the file does not define exits `3` and names the flows it does. |
+| `--review-fix-level` | `LEVEL` | The task's own `review_fix_level`: the level a finding must reach to fail its review rounds. The value is `critical`, `major` or `minor`; without the flag the field is not written, so the task uses the `fix_level` of the reviewer its gate profile names. Any other value exits `3` and names the three. |
 
 A task can only be added to a plan that is `draft` and not cancelled by its tasks; a confirmed or cancelled plan exits `3`.
 An `--after` id must name a task of the same plan or a task whose state is `done`; anything else exits `3`.
@@ -139,8 +140,9 @@ When everything is hidden, that line is the whole output; nothing hidden means n
 A plan or task whose file does not match arc's record is marked `(changed outside arc)`.
 
 The JSON array holds one object per plan: `id`, `title`, `status`, `auto`, `priority`, `max_cost_usd`, `max_wall_time_secs`, `cost_usd` (its tasks' `cost_usd` sum, the number the plan budget compares), `total_cost_usd` (its tasks' totals sum), `cost_unknown` (`true` when one of its tasks is), `changed_outside_arc`, and `tasks`.
-Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `followup_pending`, `pending_hooks`, `pending_hook_states`, `merged_sha`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
+Each task object holds `id`, `plan`, `flow`, `title`, `state`, `phase`, `queue_reason`, `attempt`, `attempt_id`, `token`, `cost_usd`, `total_cost_usd`, `cost_unknown`, `auto_rework`, `retry_count`, `after`, `supersedes`, `allow_noop`, `allow_noop_source`, `review_fix_level`, `review_fix_level_source`, `followup_pending`, `pending_hooks`, `pending_hook_states`, `merged_sha`, `extra_stages`, `max_attempts`, `max_cost_usd`, `max_wall_time_secs`, `stall_timeout_secs`, `base_sha`, `head_sha`, `verified_sha`, `verdict_set_digest`, `retry_at`, and `changed_outside_arc`.
 `allow_noop` is the effective value: the task's own when its file carries the field, else its flow's. `allow_noop_source` is `task` or `flow`, the one it came from.
+`review_fix_level` is the effective value: the task's own when its file carries the field, else the `fix_level` of the reviewer its gate profile names. `review_fix_level_source` is `task` or `reviewer`, the one it came from.
 `flow` is the task's flow name, and `default` when its file has no `flow` field.
 `queue_reason` is the slot reason the task line prints (`waiting for a free <flow> slot` or `waiting for a free concurrency slot`), or `null` when no limit holds the task.
 
@@ -169,8 +171,9 @@ The id names one plan or task. An id that names both a plan and a task is refuse
 
 The object holds the same keys as in `list --json` (`queue_reason` included), plus `body`, `session_id`, `gate_profile`, `rework_reason`, `attempt_failure`, `attempt_model_error`, the `after` chain's `waits_on`, `blocks`, `never_runs` and `cycle` (see [the `after` chain](#the-after-chain)), and the newest review verdict's `review`, `review_verdict`, `review_session_ids`, `review_cost_micros`, `review_model_error` and `review_settings`.
 `allow_noop` is the effective value, and `allow_noop_source` is `task` or `flow`, the one it came from.
+`review_fix_level` is the effective value, and `review_fix_level_source` is `task` or `reviewer`, the one it came from.
 An unset field is `null`; `session_id` is the current attempt's worker session id, from its `execution.json`, else its `identity.json`, else the claim's `start.json`, and `null` only when none of them names one; `rework_reason` is `null` unless the task is in `review.verifying` or `review.rework_pending` and has a recorded reason (a failed stage, a moved branch, a gate that left no record, a gate that died after it started, a reject note, the automatic rework limit that paused the plan, a conflict that reached `limits.max_conflict_rework`, an automatic reverify count that is used up, or a review waiting on an unavailable model, whose text is `review_unavailable: model <kind> (HTTP <status>), retry at <UTC time>`). `retry_at` is the absolute UTC time a waiting retry, a worker model wait or a review wait ends. `attempt_failure` is the current attempt's own failure reason when it ended before the gate, and `null` when it has none or when `rework_reason` carries the reason. `attempt_model_error` is the `model_error` object of a worker attempt that waited on its model, or `null` (see [A worker wait on an unavailable model](gate-failures.md#a-worker-wait-on-an-unavailable-model)).
-`review` is `{"summary", "findings", "verified"}` from the newest `review` verdict, or `null`; each finding is an object with `severity` and `summary` and, when it has them, `file`, `line`, `trigger` and `pre_existing` (see [the review stage](gate-review.md#the-review-stage)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_model_error` is the failing session's `Result.model_error` object, or `null` (see [A review wait on an unavailable model](gate-review.md#a-review-wait-on-an-unavailable-model)); `review_settings` is `{"round", "reviewer", "fix_level", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the reviewer's name, its `fix_level`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
+`review` is `{"summary", "findings", "verified"}` from the newest `review` verdict, or `null`; each finding is an object with `severity` and `summary` and, when it has them, `file`, `line`, `trigger` and `pre_existing` (see [the review stage](gate-review.md#the-review-stage)); `review_verdict` is its path or `null`; `review_session_ids` lists every session the stage ran; `review_cost_micros` is their summed cost in micros of a US dollar (`null` when the run reported none); `review_model_error` is the failing session's `Result.model_error` object, or `null` (see [A review wait on an unavailable model](gate-review.md#a-review-wait-on-an-unavailable-model)); `review_settings` is `{"round", "reviewer", "fix_level", "exec_args", "timeout_secs", "timeout"}` (the round `first` or `rework`, the reviewer's name, the effective `fix_level`, the config key the session's arguments came from, its wall-time limit in seconds and the key that limit came from), or `null`.
 For a task with a review verdict, the text form also prints `review_verdict`, `review_summary`, `review_findings`, `review_verified`, `review_session_ids`, `review_cost_micros`, and `review_round`, `review_reviewer`, `review_exec_args`, `review_timeout_secs` and `review_timeout`.
 The text form prints `session_id` after `attempt_id`.
 An id that names nothing exits `1`.
@@ -202,7 +205,7 @@ Every file arc writes is recorded with a content hash in the ledger.
 When a plan or task file on disk is not the one arc last wrote, arc does not act on it: the change may have come from an editor, a pull, or a checkout.
 
 `adopt` records the current content as arc's own, so the item can be used again.
-It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`, `extra_stages`, the per-task limits, and a plan's limits and `tasks` list.
+It accepts a change to the body, the title, `after`, `supersedes`, `allow_noop`, `review_fix_level`, `extra_stages`, the per-task limits, and a plan's limits and `tasks` list.
 
 | Argument | Value | What it does |
 |---|---|---|

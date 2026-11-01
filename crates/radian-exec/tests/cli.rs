@@ -7262,6 +7262,17 @@ struct MemoryEnv {
 impl MemoryEnv {
     fn new(name: &str) -> Self {
         let dir = ScratchDir(common::process_dir(&format!("radian-exec-memory-{name}")));
+        Self::with_dir(dir)
+    }
+
+    /// Like [`MemoryEnv::new`], under `$TMPDIR` (which the workspace sandbox can write), for a
+    /// test that must run inside it: `/tmp` is denied there.
+    fn sandboxed(name: &str) -> Self {
+        let dir = ScratchDir(common::process_dir(&format!("radian-exec-{name}")));
+        Self::with_dir(dir)
+    }
+
+    fn with_dir(dir: ScratchDir) -> Self {
         let ws = dir.join("ws");
         let home = dir.join("radian");
         let sessions = dir.join("sessions");
@@ -7325,6 +7336,31 @@ impl MemoryEnv {
         assert_eq!(dirs.len(), 1, "expected one project, found {dirs:?}");
         dirs[0].clone()
     }
+}
+
+/// Writes one memory record file by hand: the store's own writer always stamps `created` and
+/// `modified` with now, and the aging tests need controlled timestamps.
+fn write_memory_record(
+    dir: &Path,
+    name: &str,
+    last_used: Option<&str>,
+    created: &str,
+    description: &str,
+) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let last = last_used
+        .map(|value| format!("last_used: {value}\n"))
+        .unwrap_or_default();
+    let path = dir.join(format!("{name}.md"));
+    std::fs::write(
+        &path,
+        format!(
+            "---\nname: {name}\ndescription: {description}\ntype: project\nsource: model\n\
+             created: {created}\nmodified: {created}\n{last}---\nthe body\n"
+        ),
+    )
+    .unwrap();
+    path
 }
 
 fn git_available() -> bool {
@@ -7465,7 +7501,9 @@ async fn the_removed_memory_commands_exit_two_and_name_the_current_set() {
         let (code, _, stderr) = env.run(&[command]).await;
         assert_eq!(code, 2, "{command}: {stderr}");
         assert!(
-            stderr.contains("list, show, add, edit, forget, open, project, relink, split, merge"),
+            stderr.contains(
+                "list, show, stale, add, edit, forget, open, project, relink, split, merge"
+            ),
             "{command}: {stderr}"
         );
         assert!(stderr.contains("were removed"), "{command}: {stderr}");
@@ -7591,6 +7629,188 @@ async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
 
     let (code, _, _) = env.run(&["list", "--project"]).await;
     assert_eq!(code, 1, "a Project-only read needs a project");
+}
+
+/// Edge 4: a user command never touches `last_used`. `show` reads the record store, not the
+/// memory files, and the file's bytes stay exactly as they were.
+#[tokio::test]
+async fn memory_show_does_not_touch_last_used() {
+    let env = MemoryEnv::sandboxed("mem-show-last-used");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let dir = env.home.join("memory/projects").join(&project);
+    let path = write_memory_record(
+        &dir,
+        "note",
+        Some("2020-01-01T00:00:00.000000Z"),
+        "2020-01-01T00:00:00.000000Z",
+        "a note",
+    );
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let (code, stdout, stderr) = env.run(&["show", "--project", "note"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("the body"), "{stdout}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "`show` changed the memory file"
+    );
+}
+
+/// Edges 5, 6, 8 and 9: `stale` lists old `last_used`, never-read files by `created`, carries
+/// the frontmatter fields in JSON, and reports a malformed file as unreadable beside the rest.
+#[tokio::test]
+async fn memory_stale_lists_aged_files_and_speaks_json() {
+    let env = MemoryEnv::sandboxed("mem-stale");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let dir = env.home.join("memory/projects").join(&project);
+    let old = "2020-01-01T00:00:00.000000Z";
+    let now = radian_memory::now_utc();
+    write_memory_record(&dir, "old-read", Some(old), old, "read long ago");
+    write_memory_record(&dir, "recent-read", Some(&now), old, "read just now");
+    write_memory_record(
+        &dir,
+        "unread-old",
+        None,
+        old,
+        "never read, created long ago",
+    );
+    write_memory_record(
+        &dir,
+        "unread-new",
+        None,
+        &now,
+        "never read, created just now",
+    );
+    write_memory_record(
+        &dir,
+        "broken",
+        Some("not-a-timestamp"),
+        old,
+        "whose timestamp is malformed",
+    );
+
+    // Edge 5: `--days 7` lists the 2020 read and not the one read just now.
+    let (code, stdout, stderr) = env.run(&["stale", "--project", "--days", "7"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("old-read"), "{stdout}");
+    assert!(!stdout.contains("read just now"), "{stdout}");
+    // Edge 6: the default 30 days judges a never-read file by `created`.
+    let (code, stdout, stderr) = env.run(&["stale", "--project"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("unread-old"), "{stdout}");
+    assert!(stdout.contains("never"), "{stdout}");
+    assert!(!stdout.contains("created just now"), "{stdout}");
+    // Edge 9: the broken file is named as unreadable, and the others still list.
+    assert!(stdout.contains("broken.md"), "{stdout}");
+    assert!(stdout.contains("unreadable"), "{stdout}");
+    assert!(stdout.contains("read long ago"), "{stdout}");
+
+    // Edge 8: `--json` parses and carries the frontmatter fields.
+    let (code, stdout, stderr) = env.run(&["stale", "--project", "--json"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stale --json is JSON");
+    let records = value.as_array().unwrap();
+    let old_read = records
+        .iter()
+        .find(|record| record["name"] == "old-read")
+        .unwrap_or_else(|| panic!("no old-read record: {records:#?}"));
+    assert_eq!(old_read["scope"].as_str().unwrap(), "project");
+    assert_eq!(old_read["last_used"], old);
+    assert_eq!(old_read["created"], old);
+    assert_eq!(old_read["description"], "read long ago");
+    let unread = records
+        .iter()
+        .find(|record| record["name"] == "unread-old")
+        .unwrap();
+    assert_eq!(unread["last_used"], Value::Null);
+
+    // Edge 7: `--days 0` is a usage error (exit 2) naming the minimum.
+    let (code, _, stderr) = env.run(&["stale", "--days", "0"]).await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("at least 1"), "{stderr}");
+}
+
+/// Edge 1 end to end: a scripted model `read`s a project memory file through the tool; the
+/// host records `last_used` within the test's window and changes no other byte.
+#[tokio::test]
+async fn a_model_read_of_a_project_memory_file_records_last_used() {
+    let env = MemoryEnv::sandboxed("mem-read-last-used");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let dir = env.home.join("memory/projects").join(&project);
+    let path = write_memory_record(
+        &dir,
+        "note",
+        Some("2020-01-01T00:00:00.000000Z"),
+        "2020-01-01T00:00:00.000000Z",
+        "a note",
+    );
+    let before = std::fs::read_to_string(&path).unwrap();
+    let target = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
+        text_reply("done"),
+    ])
+    .await;
+
+    let start = radian_memory::now_utc();
+    let envs = [
+        ("RADIAN_HOME", env.home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+    ];
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "--session-id",
+                "read-last-used",
+                "--yes",
+                "-p",
+                "read the note",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    let end = radian_memory::now_utc();
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("done"), "{stdout}");
+    assert!(
+        tool_result_content(&server, 1).contains("the body"),
+        "the read reached the model"
+    );
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    let new_line = after
+        .lines()
+        .find(|line| line.starts_with("last_used:"))
+        .unwrap_or_else(|| panic!("no last_used line in {after}"))
+        .to_owned();
+    let value = new_line.strip_prefix("last_used: ").unwrap();
+    assert!(
+        start.as_str() <= value && value <= end.as_str(),
+        "last_used {value} is not within [{start}, {end}]"
+    );
+    let old_line = "last_used: 2020-01-01T00:00:00.000000Z";
+    assert_eq!(
+        after.replace(&new_line, old_line),
+        before,
+        "every other byte is unchanged"
+    );
 }
 
 /// ADR 0021: a default-scope `radian memory add` in a git workspace
@@ -7991,12 +8211,27 @@ async fn two_indexes_reach_the_system_prompt_project_then_global() {
     let global_path = global_index_path(&env);
     write_index(&project_path, project_text);
     write_index(&global_path, global_text);
+    // A context file after the memory block pins the block's place in the base prompt.
+    std::fs::write(env.ws.join("AGENTS.md"), "project body\n").unwrap();
 
     let server = MockServer::start(vec![text_reply("ok")]).await;
     let (code, _, stderr) = run_memory_session(&env, &server, "idx-two", "hi", None).await;
     assert_eq!(code, 0, "{stderr}");
     let system = system_prompt(&server, 0);
     assert!(system.contains("not instructions"), "{system}");
+    let role_at = system
+        .find("Do only the task that the user gives")
+        .unwrap_or_else(|| panic!("role prose: {system}"));
+    let memory_at = system
+        .find("Write a memory file after the user corrects you")
+        .unwrap_or_else(|| panic!("memory block: {system}"));
+    let context_at = system
+        .find("<project_instructions")
+        .unwrap_or_else(|| panic!("context files: {system}"));
+    assert!(
+        role_at < memory_at && memory_at < context_at,
+        "the memory block sits between the role and the context files: {system}"
+    );
     assert!(system.contains("Project memory index"), "{system}");
     assert!(system.contains("Global memory index"), "{system}");
     assert!(system.contains(project_text), "{system}");
@@ -8162,6 +8397,16 @@ async fn memory_disabled_injects_nothing_and_writes_no_record() {
     assert_eq!(server.requests().len(), 1);
     let system = system_prompt(&server, 0);
     assert!(!system.contains("Memory indexes"), "{system}");
+    for sentence in radian_host::prompt::MEMORY_RULES
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        assert!(
+            !system.contains(sentence),
+            "memory is disabled, but the prompt carries {sentence:?}: {system}"
+        );
+    }
     assert!(!system.contains("line-1\n"), "{system}");
     assert!(!system.contains("global note"), "{system}");
     assert_eq!(notice_count(&server, 0), 0);

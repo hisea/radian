@@ -14,6 +14,7 @@ mod identity;
 pub mod injection;
 mod open;
 mod service;
+mod touch;
 
 pub use commands::{
     COMMAND_NAMES, CommandError, CommandOutput, MemoryCommand, ProjectCommand, TYPE_NAMES,
@@ -29,3 +30,4 @@ pub use service::{
     CreatedProject, MemoryService, MemoryServiceError, MoveReport, ProjectForWrite, ProjectState,
     ScopeSelection, ScopedEntry, WriteScope,
 };
+pub use touch::MemoryTouch;

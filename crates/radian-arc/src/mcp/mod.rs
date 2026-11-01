@@ -138,10 +138,11 @@ impl ArcServer {
                 let allow_noop = args.optional_flag("allow_noop")?;
                 let extra_stages = args.optional_strings("extra_stages")?;
                 let flow = args.optional_string("flow")?;
+                let review_fix_level = args.optional_string("review_fix_level")?;
                 args.finish()?;
                 let id = self
                     .store
-                    .add_task_proposed_opt(
+                    .add_task_proposed_with_fix_level(
                         &plan,
                         &slug,
                         &title,
@@ -150,6 +151,7 @@ impl ArcServer {
                         extra_stages,
                         &brief,
                         flow.as_deref(),
+                        review_fix_level.as_deref(),
                     )
                     .map_err(reason)?;
                 Ok(json!({ "id": id }))
@@ -178,6 +180,7 @@ impl ArcServer {
                 let allow_noop = args.optional_flag("allow_noop")?;
                 let extra_stages = args.optional_strings_opt("extra_stages")?;
                 let flow = args.optional_string("flow")?;
+                let review_fix_level = args.optional_nullable_string("review_fix_level")?;
                 args.finish()?;
                 store::plan_ops::update_task_with_flow(
                     &self.store,
@@ -188,6 +191,7 @@ impl ArcServer {
                     allow_noop,
                     extra_stages,
                     flow.as_deref(),
+                    review_fix_level.as_ref().map(|level| level.as_deref()),
                 )
                 .map_err(reason)?;
                 store::cli::show_json(&self.store, &task).map_err(reason)
@@ -831,6 +835,20 @@ impl Args {
             Some(Value::Bool(value)) => Ok(Some(value)),
             Some(_) => Err(format!("invalid arguments: `{key}` must be true or false")),
             None => Ok(None),
+        }
+    }
+
+    /// [`Args::optional_string`] that tells an absent argument from an explicit `null`: `None`
+    /// is absent, `Some(None)` is a `null`, and `Some(Some(text))` is a string. `update_task`
+    /// reads `review_fix_level` this way, because a `null` clears the task's own level.
+    fn optional_nullable_string(&mut self, key: &str) -> Result<Option<Option<String>>, String> {
+        match self.values.remove(key) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(Value::String(text)) => Ok(Some(Some(text))),
+            Some(_) => Err(format!(
+                "invalid arguments: `{key}` must be a string or null"
+            )),
         }
     }
 

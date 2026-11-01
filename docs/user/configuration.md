@@ -229,7 +229,7 @@ extra_paths = ["~/.claude/skills"]
 
 | Key | Type | Default | Allowed | When it takes effect | What it does |
 |---|---|---|---|---|---|
-| `memory.enabled` | boolean | `true` | `true`, `false` | Next session | `false` turns off index injection: no section, no rewrite notice and no `MemoryInjected` record. User commands still work. |
+| `memory.enabled` | boolean | `true` | `true`, `false` | Next session | `false` turns off memory: no memory rules block in the base prompt, no index section, no rewrite notice and no `MemoryInjected` record. User commands still work. |
 | `memory.scopes` | array of strings | `project, global` | `project`, `global` | Next session | Which index files are injected. The order is always project then global. |
 | `memory.index_max_lines` | positive integer | `200` | 1 or more | Next session | The line cap for each index. A line past the cap is not injected. |
 | `memory.index_max_bytes` | positive integer | `25600` | 1 or more | Next session | The byte cap for each index, cut at the last whole line within the cap. A dropped line triggers one rewrite notice. |

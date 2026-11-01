@@ -124,6 +124,7 @@ type into the message box.
 |---|---|---|
 | `/memory list` | `/memory list [--global\|--project] [--json]` | One line per file: scope, name, type, source, modified time and description; project first, then global. `--json` prints the frontmatter objects. An unreadable file is one line marked `unreadable` with its reason. |
 | `/memory show` | `/memory show [--global\|--project] [--json] <name>` | Print one file's frontmatter and body as stored; `--json` prints `frontmatter` and `body`. |
+| `/memory stale` | `/memory stale [--days <N>] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`; `--json` gives an array of objects with the frontmatter fields. Reads the memory files only. |
 | `/memory add` | `/memory add [--global] [--type user\|feedback\|project\|reference] <name>` | Create the file (empty body, `source: user`, `created`, `modified`), append its index line, and open it in the editor. `--type` defaults to `user`; project scope by default. A bad or existing name exits 2 and writes nothing. Example: `/memory add deploy-notes --type project`. |
 | `/memory edit` | `/memory edit [--global] <name>` | Open an existing file in the editor. |
 | `/memory forget` | `/memory forget [--global] [--yes] <name>` | Delete the file and its index line. Asks first; off a terminal without `--yes` it refuses. |
@@ -260,6 +261,6 @@ the waiting count.
 the running turn. `ctrl-c` cancels the running turn. A second `ctrl-c`
 within 2 seconds on an empty input quits; any other key disarms it. There is
 no quit command. A side question (`/btw`) and a read command (`/context`,
-`/usage`, `/memory list`, `/memory show`, `/memory open`, `/memory project`) run while a turn
+`/usage`, `/memory list`, `/memory show`, `/memory stale`, `/memory open`, `/memory project`) run while a turn
 runs without interrupting it. Writes take effect at the next turn boundary:
 `/model`, `/thinking`, `/access`, `/compact`, `/memory` writes.

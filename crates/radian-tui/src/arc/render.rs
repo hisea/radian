@@ -957,21 +957,16 @@ fn draw_task(frame: &mut Frame, area: Rect, app: &mut ArcApp) {
             );
         }
         TaskTab::Attempts => {
-            let height = area.height as usize;
-            // The attempts window follows the selection the way the plan list does: it moves
-            // only when the selection leaves its top or its bottom row.
-            if let Some(page) = app.task.as_mut() {
-                let visible = height.saturating_sub(lines.len() + 1);
-                let current = page
-                    .attempt_index()
-                    .unwrap_or(page.attempts.len().saturating_sub(1));
-                page.attempt_top =
-                    scroll_top(page.attempt_top, current, visible, page.attempts.len());
-            }
-            let Some(page) = &app.task else {
+            let Some(page) = app.task.as_mut() else {
                 return;
             };
-            draw_attempts(&mut lines, page, width as usize, height, &theme);
+            draw_attempts(
+                &mut lines,
+                page,
+                width as usize,
+                area.height as usize,
+                &theme,
+            );
         }
     }
     lines.push(frame_bottom(&theme));
@@ -1413,7 +1408,7 @@ fn diff_file_frame(
 
 fn draw_attempts(
     lines: &mut Vec<Line<'static>>,
-    page: &TaskPage,
+    page: &mut TaskPage,
     width: usize,
     height: usize,
     theme: &Theme,
@@ -1425,12 +1420,14 @@ fn draw_attempts(
         ));
         return;
     }
-    let _ = width;
-    // The rows left after the frame's first rows and its bottom. The window is kept in
-    // `attempt_top` and moves only when the selection leaves it, like the plan list.
+    // The rows left after the frame's first rows and its bottom.
     let visible = height.saturating_sub(lines.len() + 1);
-    let first = page.attempt_top;
-    for attempt in page.attempts.iter().skip(first).take(visible) {
+    // Every row the tab draws, findings included, is built first: the window counts these
+    // rows, so a finding below the fold is reachable with `j`/`f` like any other row.
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut starts = Vec::with_capacity(page.attempts.len());
+    for attempt in &page.attempts {
+        starts.push(rows.len());
         let current = page.attempt == Some(attempt.attempt);
         let cursor = if current {
             Span::styled("❯ ", theme.model)
@@ -1466,7 +1463,72 @@ fn draw_attempts(
             }
         }
         let line = Line::from(spans);
-        lines.push(rail(theme, line));
+        rows.push(rail(theme, line));
+        // A review verdict's findings, grouped by severity, highest first, nested under the
+        // attempt row (ADR 0048 decision 10). Another verdict draws none.
+        for verdict in &attempt.verdicts {
+            if verdict.findings.is_empty() {
+                continue;
+            }
+            for severity in radian_arc::gate::REVIEW_LEVELS {
+                let findings: Vec<&radian_arc::gate::Finding> = verdict
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == *severity)
+                    .collect();
+                if findings.is_empty() {
+                    continue;
+                }
+                rows.push(rail(
+                    theme,
+                    Line::from(Span::styled(format!("  {severity}"), theme.notice_label)),
+                ));
+                let (glyph, style) = if *severity == "minor" {
+                    ('•', theme.text)
+                } else {
+                    ('×', theme.status_error)
+                };
+                for finding in findings {
+                    let mut text = format!("  {glyph} {}", finding.summary_line());
+                    if finding.pre_existing {
+                        text.push_str(" (pre_existing)");
+                    }
+                    push_nested(&mut rows, &text, width, style, theme);
+                    if !finding.trigger.is_empty() {
+                        push_nested(
+                            &mut rows,
+                            &format!("    {}", finding.trigger),
+                            width,
+                            theme.hint,
+                            theme,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let last = rows.len().saturating_sub(visible);
+    // A changed selection brings its attempt row into view; a `j`/`k` scroll keeps the
+    // place the user chose.
+    if page.attempt_shown != page.attempt {
+        if let Some(index) = page.attempt_index() {
+            let start = starts.get(index).copied().unwrap_or(0);
+            if start < page.attempt_scroll {
+                page.attempt_scroll = start;
+            } else if visible > 0 && start >= page.attempt_scroll + visible {
+                page.attempt_scroll = start + 1 - visible;
+            }
+        }
+        page.attempt_shown = page.attempt;
+    }
+    if page.attempt_follow {
+        page.attempt_scroll = last;
+        page.attempt_follow = false;
+    } else {
+        page.attempt_scroll = page.attempt_scroll.min(last);
+    }
+    for line in rows.into_iter().skip(page.attempt_scroll).take(visible) {
+        lines.push(line);
     }
 }
 
@@ -1771,6 +1833,25 @@ fn summary_lines(
         ));
     }
     lines.push(frame_bottom(theme));
+}
+
+/// One nested item under an attempt row: the leading spaces of `text` are its indent, the rest
+/// wraps to the room left inside the frame and keeps that indent on every row.
+fn push_nested(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    inner: usize,
+    style: Style,
+    theme: &Theme,
+) {
+    let indent = text.len() - text.trim_start().len();
+    let pad = " ".repeat(indent);
+    for row in crate::render::wrap(text.trim_start(), inner.saturating_sub(indent)) {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled(format!("{pad}{row}"), style)),
+        ));
+    }
 }
 
 /// `N commands`, `1 session`.

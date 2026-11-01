@@ -2,6 +2,7 @@
 
 - 状态：第 1、2、3 步已落地；第 4 步（trigger）idea
 - 涉及 ADR：0048（§10 gate profile、§14 v0 范围、§15 `config.toml`）、0043（单会话、`subagent` 子进程先例）、0044（`Result` 回传契约）、0025（skill）、0008（配置 schema）
+- 关联：第 2 步 per-profile 的 review 键是 gate profile 的 reviewer profile，即 `gate.profiles.<name>.reviewer`
 - 来源：owner 问题 2026-10-22（一个项目同时跑 coding、game art、marketing content 等流程）；mattpocock/skills PR #1316（software-factory 术语表：trigger、三道刹车、每个 task 的五个问题、ratchet / retro / fix 三个示例 task）
 
 ## 背景

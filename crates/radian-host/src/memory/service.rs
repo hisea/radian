@@ -253,16 +253,26 @@ impl MemoryService {
     /// 4): `<memory root>/global/` and, when this workspace is linked to a project,
     /// `<memory root>/projects/<ProjectId>/`. Each directory is created 0700 on first use.
     pub fn file_tool_roots(&self) -> Vec<PathBuf> {
+        self.file_scope_roots()
+            .into_iter()
+            .map(|(_, dir)| dir)
+            .collect()
+    }
+
+    /// The same directories as [`MemoryService::file_tool_roots`], each with the scope it is
+    /// the store directory of: `global` first, then this workspace's project when it is linked.
+    /// Each directory is created 0700 on first use, exactly as the file tools need it.
+    pub fn file_scope_roots(&self) -> Vec<(Scope, PathBuf)> {
         let mut scopes = vec![Scope::Global];
         if let Ok(project) = self.project_id() {
             scopes.push(Scope::Project(project));
         }
         scopes
-            .iter()
+            .into_iter()
             .map(|scope| {
-                let dir = self.files.scope_dir(scope);
+                let dir = self.files.scope_dir(&scope);
                 let _ = crate::ensure_private_dir(&dir);
-                dir
+                (scope, dir)
             })
             .collect()
     }
@@ -337,7 +347,7 @@ impl MemoryService {
     }
 
     /// The scopes a read covers, in order. `Default` is Project then Global; Project is simply
-    /// omitted when the workspace is unlinked.
+    /// omitted when the workspace is unlinked, so Global reads always work.
     pub fn read_scopes(&self, selection: ScopeSelection) -> Result<Vec<Scope>, MemoryServiceError> {
         Ok(match selection {
             ScopeSelection::GlobalOnly => vec![Scope::Global],

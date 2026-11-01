@@ -20,7 +20,7 @@ Run it only in a real terminal: it takes over the screen.
 |---|---|---|---|---|---|
 | `--config` | `FILE` | `RADIAN_CONFIG`, else `~/.radian/config/config.toml` | `RADIAN_CONFIG` | — | Read this configuration file. Radian never writes it. |
 | `-w`, `--workspace` | `DIR` | current directory | — | — | Root the built-in file tools here. Without it the current directory is the workspace. |
-| `--system` | `SYSTEM` | — | — | — | System prompt text. |
+| `--system` | `SYSTEM` | — | — | — | System prompt text. Replaces the role prose only. |
 | `-h`, `--help` | — | — | — | — | Print help and exit. |
 | `-V`, `--version` | — | — | — | — | Print the version and exit. |
 
@@ -89,7 +89,7 @@ The print-and-exit modes (`--list`, `--export`, `--search`, `--fork`) need no mo
 | `--config` | `FILE` | `RADIAN_CONFIG`, else default file | — | Read this configuration file. Radian never writes it. |
 | `--max-tokens` | `N` | `16384` | — | `max_tokens` for anthropic. Refused for `openai-compatible`. |
 | `--thinking` | `MODE` | `medium` | — | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, clamped per route. Legacy `adaptive` and `enabled:<budget>` warn and still work. |
-| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. |
+| `--system` | `SYSTEM` | — | `--system-file` | System prompt text. Replaces the role prose only. |
 | `--system-file` | `FILE` | — | — | Read the system prompt from this file. |
 | `--mcp-config` | `FILE` | — | — | MCP servers JSON file. |
 | `--workspace` | `DIR` | current directory | — | Root the built-in file tools here. |
@@ -242,6 +242,7 @@ Needs no model, no key, no session file, no network.
 |---|---|---|
 | `list` | `--global`, `--project`, `--json` | One line per file (scope, name, type, source, modified, description), project first then global. `--json` prints the frontmatter objects. An unreadable file is one `unreadable` line with its reason. |
 | `show` | `--global`, `--project`, `--json`, `NAME` | Print one file's frontmatter and body as stored; `--json` prints `frontmatter` and `body`. |
+| `stale` | `--days DAYS` (default `30`), `--global`, `--project`, `--json` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`; `DAYS` is an integer of 1 or more. Reads the memory files only. |
 | `add` | `--global`, `--type user\|feedback\|project\|reference` (default `user`), `NAME` | Create the file (empty body, `source: user`, `created`, `modified`), append its index line, and open it. A git workspace registers itself on first write. A bad or existing name exits 2 and writes nothing. |
 | `edit` | `--global`, `NAME` | Open an existing file. |
 | `forget` | `--global`, `--yes`, `NAME` | Delete the file and its index line, after confirmation. |
@@ -252,7 +253,7 @@ Needs no model, no key, no session file, no network.
 | `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. A name in both is renamed `<name>-2` and reported. |
 
 `--global` and `--project` conflict except where both are absent (the default scope).
-`list`, `show`, and `project` accept `--json` for machine output.
+`list`, `show`, `stale`, and `project` accept `--json` for machine output.
 `forget`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
 Exit `0` on success, `1` for a missing file or an I/O failure, `2` for bad use, a bad or
 existing `add` name, or a removed command (which names the current set).

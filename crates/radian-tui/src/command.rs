@@ -43,7 +43,7 @@ pub const HELP: &str = "\
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
-/memory <command>     durable memory: list, show, add, edit, forget, open, project,
+/memory <command>     durable memory: list, show, stale, add, edit, forget, open, project,
                       relink, split, merge; `/memory off|on` switches this session
 /skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
@@ -511,8 +511,8 @@ fn logout_level(typed: &[&str], partial: &str) -> Level {
 }
 
 /// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
-const MEMORY_DESCRIPTION: &str = "durable memory: list, show, add, edit, forget, open, \
-                                  project, relink, split, merge; `/memory off|on` \
+const MEMORY_DESCRIPTION: &str = "durable memory: list, show, stale, add, edit, forget, \
+                                  open, project, relink, split, merge; `/memory off|on` \
                                   switches this session";
 
 /// The `/memory` subcommands and a one-line description each. The list is the authority for
@@ -521,6 +521,7 @@ const MEMORY_DESCRIPTION: &str = "durable memory: list, show, add, edit, forget,
 const MEMORY_SUBCOMMANDS: &[(&str, &str)] = &[
     ("list", "list files (Project then Global)"),
     ("show", "show one file's frontmatter and body"),
+    ("stale", "list files not read for a while"),
     ("add", "create a file and open it in the editor"),
     ("edit", "open an existing file in the editor"),
     (

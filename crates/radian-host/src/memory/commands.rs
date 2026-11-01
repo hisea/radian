@@ -9,6 +9,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use radian_memory::{Frontmatter, MemoryError, ProjectId, RECORD_TYPES, Record};
 
@@ -23,7 +24,7 @@ pub const USAGE_ERROR: i32 = 2;
 /// The current command names, in documentation order. The removed-command error and the TUI's
 /// completion table both read this list.
 pub const COMMAND_NAMES: &[&str] = &[
-    "list", "show", "add", "edit", "forget", "open", "project", "relink", "split", "merge",
+    "list", "show", "stale", "add", "edit", "forget", "open", "project", "relink", "split", "merge",
 ];
 
 /// The `--type` values, in documentation order. The parser and the manual's drift test both
@@ -64,6 +65,19 @@ pub enum MemoryCommand {
         #[arg(long)]
         json: bool,
         name: String,
+    },
+    /// List memory files not read for a while: `last_used` older than --days, or never read
+    /// and `created` older than --days. Reads the file store only.
+    Stale {
+        /// Days after which a file is stale. An integer of 1 or more; the default is 30.
+        #[arg(long, default_value_t = DEFAULT_STALE_DAYS)]
+        days: u64,
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Create a memory file and open it in the editor.
     Add {
@@ -165,11 +179,13 @@ pub enum ProjectCommand {
 }
 
 impl MemoryCommand {
-    /// The command's own `--json` flag (list/show/project).
+    /// The command's own `--json` flag (list/show/stale/project). `execute` takes `json`
+    /// explicitly so a host can force text; both hosts pass this value.
     pub fn json(&self) -> bool {
         match self {
             MemoryCommand::List { json, .. }
             | MemoryCommand::Show { json, .. }
+            | MemoryCommand::Stale { json, .. }
             | MemoryCommand::Project { json, .. } => *json,
             _ => false,
         }
@@ -238,6 +254,13 @@ pub struct CommandOutput {
     pub open: Option<PathBuf>,
 }
 
+/// The `stale` command's default age, in days.
+pub const DEFAULT_STALE_DAYS: u64 = 30;
+
+/// The smallest accepted `--days`: zero would mean "everything", which is not a staleness
+/// question and would list every file.
+pub const MIN_STALE_DAYS: u64 = 1;
+
 fn selection(global: bool, project: bool) -> ScopeSelection {
     if global {
         ScopeSelection::GlobalOnly
@@ -288,6 +311,20 @@ pub fn execute(
                 json_line(&show_json(&record))?
             } else {
                 service.read_text(&scope, &name)?
+            };
+        }
+        MemoryCommand::Stale {
+            days,
+            global,
+            project,
+            ..
+        } => {
+            output.note = unlinked_note(service, global, project)?;
+            let entries = stale_entries(service, selection(global, project), days)?;
+            output.text = if json {
+                stale_json(&entries)?
+            } else {
+                entries.iter().map(stale_row).collect()
             };
         }
         MemoryCommand::Add {
@@ -459,6 +496,108 @@ fn scope_label(scope: &radian_memory::Scope) -> &'static str {
     }
 }
 
+/// The files `stale` lists: every record whose `last_used` (or, when it was never read,
+/// `created`) is older than `days`, followed by every file that could not be parsed. A zero
+/// age is a usage error naming the minimum.
+fn stale_entries(
+    service: &MemoryService,
+    selection: ScopeSelection,
+    days: u64,
+) -> Result<Vec<ScopedEntry>, CommandError> {
+    if days < MIN_STALE_DAYS {
+        return Err(CommandError::usage(format!(
+            "--days must be at least {MIN_STALE_DAYS}"
+        )));
+    }
+    // An absurd age makes the cutoff earlier than any record; the arithmetic never panics.
+    let days = i64::try_from(days).unwrap_or(i64::MAX);
+    let cutoff = chrono::Duration::try_days(days)
+        .and_then(|span| Utc::now().checked_sub_signed(span))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let entries = service.list(selection)?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| match entry {
+            ScopedEntry::Record { frontmatter, .. } => is_stale(frontmatter, cutoff),
+            ScopedEntry::Unreadable { .. } => true,
+        })
+        .collect())
+}
+
+/// Older than the cutoff. A record never read is judged by `created`. The store has already
+/// validated both timestamps; a value that somehow does not parse is listed rather than dropped.
+fn is_stale(frontmatter: &Frontmatter, cutoff: DateTime<Utc>) -> bool {
+    let timestamp = frontmatter
+        .last_used
+        .as_deref()
+        .unwrap_or(&frontmatter.created);
+    match DateTime::parse_from_rfc3339(timestamp) {
+        Ok(time) => time.with_timezone(&Utc) < cutoff,
+        Err(_) => true,
+    }
+}
+
+/// `scope  name  last_used-or-never  description`.
+fn stale_row(entry: &ScopedEntry) -> String {
+    match entry {
+        ScopedEntry::Record { scope, frontmatter } => format!(
+            "{}  {}  {}  {}\n",
+            scope_label(scope),
+            frontmatter.name,
+            frontmatter.last_used.as_deref().unwrap_or("never"),
+            one_line(&frontmatter.description),
+        ),
+        ScopedEntry::Unreadable {
+            scope,
+            path,
+            reason,
+        } => format!(
+            "{}  {}  unreadable  {}\n",
+            scope_label(scope),
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            one_line(reason),
+        ),
+    }
+}
+
+/// The frontmatter fields of every listed file, with `last_used` null when never read. A file
+/// that could not be read has no frontmatter: its object carries the path and the reason.
+fn stale_json(entries: &[ScopedEntry]) -> Result<String, CommandError> {
+    let values: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| match entry {
+            ScopedEntry::Record { scope, frontmatter } => serde_json::json!({
+                "scope": scope_label(scope),
+                "name": frontmatter.name,
+                "description": frontmatter.description,
+                "type": frontmatter.record_type,
+                "source": frontmatter.source,
+                "created": frontmatter.created,
+                "modified": frontmatter.modified,
+                "last_used": frontmatter.last_used,
+                "provenance": frontmatter.provenance.as_ref().map(|provenance| {
+                    serde_json::json!({
+                        "session_id": provenance.session_id,
+                        "turn_id": provenance.turn_id,
+                    })
+                }),
+            }),
+            ScopedEntry::Unreadable {
+                scope,
+                path,
+                reason,
+            } => serde_json::json!({
+                "scope": scope_label(scope),
+                "path": path.to_string_lossy(),
+                "unreadable": reason,
+            }),
+        })
+        .collect();
+    json_line(&values)
+}
+
 /// A field as one line.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -612,6 +751,7 @@ pub fn parse_args(args: &[String]) -> Result<MemoryCommand, clap::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use radian_memory::Scope;
 
     fn scratch(label: &str) -> crate::test_support::TempDir {
         crate::test_support::TempDir::with_label("radian-memory-cmd", label)
@@ -778,6 +918,210 @@ mod tests {
         .unwrap();
         assert!(output.text.contains("good"), "{}", output.text);
         assert!(output.text.contains("unreadable"), "{}", output.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `parse_args` accepts a quoted argument and rejects an unknown subcommand with clap's
+    /// rendered error.
+    #[test]
+    fn parse_args_uses_the_shared_grammar() {
+        let command = parse_args(&["add".into(), "hello world".into()]).unwrap();
+        assert!(matches!(command, MemoryCommand::Add { name, .. } if name == "hello world"));
+        let error = parse_args(&["nope".into()]).unwrap_err();
+        assert!(error.to_string().contains("nope"), "{error}");
+    }
+
+    /// Writes a record file by hand, with the timestamps the test needs (the store's own
+    /// writer always sets `created` and `modified` to now).
+    fn write_record(
+        service: &MemoryService,
+        scope: &Scope,
+        name: &str,
+        last_used: Option<&str>,
+        created: &str,
+        description: &str,
+    ) {
+        let dir = service.files().scope_dir(scope);
+        std::fs::create_dir_all(&dir).unwrap();
+        let last = last_used
+            .map(|value| format!("last_used: {value}\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            dir.join(format!("{name}.md")),
+            format!(
+                "---\nname: {name}\ndescription: {description}\ntype: project\nsource: model\n\
+                 created: {created}\nmodified: {created}\n{last}---\nthe body\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn days_ago(days: i64) -> String {
+        (Utc::now() - chrono::Duration::days(days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+    }
+
+    fn stale(days: u64) -> MemoryCommand {
+        MemoryCommand::Stale {
+            days,
+            global: true,
+            project: false,
+            json: false,
+        }
+    }
+
+    /// Edge 5: `--days 7` lists a file read 8 days ago, not one read yesterday.
+    #[test]
+    fn stale_lists_a_file_read_eight_days_ago_and_not_one_read_yesterday() {
+        let (dir, service) = service("stale-days");
+        let old = days_ago(8);
+        let recent = days_ago(1);
+        write_record(
+            &service,
+            &Scope::Global,
+            "old",
+            Some(&old),
+            &old,
+            "the old note",
+        );
+        write_record(
+            &service,
+            &Scope::Global,
+            "recent",
+            Some(&recent),
+            &recent,
+            "the recent note",
+        );
+
+        let output = execute(&service, stale(7), false, false).unwrap();
+        assert!(
+            output.text.contains("old") && output.text.contains(&old),
+            "{output:?}"
+        );
+        assert!(
+            !output.text.contains("the recent note"),
+            "a file read yesterday is not stale: {output:?}"
+        );
+        assert!(
+            output.text.contains("global  old  "),
+            "one line per file: {output:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge 6: a file never read is judged by `created`; the default is 30 days.
+    #[test]
+    fn stale_lists_a_never_read_file_by_its_created_date() {
+        let (dir, service) = service("stale-never");
+        let old = days_ago(31);
+        let recent = days_ago(1);
+        write_record(
+            &service,
+            &Scope::Global,
+            "unread-old",
+            None,
+            &old,
+            "created long ago",
+        );
+        write_record(
+            &service,
+            &Scope::Global,
+            "unread-new",
+            None,
+            &recent,
+            "created yesterday",
+        );
+
+        let output = execute(&service, stale(DEFAULT_STALE_DAYS), false, false).unwrap();
+        assert!(output.text.contains("unread-old"), "{output:?}");
+        assert!(
+            output.text.contains("never"),
+            "a never-read file says so: {output:?}"
+        );
+        assert!(
+            !output.text.contains("created yesterday"),
+            "a file created yesterday is not stale: {output:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge 7: `--days 0` is a usage error naming the minimum.
+    #[test]
+    fn stale_refuses_zero_days_as_a_usage_error() {
+        let (dir, service) = service("stale-zero");
+        let error = execute(&service, stale(0), false, false).unwrap_err();
+        assert_eq!(error.code, 2, "{error:?}");
+        assert_eq!(error.code, USAGE_ERROR, "{error:?}");
+        assert!(
+            error.message.contains("at least 1"),
+            "the message names the minimum: {error:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge 8: `--json` carries the frontmatter fields, `last_used` null when never read.
+    #[test]
+    fn stale_json_carries_the_frontmatter_fields() {
+        let (dir, service) = service("stale-json");
+        let created = days_ago(31);
+        write_record(
+            &service,
+            &Scope::Global,
+            "unread",
+            None,
+            &created,
+            "never read",
+        );
+
+        let command = MemoryCommand::Stale {
+            days: DEFAULT_STALE_DAYS,
+            global: true,
+            project: false,
+            json: true,
+        };
+        let output = execute(&service, command, false, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(output.text.trim()).unwrap();
+        let record = &value.as_array().unwrap()[0];
+        assert_eq!(record["name"], "unread");
+        assert_eq!(record["scope"], "global");
+        assert_eq!(record["last_used"], serde_json::Value::Null);
+        assert_eq!(record["created"], created);
+        assert_eq!(record["description"], "never read");
+        assert_eq!(record["type"], "project");
+        assert_eq!(record["source"], "model");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edge 9: a malformed `last_used` is reported as unreadable, and the other files list.
+    #[test]
+    fn stale_reports_an_unreadable_file_and_lists_the_others() {
+        let (dir, service) = service("stale-broken");
+        let old = days_ago(31);
+        write_record(
+            &service,
+            &Scope::Global,
+            "good",
+            None,
+            &old,
+            "the readable note",
+        );
+        write_record(
+            &service,
+            &Scope::Global,
+            "broken",
+            Some("not-a-timestamp"),
+            &old,
+            "the broken note",
+        );
+
+        let output = execute(&service, stale(DEFAULT_STALE_DAYS), false, false).unwrap();
+        assert!(output.text.contains("the readable note"), "{output:?}");
+        assert!(output.text.contains("broken.md"), "{output:?}");
+        assert!(output.text.contains("unreadable"), "{output:?}");
+        assert!(
+            output.text.contains("last_used"),
+            "the reason names the field: {output:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

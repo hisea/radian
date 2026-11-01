@@ -24,6 +24,15 @@ The memory root is `$RADIAN_HOME/memory` when `RADIAN_HOME` is set, otherwise
 `$HOME/.radian/memory`. Directories are owner-only and files are owner-only. Every write is
 atomic: a crash leaves either the old file or the new one.
 
+## Memory files and `last_used`
+
+A memory file holds one record. Its frontmatter carries `name`, `description`,
+`type`, `source`, `created`, `modified`, `last_used` and an optional
+`provenance`. When the model `read`s a memory file other than `MEMORY.md`, the
+host sets `last_used` to the time of the read and changes no other byte. A
+user command (`list`, `show`, `stale`) never changes it. An absent `last_used`
+means the file was never read.
+
 The model writes these files with the ordinary `write` and `patch` tools. In both tiers those
 tools reach only the global directory and, when the workspace maps to a project, that
 project's directory. Every other path under the memory directory stays denied, and `shell`
@@ -41,7 +50,7 @@ A record starts with `---`, then one field per line, then `---`, then the body.
 | `source` | closed set | `model`, `user`, `import`. The host sets it at the first write and keeps it afterwards; the model never supplies it. |
 | `created` | RFC 3339 UTC | Set once. |
 | `modified` | RFC 3339 UTC | Set on every write. |
-| `last_used` | RFC 3339 UTC or absent | Optional. Absent means the record was never read. This build does not change it; a hand edit may set it. |
+| `last_used` | RFC 3339 UTC or absent | Optional. Absent means the record was never read. A model `read` sets it; a user command never changes it. |
 | `provenance` | optional map | `session_id` and `turn_id`, each optional. A model-written record may carry them. |
 
 A file whose frontmatter does not parse, or whose `type` or `source` is outside its set, is
@@ -88,6 +97,7 @@ directory.
 |---|---|
 | `list [--global\|--project] [--json]` | List one line per file: scope, name, type, source, modified time and description. The project scope comes first, then global. An unreadable file is one line marked `unreadable` with its reason. `--json` prints the frontmatter objects instead, plus `scope`. |
 | `show [--global\|--project] [--json] <name>` | Print the file's frontmatter and body exactly as stored. `--json` prints `{"frontmatter": {…}, "body": "…"}`. |
+| `stale [--days N] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than N days, or it has no `last_used` and its `created` is older than N days. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`. `--json` gives an array of objects with the frontmatter fields, with `last_used` null when never read. A file whose frontmatter cannot be read is listed as unreadable and the other files still list. |
 | `add [--global] [--type user\|feedback\|project\|reference] <name>` | Create `<name>.md` with an empty body and `source: user`, `created` and `modified`; append its index line; open it in the editor. `--type` defaults to `user`. Project scope by default. A name outside the rule, or one that already exists, is a usage error and writes nothing. |
 | `edit [--global] <name>` | Open an existing file in the editor. A missing file is an error. |
 | `forget [--global] [--yes] <name>` | Delete the file and its index line. Asks first; `--yes` skips the question. Off a terminal without `--yes` it refuses and keeps the file. |
@@ -98,7 +108,8 @@ directory.
 | `merge [--yes] <into> <from>` | Move every file from one project into another. When both hold the same name, the file from `from` is renamed `<name>-2` (then `-3`, …), its `name` line is rewritten, and the collision is reported. Asks first. |
 
 `forget`, `split` and `merge` are the only commands that ask for confirmation. `list`,
-`show`, `project` and `open` are reads: they run while a turn runs and do not interrupt it.
+`show`, `stale`, `project` and `open` are reads: they run while a turn runs and do not
+interrupt it.
 
 `archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not exist. A call
 to one exits 2 with an error naming the current command set.
@@ -120,6 +131,35 @@ the interface.
 `provenance`. An unreadable entry carries `scope`, `unreadable: true`, `path` and `reason`.
 
 `show --json` is one object with `frontmatter` (the same fields) and `body` (the stored body).
+
+## What the model is told
+
+When memory is on and a memory directory exists, the base prompt carries one memory block
+between the role prose and the context files. `[memory] enabled = false` removes the block
+together with the index section; no memory directory removes both too. The block tells the
+model:
+
+- Write a memory file after you correct the model, at a handoff, or when it learns a fact
+  that helps a later session.
+- Do not write what the repository already records: code structure, git history or
+  `AGENTS.md`. Project facts and project procedures go to `AGENTS.md`; cross-project
+  procedures go to a user skill.
+- Write one file per fact in the memory directory the index section names. Give each file
+  `name`, `description`, `type`, `source`, `created` and `modified` frontmatter fields, and
+  add one `- [title](file) — description` line to the index. Update the file on the same
+  subject instead of writing a new one. Delete a file that is wrong.
+- Content that names this repository's paths, branches, files, decision numbers, task
+  numbers or structure is project. Your preferences, corrections of the model's way of
+  working and pointers that hold across repositories are global. When unsure, the model
+  writes project. `type` is independent of scope.
+- Memory is not proof of current behavior. The model verifies that a file, flag or command
+  still exists before it recommends one. It cites only the memory it used. It consults
+  memory when the request names the repository, an earlier decision or continuity, and not
+  when the request is self-contained.
+- Read the project index before the global index. On the same subject, the project file wins.
+
+A custom system prompt (`--system` or `--system-file`) replaces the role prose. The memory
+block stays, like the index section, because it is host policy.
 
 ## What the model sees
 
