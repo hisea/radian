@@ -1991,3 +1991,17 @@ sandbox --test <binary> -E 'test(<name>)'`, and the file was restored from a cop
 | TK0267-M3 | `TaskFile::from_text` accepts any `review_fix_level` (the `REVIEW_LEVELS` check dropped) | `store::a_review_fix_level_outside_the_set_fails_the_list_like_a_bad_allow_noop` (`blocker` read as a task, so `load_task` succeeded) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0291: an old-shape verdict is decided by its report (2026-10-31, branch `work/TK0291-reviewer-profiles-findings-followups`)
+
+`Verdict::review_failing` and `review_rest` choose the old-shape rule by `ReviewReport::old_blocking`
+instead of the verdict's `reason`, so a passing old verdict's `suggestions` stay in the rest on the
+merge page and in the follow-up. The mutation was applied by hand to the working file, the named
+test ran with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E 'test(<name>)'`,
+and the file was restored from a copy under `.radian/tmp/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0291-M1 | `review_failing` / `review_rest` dispatch on `self.reason == Some(REVIEW_BLOCKING)` again, so a passing old verdict's `major` suggestion is decided by `fix_level` | `gate::review::tests::a_passing_old_verdicts_major_suggestion_stays_in_the_rest` (the `major` suggestion was returned as failing) | ✅ 1 failed |
+
+1/1 caught.

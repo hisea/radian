@@ -1836,7 +1836,9 @@ fn summary_lines(
 }
 
 /// One nested item under an attempt row: the leading spaces of `text` are its indent, the rest
-/// wraps to the room left inside the frame and keeps that indent on every row.
+/// wraps to the room left inside the frame and keeps that indent on every row. `inner` is
+/// `area.width - 2`, and [`rail`] spends four columns, two of them outside `inner`, so the
+/// indent and those two columns come off the wrap width.
 fn push_nested(
     lines: &mut Vec<Line<'static>>,
     text: &str,
@@ -1846,7 +1848,7 @@ fn push_nested(
 ) {
     let indent = text.len() - text.trim_start().len();
     let pad = " ".repeat(indent);
-    for row in crate::render::wrap(text.trim_start(), inner.saturating_sub(indent)) {
+    for row in crate::render::wrap(text.trim_start(), inner.saturating_sub(indent + 2)) {
         lines.push(rail(
             theme,
             Line::from(Span::styled(format!("{pad}{row}"), style)),
