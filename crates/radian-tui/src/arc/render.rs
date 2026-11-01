@@ -421,11 +421,13 @@ fn footer_line(app: &ArcApp, width: usize) -> Line<'static> {
             let applies = app.task.as_ref().is_some_and(|page| {
                 page.phase.starts_with("review.") || page.phase.starts_with("done.")
             });
+            let detail_open = app.task.as_ref().is_some_and(|page| page.metric_open);
             vec![
                 Hint::new("j/k", "scroll", false),
                 Hint::new("f", "follow", false),
                 Hint::new("[ ]", "attempt", false),
                 Hint::new("n/p", "file", false),
+                Hint::new("r", "requests", !detail_open),
                 Hint::new("h/l", "tab", false),
                 Hint::new("tab", "tabs", false),
                 Hint::new("m", "merge page", !applies),

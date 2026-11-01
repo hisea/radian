@@ -5073,6 +5073,8 @@ fn write_review_run(
         ended_at: ended.to_owned(),
         metrics: Some(metrics),
     }];
+    verdict.started_at = started.to_owned();
+    verdict.ended_at = ended.to_owned();
     let path = verdict_path(fixture.store.repo(), task, &label, Stage::Review).unwrap();
     verdict
         .write_new(&path)
@@ -5113,6 +5115,35 @@ fn request(ts: &str, kind: &str, input: u64) -> serde_json::Value {
         "fee_micros": 1000,
         "stop_reason": "end_turn",
         "model": "m",
+    })
+}
+
+/// [`request`] with every field the detail's request table draws.
+#[allow(clippy::too_many_arguments)]
+fn request_entry(
+    ts: &str,
+    latency: u64,
+    kind: &str,
+    input: u64,
+    cache: u64,
+    output: u64,
+    reasoning: u64,
+    fee: u64,
+    stop: &str,
+    model: &str,
+) -> serde_json::Value {
+    json!({
+        "ts": ts,
+        "latency_ms": latency,
+        "kind": kind,
+        "input_uncached": input,
+        "cache_read": cache,
+        "cache_write": 0,
+        "output": output,
+        "reasoning": reasoning,
+        "fee_micros": fee,
+        "stop_reason": stop,
+        "model": model,
     })
 }
 
@@ -5244,7 +5275,7 @@ fn an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times() {
             "exec_args": [],
         }),
     );
-    write_command_times(&fixture, &task, 2, &[("cargo nextest run --locked", 5_000)]);
+    write_command_times(&fixture, &task, 2, &[("make check", 5_000)]);
 
     let mut app = fixture.app();
     open_metrics(&mut app, &fixture, "e");
@@ -5255,11 +5286,11 @@ fn an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times() {
     );
     assert!(text.contains("1m01s"), "the wall time still draws:\n{text}");
     assert!(
-        text.contains("cargo nextest") && text.contains("5s"),
+        text.contains("make check") && text.contains("5s"),
         "the command label and time still draw:\n{text}"
     );
     assert!(
-        text.contains("cargo nextest run --locked"),
+        text.contains("make check"),
         "the command line still draws:\n{text}"
     );
 }
@@ -5318,8 +5349,9 @@ fn the_anomaly_counts_are_drawn_only_above_zero() {
     assert!(!text.contains("errors "), "no zero error count:\n{text}");
 }
 
-/// `Enter` opens the selected worker run's request log below it; `Esc` closes the detail and a
-/// second `Esc` leaves the page.
+/// `Enter` opens the selected worker run's detail with its tool table and a collapsed request
+/// log; `r` shows the log and collapses it again; `Esc` closes the detail and a second `Esc`
+/// leaves the page.
 #[test]
 fn enter_opens_the_request_log_and_esc_closes_it_then_the_page() {
     let fixture = Fixture::new();
@@ -5351,6 +5383,21 @@ fn enter_opens_the_request_log_and_esc_closes_it_then_the_page() {
     assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
     assert!(app.task.as_ref().unwrap().metric_open, "the detail is open");
     let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("requests 3 (r to expand)"),
+        "the log opens collapsed:\n{text}"
+    );
+    assert!(
+        !text.contains("chat"),
+        "the log is not drawn until it is expanded:\n{text}"
+    );
+
+    assert_eq!(app.on_key(&key(KeyCode::Char('r'))), ArcKey::Redraw);
+    assert!(
+        app.task.as_ref().unwrap().metric_requests,
+        "the log is expanded"
+    );
+    let text = screen(&mut app, 120, 40);
     assert_eq!(
         text.matches("chat").count(),
         3,
@@ -5361,11 +5408,34 @@ fn enter_opens_the_request_log_and_esc_closes_it_then_the_page() {
         "2026-01-01T00:00:02Z",
         "2026-01-01T00:00:03Z",
     ] {
-        assert!(text.contains(ts), "the request's time is drawn:\n{text}");
+        let local = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string();
+        assert!(
+            text.contains(&local),
+            "the request's local time {local}:\n{text}"
+        );
+        assert!(
+            !text.contains(ts),
+            "the full UTC stamp is not drawn:\n{text}"
+        );
     }
     assert!(
-        text.contains("requests"),
-        "the request log's heading:\n{text}"
+        text.contains("requests 3 (r to collapse)"),
+        "the expanded log says how to collapse it:\n{text}"
+    );
+
+    assert_eq!(app.on_key(&key(KeyCode::Char('r'))), ArcKey::Redraw);
+    assert!(
+        !app.task.as_ref().unwrap().metric_requests,
+        "r collapses it"
+    );
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        text.contains("requests 3 (r to expand)") && !text.contains("chat"),
+        "the second r restores the collapsed row:\n{text}"
     );
 
     assert_eq!(app.on_key(&key(KeyCode::Esc)), ArcKey::Redraw);
@@ -5467,15 +5537,7 @@ fn the_metrics_tab_cuts_a_narrow_row_with_an_ellipsis() {
             "compaction_ms": 15_000,
         })),
     );
-    write_command_times(
-        &fixture,
-        &task,
-        2,
-        &[(
-            "cargo nextest run --workspace --locked --no-fail-fast",
-            5_000,
-        )],
-    );
+    write_command_times(&fixture, &task, 2, &[("./scripts/test.sh --all", 5_000)]);
 
     let mut app = fixture.app();
     open_metrics(&mut app, &fixture, "e");
@@ -5643,23 +5705,28 @@ fn a_tool_row_with_missing_counters_draws_weak_dashes() {
     assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
     let terminal = render(&mut app, 120, 40);
     let text = rows(&terminal).join("\n");
-    assert!(
-        text.contains("browser  3  -  -  -"),
-        "the unreported counters are dashes:\n{text}"
-    );
-    let (row, column) = fg_of(&terminal, "browser  3  -  -  -");
-    let first_dash =
-        column + u16::try_from("browser  3  ".chars().count()).expect("a short prefix");
-    assert_eq!(
-        fg(&terminal, row, first_dash),
-        app.theme.hint.fg,
-        "the missing bytes are weak:\n{text}"
-    );
-    assert_eq!(
-        fg(&terminal, row, first_dash + 3),
-        app.theme.hint.fg,
-        "the missing failed count is weak:\n{text}"
-    );
+    let row = rows(&terminal)
+        .into_iter()
+        .find(|row| row.contains("browser"))
+        .unwrap_or_else(|| panic!("no browser row:\n{text}"));
+    // tool 7, calls 5, bytes 5, failed 6, denied 6, two spaces apart, after the rail and indent.
+    assert_eq!(columns(&row, 6, 7).trim(), "browser", "{row:?}\n{text}");
+    assert_eq!(columns(&row, 15, 5).trim(), "3", "{row:?}\n{text}");
+    for (start, width, label) in [(22, 5, "bytes"), (29, 6, "failed"), (37, 6, "denied")] {
+        assert_eq!(
+            columns(&row, start, width).trim(),
+            "-",
+            "the missing {label} is a dash: {row:?}\n{text}"
+        );
+    }
+    let (row, _) = fg_of(&terminal, "browser");
+    for column in [26, 34, 42] {
+        assert_eq!(
+            fg(&terminal, row, column),
+            app.theme.hint.fg,
+            "the missing counter is weak:\n{text}"
+        );
+    }
 }
 
 /// Leaving the metrics tab closes its open detail, so `Esc` on another tab returns from the
@@ -5939,15 +6006,15 @@ fn the_command_label_comes_from_the_first_word_and_its_argument() {
         &task,
         2,
         &[
-            ("cargo fmt --all -- --check", 2_000),
-            ("CARGO_TARGET_DIR=/x cargo clippy --workspace", 6_000),
+            ("make check", 2_000),
+            ("MODE=fast ./scripts/test.sh --quick", 6_000),
             (
-                "set -e; base=$(git merge-base HEAD origin/main); if true; then echo; fi",
+                "set -e; base=$(printf 'a b'); if true; then printf 'ok'; fi",
                 2_000,
             ),
-            ("/Users/x/.local/bin/arc-gate-lxc crates", 3_000),
+            ("/opt/tools/runner inspect", 3_000),
             ("make", 1_000),
-            ("A=1 B=2 ./run.sh -v", 1_000),
+            ("A=1 B=2 ./scripts/test.sh -v", 1_000),
         ],
     );
 
@@ -5955,11 +6022,11 @@ fn the_command_label_comes_from_the_first_word_and_its_argument() {
     open_metrics(&mut app, &fixture, "e");
     let text = screen(&mut app, 140, 40);
     for (label, detail) in [
-        ("cargo fmt", "cargo fmt --all -- --check"),
-        ("cargo clippy", "cargo clippy --workspace"),
-        ("arc-gate-lxc", "/Users/x/.local/bin/arc-gate-lxc crates"),
+        ("make check", "make check"),
+        ("test.sh", "./scripts/test.sh --quick"),
+        ("runner inspect", "/opt/tools/runner inspect"),
         ("make", "make"),
-        ("run.sh", "./run.sh -v"),
+        ("test.sh", "./scripts/test.sh -v"),
     ] {
         let row = text
             .lines()
@@ -5997,7 +6064,7 @@ fn a_first_attempt_without_integration_draws_no_integration_row() {
         "2026-01-01T00:00:10Z",
         Some(json!({"requests": 1, "input_uncached": 1})),
     );
-    write_command_times(&fixture, &task, 2, &[("cargo fmt", 1_000)]);
+    write_command_times(&fixture, &task, 2, &[("make check", 1_000)]);
 
     let mut app = fixture.app();
     open_metrics(&mut app, &fixture, "e");
@@ -6291,7 +6358,7 @@ fn a_run_without_a_drawable_counter_still_draws_its_route_and_cost() {
         1,
         "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:10Z",
-        Some(json!({"fee_micros": 120_000})),
+        Some(json!({"fee_micros": 400})),
     );
     write_worker_metrics(
         &fixture,
@@ -6311,8 +6378,8 @@ fn a_run_without_a_drawable_counter_still_draws_its_route_and_cost() {
         .find(|row| row.contains("no token metrics recorded") && row.contains('$'))
         .expect("the fee-only run draws its cost");
     assert!(
-        fee_row.contains("$0.120"),
-        "the reported fee is drawn: {fee_row:?}"
+        fee_row.contains("$0.0004"),
+        "the reported sub-cent fee is drawn: {fee_row:?}"
     );
     assert!(
         fee_row.contains("anthropic/m"),
@@ -6412,4 +6479,465 @@ fn a_narrow_metrics_frame_keeps_the_columns_aligned() {
         text.contains("command-name-he…     2s"),
         "the duration column stays aligned:\n{text}"
     );
+}
+
+/// The local time-of-day of an RFC 3339 stamp, as the request log draws it.
+fn local_time_at(ts: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .expect("the fixture stamp parses")
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string()
+}
+
+/// The text a screen row holds from character column `start` for `width` columns.
+fn columns(row: &str, start: usize, width: usize) -> String {
+    row.chars().skip(start).take(width).collect()
+}
+
+/// The `YYYY-MM-DD` a detail row is, when the row is a request log's weak date row.
+fn date_row(row: &str) -> Option<&str> {
+    let start = row.find('│')? + '│'.len_utf8();
+    let text = row[start..].trim();
+    let bytes = text.as_bytes();
+    (bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit()))
+    .then_some(text)
+}
+
+/// The tool table pads the name column to the widest name and right-aligns every number to its
+/// column's widest value, the header included. Mutation: numbers left-aligned again.
+#[test]
+fn the_tool_table_lines_up_every_column() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 1,
+            "input_uncached": 1,
+            "tools": {
+                "grep": {"calls": 19, "result_bytes": 79_000, "failed": 0, "denied": 0},
+                "read": {"calls": 18, "result_bytes": 104_000, "failed": 0, "denied": 0},
+                "shell": {"calls": 17, "result_bytes": 19_000, "failed": 0, "denied": 0},
+                "patch": {"calls": 6, "result_bytes": 456, "failed": 0, "denied": 0},
+            },
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    let text = screen(&mut app, 120, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let header = rows
+        .iter()
+        .position(|row| row.contains("tool") && row.contains("calls"))
+        .unwrap_or_else(|| panic!("no tool table:\n{text}"));
+    let table = &rows[header..header + 5];
+    // tool 5, calls 5, bytes 5, failed 6, denied 6, two apart, after the rail and the indent.
+    let expected = [
+        ("tool", "calls", "bytes", "failed", "denied"),
+        ("grep", "19", "79K", "0", "0"),
+        ("read", "18", "104K", "0", "0"),
+        ("shell", "17", "19K", "0", "0"),
+        ("patch", "6", "456", "0", "0"),
+    ];
+    for (row, (tool, calls, bytes, failed, denied)) in table.iter().zip(expected) {
+        assert_eq!(columns(row, 6, 5).trim(), tool, "{row:?}\n{text}");
+        for (start, width, value) in [
+            (13, 5, calls),
+            (20, 5, bytes),
+            (27, 6, failed),
+            (35, 6, denied),
+        ] {
+            let field = columns(row, start, width);
+            assert_eq!(field.trim(), value, "{row:?}\n{text}");
+            assert!(
+                field.ends_with(value),
+                "`{value}` is right-aligned in its column: {field:?}\n{text}"
+            );
+        }
+    }
+}
+
+/// The request log right-aligns its numbers and left-aligns its text, and a sub-cent fee keeps
+/// four decimals. Mutation: the sub-cent format dropped.
+#[test]
+fn the_request_log_lines_up_and_formats_sub_cent_fees() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 2,
+            "input_uncached": 1,
+            "request_log": [
+                request_entry(
+                    "2026-01-01T12:00:00Z",
+                    850,
+                    "chat",
+                    705,
+                    0,
+                    2,
+                    1,
+                    400,
+                    "end_turn",
+                    "m",
+                ),
+                request_entry(
+                    "2026-01-01T12:00:03Z",
+                    3_200,
+                    "chat",
+                    12_000,
+                    0,
+                    2,
+                    1,
+                    36_000,
+                    "end_turn",
+                    "m",
+                ),
+            ],
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    assert_eq!(app.on_key(&key(KeyCode::Char('r'))), ArcKey::Redraw);
+    let text = screen(&mut app, 160, 40);
+    assert!(text.contains("$0.0004"), "the sub-cent fee:\n{text}");
+    assert!(text.contains("$0.036"), "the three-decimal fee:\n{text}");
+    let rows: Vec<&str> = text.lines().collect();
+    let header = rows
+        .iter()
+        .position(|row| row.contains("time") && row.contains("latency"))
+        .unwrap_or_else(|| panic!("no request table:\n{text}"));
+    let log = &rows[header + 1..header + 3];
+    // time 8, latency 7, kind 4, in 3, cache 5, out 3, think 5, fee 7, stop 8, model 5.
+    let first_time = local_time_at("2026-01-01T12:00:00Z");
+    let second_time = local_time_at("2026-01-01T12:00:03Z");
+    let expected: [(&str, &str, &str); 2] = [
+        (first_time.as_str(), "850ms", "$0.0004"),
+        (second_time.as_str(), "3.2s", "$0.036"),
+    ];
+    for (row, (time, latency, fee)) in log.iter().zip(expected) {
+        assert_eq!(columns(row, 6, 8).trim_end(), time, "{row:?}\n{text}");
+        for (start, width, value) in [
+            (16, 7, latency),
+            (31, 3, if latency == "850ms" { "705" } else { "12K" }),
+            (36, 5, "0"),
+            (43, 3, "2"),
+            (48, 5, "1"),
+            (55, 7, fee),
+        ] {
+            let field = columns(row, start, width);
+            assert_eq!(field.trim(), value, "{row:?}\n{text}");
+            assert!(
+                field.ends_with(value),
+                "`{value}` is right-aligned in its column: {field:?}\n{text}"
+            );
+        }
+        assert_eq!(columns(row, 25, 4).trim_end(), "chat", "{row:?}\n{text}");
+        assert_eq!(
+            columns(row, 64, 8).trim_end(),
+            "end_turn",
+            "{row:?}\n{text}"
+        );
+        assert_eq!(columns(row, 74, 5).trim_end(), "m", "{row:?}\n{text}");
+    }
+}
+
+/// A request log within one local date draws no date row; one that crosses midnight draws one
+/// weak date row before the first request of each date.
+#[test]
+fn the_request_log_draws_a_date_row_only_across_local_dates() {
+    let fixture = Fixture::new();
+    let same = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &same,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 2,
+            "input_uncached": 1,
+            "request_log": [
+                request_entry("2026-01-01T12:00:00Z", 850, "chat", 1, 0, 2, 1, 1000, "end_turn", "m"),
+                request_entry("2026-01-01T12:00:05Z", 850, "chat", 2, 0, 2, 1, 1000, "end_turn", "m"),
+            ],
+        })),
+    );
+    let across = fixture.id("f").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &across,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 2,
+            "input_uncached": 1,
+            "request_log": [
+                request_entry("2026-01-01T00:00:00Z", 850, "chat", 1, 0, 2, 1, 1000, "end_turn", "m"),
+                request_entry("2026-01-03T00:00:00Z", 850, "chat", 2, 0, 2, 1, 1000, "end_turn", "m"),
+            ],
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    app.on_key(&key(KeyCode::Enter));
+    app.on_key(&key(KeyCode::Char('r')));
+    let text = screen(&mut app, 120, 40);
+    assert!(
+        !text.lines().any(|row| date_row(row).is_some()),
+        "one local date needs no date row:\n{text}"
+    );
+
+    open_metrics(&mut app, &fixture, "f");
+    app.on_key(&key(KeyCode::Enter));
+    app.on_key(&key(KeyCode::Char('r')));
+    let text = screen(&mut app, 120, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let dates: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| date_row(row).map(|_| index))
+        .collect();
+    assert_eq!(dates.len(), 2, "one date row per local date:\n{text}");
+    assert_ne!(date_row(rows[dates[0]]), date_row(rows[dates[1]]));
+    for index in dates {
+        let next = rows[index + 1];
+        assert!(
+            next.contains(':'),
+            "the date row precedes its first request: {next:?}\n{text}"
+        );
+    }
+}
+
+/// A page whose runs all predate metrics draws no `❯`, and `Enter` opens nothing.
+#[test]
+fn a_page_of_old_runs_selects_nothing() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    for attempt in 1..=2 {
+        write_worker_metrics(
+            &fixture,
+            &task,
+            attempt,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:13:08Z",
+            None,
+        );
+    }
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 120, 40);
+    assert!(!text.contains('❯'), "no run can be selected:\n{text}");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Ignored);
+    assert!(!app.task.as_ref().unwrap().metric_open);
+    let text = screen(&mut app, 120, 40);
+    assert!(!text.contains("tools"), "Enter draws no detail:\n{text}");
+}
+
+/// `j`/`k` stop only on the run that has metrics; an old run is skipped.
+#[test]
+fn old_runs_are_skipped_by_j_and_k() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        None,
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 120, 40);
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        1,
+        "the only run with metrics is selected:\n{text}"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Char('j'))), ArcKey::Redraw);
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        1,
+        "`j` stops at the last run with metrics"
+    );
+    assert_eq!(app.on_key(&key(KeyCode::Char('k'))), ArcKey::Redraw);
+    assert_eq!(
+        app.task.as_ref().unwrap().metric_sel,
+        1,
+        "`k` skips the old run"
+    );
+    let text = screen(&mut app, 120, 40);
+    let old = text
+        .lines()
+        .find(|row| row.contains("no token metrics recorded"))
+        .expect("the old run's plain row");
+    assert!(!old.contains('❯'), "the old run is not selected:\n{text}");
+    assert_eq!(app.on_key(&key(KeyCode::Enter)), ArcKey::Redraw);
+    assert!(app.task.as_ref().unwrap().metric_open);
+}
+
+/// The total's `wall` is the sum of each attempt's recorded worker wall time and gate stage time.
+/// A task that recorded no wall time draws no `wall` part.
+#[test]
+fn the_total_adds_the_recorded_worker_and_stage_walls() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:15:04Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_command_times(&fixture, &task, 1, &[("make check", 60_000)]);
+    write_review_run(
+        &fixture,
+        &task,
+        1,
+        1,
+        "2026-01-01T00:15:05Z",
+        "2026-01-01T00:15:35Z",
+        json!({"requests": 1, "input_uncached": 1}),
+        Vec::new(),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:16:00Z",
+        "2026-01-01T00:48:30Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+
+    let no_wall = fixture.id("f").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &no_wall,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"requests": 1, "input_uncached": 1})),
+    );
+    write_run_json(
+        &fixture,
+        &no_wall,
+        2,
+        "execution.json",
+        &json!({"exec_args": []}),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    let total = text
+        .lines()
+        .find(|row| row.contains("total"))
+        .unwrap_or_else(|| panic!("no total row:\n{text}"));
+    assert!(
+        total.contains("wall 49m04s"),
+        "15m04s + 1m + 30s + 32m30s: {total:?}\n{text}"
+    );
+
+    open_metrics(&mut app, &fixture, "f");
+    let text = screen(&mut app, 140, 40);
+    let total = text
+        .lines()
+        .find(|row| row.contains("total"))
+        .unwrap_or_else(|| panic!("no total row:\n{text}"));
+    assert!(
+        !total.contains("wall"),
+        "nothing recorded a wall time: {total:?}\n{text}"
+    );
+}
+
+/// At 60 columns the request log keeps its columns and is cut at the right edge with `…`, never
+/// wrapped onto a second row.
+#[test]
+fn a_narrow_request_log_is_cut_at_the_right_edge() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({
+            "requests": 2,
+            "input_uncached": 1,
+            "request_log": [
+                request_entry("2026-01-01T12:00:00Z", 850, "chat", 1, 0, 2, 1, 1000, "end_turn", "m"),
+                request_entry("2026-01-01T12:00:05Z", 850, "chat", 2, 0, 2, 1, 1000, "end_turn", "m"),
+            ],
+        })),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    app.on_key(&key(KeyCode::Enter));
+    app.on_key(&key(KeyCode::Char('r')));
+    let text = screen(&mut app, 60, 24);
+    let rows: Vec<&str> = text.lines().collect();
+    let header = rows
+        .iter()
+        .position(|row| row.contains("time") && row.contains("latency"))
+        .unwrap_or_else(|| panic!("no request table:\n{text}"));
+    assert!(
+        rows[header].ends_with('…'),
+        "the header is cut at the right edge: {:?}\n{text}",
+        rows[header]
+    );
+    for ts in ["2026-01-01T12:00:00Z", "2026-01-01T12:00:05Z"] {
+        let time = local_time_at(ts);
+        let matching: Vec<&str> = rows
+            .iter()
+            .copied()
+            .filter(|row| row.contains(&time))
+            .collect();
+        assert_eq!(matching.len(), 1, "one row for {time}:\n{text}");
+        assert!(
+            matching[0].ends_with('…'),
+            "the request row is cut, not wrapped: {:?}\n{text}",
+            matching[0]
+        );
+        assert_eq!(
+            matching[0].chars().skip(6).take(8).collect::<String>(),
+            time,
+            "the time keeps its column: {:?}\n{text}",
+            matching[0]
+        );
+    }
 }

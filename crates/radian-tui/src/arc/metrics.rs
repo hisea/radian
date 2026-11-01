@@ -10,10 +10,18 @@
 //! the runs drawn as that plain row. A value a record did not report is left out rather than drawn
 //! as `-`; the one exception is the context window (`ctx 83K/-`), whose missing window is a weak
 //! `-`.
-//! `j`/`k` move the `❯` over the run rows, `Enter` opens the selected run's tool table and request
-//! log below its last row, and `Esc` closes that detail before it leaves the page.
+//! `j`/`k` move the `❯` over the run rows, `Enter` opens the selected run's detail (its tool table
+//! and a collapsed request-log row) below its last row, `r` toggles the request log while that
+//! detail is open, and `Esc` closes the detail before it leaves the page. A run whose record
+//! carries no metrics cannot be selected, so `j`/`k` skip it and `Enter` does nothing on it.
 //!
-//! Numbers use [`crate::timing`]'s compact forms, the same the footer's `tokens` item draws.
+//! The tool table and the request log share [`Table`]: every column is as wide as its header and
+//! its widest cell, text is left-aligned and numbers right-aligned, and no row is built by joining
+//! its values with a fixed separator. The total's `wall` part is the sum over attempts of each
+//! attempt's recorded worker wall time and gate stage times ([`recorded_wall`]).
+//!
+//! Numbers use [`crate::timing`]'s compact forms, the same the footer's `tokens` item draws; a fee
+//! below one cent keeps four decimals ([`format_fee`]).
 //! Nothing here reads a file: the page state loaded the metrics through `radian_arc::read`.
 
 use std::path::Path;
@@ -29,7 +37,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::TaskPage;
 use super::render::{fit_spans, rail};
 use crate::theme::Theme;
-use crate::timing::{format_cost, format_seconds, format_tokens};
+use crate::timing::{format_duration, format_seconds, format_tokens};
 
 /// The duration column's width: `13m08s`, `50m48s`, `1h18m` right-aligned.
 const DURATION_WIDTH: usize = 7;
@@ -37,6 +45,8 @@ const DURATION_WIDTH: usize = 7;
 const MAX_LABEL_WIDTH: usize = 16;
 /// The spaces between the duration column and the detail column.
 const DETAIL_GAP: usize = 3;
+/// The spaces between two columns of the tool table and the request log.
+const COLUMN_GAP: usize = 2;
 
 /// How many run rows the tab offers: one worker run per attempt and one per review run, the
 /// newest attempt first.
@@ -68,6 +78,45 @@ pub fn run_at(
         }
     }
     None
+}
+
+/// Whether a run carries metrics the detail can draw. A record from before metrics did not is
+/// not selectable: `j`/`k` skip it and `Enter` does nothing on it.
+pub fn run_has_metrics(run: &RunMetrics) -> bool {
+    run.metrics.is_some()
+}
+
+/// The run index the tab selects for `wanted`: that index when it has metrics, else the nearest
+/// run with metrics (forward first, then backward). `None` when no run on the page has metrics.
+pub fn selectable_run(metrics: &TaskMetrics, wanted: usize) -> Option<usize> {
+    let count = run_count(metrics);
+    if count == 0 {
+        return None;
+    }
+    let wanted = wanted.min(count - 1);
+    if has_metrics_at(metrics, wanted) {
+        return Some(wanted);
+    }
+    step_selectable(metrics, wanted, true).or_else(|| step_selectable(metrics, wanted, false))
+}
+
+/// The next run index with metrics from `from`, in the direction `forward`; `None` at the end of
+/// the run rows. `from` itself is never returned.
+pub fn step_selectable(metrics: &TaskMetrics, from: usize, forward: bool) -> Option<usize> {
+    let count = run_count(metrics);
+    let indexes: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new((from.saturating_add(1))..count)
+    } else {
+        Box::new((0..from).rev())
+    };
+    indexes
+        .into_iter()
+        .find(|index| has_metrics_at(metrics, *index))
+}
+
+fn has_metrics_at(metrics: &TaskMetrics, index: usize) -> bool {
+    run_at(metrics, index)
+        .is_some_and(|(attempt, run)| run_has_metrics(run.unwrap_or(&attempt.worker)))
 }
 
 /// Draws the tab into the frame's rows. `width` is the frame's body width (the area minus the
@@ -103,6 +152,16 @@ pub fn draw(
             label_width: label_width(metrics),
             content,
         };
+        // A run whose record carries no metrics is not selectable: the marker and the detail only
+        // ever land on a run that reported some.
+        let count = run_count(metrics);
+        let selection = selectable_run(metrics, page.metric_sel.min(count.saturating_sub(1)));
+        if let Some(index) = selection {
+            page.metric_sel = index;
+        } else {
+            page.metric_open = false;
+            page.metric_requests = false;
+        }
         let mut rows: Vec<Line<'static>> = Vec::new();
         let mut run_rows: Vec<usize> = Vec::with_capacity(run_count(metrics));
         let mut run_last: Vec<usize> = Vec::with_capacity(run_count(metrics));
@@ -117,7 +176,7 @@ pub fn draw(
             theme,
             total_line(
                 &metrics.total,
-                metrics.attempts.len(),
+                &metrics.attempts,
                 plain_runs,
                 content,
                 theme,
@@ -131,7 +190,7 @@ pub fn draw(
                 &mut rows,
                 &attempt.worker,
                 "worker",
-                index == page.metric_sel,
+                selection == Some(index),
                 &layout,
                 theme,
             );
@@ -146,7 +205,7 @@ pub fn draw(
                     &mut rows,
                     run,
                     &label,
-                    index == page.metric_sel,
+                    selection == Some(index),
                     &layout,
                     theme,
                 );
@@ -161,11 +220,12 @@ pub fn draw(
         }
         // The selected run's detail sits directly below the run's last row.
         if page.metric_open
+            && selection == Some(page.metric_sel)
             && let Some((attempt, run)) = run_at(metrics, page.metric_sel)
             && let Some(&position) = run_last.get(page.metric_sel)
         {
             let run = run.unwrap_or(&attempt.worker);
-            let detail = detail_rows(run, content, theme);
+            let detail = detail_rows(run, page.metric_requests, content, theme);
             rows.splice(
                 position + 1..position + 1,
                 detail.into_iter().map(|line| rail(theme, line)),
@@ -209,12 +269,12 @@ pub fn draw(
     }
 }
 
-/// One styled piece of the detail's tables. A `weak` piece is a value the record did not report,
-/// and a `missing_tail` draws a weak `-` after reported text.
+/// One styled piece of the detail's tables. A `weak` piece is a header or a value the record did
+/// not report.
+#[derive(Clone)]
 struct Cell {
     text: String,
     weak: bool,
-    missing_tail: bool,
 }
 
 impl Cell {
@@ -222,7 +282,6 @@ impl Cell {
         Self {
             text: text.into(),
             weak: false,
-            missing_tail: false,
         }
     }
 
@@ -230,7 +289,6 @@ impl Cell {
         Self {
             text: "-".to_owned(),
             weak: true,
-            missing_tail: false,
         }
     }
 
@@ -238,12 +296,119 @@ impl Cell {
         Self {
             text: text.into(),
             weak: true,
-            missing_tail: false,
         }
     }
 
     fn optional(value: Option<String>) -> Self {
         value.map_or_else(Self::missing, Self::reported)
+    }
+}
+
+/// How a table column pads its cells.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Align {
+    Left,
+    Right,
+}
+
+/// One column of [`Table`]: its header and how its seen values line up.
+struct Column {
+    header: Cell,
+    align: Align,
+}
+
+/// One table row: a line of cells, or a full-width weak note (a request log's date row).
+enum TableRow {
+    Cells(Vec<Cell>),
+    Note(Cell),
+}
+
+/// The layout the tool table and the request log share: every column is as wide as its header and
+/// its widest cell, text is left-aligned, numbers right-aligned, and [`COLUMN_GAP`] spaces separate
+/// two columns. A row is built from its cells by [`Table::lines`], never by joining its values with
+/// a fixed separator.
+struct Table {
+    columns: Vec<Column>,
+    rows: Vec<TableRow>,
+}
+
+impl Table {
+    /// A table with its header row already pushed.
+    fn new(columns: Vec<(&'static str, Align)>) -> Self {
+        let columns: Vec<Column> = columns
+            .into_iter()
+            .map(|(header, align)| Column {
+                header: Cell::header(header),
+                align,
+            })
+            .collect();
+        let header = TableRow::Cells(columns.iter().map(|column| column.header.clone()).collect());
+        Self {
+            columns,
+            rows: vec![header],
+        }
+    }
+
+    fn push(&mut self, cells: Vec<Cell>) {
+        self.rows.push(TableRow::Cells(cells));
+    }
+
+    fn note(&mut self, text: impl Into<String>) {
+        self.rows.push(TableRow::Note(Cell::header(text)));
+    }
+
+    /// Each column's width: its header and its widest cell.
+    fn widths(&self) -> Vec<usize> {
+        self.columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                let mut width = column.header.text.width();
+                for row in &self.rows {
+                    if let TableRow::Cells(cells) = row
+                        && let Some(cell) = cells.get(index)
+                    {
+                        width = width.max(cell.text.width());
+                    }
+                }
+                width
+            })
+            .collect()
+    }
+
+    /// The table's rows at `indent`, cut to `content` cells; a note takes the indent and its text
+    /// alone.
+    fn lines(&self, indent: usize, content: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let widths = self.widths();
+        self.rows
+            .iter()
+            .map(|row| match row {
+                TableRow::Note(cell) => Line::from(fit_spans(
+                    vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(cell.text.clone(), cell_style(cell.weak, theme)),
+                    ],
+                    content,
+                )),
+                TableRow::Cells(cells) => {
+                    let mut spans = vec![Span::raw(" ".repeat(indent))];
+                    for (index, column) in self.columns.iter().enumerate() {
+                        if index > 0 {
+                            spans.push(Span::raw(" ".repeat(COLUMN_GAP)));
+                        }
+                        let width = widths[index];
+                        let cell = cells.get(index).cloned().unwrap_or_else(Cell::missing);
+                        let padding = width.saturating_sub(cell.text.width());
+                        let text = match column.align {
+                            Align::Left => format!("{}{}", cell.text, " ".repeat(padding)),
+                            Align::Right => format!("{}{}", " ".repeat(padding), cell.text),
+                        };
+                        spans.push(Span::styled(text, cell_style(cell.weak, theme)));
+                    }
+                    Line::from(fit_spans(spans, content))
+                }
+            })
+            .collect()
     }
 }
 
@@ -394,7 +559,7 @@ fn run_first_line(
     if let Some(model) = model_text(run) {
         detail.push(Span::styled(model, theme.text));
     }
-    if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_cost) {
+    if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_fee) {
         if !detail.is_empty() {
             detail.push(Span::styled(" · ", theme.hint));
         }
@@ -422,7 +587,7 @@ fn run_plain_line(
         if let Some(model) = model_text(run) {
             detail.push(Span::styled(model, theme.text));
         }
-        if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_cost) {
+        if let Some(cost) = counter(Some(metrics), "fee_micros").map(format_fee) {
             if !detail.is_empty() {
                 detail.push(Span::styled(" · ", theme.hint));
             }
@@ -599,24 +764,27 @@ fn counter_lines(items: &[Item], layout: &Layout, theme: &Theme) -> Vec<Line<'st
 }
 
 /// The total row over every attempt: `N attempts`, the cost (`total_cost_usd`, rework included),
-/// the wall time, the queue wait, the request and token sums, then the runs drawn as the one plain
-/// row. A part no record reported is left out.
+/// the recorded wall time, the queue wait, the request and token sums, then the runs drawn as the
+/// one plain row. A part no record reported is left out. `wall` is [`recorded_wall`]'s sum, not the
+/// reader's sum of the runs' own walls, so it includes the gate stages and still draws when only a
+/// stage recorded a time.
 fn total_line(
     total: &MetricsTotal,
-    attempts: usize,
+    attempts: &[AttemptMetrics],
     plain_runs: usize,
     content: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let mut parts = vec![if attempts == 1 {
+    let count = attempts.len();
+    let mut parts = vec![if count == 1 {
         "1 attempt".to_owned()
     } else {
-        format!("{attempts} attempts")
+        format!("{count} attempts")
     }];
     if let Some(cost) = total.total_cost_usd {
         parts.push(cost_usd(cost));
     }
-    if let Some(wall) = total.wall_secs {
+    if let Some(wall) = recorded_wall(attempts) {
         parts.push(format!("wall {}", seconds(wall)));
     }
     if let Some(queue) = total.queue_wait_secs {
@@ -659,6 +827,33 @@ fn total_line(
         spans.push(Span::styled(note, theme.hint));
     }
     Line::from(fit_spans(spans, content))
+}
+
+/// The total's wall time: the sum over attempts of each attempt's worker wall time plus its gate
+/// stage times (`commands`, `integration`, `review`), counting only the values a record reported.
+/// `None` when no value is recorded at all, so the total draws no `wall` part.
+fn recorded_wall(attempts: &[AttemptMetrics]) -> Option<f64> {
+    let mut total = 0.0;
+    let mut recorded = false;
+    for attempt in attempts {
+        if let Some(wall) = attempt.worker.wall_secs {
+            total += wall;
+            recorded = true;
+        }
+        for command in &attempt.commands {
+            total += command.duration_ms as f64 / 1_000.0;
+            recorded = true;
+        }
+        if let Some(wall) = attempt.integration_wall_secs {
+            total += wall;
+            recorded = true;
+        }
+        if let Some(wall) = attempt.review_wall_secs {
+            total += wall;
+            recorded = true;
+        }
+    }
+    recorded.then_some(total)
 }
 
 /// The attempt's gate rows, in order: every command with its label and line, `integration` and
@@ -846,8 +1041,15 @@ fn is_shell(rest: &str) -> bool {
         .is_some_and(|word| word.contains(';') || word.contains("&&") || word.contains('|'))
 }
 
-/// The selected run's detail: the tool table (by calls) and the request log.
-fn detail_rows(run: &RunMetrics, content: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// The selected run's detail: the tool table (by calls), then the request log. The log is
+/// collapsed to one weak `requests N (r to expand)` row until `expanded`; `r` toggles it while the
+/// detail is open.
+fn detail_rows(
+    run: &RunMetrics,
+    expanded: bool,
+    content: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let metrics = run.metrics.as_ref();
     let mut rows = vec![plain("  tools", theme.hint, content)];
     match metrics
@@ -855,105 +1057,116 @@ fn detail_rows(run: &RunMetrics, content: usize, theme: &Theme) -> Vec<Line<'sta
         .and_then(Value::as_object)
     {
         Some(tools) if !tools.is_empty() => {
-            rows.push(cells_line(
-                "  ",
-                vec![
-                    Cell::header("tool"),
-                    Cell::header("calls"),
-                    Cell::header("bytes"),
-                    Cell::header("failed"),
-                    Cell::header("denied"),
-                ],
-                content,
-                theme,
-            ));
+            let mut table = Table::new(vec![
+                ("tool", Align::Left),
+                ("calls", Align::Right),
+                ("bytes", Align::Right),
+                ("failed", Align::Right),
+                ("denied", Align::Right),
+            ]);
             let mut entries: Vec<(&String, &Value)> = tools.iter().collect();
             entries.sort_by(|(one, left), (other, right)| {
                 calls(right).cmp(&calls(left)).then_with(|| one.cmp(other))
             });
             for (name, tool) in entries {
-                rows.push(cells_line(
-                    "  ",
-                    vec![
-                        Cell::reported(name.clone()),
-                        Cell::optional(calls(tool).map(|count| count.to_string())),
-                        Cell::optional(
-                            tool.get("result_bytes")
-                                .and_then(Value::as_u64)
-                                .map(format_tokens),
-                        ),
-                        Cell::optional(
-                            tool.get("failed")
-                                .and_then(Value::as_u64)
-                                .map(|count| count.to_string()),
-                        ),
-                        Cell::optional(
-                            tool.get("denied")
-                                .and_then(Value::as_u64)
-                                .map(|count| count.to_string()),
-                        ),
-                    ],
-                    content,
-                    theme,
-                ));
+                table.push(vec![
+                    Cell::reported(name.clone()),
+                    Cell::optional(calls(tool).map(|count| count.to_string())),
+                    Cell::optional(
+                        tool.get("result_bytes")
+                            .and_then(Value::as_u64)
+                            .map(format_tokens),
+                    ),
+                    Cell::optional(
+                        tool.get("failed")
+                            .and_then(Value::as_u64)
+                            .map(|count| count.to_string()),
+                    ),
+                    Cell::optional(
+                        tool.get("denied")
+                            .and_then(Value::as_u64)
+                            .map(|count| count.to_string()),
+                    ),
+                ]);
             }
+            rows.extend(table.lines(2, content, theme));
         }
         _ => rows.push(plain("  -", theme.hint, content)),
     }
-    rows.push(plain("  requests", theme.hint, content));
-    match metrics
+
+    let log = metrics
         .and_then(|metrics| metrics.get("request_log"))
-        .and_then(Value::as_array)
-    {
-        Some(log) if !log.is_empty() => {
-            rows.push(cells_line(
-                "  ",
-                vec![
-                    Cell::header("time"),
-                    Cell::header("latency"),
-                    Cell::header("kind"),
-                    Cell::header("in"),
-                    Cell::header("cache"),
-                    Cell::header("out"),
-                    Cell::header("think"),
-                    Cell::header("fee"),
-                    Cell::header("stop"),
-                    Cell::header("model"),
-                ],
-                content,
-                theme,
-            ));
-            for request in log {
-                rows.push(cells_line(
-                    "  ",
-                    vec![
-                        Cell::optional(string(request, "ts")),
-                        Cell::optional(
-                            request
-                                .get("latency_ms")
-                                .and_then(Value::as_u64)
-                                .map(|ms| format!("{ms}ms")),
-                        ),
-                        Cell::optional(string(request, "kind")),
-                        Cell::optional(count(request, "input_uncached").map(format_tokens)),
-                        Cell::optional(count(request, "cache_read").map(format_tokens)),
-                        Cell::optional(count(request, "output").map(format_tokens)),
-                        Cell::optional(count(request, "reasoning").map(format_tokens)),
-                        Cell::optional(
-                            request
-                                .get("fee_micros")
-                                .and_then(Value::as_u64)
-                                .map(format_cost),
-                        ),
-                        Cell::optional(string(request, "stop_reason")),
-                        Cell::optional(string(request, "model")),
-                    ],
-                    content,
-                    theme,
-                ));
+        .and_then(Value::as_array);
+    let log_len = log.map_or(0, Vec::len);
+    if log_len == 0 {
+        rows.push(plain("  requests -", theme.hint, content));
+    } else if !expanded {
+        rows.push(plain(
+            format!("  requests {log_len} (r to expand)"),
+            theme.hint,
+            content,
+        ));
+    } else {
+        rows.push(plain(
+            format!("  requests {log_len} (r to collapse)"),
+            theme.hint,
+            content,
+        ));
+        let log = log.expect("a non-empty log");
+        let strip = strip_provider(run, log);
+        let times: Vec<(Option<String>, Cell)> = log
+            .iter()
+            .map(|request| request_time(string(request, "ts").as_deref()))
+            .collect();
+        let dates: Vec<&str> = times
+            .iter()
+            .filter_map(|(date, _)| date.as_deref())
+            .collect();
+        let several_dates = dates
+            .iter()
+            .enumerate()
+            .any(|(index, date)| dates.iter().take(index).any(|earlier| earlier != date));
+        let mut table = Table::new(vec![
+            ("time", Align::Left),
+            ("latency", Align::Right),
+            ("kind", Align::Left),
+            ("in", Align::Right),
+            ("cache", Align::Right),
+            ("out", Align::Right),
+            ("think", Align::Right),
+            ("fee", Align::Right),
+            ("stop", Align::Left),
+            ("model", Align::Left),
+        ]);
+        let mut last_date: Option<String> = None;
+        for (index, request) in log.iter().enumerate() {
+            let (date, time) = &times[index];
+            if several_dates
+                && let Some(date) = date.as_deref()
+                && last_date.as_deref() != Some(date)
+            {
+                table.note(date.to_owned());
+                last_date = Some(date.to_owned());
             }
+            table.push(vec![
+                time.clone(),
+                latency_cell(request.get("latency_ms").and_then(Value::as_u64)),
+                Cell::optional(string(request, "kind")),
+                Cell::optional(count(request, "input_uncached").map(format_tokens)),
+                Cell::optional(count(request, "cache_read").map(format_tokens)),
+                Cell::optional(count(request, "output").map(format_tokens)),
+                Cell::optional(count(request, "reasoning").map(format_tokens)),
+                Cell::optional(
+                    request
+                        .get("fee_micros")
+                        .and_then(Value::as_u64)
+                        .map(format_fee),
+                ),
+                Cell::optional(string(request, "stop_reason")),
+                request_model(request, run.provider.as_deref(), strip),
+            ]);
         }
-        _ => rows.push(plain("  -", theme.hint, content)),
+        rows.extend(table.lines(2, content, theme));
     }
     if metrics
         .and_then(|metrics| metrics.get("request_log_truncated"))
@@ -965,19 +1178,87 @@ fn detail_rows(run: &RunMetrics, content: usize, theme: &Theme) -> Vec<Line<'sta
     rows
 }
 
-/// A row of `cells`, two spaces apart, its not-reported cells weak.
-fn cells_line(indent: &str, cells: Vec<Cell>, content: usize, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![Span::raw(indent.to_owned())];
-    for (index, cell) in cells.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  ", theme.hint));
-        }
-        spans.push(Span::styled(cell.text, cell_style(cell.weak, theme)));
-        if cell.missing_tail {
-            spans.push(Span::styled("-", theme.hint));
+/// Whether every request of `log` names a model under the run's own provider, so the model column
+/// can drop that provider prefix. A request that reports no model does not block the rule, and a
+/// run with no provider never strips one.
+fn strip_provider(run: &RunMetrics, log: &[Value]) -> bool {
+    let Some(provider) = run.provider.as_deref() else {
+        return false;
+    };
+    let prefix = format!("{provider}/");
+    let mut seen = false;
+    for request in log {
+        if let Some(model) = string(request, "model") {
+            seen = true;
+            if !model.starts_with(&prefix) {
+                return false;
+            }
         }
     }
-    Line::from(fit_spans(spans, content))
+    seen
+}
+
+/// One request's model: `<provider>/<model>` when the model column did not drop the provider, else
+/// the model alone.
+fn request_model(request: &Value, provider: Option<&str>, strip: bool) -> Cell {
+    let Some(model) = string(request, "model") else {
+        return Cell::missing();
+    };
+    match provider.filter(|_| strip) {
+        Some(provider) => Cell::reported(
+            model
+                .strip_prefix(&format!("{provider}/"))
+                .unwrap_or(&model)
+                .to_owned(),
+        ),
+        None => Cell::reported(model),
+    }
+}
+
+/// A request's local date and time-of-day, `HH:MM:SS`. A stamp the parser does not accept stays
+/// as it was reported, with no date to group it under.
+fn request_time(text: Option<&str>) -> (Option<String>, Cell) {
+    let Some(text) = text else {
+        return (None, Cell::missing());
+    };
+    match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(at) => {
+            let local = at.with_timezone(&chrono::Local);
+            (
+                Some(local.format("%Y-%m-%d").to_string()),
+                Cell::reported(local.format("%H:%M:%S").to_string()),
+            )
+        }
+        Err(_) => (None, Cell::reported(text.to_owned())),
+    }
+}
+
+/// A request's latency in the stage column's short form: `850ms` below one second, then `3.2s`
+/// and `1m04s`.
+fn latency_text(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        format_duration(Duration::from_millis(ms))
+    }
+}
+
+/// A request's latency cell; a request that reported none draws a weak `-`.
+fn latency_cell(ms: Option<u64>) -> Cell {
+    ms.map_or_else(Cell::missing, |ms| Cell::reported(latency_text(ms)))
+}
+
+/// A fee in US dollars: `$0` for a reported zero, four decimals below one cent (`$0.0004`) and
+/// three from one cent (`$0.036`, `$1.234`), so a sub-cent fee never reads as free.
+fn format_fee(micros: u64) -> String {
+    let usd = micros as f64 / 1_000_000.0;
+    if micros == 0 {
+        "$0".to_owned()
+    } else if micros < 10_000 {
+        format!("${usd:.4}")
+    } else {
+        format!("${usd:.3}")
+    }
 }
 
 fn plain(text: impl Into<String>, style: Style, content: usize) -> Line<'static> {
@@ -1020,7 +1301,7 @@ fn seconds(secs: f64) -> String {
 }
 
 fn cost_usd(usd: f64) -> String {
-    format_cost((usd * 1_000_000.0).round() as u64)
+    format_fee((usd * 1_000_000.0).round() as u64)
 }
 
 /// A whole percent, no decimals.
@@ -1198,21 +1479,18 @@ mod tests {
 
     #[test]
     fn a_command_label_follows_the_first_word_and_its_argument() {
-        assert_eq!(command_label("cargo fmt --all -- --check"), "cargo fmt");
+        assert_eq!(command_label("make check --all"), "make check");
         assert_eq!(
-            command_label("CARGO_TARGET_DIR=/x cargo clippy --workspace"),
-            "cargo clippy"
+            command_label("MODE=fast ./scripts/test.sh --quick"),
+            "test.sh"
         );
         assert_eq!(
-            command_label("set -e; base=$(git merge-base HEAD origin/main); if …"),
+            command_label("set -e; base=$(printf 'x'); if true; then printf 'ok'; fi"),
             "sh"
         );
-        assert_eq!(
-            command_label("/Users/x/.local/bin/arc-gate-lxc crates"),
-            "arc-gate-lxc crates"
-        );
+        assert_eq!(command_label("/opt/tools/runner inspect"), "runner inspect");
         assert_eq!(command_label("make"), "make");
-        assert_eq!(command_label("A=1 B=2 ./run.sh -v"), "run.sh");
+        assert_eq!(command_label("A=1 B=2 ./scripts/test.sh -v"), "test.sh");
     }
 
     #[test]
@@ -1229,14 +1507,14 @@ mod tests {
     #[test]
     fn a_long_label_is_cut_to_the_label_column() {
         assert_eq!(
-            cut_label("arc-gate-lxc crates", MAX_LABEL_WIDTH),
-            "arc-gate-lxc"
+            cut_label("runner inspect crates", MAX_LABEL_WIDTH),
+            "runner inspect"
         );
         assert_eq!(
             cut_label("command-name-here arg", MAX_LABEL_WIDTH),
             "command-name-he…"
         );
-        assert_eq!(cut_label("cargo clippy", MAX_LABEL_WIDTH), "cargo clippy");
+        assert_eq!(cut_label("make check", MAX_LABEL_WIDTH), "make check");
     }
 
     #[test]
@@ -1278,5 +1556,150 @@ mod tests {
             .collect();
         assert!(text.contains("review"), "{text}");
         assert!(!text.contains("no findings"), "{text}");
+    }
+
+    /// A fee below one cent keeps four decimals, from one cent three, and a reported zero is
+    /// `$0`.
+    #[test]
+    fn a_sub_cent_fee_keeps_four_decimals() {
+        assert_eq!(format_fee(0), "$0");
+        assert_eq!(format_fee(400), "$0.0004");
+        assert_eq!(format_fee(1_000), "$0.0010");
+        assert_eq!(format_fee(36_000), "$0.036");
+        assert_eq!(format_fee(120_000), "$0.120");
+        assert_eq!(format_fee(1_000_000), "$1.000");
+        assert_eq!(cost_usd(0.0004), "$0.0004", "the total uses the same form");
+        assert_eq!(cost_usd(0.0), "$0");
+    }
+
+    /// A latency below one second reads in milliseconds, then in the stage column's short form.
+    #[test]
+    fn a_latency_reads_in_milliseconds_seconds_and_minutes() {
+        assert_eq!(latency_text(850), "850ms");
+        assert_eq!(latency_text(3_200), "3.2s");
+        assert_eq!(latency_text(64_000), "1m04s");
+        let missing = latency_cell(None);
+        assert_eq!(missing.text, "-");
+        assert!(missing.weak, "a missing latency is weak");
+        assert_eq!(latency_cell(Some(850)).text, "850ms");
+    }
+
+    /// The tool table and the request log share one layout: every column is as wide as its header
+    /// and its widest cell, text left-aligned and numbers right-aligned, and a note keeps only the
+    /// indent.
+    #[test]
+    fn the_shared_table_layout_pads_every_column_to_its_widest_cell() {
+        let mut table = Table::new(vec![("tool", Align::Left), ("calls", Align::Right)]);
+        table.push(vec![Cell::reported("grep"), Cell::reported("19")]);
+        table.push(vec![Cell::reported("patch"), Cell::reported("6")]);
+        table.note("2026-01-01");
+        let text: Vec<String> = table
+            .lines(2, 80, &Theme::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(text[0], "  tool   calls");
+        assert_eq!(text[1], "  grep      19");
+        assert_eq!(text[2], "  patch      6");
+        assert_eq!(text[3], "  2026-01-01");
+        for row in &text[..3] {
+            assert_eq!(
+                row.chars().count(),
+                14,
+                "every column keeps its edge: {row:?}"
+            );
+        }
+    }
+
+    fn attempt(
+        worker_wall: Option<f64>,
+        commands: &[u64],
+        integration: Option<f64>,
+        review: Option<f64>,
+    ) -> AttemptMetrics {
+        AttemptMetrics {
+            attempt: 1,
+            attempt_id: "t-1".to_owned(),
+            worker: RunMetrics {
+                run: None,
+                session_id: None,
+                started_at: None,
+                ended_at: None,
+                wall_secs: worker_wall,
+                provider: None,
+                model: None,
+                metrics: Some(json!({"requests": 1})),
+            },
+            reviews: Vec::new(),
+            review_wall_secs: review,
+            commands: commands
+                .iter()
+                .map(|millis| radian_arc::read::CommandMetric {
+                    line: "make check".to_owned(),
+                    duration_ms: *millis,
+                })
+                .collect(),
+            integration_wall_secs: integration,
+            diff: None,
+            increment: None,
+            cost_usd: None,
+            review_cost_usd: None,
+            queue_wait_secs: None,
+        }
+    }
+
+    /// The total's wall counts the worker and the gate stages that recorded a time, and draws no
+    /// part when nothing did.
+    #[test]
+    fn the_total_wall_sums_the_worker_and_the_stage_times() {
+        let attempts = vec![
+            attempt(Some(904.0), &[60_000], None, Some(30.0)),
+            attempt(Some(1_950.0), &[], None, None),
+        ];
+        assert_eq!(recorded_wall(&attempts), Some(2_944.0));
+        assert_eq!(recorded_wall(&[attempt(None, &[], None, None)]), None);
+        assert_eq!(
+            recorded_wall(&[attempt(None, &[5_000], None, None)]),
+            Some(5.0),
+            "a stage time alone is recorded"
+        );
+    }
+
+    /// The model column drops the provider only when every request that names a model names the
+    /// run's own provider.
+    #[test]
+    fn the_model_column_drops_the_provider_every_request_shares() {
+        let run = RunMetrics {
+            run: None,
+            session_id: None,
+            started_at: None,
+            ended_at: None,
+            wall_secs: None,
+            provider: Some("acme".to_owned()),
+            model: Some("m".to_owned()),
+            metrics: None,
+        };
+        assert!(strip_provider(
+            &run,
+            &[json!({"model": "acme/m"}), json!({"model": "acme/m"})]
+        ));
+        assert!(!strip_provider(
+            &run,
+            &[json!({"model": "acme/m"}), json!({"model": "other/m"})]
+        ));
+        assert!(!strip_provider(&run, &[json!({"model": "m"})]));
+        assert_eq!(
+            request_model(&json!({"model": "acme/m"}), Some("acme"), true).text,
+            "m"
+        );
+        assert_eq!(
+            request_model(&json!({"model": "acme/m"}), Some("acme"), false).text,
+            "acme/m"
+        );
     }
 }
