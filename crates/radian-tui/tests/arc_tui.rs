@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use radian_arc::gate::{Stage, Verdict, verdict_path};
+use radian_arc::gate::{Finding, ReviewReport, Stage, Verdict, verdict_path};
 use radian_arc::read;
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, config};
@@ -2158,6 +2158,52 @@ fn write_verdicts(
     }
 }
 
+/// A passing `review` verdict for one attempt with the findings the test gives it.
+fn write_review_findings(fixture: &Fixture, task: &str, attempt: u32, findings: Vec<Finding>) {
+    let label = format!("{task}-{attempt}");
+    let mut verdict = Verdict::human("c".repeat(40), true, None);
+    verdict.stage = Stage::Review;
+    verdict.review = Some(ReviewReport {
+        summary: "the change reads correctly".to_owned(),
+        findings,
+        verified: Vec::new(),
+        old_blocking: None,
+    });
+    let path = verdict_path(fixture.store.repo(), task, &label, Stage::Review).unwrap();
+    verdict.write_new(&path).expect("a verdict is written once");
+}
+
+/// A review verdict in the old `blocking` / `suggestions` shape, written the way a build
+/// before findings wrote it.
+fn write_old_shape_review(
+    fixture: &Fixture,
+    task: &str,
+    attempt: u32,
+    blocking: serde_json::Value,
+    suggestions: serde_json::Value,
+) {
+    let label = format!("{task}-{attempt}");
+    let mut verdict = Verdict::human("c".repeat(40), true, None);
+    verdict.stage = Stage::Review;
+    let path = verdict_path(fixture.store.repo(), task, &label, Stage::Review).unwrap();
+    let mut value = serde_json::to_value(&verdict).expect("the verdict serializes");
+    value["review"] = json!({
+        "summary": "the change reads correctly",
+        "blocking": blocking,
+        "suggestions": suggestions,
+        "verified": ["it compiles"],
+    });
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the verdict directory");
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&value).expect("the verdict serializes")
+        ),
+    )
+    .expect("the old-shape verdict is written");
+}
+
 #[test]
 fn the_attempts_tab_lists_each_verdict_with_its_reason() {
     let fixture = Fixture::new();
@@ -2201,6 +2247,146 @@ fn the_attempts_tab_lists_each_verdict_with_its_reason() {
     assert_eq!(app.task.as_ref().unwrap().attempt, Some(1));
     assert_eq!(app.on_key(&key(KeyCode::Char(']'))), ArcKey::Redraw);
     assert_eq!(app.task.as_ref().unwrap().attempt, Some(2));
+}
+
+/// A review verdict's findings are listed under its attempt, grouped by severity, highest
+/// first, with the marker and colour of the old rows, a demoted finding marked
+/// `(pre_existing)`, and a trigger on its own indented row.
+#[test]
+fn the_attempts_tab_groups_a_review_verdicts_findings_by_severity() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(&fixture, &task, 1, &[("commands", true, None)]);
+    write_review_findings(
+        &fixture,
+        &task,
+        1,
+        vec![
+            Finding {
+                severity: "minor".to_owned(),
+                file: Some("src/c.rs".to_owned()),
+                line: Some(9),
+                summary: "a nit".to_owned(),
+                trigger: String::new(),
+                pre_existing: false,
+            },
+            Finding {
+                severity: "critical".to_owned(),
+                file: Some("src/a.rs".to_owned()),
+                line: Some(7),
+                summary: "the lock is dropped early".to_owned(),
+                trigger: "run two workers".to_owned(),
+                pre_existing: false,
+            },
+            Finding {
+                severity: "major".to_owned(),
+                file: Some("src/b.rs".to_owned()),
+                line: Some(4),
+                summary: "the count is off".to_owned(),
+                trigger: String::new(),
+                pre_existing: true,
+            },
+        ],
+    );
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    let theme = app.theme.clone();
+    let text = screen(&mut app, 120, 30);
+    for needle in [
+        "critical",
+        "× [critical] src/a.rs:7 the lock is dropped early",
+        "major",
+        "× [major] src/b.rs:4 the count is off (pre_existing)",
+        "minor",
+        "• [minor] src/c.rs:9 a nit",
+    ] {
+        assert!(text.contains(needle), "missing `{needle}`:\n{text}");
+    }
+    let position = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}`:\n{text}"))
+    };
+    assert!(
+        position("critical") < position("major") && position("major") < position("minor"),
+        "the headings are not highest first:\n{text}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.contains("[critical]") && line.contains("run two workers")),
+        "the trigger shares the finding's row:\n{text}"
+    );
+    let terminal = render(&mut app, 120, 30);
+    let (row, column) = fg_of(&terminal, "× [critical]");
+    assert_eq!(fg(&terminal, row, column), theme.status_error.fg);
+    let (row, column) = fg_of(&terminal, "• [minor]");
+    assert_eq!(fg(&terminal, row, column), theme.text.fg);
+}
+
+/// An old-shape review verdict renders through the same mapping on the attempts page: its
+/// `blocking` items at their own level, else `major`, and its `suggestions` at their own level,
+/// else `minor`.
+#[test]
+fn the_attempts_tab_renders_an_old_shape_review_through_the_same_mapping() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(&fixture, &task, 1, &[("commands", true, None)]);
+    write_old_shape_review(
+        &fixture,
+        &task,
+        1,
+        json!([{"level": "major", "file": "a.txt", "line": 2, "text": "[major] the second line is wrong"}]),
+        json!([{"level": "minor", "file": "a.txt", "line": 5, "text": "a nit"}, "another nit"]),
+    );
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    let text = screen(&mut app, 120, 30);
+    for needle in [
+        "× [major] a.txt:2 the second line is wrong",
+        "• [minor] a.txt:5 a nit",
+        "• [minor] another nit",
+    ] {
+        assert!(text.contains(needle), "missing `{needle}`:\n{text}");
+    }
+    for absent in ["blocking", "suggestions"] {
+        assert!(
+            !text.contains(absent),
+            "the old group name `{absent}` is drawn:\n{text}"
+        );
+    }
+}
+
+/// A review verdict with no findings adds no row: the attempt keeps the verdict it printed
+/// before, and no severity heading appears.
+#[test]
+fn the_attempts_tab_draws_nothing_for_a_verdict_with_no_findings() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(
+        &fixture,
+        &task,
+        1,
+        &[("commands", true, None), ("review", true, None)],
+    );
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("✓ review"), "{text}");
+    for absent in ["│ critical", "│ major", "│ minor"] {
+        assert!(
+            !text.contains(absent),
+            "a heading with no finding is drawn (`{absent}`):\n{text}"
+        );
+    }
 }
 
 #[test]

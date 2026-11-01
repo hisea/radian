@@ -3442,17 +3442,19 @@ the source was restored from the backup.
 |---|---|---|---|
 | TK0286-M5 | the early per-route reserved-key check is removed (the window's `C <= R` check runs first again) | ✅ 1 failed (rc=100) | `pty_a_reserved_extra_body_key_is_refused_before_the_window_check` (the output reported `--context-window ... is not larger than the output reservation 32000`, not the reserved-key line) |
 
-## TK0266: the merge page groups a review verdict's findings by severity (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
+## TK0266: the TUI lists a review verdict's findings by severity (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
 The summary frame draws one heading per severity that has findings, highest first, a
-`pre_existing` mark on a demoted finding and the trigger on its own indented row; an old-shape
-verdict reads through the same mapping. The mutation was applied to the review view the page
-reads (`crates/radian-arc/src/read.rs`, the `ReviewSummaryView` construction), the named test ran
-with `cargo nextest run -p radian-tui --locked --profile sandbox --test arc_merge -E 'test(…)'`,
-and the file was restored from a copy under `.radian/mut/` (`cmp` found it identical).
+`pre_existing` mark on a demoted finding and the trigger on its own indented row; the attempts
+tab draws the same list under an attempt's review verdict. An old-shape verdict reads through
+the same mapping on both. The mutation was applied to both review views the pages read
+(`crates/radian-arc/src/read.rs`: the `ReviewSummaryView` and `AttemptVerdict` constructions),
+the named tests ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test
+arc_tui` and `--test arc_merge`, and the file was restored from a copy under `.radian/mut/`
+(`cmp` found it identical).
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0266-M3 | the review view drops an old-shape report's findings (`old_blocking.is_some()` builds an empty list), removing the old-shape mapping from the page | `arc_merge::an_old_shape_review_renders_through_the_same_mapping` (the page drew `✓ it compiles` but no `major` or `minor` group) | ✅ 1 failed |
+| TK0266-M3 | the review views drop an old-shape report's findings (`old_blocking.is_some()` builds an empty list), removing the old-shape mapping from the pages | `arc_tui::the_attempts_tab_renders_an_old_shape_review_through_the_same_mapping` (the attempt drew `✓ review` but no `major` or `minor` group) and `arc_merge::an_old_shape_review_renders_through_the_same_mapping` (the page drew `✓ it compiles` but no group) | ✅ 2 failed |
 
 1/1 caught.

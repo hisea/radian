@@ -1425,7 +1425,6 @@ fn draw_attempts(
         ));
         return;
     }
-    let _ = width;
     // The rows left after the frame's first rows and its bottom. The window is kept in
     // `attempt_top` and moves only when the selection leaves it, like the plan list.
     let visible = height.saturating_sub(lines.len() + 1);
@@ -1467,6 +1466,48 @@ fn draw_attempts(
         }
         let line = Line::from(spans);
         lines.push(rail(theme, line));
+        // A review verdict's findings, grouped by severity, highest first, nested under the
+        // attempt row (ADR 0048 decision 10). Another verdict draws none.
+        for verdict in &attempt.verdicts {
+            if verdict.findings.is_empty() {
+                continue;
+            }
+            for severity in radian_arc::gate::REVIEW_LEVELS {
+                let findings: Vec<&radian_arc::gate::Finding> = verdict
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.severity == *severity)
+                    .collect();
+                if findings.is_empty() {
+                    continue;
+                }
+                lines.push(rail(
+                    theme,
+                    Line::from(Span::styled(format!("  {severity}"), theme.notice_label)),
+                ));
+                let (glyph, style) = if *severity == "minor" {
+                    ('•', theme.text)
+                } else {
+                    ('×', theme.status_error)
+                };
+                for finding in findings {
+                    let mut text = format!("  {glyph} {}", finding.summary_line());
+                    if finding.pre_existing {
+                        text.push_str(" (pre_existing)");
+                    }
+                    push_nested(lines, &text, width, style, theme);
+                    if !finding.trigger.is_empty() {
+                        push_nested(
+                            lines,
+                            &format!("    {}", finding.trigger),
+                            width,
+                            theme.hint,
+                            theme,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1807,6 +1848,25 @@ fn push_wrapped(
     for (index, row) in crate::render::wrap(text, inner).into_iter().enumerate() {
         let row = if index == 0 { row } else { format!("  {row}") };
         lines.push(rail(theme, Line::from(Span::styled(row, style))));
+    }
+}
+
+/// One nested item under an attempt row: the leading spaces of `text` are its indent, the rest
+/// wraps to the room left inside the frame and keeps that indent on every row.
+fn push_nested(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    inner: usize,
+    style: Style,
+    theme: &Theme,
+) {
+    let indent = text.len() - text.trim_start().len();
+    let pad = " ".repeat(indent);
+    for row in crate::render::wrap(text.trim_start(), inner.saturating_sub(indent)) {
+        lines.push(rail(
+            theme,
+            Line::from(Span::styled(format!("{pad}{row}"), style)),
+        ));
     }
 }
 
