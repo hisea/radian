@@ -772,3 +772,11 @@ a
 task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
 commits). The owner's keys there are the same library calls as the CLI's subcommands. The
 gate stages `mutation` and `ci` are refused until they are built.
+
+## Hand tests
+
+- **A phone on the tailnet.** Expose the hub with `tailscale serve` (the phone has no ssh
+  client), pair with `radian hub pair`, and from the phone browse the plans and tasks of two
+  registered repositories, do one owner action, and receive one lock-screen notification from
+  an `after_awaiting_human` hook. The hub binds `127.0.0.1` only; the tailnet exposure is the
+  proxy's.

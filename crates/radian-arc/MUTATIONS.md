@@ -1959,6 +1959,22 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
 second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.
 
+## TK0285: the hub's event stream (2026-10-31, branch `work/TK0285-hub-sse-and-notifications`)
+
+`GET /v1/events` streams the shared poller's transitions for every registered repository: one
+`event: transition` per change on ADR 0048 decision 11's closed list, with the repository's
+registry name, and no replay when a client connects. Each mutation was applied by hand to the
+named working file, `radian` was rebuilt with `cargo build -p radian-tui --bin radian` because
+the integration test drives the real binary, the named test ran alone with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test hub_http -E '<the test
+below>'`, and the file was restored from a copy under `.radian/backup/` with `cp`, which
+`cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0285-M1 | `doing.running` joins the closed `CHANNEL_PHASES` list, so a transition the channel does not send is streamed | `hub_http::a_transition_the_channel_does_not_send_produces_no_event` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
+| TK0285-M2 | the poller compares the first read with an empty snapshot, so a client that connects after a transition receives it as a replay | `hub_http::a_client_that_connects_after_a_transition_gets_no_replay_and_the_lists_show_it` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
+| TK0285-M3 | `event_frame` drops the `repo` key from a task event's data | `hub_http::one_transition_in_each_repository_arrives_with_its_repository_and_the_channels_fields` (the left object had no `repo`; the right had `"repo": "a"`) | ✅ 1 failed |
 ## TK0266: the follow-up collects what did not fail each review round (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
 The follow-up reads every review round of a collected task, oldest attempt first, and keeps the
