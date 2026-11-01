@@ -360,6 +360,19 @@ impl App {
         UpdateResult::dirty()
     }
 
+    /// The newest memory card's file (ADR 0035), for `Enter` with an empty input. A `read`
+    /// line is not a card, so it never answers here.
+    pub(super) fn newest_memory_card(&self) -> Option<std::path::PathBuf> {
+        self.session.entries.iter().rev().find_map(|entry| {
+            entry
+                .tool
+                .as_deref()
+                .and_then(|card| card.memory.as_ref())
+                .filter(|memory| !memory.read)
+                .map(|memory| memory.path.clone())
+        })
+    }
+
     /// A `/memory` command finished: show its output, or arm the confirmation prompt.
     pub(super) fn memory_command_done(&mut self, result: MemoryResult) -> UpdateResult {
         match result {

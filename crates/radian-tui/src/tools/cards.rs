@@ -160,6 +160,16 @@ pub(crate) fn shell_command(card: &ToolCard) -> String {
 /// the renderer's title, `shell $ make test` — the text the head row draws and copies. The
 /// `• ` marker, the meta and the status glyph are the block layer's and are never copied.
 pub fn call_text(card: &ToolCard, text: &str) -> String {
+    // ADR 0035: a memory read's one line is the memory, not the read tool's own head; the
+    // write/patch card's text is its body row, so search and copy still see the title, the type
+    // and the path.
+    if let Some(memory) = &card.memory {
+        return if memory.read {
+            format!("memory used: {}", memory.title)
+        } else {
+            memory.line()
+        };
+    }
     let title = head_text(card, text);
     if title.is_empty() {
         return card.name.clone();

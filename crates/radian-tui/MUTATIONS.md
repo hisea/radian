@@ -3487,3 +3487,35 @@ sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored from a copy
 | TK0291-M3 | `draw_attempts` draws a severity heading before its `findings.is_empty()` check | `arc_tui::the_attempts_tab_draws_a_heading_only_for_a_severity_that_has_findings` (the screen carried `│   critical` beside the `minor` row) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0279: the memory card and the read line (2026-11-01, branch `work/TK0279-memory-tui`)
+
+A settled `write`/`patch` into a memory scope draws the memory card and a memory `read` draws
+the `memory used:` line (ADR 0035). The card resolves from the recorded call and result alone,
+never from the file, so a resume redraws it. Each mutation was applied by hand to
+`crates/radian-tui/src/memory_card.rs` (or `crates/radian-tui/src/blocks/layout.rs`), the named
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test card` (the last
+row with `--lib`), and the file was restored from a copy under `.radian/mut/`, which `cmp` found
+## TK0290: the task page's metrics tab (2026-11-01, branch `work/TK0290-tui-task-metrics-tab`)
+
+The tab draws `radian_arc::read::task_metrics`. Each mutation was applied by hand (M1 in
+`crates/radian-arc/src/read.rs`, M2/M3 in `crates/radian-tui/src/arc/`), the named `arc_tui`
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test arc_tui -E
+'test(<name>)'`, and the file was restored from a copy under `.radian/`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0279-M1 | the memory path test is loosened: the call's path need not sit under the memory root and any file name with a dot counts as a record | `card::a_workspace_write_keeps_the_ordinary_card` (the memory-root app drew the memory card instead of `◻ write src/main.rs`) | ✅ 1 failed |
+| TK0279-M2 | `MEMORY.md` (and `SESSIONS.md`) reads are no longer excluded | `card::a_memory_read_draws_one_muted_line_and_the_index_keeps_the_read_head` (the index read drew `• memory used: MEMORY`) | ✅ 1 failed |
+| TK0279-M3 | a `patch`'s type is read from the file again instead of from the transcript | `card::a_resumed_patch_card_keeps_the_type_the_transcript_recorded` (the resumed card drew `y · user` where the live one drew `y · feedback`) | ✅ 1 failed |
+| TK0279-M4 | the layout cache key drops the memory card's shape | `blocks::layout::tests::a_settled_memory_card_invalidates_the_cached_line_count` (the settled card measured one row instead of three) | ✅ 1 failed |
+| TK0279-M5 | the frontmatter parser requires only `name` and `type`, not the store's other required fields | `card::a_memory_write_with_a_frontmatter_the_store_cannot_read_shows_a_question_mark` (the card drew `x · feedback` for a file the store refuses) | ✅ 1 failed |
+
+5/5 caught. The first two reproduce the original run; M3, M4 and M5 are the resume, layout and parser
+fixes from the rework.
+| TK0290-M1 | `task_metrics` leaves the first attempt's runs, costs and queue wait out of `total` (the loop skips `index == 0`) | `arc_tui::the_metrics_tab_lists_both_attempts_and_sums_them` (the total read `requests 4`, expected `requests 7`) | ✅ 1 failed |
+| TK0290-M2 | `cell_part` draws a not-reported value as `0` instead of a weak `-` | `arc_tui::an_acp_attempt_without_metrics_draws_dashes_and_keeps_the_times` (the worker row had no `model -`) | ✅ 1 failed |
+| TK0290-M3 | `TaskTab::next` leaves `Metrics` out of the cycle (`Attempts` goes straight to `Brief`) | `arc_tui::the_metrics_tab_joins_the_cycle_between_attempts_and_brief` (`Tab` from `Attempts` read `Brief`, expected `Metrics`) | ✅ 1 failed |
+
+3/3 caught.

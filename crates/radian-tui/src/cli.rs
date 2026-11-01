@@ -2075,6 +2075,7 @@ fn run_one_session(
             *term = Some((new.guard, terminal));
             let mut app = App::new(String::new(), String::new());
             app.set_workspace(workspace_path.to_path_buf());
+            app.set_memory_root(radian_host::memory_dir());
             let apply_warnings = app
                 .apply_config(config, radian_tui::theme::Theme::no_color_env())
                 .map_err(|error| format!("config: {error}"))?;

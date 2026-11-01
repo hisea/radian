@@ -5550,6 +5550,108 @@ async fn pty_memory_commands_run_without_a_model_request() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// ADR 0035: a successful model `write` into a memory scope draws the memory card, and `Enter`
+/// with an empty input opens the record through the host's opener. The opener is `$EDITOR`,
+/// stubbed here with a script that records the path it was given.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_enter_on_a_memory_card_opens_the_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new("memory-card");
+    let home = TempDir::new("memory-card-home");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(home.path().join("memory/global")).unwrap();
+    // The opener log is outside the memory scope: the script appends the path it received.
+    let opened = dir.path().join("opened.txt");
+    let editor = dir.path().join("editor.sh");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$1\" >> {}\n", opened.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let record = home.path().join("memory/global/x.md");
+    let content = "---\nname: x\ndescription: a fact\ntype: feedback\nsource: model\n\
+                   created: 2026-10-31T00:00:00Z\nmodified: 2026-10-31T00:00:00Z\n---\nbody\n";
+    let arguments = json!({
+        "path": record.display().to_string(),
+        "content": content,
+    });
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", &arguments.to_string()),
+        text_reply("REMEMBERED-IT"),
+    ])
+    .await;
+    let config = format!(
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
+         base_url = \"{}\"\n",
+        server.base_url
+    );
+    let mut pty = Pty::spawn_with_config(
+        &[
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--session-dir",
+            dir.path().join("sessions").to_str().unwrap(),
+            "--session-id",
+            "memory-card",
+        ],
+        &[
+            ("RADIAN_HOME", home.path().to_str().unwrap()),
+            ("OPENAI_API_KEY", "sk-test"),
+            ("EDITOR", editor.to_str().unwrap()),
+        ],
+        &config,
+        30,
+        110,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"remember this\r");
+    assert!(
+        pty.wait_for_screen("REMEMBERED-IT", wait_positive()),
+        "the turn did not finish:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("· feedback · global/x.md", wait_positive()),
+        "the memory card is missing:\n{}",
+        pty.screen()
+    );
+    assert!(record.exists(), "the memory write did not land");
+    assert!(
+        !std::fs::read_to_string(&opened).is_ok_and(|text| !text.is_empty()),
+        "the file was opened before Enter"
+    );
+
+    // An empty input: Enter opens the newest memory card.
+    pty.send(b"\r");
+    let deadline = Instant::now() + wait_positive();
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&opened)
+            && text.contains(&record.display().to_string())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let text = std::fs::read_to_string(&opened).unwrap_or_default();
+    assert!(
+        text.contains(&record.display().to_string()),
+        "the opener did not receive the record path: {text:?}\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// A `/memory` read command runs while a turn is stuck on a hanging model call and does not
 /// interrupt it (ADR 0021 D6: memory takes effect at the next request, not mid-turn).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

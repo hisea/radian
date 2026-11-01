@@ -938,6 +938,13 @@ impl App {
                 // An image attachment alone is a message too (`@` needs text, a dropped path
                 // does not).
                 if text.trim().is_empty() && self.composer_images.is_empty() {
+                    // ADR 0035: with nothing to send, `Enter` opens the newest memory card.
+                    // Never while a turn runs, and never for a `read` line (it has no card).
+                    if self.turn() != TurnState::Running
+                        && let Some(path) = self.newest_memory_card()
+                    {
+                        return UpdateResult::effect(Effect::OpenMemory { path });
+                    }
                     return UpdateResult::dirty();
                 }
                 // Every submitted line (messages and `//` escapes and `/…` commands) joins the

@@ -50,6 +50,7 @@ The visual hand-test list lives in `crates/radian-tui/README.md`. It holds one s
 | Thinking | `◼ ` folded / `◻ ` expanded (with body) | `reasoning` | Body rows use `│ `. Head row and shapes: see ADR 0028 |
 | Tool calls | `• ` (one row) / `◼`/`◻` (expandable body) | `frame` | Body rows use `│ `. Shapes: see ADR 0028 |
 | Q&A record | `╭─ ask ───` / `│ ` / `╰──` | `frame` | Content: see ADR 0028 |
+| Memory card | `╭─ memory ───` / `│ ` / `╰──` | `frame`; title text, type and path weak | Content: see below |
 | notice / warning / `!` commands | `* ` / `! ` / `$ ` | unchanged | |
 | Compaction summary | `── context compacted (…) ──` starts at column 1 | `frame` | |
 
@@ -71,6 +72,11 @@ The visual hand-test list lives in `crates/radian-tui/README.md`. It holds one s
 - **Current-item mark**: list and completion-menu current rows mark names with ` ✓` (ascii level ` *`, `status_ok` role). Note columns still align with other rows. Over-long names truncate first, never the ` ✓`.
 - **`/model` in one step**: lists models of all logged-in providers, flat. Each row holds the model name in the main column and the weak-level provider in the note column. The current model marks ` ✓`. Typing matches model names and provider names together. Sort: current provider first, rest by provider then model name. The direct `/model <provider>/<model>` form stays. Same-name models under different providers take one row each.
 - Lists wrap around top to bottom.
+
+### Memory card and read line
+
+- **Card**: a successful model `write` or `patch` whose path is under a memory scope directory draws one open box instead of the ordinary tool card, and the two never appear side by side. The top line is `╭─ memory ───…` run to the body width and never closed; it is followed by one body row `<title> · <type> · <path>` and the three-cell tail `╰──`, all starting in the marker column. The title is the file stem: a readable record's frontmatter `name` is its stem (ADR 0021 D3), and a file whose frontmatter does not parse falls back to the same stem. The type is the record's frontmatter `type` as `radian-memory` parses it. The card resolves both from the recorded calls alone — a `write`'s `content`, a `read`'s result, or the type an earlier card recorded for the same file — and never from the file, so a resumed transcript draws the same card after the record changed or disappeared; a `patch` names no frontmatter of its own, so it carries the type the transcript recorded for that file, and `?` is the type the transcript recorded none for or whose frontmatter does not parse. The path is relative to the memory root (`projects/<id>/x.md`). The title uses the text role, the separators, the type and the path the weak level, and the frame the `frame` role. With the input box empty, `Enter` opens the newest memory card's file with the host's opener (`$EDITOR` when set, otherwise the platform opener). A failed call, and a path outside the memory scopes, keep the ordinary tool card.
+- **Read line**: a successful `read` of a memory record (not `MEMORY.md`, not `SESSIONS.md`) draws one line `memory used: <title>` in the muted role with the `•` marker, in place of the ordinary read head. The body stays foldable as for any read.
 
 ## Verification
 

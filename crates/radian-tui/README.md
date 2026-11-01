@@ -762,6 +762,11 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
   sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
   network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
+- **the arc task page's metrics tab**: open a task with a finished attempt and press `Tab`
+  until `metrics` is the bold tab. Does a run's row read at your width, does `j`/`k` move
+  the `❯` over the run rows, does `Enter` open the tool table and request log under the
+  selected run, and does a narrow terminal cut a row with `…` rather than wrap it past the
+  rail? pty automation asserts the text, not the feel (ADR 0009).
 - **the input area's two styles**: the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
   top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
@@ -815,6 +820,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
   `/memory forget note` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
+- **a model memory write**: ask the model to remember something. Is the memory card's title,
+  type and path readable, and does `Enter` on an empty input open the file? Ask it to read a
+  memory record: is `memory used: <title>` clear, and does `Ctrl-O` still show the content?
 - **the composer's feel**: type a paragraph and edit in the middle — does Left/Right/Home/End
   (Ctrl-A/Ctrl-E) land where you expect, does a word jump (Ctrl-Left) feel right, and do
   Ctrl-W / Ctrl-U / Ctrl-K delete the amount you meant? Press Up/Down at the first/last line:
@@ -1380,7 +1388,9 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `radian-exec` 
   (ADR 0021 D2/D6). The two index files are injected into the system prompt once per process;
   a line past a cap sends one rewrite notice before the next call. The permission profile
   allows `write` and `patch` in the memory scope directories in both tiers (ADR 0012; ADR
-  0021 invariant 5); no model memory tool exists (ADR 0021 D7). A
+  0021 invariant 5); no model memory tool exists (ADR 0021 D7). A successful memory
+  `write`/`patch` draws the memory card and a memory `read` draws the `memory used:` line
+  (ADR 0035); `Enter` with an empty input opens the newest card. A
   default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
   ) is shown as a `Notice` transcript entry — one line naming the new project and
   its identity key — because stderr would be drawn over by the fullscreen UI. Tested by

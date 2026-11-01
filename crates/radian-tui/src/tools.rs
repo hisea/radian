@@ -74,6 +74,11 @@ pub struct ToolCard {
     /// card but an ACP one that carries a diff and text in the same `tool_call_update`: the
     /// diff rows keep their roles and the text rows draw as ordinary body lines.
     pub trailing_from: Option<usize>,
+    /// The memory file this call settled on (ADR 0035): present only after a successful
+    /// `read`, `write` or `patch` whose path is a record under the memory root. A `read` draws
+    /// one `memory used:` line; a `write`/`patch` draws the memory card in place of the ordinary
+    /// tool card.
+    pub memory: Option<crate::memory_card::MemoryRef>,
 }
 
 impl ToolCard {
@@ -88,6 +93,7 @@ impl ToolCard {
             is_error: false,
             status: None,
             trailing_from: None,
+            memory: None,
         }
     }
 
