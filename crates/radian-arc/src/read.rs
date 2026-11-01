@@ -925,8 +925,8 @@ pub fn task_diff_counts(store: &Store, task: &str) -> Result<Vec<DiffCount>, Err
 ///
 /// # Errors
 ///
-/// The task cannot be read, or git cannot produce the file's diff (a spawn or read failure is
-/// an error, not an empty complete diff).
+/// The task cannot be read, or git cannot produce the file's diff (a spawn, read or exit
+/// failure is an error, not an empty complete diff).
 pub fn task_diff_file(
     store: &Store,
     task: &str,
@@ -1247,22 +1247,35 @@ fn untracked_count(worktree: &Path, path: &str) -> (usize, usize) {
 /// One file's diff, read from git up to `limit` bytes. A text that fits is trimmed the way
 /// [`git::ok`](crate::git) trims every diff text, so it equals the same file's text in
 /// [`task_diff`]; a cut text is left as it is, since the cut is already a whole number of
-/// bytes of the diff. A git run that cannot be started or read is the caller's error, never an
-/// empty complete diff.
+/// bytes of the diff. A git run that cannot be started, read, or that exits with a failure is
+/// the caller's error, never an empty complete diff. `diff --no-index` is the one exception:
+/// git exits `1` there when the two files differ, which is the normal case for a new file, so
+/// that status is the diff's content and not a failure.
 fn capped_git(dir: &Path, args: &[&str], limit: usize) -> Result<DiffText, Error> {
-    let (text, truncated) = crate::git::run_capped(dir, args, limit)
+    let read = crate::git::run_capped(dir, args, limit)
         .map_err(|error| Error::Failed(format!("cannot read the diff: {error}")))?;
-    Ok(if truncated {
-        DiffText {
-            text,
+    if read.truncated {
+        return Ok(DiffText {
+            text: read.stdout,
             truncated: true,
-        }
-    } else {
-        DiffText {
-            text: text.trim().to_owned(),
-            truncated: false,
-        }
+        });
+    }
+    if !read.status.success() && !no_index_difference(&read.status, args) {
+        return Err(Error::Failed(format!(
+            "cannot read the diff: git exited with {}",
+            read.status
+        )));
+    }
+    Ok(DiffText {
+        text: read.stdout.trim().to_owned(),
+        truncated: false,
     })
+}
+
+/// Whether a failed `git diff --no-index` status is git's "the files differ" (`1`), which is a
+/// diff to read rather than an error.
+fn no_index_difference(status: &std::process::ExitStatus, args: &[&str]) -> bool {
+    status.code() == Some(1) && args.contains(&"--no-index")
 }
 
 /// The paths `git status --porcelain -z` names, in either field of a rename or copy.
@@ -2020,5 +2033,44 @@ mod tests {
             "{}",
             error.message()
         );
+    }
+
+    /// A git that exits non-zero produced no usable diff: it is the caller's error, never an
+    /// empty complete diff that the hub would answer `200` with.
+    #[test]
+    fn a_git_that_exits_non_zero_is_an_error_not_an_empty_diff() {
+        let dir = crate::test_support::TempDir::new("read-capped-status");
+        let error = capped_git(dir.path(), &["diff", "--no-such-option"], 4096)
+            .expect_err("an unknown git option exits non-zero");
+        assert!(
+            error.message().contains("git exited with"),
+            "{}",
+            error.message()
+        );
+    }
+
+    /// `git diff --no-index` exits `1` when the files differ, which is a diff to read and not a
+    /// failure: an untracked file's diff is the normal case for that status.
+    #[test]
+    fn a_no_index_difference_is_a_diff_not_an_error() {
+        let dir = crate::test_support::TempDir::new("read-capped-no-index");
+        std::fs::write(dir.path().join("new.txt"), "one\ntwo\n").expect("the test writes a file");
+        let diff = capped_git(
+            dir.path(),
+            &[
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--unified=3",
+                "--",
+                "/dev/null",
+                "new.txt",
+            ],
+            4096,
+        )
+        .expect("git's exit 1 for a difference is a diff");
+        assert!(!diff.truncated);
+        assert!(diff.text.contains("+one"), "{}", diff.text);
     }
 }

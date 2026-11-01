@@ -141,7 +141,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/items/<task>/report` | `GET` | `attempt` (string, `<task>-<n>`), `text` (string): the last assistant message of the newest attempt's `result.jsonl`. | `200`, `204` when there is no attempt or no message, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/verdicts` | `GET` | One array for the newest attempt, in the order `commands`, `mutation`, `review`, `ci`, `human`, `integration`; each entry has `stage` (string), `result` (`pass` or `fail`), `reason` (string or `null`), `path` (string, the verdict file), and `verdict` (the verdict's JSON). | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
-| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`. | `200`, `401`, `404` |
+| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`, and so is a git that cannot produce the diff: a failed read is never a `200` with an empty text. | `200`, `401`, `404` |
 | `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
@@ -167,7 +167,6 @@ A missing or empty `note`, `level` or `priority` is refused, not defaulted.
 A request body may be at most 64 KiB (65,536 bytes), and only a write route's body is read: a read request's body is ignored. A body over the limit is never kept: a declared `Content-Length` marks it too large before any buffering, the hub drains at most 1 MiB of what is left for at most 250 ms so a client still sending can read the answer, and the connection closes. It is answered `413` with `{"error": "request body too large"}`; nothing changes.
 
 A successful action answers `200` with `{"ok": true, "text": "<the CLI's stdout text>"}`.
-An over-limit body answers `413` with `{"error": "request body too large"}` instead, and nothing changes.
 A failed action answers `{"ok": false, "text": "<the CLI's message>"}` and one of these status codes:
 
 | Status | When |

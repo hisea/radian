@@ -50,6 +50,11 @@ pipes are drained, and a limit that runs out kills the whole group and reports `
 worker wrapper gives every git command the wall time that is left, so a fetch or a push cannot
 outlive the attempt.
 
+`run_capped` reads at most the caller's limit plus the one byte that says there is more, then
+kills and reaps the child, and returns the reaped exit status too: a git that exits non-zero is
+the caller's error, never an empty successful read. The only non-zero status a caller accepts is
+`diff --no-index`'s `1`, which means the two files differ.
+
 ## Configuration shape
 
 The `store` owns parsing `config.toml`; the `gate` owns these types, and the field names are

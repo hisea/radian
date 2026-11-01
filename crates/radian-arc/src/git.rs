@@ -114,17 +114,28 @@ pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<GitOutput, RunError> {
     })
 }
 
+/// What a capped read produced: the text, whether git had more, and the exit status.
+pub(crate) struct CappedRead {
+    /// Standard output, lossily decoded, at most `limit + 1` bytes.
+    pub(crate) stdout: String,
+    /// Whether the output was longer than `limit` (the one extra byte was read). A cut
+    /// command is killed, so its [`CappedRead::status`] is a signal, not an exit code.
+    pub(crate) truncated: bool,
+    /// The exit status. Non-zero means git failed, except for `diff --no-index`, whose `1`
+    /// means the two files differ.
+    pub(crate) status: ExitStatus,
+}
+
 /// Runs a git command in `dir` and reads at most `limit + 1` bytes of its standard output.
 ///
 /// The one extra byte says whether there was more. The process is killed once that much has
 /// been read, so a `git diff` of a huge file is never buffered whole: the caller prints at most
 /// `limit` bytes and says the text was cut. The `+ 1` is deliberate: it is what tells an output
 /// of exactly `limit` bytes from a longer one.
-pub(crate) fn run_capped(
-    dir: &Path,
-    args: &[&str],
-    limit: usize,
-) -> Result<(String, bool), RunError> {
+///
+/// The exit status is returned, not dropped: a git that fails is the caller's error, never an
+/// empty successful read. A cut read's status is the kill's signal and the caller ignores it.
+pub(crate) fn run_capped(dir: &Path, args: &[&str], limit: usize) -> Result<CappedRead, RunError> {
     let mut command = command(dir)?;
     command
         .args(args)
@@ -144,12 +155,17 @@ pub(crate) fn run_capped(
     }
     // The output is all the caller can use: a git still writing the rest would only fill the
     // pipe, so it is killed and reaped on every path, a failed read included, so no child is
-    // left unreaped with its pipe open.
+    // left unreaped with its pipe open. The reaped status is the command's own when it had
+    // already finished, and the kill's signal when it was cut short.
     let _ = child.kill();
-    let _ = child.wait();
+    let status = child.wait().map_err(RunError::Spawn)?;
     read.map_err(RunError::Spawn)?;
     let truncated = bytes.len() > limit;
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
+    Ok(CappedRead {
+        stdout: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+        status,
+    })
 }
 
 /// What a git command with a wall-clock limit produced.

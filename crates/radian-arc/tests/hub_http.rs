@@ -1346,6 +1346,54 @@ fn a_declared_content_length_over_the_limit_is_413_before_the_body() {
     );
 }
 
+/// The drain of an over-limit body has one deadline for the whole body, not a timeout per frame:
+/// a client that declares an over-limit body and then sends a byte at a time cannot keep the
+/// request reading past it.
+#[test]
+fn a_dribbled_over_limit_body_does_not_extend_the_drain() {
+    let a = Repo::new("hub-body-dribble");
+    let (store, _plan, task) = setup(&a);
+    set_review(&store, &task);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let token = hub.token();
+    let host = format!("127.0.0.1:{}", hub.port);
+    let length = radian_arc::hub::http::REQUEST_BODY_LIMIT + 1;
+
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", hub.port)).expect("the hub accepts a connection");
+    // Longer than the drain's whole deadline, short enough that the old per-frame timeout shows
+    // as a read failure instead of a hang.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("a read timeout is settable");
+    let request = format!(
+        "POST /v1/repos/a/items/{task}/reject HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("the request headers are written");
+
+    let mut writer = stream.try_clone().expect("the stream clones");
+    let dribble = std::thread::spawn(move || {
+        for _ in 0..30 {
+            if writer.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let response = read_response(&mut stream);
+    dribble.join().expect("the dribbling writer ends");
+
+    assert_eq!(response.status, 413, "{:?}", response.json());
+    assert_eq!(
+        response.json(),
+        serde_json::json!({"error": "request body too large"})
+    );
+}
+
 /// The loop reads the same configuration file the port came from: a top-level `--config` sets
 /// `[hub] concurrency` in the status line, and not the default file's value.
 #[test]

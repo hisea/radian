@@ -2132,13 +2132,13 @@ must run outside the workspace sandbox), and the file was restored from a copy u
 
 ## TK0292 rework: the PL0079 hub follow-ups (2026-11-01, branch `work/TK0292-radian-hub-followups`)
 
-The follow-ups fix the hub's diff error path, its lock probes, its body limit, its exec-failure
-record, its configuration path and the reverify error text. Each mutation was applied by hand to
-the named working file; where the test drives the real binary it was rebuilt with
-`cargo build -p radian-tui --bin radian`, and the named test ran with
-`cargo nextest run -p radian-arc --locked --profile sandbox --lib` or `--test hub_http` with
-`-E 'test(<name>)'`. Each file was restored from a copy under `.radian/mut/`, which `cmp` found
-identical.
+The follow-ups fix the hub's diff error path and its git exit status, its lock probes, its body
+limit and the drain's whole-deadline bound, its exec-failure record, its configuration path and
+the reverify error text. Each mutation was applied by hand to the named working file; where the
+test drives the real binary it was rebuilt with `cargo build -p radian-tui --bin radian`, and the
+named test ran with `cargo nextest run -p radian-arc --locked --profile sandbox --lib` or `--test
+hub_http` with `-E 'test(<name>)'`. Each file was restored from a copy under `.radian/mut/`, which
+`cmp` found identical.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
@@ -2150,5 +2150,7 @@ identical.
 | TK0292-M6 | `report_restart_failure` prints the failed exec but writes no `loop.log` line | `hub::r#loop::tests::a_failed_exec_is_written_to_the_claiming_repositorys_loop_log` (`loop.log` was `NotFound`) | ✅ 1 failed |
 | TK0292-M7 | `load_config` reads `resolved_path(None)`, ignoring the top-level `--config` | `hub::r#loop::tests::the_loop_reads_the_explicit_config_path` (`left: 30, right: 5`, the default interval) | ✅ 1 failed |
 | TK0292-M8 | the route's reverify failure drops the verification's own error, keeping only the claim's line | `hub_http::a_reverify_whose_verification_refuses_returns_the_claims_line_and_its_error` (the error line was missing from the body) | ✅ 1 failed |
+| TK0292-M10 | the over-limit body drain times out each frame again (`timeout(BODY_DRAIN_TIMEOUT, next)` inside the loop), so a client that dribbles a byte at a time keeps the drain alive past 250 ms | `hub_http::a_dribbled_over_limit_body_does_not_extend_the_drain` (the response read failed after 3 s: the hub was still draining) | ✅ 1 failed |
+| TK0292-M11 | `capped_git` ignores the reaped exit status again, so a failed `git diff` reads as an empty complete diff | `read::tests::a_git_that_exits_non_zero_is_an_error_not_an_empty_diff` (`expect_err` got `Ok`) | ✅ 1 failed |
 
-8/8 caught.
+10/10 caught.

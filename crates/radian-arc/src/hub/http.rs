@@ -500,10 +500,17 @@ async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> Request
     let mut body = request.into_body();
     let mut bytes = Vec::new();
     let mut drained = 0usize;
+    // One deadline for the whole drain, never one per frame: a client that sends a frame just
+    // under a per-frame timeout must not be able to extend the drain past [`BODY_DRAIN_TIMEOUT`].
+    let drain_deadline = tokio::time::Instant::now() + BODY_DRAIN_TIMEOUT;
     loop {
         let next = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx));
         let frame = if too_large {
-            match tokio::time::timeout(BODY_DRAIN_TIMEOUT, next).await {
+            let left = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(left, next).await {
                 Ok(frame) => frame,
                 Err(_) => break,
             }
@@ -539,7 +546,8 @@ async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> Request
 }
 
 /// How much of an over-limit body is drained, and for how long, so a client that is still
-/// sending reaches the `413` instead of a reset connection.
+/// sending reaches the `413` instead of a reset connection. The timeout is one deadline for
+/// the whole drain, not a limit per frame.
 const BODY_DRAIN_LIMIT: usize = 1024 * 1024;
 const BODY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
