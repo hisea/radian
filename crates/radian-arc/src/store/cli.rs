@@ -882,24 +882,31 @@ fn metrics_text(out: &mut String, metrics: &crate::read::TaskMetrics) {
                 command.duration_ms, command.line
             ));
         }
-        if let Some(seconds) = attempt.integration_wall_secs {
-            out.push_str(&format!(
-                "attempt {id} integration: wall={}\n",
-                seconds_text(seconds)
-            ));
-        }
-        if let Some(diff) = &attempt.diff {
-            out.push_str(&format!(
-                "attempt {id} diff: files={} added={} removed={}\n",
-                diff.files, diff.added, diff.removed
-            ));
-        }
-        if let Some(increment) = &attempt.increment {
-            out.push_str(&format!(
-                "attempt {id} increment: files={} added={} removed={}\n",
-                increment.files, increment.added, increment.removed
-            ));
-        }
+        out.push_str(&format!(
+            "attempt {id} integration: wall={}\n",
+            attempt
+                .integration_wall_secs
+                .map_or_else(|| "-".to_owned(), seconds_text)
+        ));
+        let stat_text = |stat: Option<&crate::read::DiffStatView>| {
+            stat.map_or_else(
+                || "-".to_owned(),
+                |stat| {
+                    format!(
+                        "files={} added={} removed={}",
+                        stat.files, stat.added, stat.removed
+                    )
+                },
+            )
+        };
+        out.push_str(&format!(
+            "attempt {id} diff: {}\n",
+            stat_text(attempt.diff.as_ref())
+        ));
+        out.push_str(&format!(
+            "attempt {id} increment: {}\n",
+            stat_text(attempt.increment.as_ref())
+        ));
     }
 }
 

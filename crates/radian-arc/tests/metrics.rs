@@ -270,6 +270,33 @@ fn a_running_attempt_reports_its_start_and_no_metrics() {
     assert!(metrics.diff.is_none());
 }
 
+/// The text block prints `-` for a diff and an increment the attempt never recorded, rather
+/// than omitting the line. Mutation: skip a line whose value is `None`, and the text holds
+/// neither here.
+#[test]
+fn the_text_block_prints_a_dash_for_an_unreported_diff_and_increment() {
+    let fixture = Fixture::new("missing-diff-text");
+    write_jsonl(
+        &fixture.run_dir(1).join("result.jsonl"),
+        &[json!({
+            "type": "Result",
+            "outcome": "completed",
+            "text": "done",
+        })],
+    );
+
+    let text = cli::show_text(&fixture.store, &fixture.task).expect("show");
+    let id = format!("{}-1", fixture.task);
+    assert!(
+        text.contains(&format!("attempt {id} diff: -\n")),
+        "the missing diff prints `-`: {text}"
+    );
+    assert!(
+        text.contains(&format!("attempt {id} increment: -\n")),
+        "the missing increment prints `-`: {text}"
+    );
+}
+
 /// A torn or missing `diffstat.json` reads as not reported, and `show` still succeeds.
 /// Mutation: propagate the parse error and `show` fails.
 #[test]

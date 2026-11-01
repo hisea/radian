@@ -184,6 +184,7 @@ fn write_diffstat(
                     "diff",
                     "--no-ext-diff",
                     "--no-textconv",
+                    "-M",
                     &format!("{base}..{}", candidate.sha),
                 ],
             )?;
@@ -193,6 +194,7 @@ fn write_diffstat(
                     "diff",
                     "--no-ext-diff",
                     "--no-textconv",
+                    "-M",
                     &format!("{previous}..{}", candidate.sha),
                 ],
             )?;
@@ -227,12 +229,13 @@ fn write_diffstat(
         .map_err(|source| GateError::Io { path, source })
 }
 
-/// One range's counts from `git diff --numstat -z`, through the crate's one git helper. A
+/// One range's counts from `git diff --numstat -z`, through the crate's one git helper. Rename
+/// detection is forced so the counts do not follow the repository's `diff.renames` setting. A
 /// rename is one file; a binary file's `-` counts read as `0`.
 fn numstat_stat(checkout: &Path, base: &str, head: &str) -> Result<DiffStat, GateError> {
     let text = super::git::ok(
         checkout,
-        &["diff", "--numstat", "-z", &format!("{base}..{head}")],
+        &["diff", "--numstat", "-z", "-M", &format!("{base}..{head}")],
     )?;
     let entries = crate::read::numstat_entries(&text);
     Ok(DiffStat {

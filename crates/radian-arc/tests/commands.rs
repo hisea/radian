@@ -331,6 +331,32 @@ fn the_diffstat_counts_a_binary_file_and_a_rename() {
     );
 }
 
+/// The counts do not depend on the repository's `diff.renames` setting: a pure rename is one
+/// file with no lines even when `diff.renames=false`, and the binary file adds none. Mutation:
+/// drop rename detection from the numstat call, and the range counts three paths here.
+#[test]
+fn the_diffstat_forces_rename_detection_over_the_repositorys_setting() {
+    let repo = TestRepo::new("diffstat-renames-off");
+    repo.git(&["config", "diff.renames", "false"]);
+    let base = repo.rev("main");
+    repo.git(&["checkout", "-B", "work/off", &base]);
+    repo.git(&["mv", "file.txt", "renamed.txt"]);
+    fs::write(repo.repo.join("blob.bin"), [0u8, 1, 2]).expect("the binary file");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-m", "rename and binary"]);
+    let head = repo.rev("HEAD");
+
+    run_commands(&repo, "TK0001-off", "TK0001-off-1", &head, None);
+    let stat = diffstat(&repo, "TK0001-off", "TK0001-off-1").expect("diffstat.json");
+    assert_eq!(stat["diff"]["files"], json!(2), "{stat}");
+    assert_eq!(
+        stat["diff"]["added"],
+        json!(0),
+        "a pure rename and a binary add no line: {stat}"
+    );
+    assert_eq!(stat["diff"]["removed"], json!(0), "{stat}");
+}
+
 /// A second attempt's increment is the rework's own change: the file the first attempt added
 /// is in `diff`, not in `increment`. A first attempt has no increment at all. Mutation: use
 /// the whole-task range for the increment, and it holds both files.
