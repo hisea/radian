@@ -34,7 +34,7 @@ pub mod registry;
 pub mod status;
 pub mod token;
 
-pub use lock::HubLock;
+pub use lock::{HubLock, HubState};
 pub use r#loop::run;
 pub use registry::{
     HUB_LOCK, NAME_MAX_CHARS, REGISTRY_FILE, Registry, RepoEntry, TOKEN_FILE, valid_name,

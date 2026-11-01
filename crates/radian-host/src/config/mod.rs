@@ -558,9 +558,9 @@ fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), 
     Ok(())
 }
 
-/// Parses `[hub]` (ADR 0048). Each key has a closed range: a value outside it is a
-/// configuration error naming the key and the range, never a guess. An unknown key is skipped
-/// and named on the startup line.
+/// Parses `[hub]` (ADR 0048). Each key has a closed range, except `concurrency`, which accepts
+/// every integer of `1` or more: a value outside the range is a configuration error naming the
+/// key and the range, never a guess. An unknown key is skipped and named on the startup line.
 fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
     let Some(table) = value.as_table() else {
         return Err(wrong_type(path, "hub", "a table"));

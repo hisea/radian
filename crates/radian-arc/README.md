@@ -50,6 +50,11 @@ pipes are drained, and a limit that runs out kills the whole group and reports `
 worker wrapper gives every git command the wall time that is left, so a fetch or a push cannot
 outlive the attempt.
 
+`run_capped` reads at most the caller's limit plus the one byte that says there is more, then
+kills and reaps the child, and returns the reaped exit status too: a git that exits non-zero is
+the caller's error, never an empty successful read. The only non-zero status a caller accepts is
+`diff --no-index`'s `1`, which means the two files differ.
+
 ## Configuration shape
 
 The `store` owns parsing `config.toml`; the `gate` owns these types, and the field names are
@@ -248,7 +253,8 @@ read and write), `token` (the bearer token every HTTP request carries), `hub.loc
 one hub holds for its life, with its pid inside) and the scheduler (`hub::run`).
 `hub::http::serve` is what `radian hub` with no subcommand calls: it takes `hub.lock`, binds
 `127.0.0.1:<[hub] port>`, prints `hub: listening on <addr>` as its first stdout line, serves
-the HTTP API on a thread of its own, and runs the scheduler on the calling thread. The
+the HTTP API on a thread of its own, and runs the hub's own thread (registry re-reads, status
+lines and joins) while every repository's pass runs on a thread of its own. The
 scheduler keeps one `run::LoopState` per registered repository on
 its own OS thread, because a pass blocks; it re-reads the registry every `[hub] interval_secs`,
 records a repository whose `runner.lock` another process holds as read-only (with the holder's

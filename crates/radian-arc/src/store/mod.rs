@@ -562,6 +562,26 @@ impl Store {
             .ok()
     }
 
+    /// Whether no process holds `runner.lock` right now. The lock is taken and released at
+    /// once and never created, and the pid the file carries is left untouched (unlike
+    /// [`Store::try_runner_lock`]). An unreadable lock file reads as free, which is what a
+    /// viewer saw before this probe existed.
+    #[must_use]
+    pub fn runner_lock_free(&self) -> bool {
+        let path = self.root.join(RUNNER_LOCK);
+        let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+            return true;
+        };
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = FileExt::unlock(&file);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(_) => true,
+        }
+    }
+
     // ---- reading ----------------------------------------------------------------------
 
     /// Reads one plan and marks whether it changed outside arc.

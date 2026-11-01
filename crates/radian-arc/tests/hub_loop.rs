@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use radian_arc::hub::HubLock;
+use radian_arc::hub::{HubLock, HubState};
 use radian_arc::store::model::TaskState;
 use radian_arc::store::{Store, plan_ops};
 
@@ -604,7 +604,7 @@ fn sigterm_releases_every_lock_and_exits_zero() {
     assert!(runner_lock_free(&b), "B's runner.lock stayed held");
     assert_eq!(
         HubLock::probe(&home.hub_dir()),
-        None,
+        HubState::Free,
         "hub.lock stayed held"
     );
 }

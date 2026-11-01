@@ -1,9 +1,10 @@
 //! The hub's HTTP API against a real process and real repositories (ADR 0048 decision 16).
 //!
-//! Every test starts `radian hub` on port `0` with a temporary `RADIAN_HOME`, reads the bound
-//! port from its first stdout line, and speaks HTTP/1.1 to it on loopback. The read routes are
-//! compared with the CLI's own `--json` output, which is the contract: the route returns the
-//! bytes `radian arc list --json` and `radian arc show --json` print.
+//! Most tests start `radian hub` on port `0` with a temporary `RADIAN_HOME`, read the bound
+//! port from its first stdout line, and speak HTTP/1.1 to it on loopback. The rebind test
+//! starts its first hub on port `0` too and its replacement on the port the first one reported.
+//! The read routes are compared with the CLI's own `--json` output, which is the contract: the
+//! route returns the bytes `radian arc list --json` and `radian arc show --json` print.
 
 mod common;
 
@@ -40,7 +41,7 @@ fn radian(home: &Path, args: &[&str]) -> std::process::Output {
 /// A running hub. Dropping it kills the process.
 struct Hub {
     child: Child,
-    _stdout: BufReader<std::process::ChildStdout>,
+    stdout: BufReader<std::process::ChildStdout>,
     home: PathBuf,
     stderr_path: PathBuf,
     port: u16,
@@ -65,16 +66,29 @@ impl Hub {
     }
 
     fn start_on_with(home: &Path, port: u16, envs: &[(&str, &str)]) -> Self {
+        Self::start_with_args(home, port, envs, &[])
+    }
+
+    /// [`Hub::start`] with a top-level `--config` file, so a test can prove the hub's loop reads
+    /// the same configuration the port came from.
+    fn start_config(home: &Path, config: &Path) -> Self {
+        let config = config.to_str().expect("the config path is UTF-8");
+        Self::start_with_args(home, 0, &[], &["--config", config])
+    }
+
+    fn start_with_args(home: &Path, port: u16, envs: &[(&str, &str)], leading: &[&str]) -> Self {
         fs::create_dir_all(home).expect("the hub home is creatable");
         let stderr_path = home.join("hub.stderr.log");
         let stderr = fs::File::create(&stderr_path).expect("the hub stderr file is creatable");
+        let port_arg = port.to_string();
         let mut command = Command::new(radian_bin());
         command
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
             .env("RADIAN_HOME", home)
-            .args(["hub", "--port", &port.to_string()])
+            .args(leading)
+            .args(["hub", "--port", port_arg.as_str()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr));
@@ -96,11 +110,20 @@ impl Hub {
             .expect("the first stdout line names a port");
         Self {
             child,
-            _stdout: reader,
+            stdout: reader,
             home: home.to_path_buf(),
             stderr_path,
             port,
         }
+    }
+
+    /// The next stdout line, trimmed of its newline.
+    fn next_line(&mut self) -> String {
+        let mut line = String::new();
+        self.stdout
+            .read_line(&mut line)
+            .expect("the hub's stdout line reads");
+        line.trim_end().to_owned()
     }
 
     fn pid(&self) -> u32 {
@@ -1267,6 +1290,138 @@ fn a_body_over_the_limit_is_413_and_changes_nothing() {
     assert_eq!(arc_files(&a), before, "an oversized body changes nothing");
 }
 
+/// A large body does not change the route's answer: the route and the method are decided, and a
+/// read route's body is never read, before any body is buffered.
+#[test]
+fn an_oversized_body_does_not_change_a_404_a_405_or_a_read_route() {
+    let a = Repo::new("hub-body-route-first");
+    let (_store, plan, _task) = setup(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let token = hub.token();
+    let host = format!("127.0.0.1:{}", hub.port);
+    let length = radian_arc::hub::http::REQUEST_BODY_LIMIT + 1;
+
+    let request = format!(
+        "POST /v1/repos/a/items/{plan}/start HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    let response = http_head_only(hub.port, &request, Duration::from_secs(5));
+    assert_eq!(response.status, 404, "{:?}", response.json());
+
+    let request = format!(
+        "GET /v1/repos/a/items/{plan}/confirm HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    let response = http_head_only(hub.port, &request, Duration::from_secs(5));
+    assert_eq!(response.status, 405, "{:?}", response.json());
+
+    let request = format!(
+        "GET /v1/version HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    let response = http_head_only(hub.port, &request, Duration::from_secs(5));
+    assert_eq!(response.status, 200, "{:?}", response.json());
+}
+
+/// A declared `Content-Length` over the limit is refused before the client sends the body at
+/// all, so a huge or endless body cannot keep a request task reading.
+#[test]
+fn a_declared_content_length_over_the_limit_is_413_before_the_body() {
+    let a = Repo::new("hub-body-declared");
+    let (store, _plan, task) = setup(&a);
+    set_review(&store, &task);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let token = hub.token();
+    let host = format!("127.0.0.1:{}", hub.port);
+    let length = radian_arc::hub::http::REQUEST_BODY_LIMIT + 1;
+    let request = format!(
+        "POST /v1/repos/a/items/{task}/reject HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    let response = http_head_only(hub.port, &request, Duration::from_secs(5));
+    assert_eq!(response.status, 413, "{:?}", response.json());
+    assert_eq!(
+        response.json(),
+        serde_json::json!({"error": "request body too large"})
+    );
+}
+
+/// The drain of an over-limit body has one deadline for the whole body, not a timeout per frame:
+/// a client that declares an over-limit body and then sends a byte at a time cannot keep the
+/// request reading past it.
+#[test]
+fn a_dribbled_over_limit_body_does_not_extend_the_drain() {
+    let a = Repo::new("hub-body-dribble");
+    let (store, _plan, task) = setup(&a);
+    set_review(&store, &task);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let token = hub.token();
+    let host = format!("127.0.0.1:{}", hub.port);
+    let length = radian_arc::hub::http::REQUEST_BODY_LIMIT + 1;
+
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", hub.port)).expect("the hub accepts a connection");
+    // Longer than the drain's whole deadline, short enough that the old per-frame timeout shows
+    // as a read failure instead of a hang.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("a read timeout is settable");
+    let request = format!(
+        "POST /v1/repos/a/items/{task}/reject HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: {length}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("the request headers are written");
+
+    let mut writer = stream.try_clone().expect("the stream clones");
+    let dribble = std::thread::spawn(move || {
+        for _ in 0..30 {
+            if writer.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let response = read_response(&mut stream);
+    dribble.join().expect("the dribbling writer ends");
+
+    assert_eq!(response.status, 413, "{:?}", response.json());
+    assert_eq!(
+        response.json(),
+        serde_json::json!({"error": "request body too large"})
+    );
+}
+
+/// The loop reads the same configuration file the port came from: a top-level `--config` sets
+/// `[hub] concurrency` in the status line, and not the default file's value.
+#[test]
+fn the_hub_reads_the_explicit_config_file_for_the_loop() {
+    let a = Repo::new("hub-http-explicit-config");
+    arc_store(&a);
+    let home = hub_home(&a);
+    let config = a.root.join("explicit.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[hub]\nport = 7000\nconcurrency = 7\n",
+    )
+    .expect("the test writes its configuration");
+    let mut hub = Hub::start_config(&home, &config);
+    let mut status = String::new();
+    for _ in 0..50 {
+        let line = hub.next_line();
+        if line.starts_with("hub: ") {
+            status = line;
+            break;
+        }
+    }
+    assert!(
+        status.contains("cap 7"),
+        "the hub's loop reads `--config` too: {status:?}"
+    );
+}
+
 // ---- the token file ----------------------------------------------------------------------
 
 #[test]
@@ -1325,22 +1480,17 @@ fn a_second_hub_is_refused_by_the_lock_and_a_port_in_use_names_the_port() {
 }
 
 /// A hub binds its port again after its predecessor's last connection left the port in
-/// `TIME_WAIT`. The `std::net` bind this replaced did not set `SO_REUSEADDR`, so the hub a
-/// rebuilt binary `exec`s exited `1` with `Address already in use` (review).
+/// `TIME_WAIT`. The first hub starts on port `0` and the replacement uses the port it reported,
+/// so the two binds are the same port with no probe in between; `bind_listener` sets
+/// `SO_REUSEADDR` on its own socket before `bind`.
 #[test]
 fn a_hub_binds_its_port_again_while_the_last_connection_is_in_time_wait() {
     let a = Repo::new("hub-http-rebind");
     arc_store(&a);
     let home = hub_home(&a);
     register(&home, "a", &a);
-    // The OS picks a free port; the test releases it before the hub binds it.
-    let port = TcpListener::bind("127.0.0.1:0")
-        .expect("the test finds a free port")
-        .local_addr()
-        .unwrap()
-        .port();
-
-    let mut first = Hub::start_on(&home, port);
+    let mut first = Hub::start_on(&home, 0);
+    let port = first.port;
     let response = first.authorized("GET", "/v1/version");
     assert_eq!(response.status, 200, "the first hub serves the port");
     // The request sent `Connection: close`, so the server closed first and `port` now has a

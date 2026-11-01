@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use radian_arc::hub::{HubLock, Registry};
+use radian_arc::hub::{HubLock, HubState, Registry};
 use radian_arc::store::{RUNNER_LOCK, Store};
 
 use super::loop_log;
@@ -141,7 +141,7 @@ impl LoopStarter {
         // schedule it, and a hub that already runs picks it up at its next read.
         let registry = self.registry()?;
         let notice = self.register(&registry)?;
-        if HubLock::probe(registry.dir()).is_some() {
+        if HubLock::probe(registry.dir()) != HubState::Free {
             return Ok(notice);
         }
         match self.spawn() {

@@ -1236,7 +1236,7 @@ fn run_hub(
             Ok(port) => port,
             Err(code) => return code,
         };
-        return hub_result(radian_arc::hub::http::serve(port));
+        return hub_result(radian_arc::hub::http::serve(port, config));
     };
     match command {
         HubCommand::Pair { no_qr } => {

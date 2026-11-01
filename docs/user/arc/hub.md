@@ -127,6 +127,7 @@ The list and show bodies are exactly the bytes `radian arc list --json` and `rad
 
 A request without a valid bearer token is `401` with `{}` before any route runs.
 The token is checked before the request body is read, so a request without one is answered without the hub buffering the body it sends.
+The route and the method are checked before the body is read too: an unknown path is `404` and a wrong method is `405` whatever body the request carries, and only a write route's body is read at all.
 An unknown repository or id on a read route is `404` with the CLI's own message as `{"error": "<message>"}`.
 Any other read path is `404` with `{"error": "no such route"}`, and a method a read route does not take is `405`.
 A write route's failure body and status codes are in [Owner actions](#owner-actions).
@@ -134,13 +135,13 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | Route | Method | Fields | Status codes |
 |---|---|---|---|
 | `/v1/version` | `GET` | `api_version` (integer), `schema_version` (integer). | `200`, `401` |
-| `/v1/repos` | `GET` | One array in registry order; each entry has `name` (string), `path` (string), `scheduled` (boolean), and `lock_holder`. `scheduled` is `true` when this hub holds the repository's `runner.lock`. `lock_holder` is the pid written in that `runner.lock` (the hub's own when it schedules the repository, another process's when it only reads it), or `null` when no process holds it. | `200`, `401` |
+| `/v1/repos` | `GET` | One array in registry order; each entry has `name` (string), `path` (string), `scheduled` (boolean), and `lock_holder`. `scheduled` is `true` when this hub holds the repository's `runner.lock`. `lock_holder` is the pid written in that `runner.lock` while a process holds it (the hub's own when it schedules the repository, another process's when it only reads it), or `null` when no process holds it or the file carries no readable pid. Both fields follow a probe of the lock, not the pid text left in the file after its holder exits. | `200`, `401` |
 | `/v1/repos/<name>/items` | `GET` | The `radian arc list --json` bytes of that repository. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<id>` | `GET` | The `radian arc show --json` bytes of that plan or task. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/report` | `GET` | `attempt` (string, `<task>-<n>`), `text` (string): the last assistant message of the newest attempt's `result.jsonl`. | `200`, `204` when there is no attempt or no message, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/verdicts` | `GET` | One array for the newest attempt, in the order `commands`, `mutation`, `review`, `ci`, `human`, `integration`; each entry has `stage` (string), `result` (`pass` or `fail`), `reason` (string or `null`), `path` (string, the verdict file), and `verdict` (the verdict's JSON). | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
-| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`. | `200`, `401`, `404` |
+| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`, and so is a git that cannot produce the diff: a failed read is never a `200` with an empty text. | `200`, `401`, `404` |
 | `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
@@ -163,7 +164,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 
 A body with no field is enough for `confirm`, `merge`, `cancel`, `pause` and `reverify`; an empty body is the same as `{}`.
 A missing or empty `note`, `level` or `priority` is refused, not defaulted.
-A request body may be at most 64 KiB (65,536 bytes). A larger body is drained, not buffered, and answered `413`; nothing changes.
+A request body may be at most 64 KiB (65,536 bytes), and only a write route's body is read: a read request's body is ignored. A body over the limit is never kept: a declared `Content-Length` marks it too large before any buffering, the hub drains at most 1 MiB of what is left for at most 250 ms so a client still sending can read the answer, and the connection closes. It is answered `413` with `{"error": "request body too large"}`; nothing changes.
 
 A successful action answers `200` with `{"ok": true, "text": "<the CLI's stdout text>"}`.
 A failed action answers `{"ok": false, "text": "<the CLI's message>"}` and one of these status codes:
@@ -174,7 +175,6 @@ A failed action answers `{"ok": false, "text": "<the CLI's message>"}` and one o
 | `404` | The repository is not registered, or the id names no plan or task. |
 | `405` | A write route was called with a method other than `POST`. |
 | `409` | Another process holds `state.lock`, or the state does not allow the action (for example a merge on a task that is not `review.awaiting_human`). A `reverify` whose claim succeeded and whose verification then refused also answers `409`, with the claim's line and the verification's own error after it. |
-| `413` | The request body is larger than 64 KiB (65,536 bytes): the body is not kept and nothing changes. |
 | `422` | A usage or validation error: a value outside the action's closed set, or another check the CLI refuses with exit `2` or with exit `3` for a value outside a set. |
 | `500` | Any other error, such as a git or file failure. |
 
@@ -278,7 +278,7 @@ work-tools  /home/me/Code/work-tools  read-only (pid 4242)
 A running hub follows a rebuilt binary as the old loop did: when a pass sees that the file at its recorded executable path changed and is stable, the hub prints `radian arc: the radian binary changed on disk; restarting the loop with it` once, in the `loop.log` of the repository whose pass saw it, finishes the passes in flight, releases every `runner.lock` and then `hub.lock`, and replaces itself with `exec` of the recorded path.
 A loop that sees the same replacement after the first one stops without printing a second line.
 The pid does not change, and a running gate and a running worker are left alone.
-When `exec` fails, the hub prints one line, takes `hub.lock` again and goes on with the old code.
+When `exec` fails, the hub writes one line to the `loop.log` of the repository whose pass claimed the restart and prints it, takes `hub.lock` again and goes on with the old code.
 
 On SIGINT or SIGTERM every loop starts no new worker and no new gate.
 A Ctrl-C in the terminal reaches the hub only: each worker and each gate runs in its own process group, and both treat SIGINT exactly as SIGTERM.

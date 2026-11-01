@@ -45,9 +45,10 @@ pub fn run(
     registry: &Registry,
     emit: Arc<dyn Fn(&str) + Send + Sync>,
     lock: HubLock,
+    config: Option<&std::path::Path>,
 ) -> Result<(), Error> {
     let mut lock = Some(lock);
-    let config = load_config()?;
+    let config = load_config(config)?;
     let interval = interval_secs(&config);
     let cap = config.hub.concurrency.max(1);
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -58,7 +59,7 @@ pub fn run(
     'hub: loop {
         let stop_all = Arc::new(AtomicBool::new(false));
         let restart = Arc::new(AtomicBool::new(false));
-        let restart_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let restart_path: Arc<Mutex<Option<Restart>>> = Arc::new(Mutex::new(None));
         let dirty = Arc::new(AtomicBool::new(true));
         let mut repos: BTreeMap<String, RepoHandle> = BTreeMap::new();
         let mut retired: Vec<JoinHandle<()>> = Vec::new();
@@ -119,20 +120,34 @@ pub fn run(
         drop(lock.take());
 
         if restart.load(Ordering::SeqCst) {
-            let path = restart_path.lock().expect("the path lock").clone();
-            if let Some(path) = path {
-                let error = run::replace_process(&path, &arguments);
-                // The exec failed: say so, take `hub.lock` again, and go on with the old code.
-                // New loops record the new identity, so they do not retry every pass.
-                (emit)(&format!(
-                    "radian arc: cannot restart with the new binary: {error}\n"
-                ));
+            let target = restart_path.lock().expect("the restart lock").take();
+            if let Some(target) = target {
+                let error = run::replace_process(&target.program, &arguments);
+                // The exec failed: say so in the repository whose pass claimed the restart, so
+                // the failure is in a `loop.log` (ADR 0048 decision 13) and not only on
+                // stdout, take `hub.lock` again, and go on with the old code. New loops record
+                // the new identity, so they do not retry every pass.
+                report_restart_failure(&*emit, &target, &error);
                 lock = Some(take_hub_lock(registry)?);
                 continue 'hub;
             }
         }
         return Ok(());
     }
+}
+
+/// The binary a rebuilt-binary restart will `exec`, and the repository whose pass claimed it
+/// (so a failed `exec` is written to that repository's `loop.log`).
+struct Restart {
+    program: PathBuf,
+    repo: PathBuf,
+}
+
+/// One line for a failed `exec`, in the claiming repository's `loop.log` and on stdout.
+fn report_restart_failure(emit: &dyn Fn(&str), target: &Restart, error: &std::io::Error) {
+    let line = format!("radian arc: cannot restart with the new binary: {error}\n");
+    run::LoopLog::new(&Store::at(&target.repo)).write(&line);
+    emit(&line);
 }
 
 /// One repository's loop handle in the hub's own thread.
@@ -158,7 +173,7 @@ fn reconcile(
     emit: &Arc<dyn Fn(&str) + Send + Sync>,
     stop_all: &Arc<AtomicBool>,
     restart: &Arc<AtomicBool>,
-    restart_path: &Arc<Mutex<Option<PathBuf>>>,
+    restart_path: &Arc<Mutex<Option<Restart>>>,
     dirty: &Arc<AtomicBool>,
     interval: u64,
     cap: u64,
@@ -266,7 +281,7 @@ fn repo_loop(
     removed: Arc<AtomicBool>,
     stop_all: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
-    restart_path: Arc<Mutex<Option<PathBuf>>>,
+    restart_path: Arc<Mutex<Option<Restart>>>,
     dirty: Arc<AtomicBool>,
 ) {
     // `Store::at` skips `Store::open`'s config check: a broken `config.toml` must surface as a
@@ -318,7 +333,10 @@ fn repo_loop(
                     // it, in its own `loop.log` and on stdout. A sibling that sees it too
                     // stops without printing a second line.
                     if !restart.swap(true, Ordering::SeqCst) {
-                        *restart_path.lock().expect("the path lock") = Some(path);
+                        *restart_path.lock().expect("the restart lock") = Some(Restart {
+                            program: path,
+                            repo: store.repo().to_path_buf(),
+                        });
                         let line = format!("radian arc: {}\n", run::RESTART_TEXT);
                         run::LoopLog::new(&store).write(&line);
                         (emit)(&line);
@@ -402,8 +420,8 @@ fn compose_status(
     }
 }
 
-fn load_config() -> Result<Config, Error> {
-    let path = radian_host::config::resolved_path(None);
+fn load_config(explicit: Option<&std::path::Path>) -> Result<Config, Error> {
+    let path = radian_host::config::resolved_path(explicit);
     radian_host::config::load_path(path.as_deref())
         .map_err(|error| Error::Failed(format!("cannot read the configuration: {error}")))
 }
@@ -419,4 +437,50 @@ fn interval_secs(config: &Config) -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(config.hub.interval_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loop reads the same file the port came from: a top-level `--config` supplies
+    /// `[hub] interval_secs` and `[hub] concurrency`, never the default file under
+    /// `RADIAN_HOME`.
+    #[test]
+    fn the_loop_reads_the_explicit_config_path() {
+        let dir = crate::test_support::TempDir::new("hub-loop-config");
+        let path = dir.path().join("explicit.toml");
+        std::fs::write(
+            &path,
+            "schema_version = 1\n[hub]\ninterval_secs = 5\nconcurrency = 7\n",
+        )
+        .expect("the test writes its configuration");
+        let config = load_config(Some(&path)).expect("the explicit file reads");
+        assert_eq!(interval_secs(&config), 5);
+        assert_eq!(config.hub.concurrency, 7);
+    }
+
+    /// A failed `exec` is written to the claiming repository's `loop.log`, not only printed.
+    #[test]
+    fn a_failed_exec_is_written_to_the_claiming_repositorys_loop_log() {
+        let dir = crate::test_support::TempDir::new("hub-exec-fail");
+        let arc = dir.path().join(".radian").join("arc");
+        std::fs::create_dir_all(&arc).expect("the arc directory is creatable");
+        let said = std::sync::Mutex::new(Vec::new());
+        let emit = |text: &str| said.lock().expect("the test lock").push(text.to_owned());
+        let target = Restart {
+            program: PathBuf::from("/nonexistent/radian"),
+            repo: dir.path().to_path_buf(),
+        };
+        report_restart_failure(&emit, &target, &std::io::Error::other("exec failed"));
+        let log = std::fs::read_to_string(arc.join(crate::run::LOOP_LOG))
+            .expect("the failure reached loop.log");
+        assert!(
+            log.contains("cannot restart with the new binary: exec failed"),
+            "{log}"
+        );
+        let printed = said.lock().expect("the test lock");
+        assert_eq!(printed.len(), 1, "one line on stdout");
+        assert!(printed[0].contains("cannot restart with the new binary"));
+    }
 }
