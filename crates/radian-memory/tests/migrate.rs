@@ -5,29 +5,49 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
 
 use common::TempDir;
-use radian_memory::{
-    FileStore, Kind, ListEntry, MemoryError, MemoryRecord, MemoryStore, MovePhase, Provenance,
-    Scope, Source, migrate_log,
-};
+use radian_memory::{FileStore, ListEntry, MemoryError, Scope, migrate_log};
+use serde_json::{Value, json};
 
 fn global() -> Scope {
     Scope::Global
 }
 
-fn create(store: &MemoryStore, key: Option<&str>, content: &str) -> MemoryRecord {
-    store
-        .create(
-            &global(),
-            Source::User,
-            Kind::Fact,
-            key.map(str::to_owned),
-            content,
-            Provenance::default(),
-        )
-        .unwrap()
+fn record(id: &str, key: Option<&str>, content: &str) -> Value {
+    json!({
+        "id": id,
+        "scope": "global",
+        "kind": "fact",
+        "key": key,
+        "content": content,
+        "source": "user",
+        "provenance": {},
+        "verification": "unverified",
+        "status": "active",
+        "created_at": "2026-10-01T00:00:00.000000Z",
+        "updated_at": "2026-10-01T00:00:00.000000Z",
+        "revision": 1,
+    })
+}
+
+fn event(seq: u64, name: &str, data: Value) -> String {
+    json!({
+        "schema_version": 1,
+        "seq": seq,
+        "ts": "2026-10-01T00:00:00.000000Z",
+        "event": name,
+        "critical": name != "StorePurged",
+        "data": data,
+    })
+    .to_string()
+}
+
+fn write_log(dir: &std::path::Path, lines: &[String]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut text = lines.join("\n");
+    text.push('\n');
+    std::fs::write(dir.join("log.jsonl"), text).unwrap();
 }
 
 fn names(store: &FileStore) -> Vec<String> {
@@ -51,35 +71,45 @@ fn snapshot(dir: &std::path::Path, names: &[&str]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn snapshot_with_times(
-    dir: &std::path::Path,
-    names: &[&str],
-) -> Vec<(Vec<u8>, Option<SystemTime>)> {
-    names
-        .iter()
-        .map(|name| {
-            let path = dir.join(name);
-            (
-                std::fs::read(&path).unwrap(),
-                std::fs::metadata(&path).unwrap().modified().ok(),
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn two_active_one_archived_and_one_forgotten_become_two_files_and_an_index() {
     let dir = TempDir::new("migrate-basic");
-    let old = MemoryStore::open(dir.path());
-    create(&old, Some("alpha"), "Alpha body");
-    create(&old, Some("beta"), "Beta body");
-    let archived = create(&old, Some("archived"), "Archived body");
-    old.archive(&global(), Source::User, &archived.id, archived.revision)
-        .unwrap();
-    let forgotten = create(&old, Some("forgotten"), "Forgotten body");
-    old.forget(&global(), Source::User, &forgotten.id).unwrap();
-
     let scope_dir = dir.path().join("global");
+    write_log(
+        &scope_dir,
+        &[
+            event(
+                0,
+                "MemoryCreated",
+                json!({"record": record("m1", Some("alpha"), "Alpha body")}),
+            ),
+            event(
+                1,
+                "MemoryCreated",
+                json!({"record": record("m2", Some("beta"), "Beta body")}),
+            ),
+            event(
+                2,
+                "MemoryCreated",
+                json!({"record": record("m3", Some("archived"), "Archived body")}),
+            ),
+            event(
+                3,
+                "MemoryArchived",
+                json!({"id": "m3", "revision": 2, "at": "2026-10-02T00:00:00.000000Z"}),
+            ),
+            event(
+                4,
+                "MemoryCreated",
+                json!({"record": record("m4", Some("forgotten"), "Forgotten body")}),
+            ),
+            event(
+                5,
+                "MemoryForgotten",
+                json!({"id": "m4", "at": "2026-10-02T00:00:00.000000Z"}),
+            ),
+        ],
+    );
     migrate_log(&scope_dir).unwrap();
 
     let store = FileStore::open(dir.path());
@@ -101,24 +131,35 @@ fn two_active_one_archived_and_one_forgotten_become_two_files_and_an_index() {
         "{index}"
     );
 
-    // A second call finds the marker and changes nothing, mtimes included.
+    // A second call finds the marker and changes nothing.
     let files = ["alpha.md", "beta.md", "MEMORY.md"];
-    let before = snapshot_with_times(&scope_dir, &files);
+    let before = snapshot(&scope_dir, &files);
     migrate_log(&scope_dir).unwrap();
-    let after = snapshot_with_times(&scope_dir, &files);
+    let after = snapshot(&scope_dir, &files);
     assert_eq!(before, after, "a second migration must be a no-op");
 }
 
 #[test]
 fn two_keys_that_map_to_the_same_name_get_a_suffix() {
     let dir = TempDir::new("migrate-collision");
-    let old = MemoryStore::open(dir.path());
+    let scope_dir = dir.path().join("global");
     // The key does not fit the name rule, so the content supplies the slug `a-b`; the other
     // key fits and is already `a-b`.
-    create(&old, Some("a b"), "a b");
-    create(&old, Some("a-b"), "another body");
-
-    let scope_dir = dir.path().join("global");
+    write_log(
+        &scope_dir,
+        &[
+            event(
+                0,
+                "MemoryCreated",
+                json!({"record": record("m1", Some("a b"), "a b")}),
+            ),
+            event(
+                1,
+                "MemoryCreated",
+                json!({"record": record("m2", Some("a-b"), "another body")}),
+            ),
+        ],
+    );
     migrate_log(&scope_dir).unwrap();
 
     let store = FileStore::open(dir.path());
@@ -138,17 +179,29 @@ fn two_keys_that_map_to_the_same_name_get_a_suffix() {
 #[test]
 fn an_interrupted_migration_writes_the_same_files_on_the_next_call() {
     let dir = TempDir::new("migrate-crash");
-    let old = MemoryStore::open(dir.path());
-    create(&old, Some("alpha"), "Alpha body");
-    create(&old, Some("beta"), "Beta body");
     let scope_dir = dir.path().join("global");
+    write_log(
+        &scope_dir,
+        &[
+            event(
+                0,
+                "MemoryCreated",
+                json!({"record": record("m1", Some("alpha"), "Alpha body")}),
+            ),
+            event(
+                1,
+                "MemoryCreated",
+                json!({"record": record("m2", Some("beta"), "Beta body")}),
+            ),
+        ],
+    );
 
     // Crash after the files and the index exist, before the log rename.
     let fired = Arc::new(AtomicBool::new(false));
     {
         let fired = Arc::clone(&fired);
-        radian_memory::set_move_hook(Box::new(move |phase| {
-            phase == MovePhase::MigrationBeforeLogRename && !fired.swap(true, Ordering::SeqCst)
+        radian_memory::set_migration_crash_hook(Box::new(move || {
+            assert!(!fired.swap(true, Ordering::SeqCst), "the hook fires once");
         }));
     }
     let error = migrate_log(&scope_dir).unwrap_err();
@@ -169,12 +222,24 @@ fn an_interrupted_migration_writes_the_same_files_on_the_next_call() {
 #[test]
 fn a_description_is_the_first_content_line_cut_at_120_characters() {
     let dir = TempDir::new("migrate-description");
-    let old = MemoryStore::open(dir.path());
-    create(&old, None, "  padded line  \nsecond line");
+    let scope_dir = dir.path().join("global");
     let long = format!("{}z\nsecond line", "x".repeat(130));
-    create(&old, None, &long);
-
-    migrate_log(dir.path().join("global")).unwrap();
+    write_log(
+        &scope_dir,
+        &[
+            event(
+                0,
+                "MemoryCreated",
+                json!({"record": record("m1", None, "  padded line  \nsecond line")}),
+            ),
+            event(
+                1,
+                "MemoryCreated",
+                json!({"record": record("m2", None, &long)}),
+            ),
+        ],
+    );
+    migrate_log(&scope_dir).unwrap();
 
     let store = FileStore::open(dir.path());
     let descriptions: Vec<String> = store
@@ -197,26 +262,4 @@ fn a_description_is_the_first_content_line_cut_at_120_characters() {
         descriptions.contains(&truncated),
         "the first line is cut at 120 characters: {descriptions:?}"
     );
-}
-
-#[test]
-fn an_old_agent_source_becomes_model() {
-    let dir = TempDir::new("migrate-source");
-    let old = MemoryStore::open(dir.path());
-    old.create(
-        &global(),
-        Source::Agent,
-        Kind::Lesson,
-        Some("lesson".to_owned()),
-        "Lesson body",
-        Provenance::default(),
-    )
-    .unwrap();
-
-    migrate_log(dir.path().join("global")).unwrap();
-
-    let store = FileStore::open(dir.path());
-    let record = store.read(&global(), "lesson").unwrap();
-    assert_eq!(record.frontmatter.source, "model");
-    assert_eq!(record.frontmatter.record_type, "feedback");
 }

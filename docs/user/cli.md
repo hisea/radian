@@ -160,6 +160,31 @@ The waiting Stop verdicts are counted in `unhandled_stop_notices`; `unhandled_jo
 {"model_error": {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}}
 ```
 
+`Result.run_metrics` reports one run's own metrics, folded from the journal records this process wrote: with `--resume` it counts only the resumed part, like `run_turns`, `run_usage` and `run_cost`. Its definitions are the ones `benchmarks/journal_metrics.py`'s `COLUMNS` use for the fields the two share. A counter no record reported is `null`, never `0` (a reported zero stays `0`).
+
+| Member | Type | Unit | Meaning |
+|---|---|---|---|
+| `requests` | number | requests | `ModelUsageRecorded` plus `CompactionUsageRecorded` records; `0` when the run made none. |
+| `compaction_requests` | number | requests | the `CompactionUsageRecorded` part of `requests`. |
+| `input_uncached` | number or null | tokens | input billed at the full price. A record marked `input_includes_cache: true` subtracts both cache counters from `input`; `false` and an unmarked old record use `input` as it is. `null` when no record reported input. |
+| `cache_read` | number or null | tokens | cache-read tokens, summed. |
+| `cache_write` | number or null | tokens | cache-write tokens, summed. |
+| `output` | number or null | tokens | reported output tokens, summed. |
+| `reasoning` | number or null | tokens | the reasoning part of the output, summed. |
+| `fee_micros` | number or null | micro-dollars | recorded call fees, summed. |
+| `fee_incomplete` | boolean | — | `true` when any recorded fee was incomplete. |
+| `peak_context` | number or null | tokens | the largest prompt of one request (input including cache). |
+| `context_window` | number or null | tokens | the window this process resolved; `null` when it is unknown. |
+| `compactions` | number | compactions | `ContextCompacted` records. |
+| `compaction_ms` | number or null | milliseconds | the summary-call time of the run's compactions, from the journal record before a compaction's first summary usage to its `ContextCompacted`, summed; `null` when the run had no compaction or a timestamp could not be read. |
+| `max_tokens_responses` | number or null | responses | usage records whose stop reason is `max_tokens`; `null` when no record carries a stop reason. |
+| `model_errors` | number | errors | `TurnFailed` records. |
+| `retries` | number | retries | the live `ModelRetrying` events this process saw (a retry is never a journal record); a resumed run counts only its own. |
+| `tools` | object | — | one `{calls, result_bytes, failed, denied}` per tool name. A call is counted when it settles and attributed through its start; a denied call counts in `calls` and `denied`, not in `failed`; `result_bytes` is the UTF-8 size of the result's text parts. |
+| `models` | array | — | `{provider, model, requests}` in first-use order; `provider` is the configured route name (a `[providers.<name>]` name or a built-in provider id), never the wire adapter. The route comes from `SessionCreated.config_snapshot` and every later `ConfigChanged` that switches provider or model. |
+| `request_log` | array | — | one entry per request in order, at most 500: `{ts, latency_ms, kind, input_uncached, cache_read, cache_write, output, reasoning, fee_micros, stop_reason, model}`. `latency_ms` runs from the previous journal record's `ts` to the usage record's `ts` (null when either is missing); `kind` is `chat` or `compaction`; `ts` and `stop_reason` are null when the record did not carry them. |
+| `request_log_truncated` | `true` | — | present only when the run made more than 500 requests: the log keeps the first 500. |
+
 ## `radian acp`
 
 `radian acp` serves the same session over the Agent Client Protocol on stdio.
@@ -240,34 +265,30 @@ Needs no model, no key, no session file, no network.
 
 | Command | Arguments and flags | What it does |
 |---|---|---|
-| `list` | `--global`, `--project`, `--all`, `--json` | List records, project first then global. `--all` includes archived records. |
-| `search` | `--global`, `--project`, `--json`, `WORD...` (required) | Search by keyword. Every word must match. |
-| `show` | `--global`, `--project`, `--json`, `ID` | Show one record by id. |
+| `list` | `--global`, `--project`, `--json` | One line per file (scope, name, type, source, modified, description), project first then global. `--json` prints the frontmatter objects. An unreadable file is one `unreadable` line with its reason. |
+| `show` | `--global`, `--project`, `--json`, `NAME` | Print one file's frontmatter and body as stored; `--json` prints `frontmatter` and `body`. |
 | `stale` | `--days DAYS` (default `30`), `--global`, `--project`, `--json` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`; `DAYS` is an integer of 1 or more. Reads the memory files only. |
-| `add` | `--global`, `--kind preference\|decision\|fact\|lesson` (default `fact`), `--key KEY`, `CONTENT` (`-` reads stdin) | Add a project record, or a global record with `--global`. A git workspace registers itself on first write. |
-| `edit` | `--global`, `--revision REV` (required), `ID`, `CONTENT` | Change a record. Needs the current revision. |
-| `archive` | `--global`, `--revision REV` (required), `ID` | Archive a record. It stays stored but leaves injection and default search. |
-| `restore` | `--global`, `--revision REV` (required), `ID` | Restore an archived record. |
-| `forget` | `--global`, `--yes`, `ID` | Forget a record, after confirmation. The bytes stay until `purge`. |
-| `purge` | `--global`, `--project`, `--yes` | Rewrite the log and remove forgotten content, after confirmation. |
-| `confirm` | `--global`, `--revision REV` (required), `ID` | Confirm a record. Keeps its original source. |
-| `export` | `--global`, `--project` | Print one scope as editable Markdown. |
-| `import` | `--global`, `--project`, `SOURCE` (`-` reads stdin) | Import an edited Markdown export. |
+| `add` | `--global`, `--type user\|feedback\|project\|reference` (default `user`), `NAME` | Create the file (empty body, `source: user`, `created`, `modified`), append its index line, and open it. A git workspace registers itself on first write. A bad or existing name exits 2 and writes nothing. |
+| `edit` | `--global`, `NAME` | Open an existing file. |
+| `forget` | `--global`, `--yes`, `NAME` | Delete the file and its index line, after confirmation. |
+| `open` | `--global`, `--project` | Print the scope directory. |
 | `project` | `--json`, `project new` | Show project identity and state, or register this workspace as a project. |
 | `relink` | `PROJECT_ID` | Attach this workspace identity key to an existing project. |
-| `split` | `--yes`, `FROM`, `TO`, `ID...` | Move records between projects, after confirmation. |
-| `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. Reports key conflicts. |
+| `split` | `--yes`, `FROM`, `TO`, `NAME...` | Move files and their index lines between projects, after confirmation. |
+| `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. A name in both is renamed `<name>-2` and reported. |
 
 `--global` and `--project` conflict except where both are absent (the default scope).
-`list`, `search`, `show`, `stale`, and `project` accept `--json` for machine output.
-`forget`, `purge`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
-Exit `0` on success, `1` for a conflict or a missing record, `2` for bad use.
-See `memory` for scopes, revisions, and confirmation rules.
+`list`, `show`, `stale`, and `project` accept `--json` for machine output.
+`forget`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
+Exit `0` on success, `1` for a missing file or an I/O failure, `2` for bad use, a bad or
+existing `add` name, or a removed command (which names the current set).
+`archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not exist.
+See `memory` for the frontmatter fields, scopes and confirmation rules.
 
 ```sh
-radian memory add "prefers tabs" --kind preference --key style
-radian memory search tabs --json
-radian memory list --all
+radian memory add style --type user
+radian memory open --global
+radian memory list --json
 ```
 
 ## `radian trust`
@@ -367,7 +388,7 @@ hooks: Run your own commands when a tool runs, the model stops, a turn fails, or
 index: What radian is and where every radian manual page lives.
 keybindings: Every key in the full screen interface, by area, and how to rebind it.
 mcp: Add local model servers over standard input and output.
-memory: Save facts across sessions and search them by keyword.
+memory: Save durable memory as Markdown files, and the commands that manage them.
 permissions: Permission tiers, trust, approval, and sandbox behavior.
 pi-migration: Draft a Radian configuration from a Pi agent directory.
 providers: Store keys, choose a provider and model, and control request options.

@@ -427,24 +427,6 @@ pub(super) fn ask_head(card: &ToolCard, _text: &str) -> String {
     }
 }
 
-/// The memory tools: the record id, the ids a read asked for, or the search query as the title.
-pub(super) fn memory_head(card: &ToolCard, _text: &str) -> String {
-    if let Some(id) = string_field(&card.arguments, "id") {
-        return id;
-    }
-    if let Some(ids) = card.arguments.get("ids").and_then(Value::as_array) {
-        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
-        return match ids.len() {
-            0 => String::new(),
-            1 => ids[0].to_owned(),
-            n => format!("{n} records"),
-        };
-    }
-    string_field(&card.arguments, "key")
-        .or_else(|| string_field(&card.arguments, "query"))
-        .unwrap_or_default()
-}
-
 /// The unified-diff body (ADR 0028): one row per line of the entry's
 /// text. Used by `patch` (whose entry text **is** the synthesized `@@`/`-old`/`+new` diff).
 ///

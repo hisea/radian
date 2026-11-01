@@ -92,58 +92,53 @@ to an exited MCP child's pipe would then kill the whole command with a signal.
 
 ## Memory (`radian memory …`)
 
-`radian memory` is the user side of ADR 0021 (M1): durable memory shared across sessions,
-stored under `~/.radian/memory/` (`$RADIAN_HOME/memory`). It is its own mode: **no `--model`,
-no key, no session file, no network**. Put `--workspace <dir>` before `memory` to name the
-workspace; the default is the current directory.
+`radian memory` is the user side of the memory file store (ADR 0021): durable memory shared
+across sessions, stored under `~/.radian/memory/` (`$RADIAN_HOME/memory`). A record is one
+Markdown file; deleting it is forgetting. It is its own mode: **no `--model`, no key, no
+session file, no network**. Put `--workspace <dir>` before `memory` to name the workspace;
+the default is the current directory.
 
 Memory is scoped to a **project** (a git repository, shared by all its worktrees through the
 git common dir, or the canonical workspace path outside a repository) and to **Global**. Reads
-default to Project then Global, with a Project record overriding a Global one with the same
-key. Writes default to Project; `--global` writes a Global record.
+default to Project then Global, with a Project file of the same name winning. Writes default
+to Project; `--global` writes a Global file.
 
 | Command | What it does |
 |---|---|
-| `list [--global\|--project] [--all]` | Active records (`--all` adds archived), Project first; `--json` for machine output |
-| `search <词…> [--global\|--project]` | keyword search (every word must match); `--json` |
-| `show <id> [--global\|--project]` | one record; `--json` |
-| `add [--global] [--kind preference\|decision\|fact\|lesson] [--key KEY] <内容\|->` | a new record; `-` reads stdin; the default kind is `fact` |
-| `edit <id> --revision N <内容\|->` | change the content |
-| `archive <id> --revision N` / `restore <id> --revision N` | lifecycle |
-| `confirm <id> --revision N` | confirm an Agent/Import record (its `source` is kept) |
-| `forget <id>` | logical delete (never resurrected by a rebuild); needs confirmation |
-| `purge [--global\|--project]` | physically rewrite the log, removing forgotten content; needs confirmation |
-| `export [--global\|--project]` / `import [--global\|--project] <文件\|->` | the editable Markdown view |
+| `list [--global\|--project] [--json]` | one line per file (scope, name, type, source, modified, description), Project first; an unreadable file is one `unreadable` line with its reason; `--json` for the frontmatter objects |
+| `show [--global\|--project] [--json] <name>` | one file's frontmatter and body as stored; `--json` carries `frontmatter` and `body` |
+| `add [--global] [--type user\|feedback\|project\|reference] <name>` | a new file (empty body, `source: user`, `created`, `modified`), its index line, then the editor; `--type` defaults to `user` |
+| `edit [--global] <name>` | open an existing file in the editor |
+| `forget [--global] [--yes] <name>` | delete the file and its index line; needs confirmation |
+| `open [--global\|--project]` | print the scope directory (the interface opens it) |
 | `project` / `project new` | show the identity key and project state, or register it; `--json` |
 | `relink <ProjectId>` | attach this workspace to an existing project |
-| `split <from> <to> <id…>` / `merge <into> <from>` | move records between projects; need confirmation |
+| `split [--yes] <from> <to> <name…>` / `merge [--yes] <into> <from>` | move files and their index lines between projects; need confirmation; a merge collision renames the moved file `<name>-2` |
 
 - **A write registers the project itself** (ADR 0021): a default-scope `add` in a
   git repository whose project is not in the registry registers it, saves there, and prints
   one `[memory] created project …` notice line naming the project and its identity key. When a
   project with the same repository name already exists (a moved or re-cloned repository), the
   notice adds the `relink`/`merge` hint. **Only a write registers**: reads and injection never
-  do — a default-scope `list`/`search` on an unregistered workspace reads Global only and says
-  so. A directory that is not a git repository is **not a project workspace**: a default-scope
-  `add` fails with "not a project workspace … the memory was not saved", registers nothing and
-  never points at another scope; `radian memory project new` still registers such a directory
-  by hand. `project`/`relink` remain the explicit route to link or re-link an identity key.
+  do — a default-scope `list` on an unregistered workspace reads Global only and says so. A
+  directory that is not a git repository is **not a project workspace**: a default-scope `add`
+  fails with "not a project workspace … the memory was not saved", registers nothing and never
+  points at another scope; `radian memory project new` still registers such a directory by
+  hand.
 - **`--global` is for facts that hold in every project**, or when the user asks for global: a
   memory that mentions this project's paths, branches or structure belongs to the project
   scope.
-- **Confirmations** (`forget`, `purge`, `split`, `merge`): a terminal asks `y/N`; `--yes`
-  skips it; **without a terminal and without `--yes` the command refuses, exits 2 and does
-  nothing**.
-- **A command that takes an `<id>` finds the scope itself** (`show`, `edit`, `archive`,
-  `restore`, `confirm`, `forget`): an id is unique across scopes, so the command looks the id
-  up in Project (when this workspace is linked) and then Global and acts on the scope that
-  holds it — a Global record still works from an unlinked workspace. An explicit
-  `--global`/`--project` **only restricts** the search to that scope; an id that no visible
-  scope holds is `no memory record <id>`.
-- Every user command writes `source: user`; the store applies the revision and same-key rules
-  (`KeyConflict`, `RevisionConflict`).
-- **Exit codes**: 0 on success; 1 for a conflict, a missing record or an unlinked workspace;
-  2 for a usage error or a refused confirmation (plus clap's own usage failures).
+- **Confirmations** (`forget`, `split`, `merge`): a terminal asks `y/N`; `--yes` skips it;
+  **without a terminal and without `--yes` the command refuses, exits 2 and does nothing**.
+- **`show`, `edit` and `forget` find the scope themselves**: they look the name up in Project
+  (when this workspace is linked) and then Global and act on the first scope that holds it — a
+  Global file still works from an unlinked workspace. An explicit `--global`/`--project`
+  **only restricts** the lookup.
+- **`add` and `edit` use `$EDITOR`** when it is set, otherwise the platform opener. Off a
+  terminal they create or name the file, print its path, and say no editor was opened.
+- **Exit codes**: 0 on success; 1 for a missing file or an I/O failure; 2 for a usage error, a
+  bad or existing `add` name, a refused confirmation, or a removed command (which names the
+  current set).
 
 ### The agent's memory injection (ADR 0021 D6)
 
@@ -154,17 +149,18 @@ D6). Each index is capped by `[memory] index_max_lines` (default 200) and
 notice before the next call, once per session per scope. The bodies are not injected: the
 model reads a record with `read`.
 
-A model has no memory write tool: memory records are written with the ordinary `write` and
+A model has no memory write tool: memory files are written with the ordinary `write` and
 `patch`, which reach the two memory scope directories in both tiers (ADR 0039 decision 4) and
 which the permission profile allows in both tiers (ADR 0012; ADR 0021 invariant 5); whether a
 call reaches the file is the file tools' root boundary and the host's write guards, which may
 refuse an allowed call after an MCP tool result or for content that looks like a secret (ADR
-0021 invariant 4). Old `source: agent` records in existing
-logs stay readable. When the user asks the model to remember something, the model routes it by
-content (ADR 0036): a project fact (or a procedure that only applies to this project) goes into
-`AGENTS.md`, a procedure useful across projects becomes a user-level skill at
-`~/.agents/skills/<name>/SKILL.md`, and a cross-project preference is written as a memory
-record under `global/`.
+0021 invariant 4). `/memory off` refuses those two tools in the memory scopes for the rest of
+the process and records the switch so a resume starts without the section; `/memory on` allows
+them again. Old `source: agent` records in existing logs stay readable. When the user asks the
+model to remember something, the model routes it by content (ADR 0036): a project fact (or a
+procedure that only applies to this project) goes into `AGENTS.md`, a procedure useful across
+projects becomes a user-level skill at `~/.agents/skills/<name>/SKILL.md`, and a
+cross-project preference is written as a memory record under `global/`.
 
 The section is computed **once per process**, so every request of a session carries the same
 system-prompt bytes and a provider's prefix cache stays valid; a change to an index file takes

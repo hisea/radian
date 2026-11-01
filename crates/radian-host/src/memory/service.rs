@@ -1,17 +1,15 @@
-//! The host-side memory service (ADR 0021 D1/D2/D8): one object that owns the storage layer,
-//! the project registry and this workspace's project resolution, so every command goes through
-//! the same scope, source and revision rules.
+//! The host-side memory service (ADR 0021 D1/D2/D8): a thin layer over the file store and the
+//! project registry, so every command uses the same scope, name and index rules.
 //!
-//! The API is **synchronous**: the memory store is a single-writer JSONL log, each operation is
-//! short (no network, no model), and the CLI and TUI both call it from a place where blocking on
-//! an fsync is fine. An `async` facade would only wrap the same blocking calls.
+//! The API is synchronous: the store is local files, each operation is short, and the CLI and
+//! TUI both call it where blocking on an fsync is fine.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use radian_memory::{
-    Confirmer, FileStore, ImportReport, Kind, MemoryError, MemoryId, MemoryRecord, MemoryStore,
-    MoveReport, ProjectId, ProjectRegistry, Provenance, Scope, SearchQuery, Source, search,
+    FileStore, ListEntry, MemoryError, NewRecord, ProjectId, ProjectRegistry, Record, Scope,
+    validate_record_name,
 };
 
 use super::identity::project_identity_key;
@@ -24,9 +22,7 @@ pub enum ProjectState {
     /// It is not. A Project-scoped operation fails; the user chooses `create_project` or
     /// [`MemoryService::relink`]. `candidates` lists the projects whose identity key has the
     /// same [`candidate_name`](super::identity::candidate_name) ("同名仓库"); the rule is
-    /// deliberately a hint, not a match. (A **write** in the default scope does not fail:
-    /// [`MemoryService::project_for_write`] registers a git workspace itself, ADR 0021
-    /// .)
+    /// deliberately a hint, not a match.
     Unlinked {
         identity_key: String,
         candidates: Vec<ProjectId>,
@@ -43,7 +39,7 @@ pub enum ScopeSelection {
     ProjectOnly,
 }
 
-/// Which scope a write (or a single-scope read like export/import) covers.
+/// Which scope a write or a single-scope read covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WriteScope {
     /// The current project. An unlinked workspace makes this an error, never a silent create.
@@ -52,33 +48,26 @@ pub enum WriteScope {
     Global,
 }
 
-/// What [`MemoryService::project_for_write`] resolved for a **write** in the default scope
-/// (ADR 0021).
+/// What [`MemoryService::project_for_write`] resolved for a write in the default scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectForWrite {
-    /// The identity key was already registered: the write goes to this project, and nothing
-    /// is shown.
+    /// The identity key was already registered: the write goes to this project.
     Linked(ProjectId),
     /// The identity key comes from a git repository and was not registered: it was registered
     /// now, and the host shows [`CreatedProject::notice`].
     Created(CreatedProject),
 }
 
-/// A project a default-scope write just registered for this workspace (ADR 0021).
+/// A project a default-scope write just registered for this workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedProject {
     pub project: ProjectId,
-    /// The identity key the project was registered under (the git common dir).
     pub identity_key: String,
-    /// The projects whose identity key is named like this workspace's (ADR 0021 D2's
-    /// "同名仓库" candidate rule). A moved or re-cloned repository leaves a likely previous
-    /// project here; the notice points at `relink`/`merge` so the user can join them.
     pub candidates: Vec<ProjectId>,
 }
 
 impl CreatedProject {
-    /// The one notice line the hosts show (ADR 0021): which project was created,
-    /// for which identity key, and — when a likely previous project exists — how to join them.
+    /// The one notice line the hosts show.
     pub fn notice(&self) -> String {
         let mut line = format!(
             "created project {} for identity key {} (project memory goes there now)",
@@ -89,7 +78,7 @@ impl CreatedProject {
             line.push_str(&format!(
                 "; a previous project ({}) already had this repository name — run `radian \
                  memory relink {previous}` to attach this workspace to it, or `radian memory \
-                 merge {} {previous}` to move its records into the new project",
+                 merge {} {previous}` to move its files into the new project",
                 list.join(", "),
                 self.project,
             ));
@@ -98,8 +87,39 @@ impl CreatedProject {
     }
 }
 
-/// A memory operation failure, with the host's own cases: a workspace that is not linked to a
-/// project, and a directory that is not a project workspace at all.
+/// One `list` entry with its scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedEntry {
+    Record {
+        scope: Scope,
+        frontmatter: radian_memory::Frontmatter,
+    },
+    Unreadable {
+        scope: Scope,
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl ScopedEntry {
+    pub fn scope(&self) -> &Scope {
+        match self {
+            ScopedEntry::Record { scope, .. } | ScopedEntry::Unreadable { scope, .. } => scope,
+        }
+    }
+}
+
+/// What `split`/`merge` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveReport {
+    pub moved: Vec<String>,
+    pub missing: Vec<String>,
+    pub conflicts: Vec<String>,
+    /// `(old name, new name)` for a merge collision.
+    pub renamed: Vec<(String, String)>,
+}
+
+/// A memory operation failure, with the host's own cases.
 #[derive(Debug)]
 pub enum MemoryServiceError {
     Storage(MemoryError),
@@ -107,11 +127,17 @@ pub enum MemoryServiceError {
         identity_key: String,
         candidates: Vec<ProjectId>,
     },
-    /// This directory's identity key does not come from a git repository, so it is not a
-    /// project workspace (ADR 0021): a write in the default scope has no project to
-    /// go to and writes nothing. `radian memory project new` still registers it by hand.
+    /// This directory's identity key does not come from a git repository.
     NotAProjectWorkspace {
         identity_key: String,
+    },
+    /// No file with this name in the selected scopes.
+    NotFound {
+        name: String,
+    },
+    /// A file with this name already exists in the selected scope.
+    AlreadyExists {
+        name: String,
     },
 }
 
@@ -144,6 +170,10 @@ impl fmt::Display for MemoryServiceError {
                  does not come from a git repository, so the memory was not saved. Run \
                  `radian memory project new` to register this directory as a project"
             ),
+            MemoryServiceError::NotFound { name } => write!(f, "no memory file named {name:?}"),
+            MemoryServiceError::AlreadyExists { name } => {
+                write!(f, "a memory file named {name:?} already exists")
+            }
         }
     }
 }
@@ -159,12 +189,10 @@ impl From<MemoryError> for MemoryServiceError {
 /// The memory service rooted at a memory directory, for one workspace.
 #[derive(Debug, Clone)]
 pub struct MemoryService {
-    store: MemoryStore,
+    files: FileStore,
     registry: ProjectRegistry,
     workspace: PathBuf,
     identity_key: String,
-    /// Whether `identity_key` came from a git repository (ADR 0021: the condition
-    /// for a write to register this workspace as a project).
     git_identity: bool,
 }
 
@@ -181,7 +209,7 @@ impl MemoryService {
         let git_identity = super::identity::is_git_identity(&workspace);
         let root = root.into();
         Self {
-            store: MemoryStore::open(root.clone()),
+            files: FileStore::open(root.clone()),
             registry: ProjectRegistry::open(root),
             workspace,
             identity_key,
@@ -189,12 +217,16 @@ impl MemoryService {
         }
     }
 
-    pub fn store(&self) -> &MemoryStore {
-        &self.store
+    pub fn files(&self) -> &FileStore {
+        &self.files
     }
 
     pub fn registry(&self) -> &ProjectRegistry {
         &self.registry
+    }
+
+    pub fn root(&self) -> &Path {
+        self.files.root()
     }
 
     pub fn workspace(&self) -> &Path {
@@ -206,9 +238,7 @@ impl MemoryService {
         &self.identity_key
     }
 
-    /// Whether the identity key is registered, and the candidates if it is not. Resolving
-    /// itself never registers: a write goes through [`MemoryService::project_for_write`], which
-    /// **may** register a git workspace (ADR 0021), and reads never do.
+    /// Whether the identity key is registered, and the candidates if it is not.
     pub fn state(&self) -> Result<ProjectState, MemoryServiceError> {
         match self.registry.resolve(&self.identity_key)? {
             Some(project) => Ok(ProjectState::Known(project)),
@@ -221,12 +251,7 @@ impl MemoryService {
 
     /// The memory scope directories the file tools may read **and write** (ADR 0039 decision
     /// 4): `<memory root>/global/` and, when this workspace is linked to a project,
-    /// `<memory root>/projects/<ProjectId>/`. Resolving never registers a project (ADR 0021
-    /// D2): an unlinked workspace, or a registry that cannot be read, gets `global/` only.
-    ///
-    /// Each directory is created 0700 on first use (ADR 0021 D3), so a model that writes a
-    /// memory file before any memory command ran still has a root the file tools can open; a
-    /// creation that fails leaves the directory absent and the tool build skips it.
+    /// `<memory root>/projects/<ProjectId>/`. Each directory is created 0700 on first use.
     pub fn file_tool_roots(&self) -> Vec<PathBuf> {
         self.file_scope_roots()
             .into_iter()
@@ -242,20 +267,14 @@ impl MemoryService {
         if let Ok(project) = self.project_id() {
             scopes.push(Scope::Project(project));
         }
-        let files = self.files();
         scopes
             .into_iter()
             .map(|scope| {
-                let dir = files.scope_dir(&scope);
+                let dir = self.files.scope_dir(&scope);
                 let _ = crate::ensure_private_dir(&dir);
                 (scope, dir)
             })
             .collect()
-    }
-
-    /// The file store rooted at this service's memory directory (ADR 0021 D3).
-    pub fn files(&self) -> FileStore {
-        FileStore::open(self.store.root().to_path_buf())
     }
 
     /// The current project, or the `Unlinked` error.
@@ -272,25 +291,12 @@ impl MemoryService {
         }
     }
 
-    /// Registers this identity key as a new project. `radian memory project new` calls it, and
-    /// so does [`MemoryService::project_for_write`] — the registration a default-scope write
-    /// performs in a git workspace (ADR 0021).
+    /// Registers this identity key as a new project.
     pub fn create_project(&self) -> Result<ProjectId, MemoryServiceError> {
         Ok(self.registry.register(&self.identity_key)?)
     }
 
     /// Resolves the Project scope for a **write** in the default scope (ADR 0021).
-    ///
-    /// A registered identity key resolves as before ([`ProjectForWrite::Linked`]). An
-    /// unregistered key that comes from a git repository **is registered now**
-    /// ([`ProjectForWrite::Created`]), which is what makes project memory work at all for a
-    /// workspace the user never registered; the caller shows the notice. A directory whose key
-    /// is not a git common dir is [`MemoryServiceError::NotAProjectWorkspace`]: it is not a
-    /// project workspace, so nothing is created and nothing is written; `radian memory project
-    /// new` still registers it by hand.
-    ///
-    /// **Only a write calls this.** Reads and injection never create a project (revision 1):
-    /// an unregistered workspace reads and injects Global only, exactly as before.
     pub fn project_for_write(&self) -> Result<ProjectForWrite, MemoryServiceError> {
         match self.state()? {
             ProjectState::Known(project) => Ok(ProjectForWrite::Linked(project)),
@@ -324,7 +330,6 @@ impl MemoryService {
         Ok(self.registry.identity_keys(project)?)
     }
 
-    /// Projects whose identity key is named like this workspace's ("同名仓库", ADR 0021 D2).
     fn candidates(&self) -> Result<Vec<ProjectId>, MemoryServiceError> {
         let current = super::identity::candidate_name(&self.identity_key);
         let mut candidates = Vec::new();
@@ -343,10 +348,7 @@ impl MemoryService {
 
     /// The scopes a read covers, in order. `Default` is Project then Global; Project is simply
     /// omitted when the workspace is unlinked, so Global reads always work.
-    pub(crate) fn read_scopes(
-        &self,
-        selection: ScopeSelection,
-    ) -> Result<Vec<Scope>, MemoryServiceError> {
+    pub fn read_scopes(&self, selection: ScopeSelection) -> Result<Vec<Scope>, MemoryServiceError> {
         Ok(match selection {
             ScopeSelection::GlobalOnly => vec![Scope::Global],
             ScopeSelection::ProjectOnly => vec![Scope::Project(self.project_id()?)],
@@ -361,180 +363,335 @@ impl MemoryService {
         })
     }
 
-    fn write_scope(&self, scope: WriteScope) -> Result<Scope, MemoryServiceError> {
+    /// The scope a write goes to.
+    pub fn write_scope(&self, scope: WriteScope) -> Result<Scope, MemoryServiceError> {
         Ok(match scope {
             WriteScope::Global => Scope::Global,
             WriteScope::Project => Scope::Project(self.project_id()?),
         })
     }
 
+    /// The scope directory a command prints or opens.
+    pub fn scope_dir(&self, scope: &Scope) -> PathBuf {
+        self.files.scope_dir(scope)
+    }
+
+    pub fn record_path(&self, scope: &Scope, name: &str) -> PathBuf {
+        self.files.record_path(scope, name)
+    }
+
     // ---- reads ----
 
-    /// The combined, deduplicated view of the selected scopes (Project overrides Global,
-    /// ADR 0021 D1). Archived records are included only when `include_archived`.
-    pub fn list(
-        &self,
-        selection: ScopeSelection,
-        include_archived: bool,
-    ) -> Result<Vec<MemoryRecord>, MemoryServiceError> {
-        let records = self.store.view(&self.read_scopes(selection)?)?;
-        Ok(records
-            .into_iter()
-            .filter(|record| include_archived || record.is_active())
-            .collect())
+    /// Every file in the selected scopes, project first then global, readable files first.
+    pub fn list(&self, selection: ScopeSelection) -> Result<Vec<ScopedEntry>, MemoryServiceError> {
+        let mut entries = Vec::new();
+        for scope in self.read_scopes(selection)? {
+            for entry in self.files.list(&scope)? {
+                entries.push(match entry {
+                    ListEntry::Record(frontmatter) => ScopedEntry::Record {
+                        scope: scope.clone(),
+                        frontmatter,
+                    },
+                    ListEntry::Unreadable { path, reason } => ScopedEntry::Unreadable {
+                        scope: scope.clone(),
+                        path,
+                        reason,
+                    },
+                });
+            }
+        }
+        Ok(entries)
     }
 
-    /// Keyword search over the selected scopes, in the deterministic ADR 0021 D6 order.
-    pub fn search(
+    /// The first selected scope that holds `name`, project first.
+    pub fn locate_name(
         &self,
         selection: ScopeSelection,
-        query: &SearchQuery,
-    ) -> Result<Vec<MemoryRecord>, MemoryServiceError> {
-        let records = self.store.view(&self.read_scopes(selection)?)?;
-        Ok(search(&records, query))
-    }
-
-    /// One record by id; the Project copy wins when both scopes hold it.
-    pub fn get(
-        &self,
-        selection: ScopeSelection,
-        id: &MemoryId,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let records = self.store.view(&self.read_scopes(selection)?)?;
-        records
-            .into_iter()
-            .find(|record| record.id == *id)
-            .ok_or_else(|| MemoryError::NotFound { id: id.clone() }.into())
-    }
-
-    /// The scope that actually holds `id`, searching in the default read order: Project when
-    /// this workspace is linked, then Global. `None` when no visible scope holds it. Record
-    /// ids are unique across scopes, so an id command can find a record without the user
-    /// naming its scope (ADR 0021 D1); an unlinked workspace still finds a Global record.
-    pub fn locate(&self, id: &MemoryId) -> Result<Option<Scope>, MemoryServiceError> {
-        for scope in self.read_scopes(ScopeSelection::Default)? {
-            let holds_it = self
-                .store
-                .records(&scope)?
-                .iter()
-                .any(|record| record.id == *id);
-            if holds_it {
+        name: &str,
+    ) -> Result<Option<Scope>, MemoryServiceError> {
+        validate_record_name(name).map_err(|reason| MemoryError::InvalidName {
+            name: name.to_owned(),
+            reason,
+        })?;
+        for scope in self.read_scopes(selection)? {
+            if self.files.exists(&scope, name)? {
                 return Ok(Some(scope));
             }
         }
         Ok(None)
     }
 
-    // ---- writes. Every one is `Source::User` (ADR 0021 D5: user commands). ----
+    /// One parsed record.
+    pub fn read(&self, scope: &Scope, name: &str) -> Result<Record, MemoryServiceError> {
+        Ok(self.files.read(scope, name)?)
+    }
 
+    /// The file's bytes as stored.
+    pub fn read_text(&self, scope: &Scope, name: &str) -> Result<String, MemoryServiceError> {
+        let path = self.files.record_path(scope, name);
+        Ok(std::fs::read_to_string(&path).map_err(|source| MemoryError::Open { path, source })?)
+    }
+
+    // ---- writes ----
+
+    /// Creates `<name>.md` with an empty body and a `source: user` skeleton, then appends its
+    /// index line. The name is validated and an existing file refused before anything is written.
     pub fn add(
         &self,
         scope: WriteScope,
-        kind: Kind,
-        key: Option<String>,
-        content: String,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
+        name: &str,
+        record_type: &str,
+    ) -> Result<(Scope, Record), MemoryServiceError> {
+        validate_record_name(name).map_err(|reason| MemoryError::InvalidName {
+            name: name.to_owned(),
+            reason,
+        })?;
         let scope = self.write_scope(scope)?;
-        Ok(self.store.create(
+        if self.files.exists(&scope, name)? {
+            return Err(MemoryServiceError::AlreadyExists {
+                name: name.to_owned(),
+            });
+        }
+        let record = self.files.write(
             &scope,
-            Source::User,
-            kind,
-            key,
-            content,
-            Provenance::default(),
-        )?)
+            NewRecord {
+                name: name.to_owned(),
+                description: String::new(),
+                record_type: record_type.to_owned(),
+                source: "user".to_owned(),
+                provenance: None,
+                body: String::new(),
+            },
+        )?;
+        self.append_index_line(&scope, name, "")?;
+        Ok((scope, record))
     }
 
-    pub fn edit(
-        &self,
-        scope: WriteScope,
-        id: &MemoryId,
-        expected_revision: u64,
-        content: String,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self
-            .store
-            .revise(&scope, Source::User, id, expected_revision, content)?)
+    /// Deletes `<name>.md` and its index line. Deleting the file is forgetting.
+    pub fn remove(&self, scope: &Scope, name: &str) -> Result<(), MemoryServiceError> {
+        if !self.files.exists(scope, name)? {
+            return Err(MemoryServiceError::NotFound {
+                name: name.to_owned(),
+            });
+        }
+        self.files.delete(scope, name)?;
+        self.remove_index_file(scope, &format!("{name}.md"))?;
+        Ok(())
     }
 
-    pub fn archive(
-        &self,
-        scope: WriteScope,
-        id: &MemoryId,
-        expected_revision: u64,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self
-            .store
-            .archive(&scope, Source::User, id, expected_revision)?)
-    }
-
-    pub fn restore(
-        &self,
-        scope: WriteScope,
-        id: &MemoryId,
-        expected_revision: u64,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self
-            .store
-            .restore(&scope, Source::User, id, expected_revision)?)
-    }
-
-    pub fn forget(&self, scope: WriteScope, id: &MemoryId) -> Result<(), MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self.store.forget(&scope, Source::User, id)?)
-    }
-
-    pub fn confirm(
-        &self,
-        scope: WriteScope,
-        id: &MemoryId,
-        expected_revision: u64,
-    ) -> Result<MemoryRecord, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self
-            .store
-            .confirm(&scope, id, Confirmer::User, expected_revision)?)
-    }
-
-    pub fn purge(&self, scope: WriteScope) -> Result<usize, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self.store.purge(&scope)?)
-    }
-
-    pub fn export(&self, scope: WriteScope) -> Result<String, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self.store.export(&scope)?)
-    }
-
-    pub fn import(
-        &self,
-        scope: WriteScope,
-        text: &str,
-    ) -> Result<ImportReport, MemoryServiceError> {
-        let scope = self.write_scope(scope)?;
-        Ok(self.store.import(&scope, text)?)
-    }
-
-    /// `split`/`merge` name the two projects directly; they do not depend on this workspace's
-    /// project.
+    /// `split`: move each named file and its index line from one project to another. A missing
+    /// source name is reported; a name already present in the target is reported and left in
+    /// place (never overwritten).
     pub fn split(
         &self,
         from: &ProjectId,
-        ids: &[MemoryId],
         to: &ProjectId,
+        names: &[String],
     ) -> Result<MoveReport, MemoryServiceError> {
-        Ok(self.store.split(from, ids, to)?)
+        let source = Scope::Project(from.clone());
+        let target = Scope::Project(to.clone());
+        let mut report = MoveReport::default();
+        for name in names {
+            let mut from_path = self.files.record_path(&source, name);
+            let to_path = self.files.record_path(&target, name);
+            if !from_path.is_file() {
+                report.missing.push(name.clone());
+                continue;
+            }
+            if to_path.exists() {
+                report.conflicts.push(name.clone());
+                continue;
+            }
+            crate::ensure_private_dir(&self.files.scope_dir(&target)).map_err(|source| {
+                MemoryError::Open {
+                    path: self.files.scope_dir(&target),
+                    source,
+                }
+            })?;
+            std::fs::rename(&from_path, &to_path).map_err(|source| MemoryError::Open {
+                path: from_path.clone(),
+                source,
+            })?;
+            self.move_index_line(&source, &target, name, name)?;
+            report.moved.push(name.clone());
+            let _ = &mut from_path;
+        }
+        Ok(report)
     }
 
+    /// `merge`: move every record file from `from` into `into`. A name already present in the
+    /// target is reported, and the `from` file is renamed `<name>-2`, `<name>-3`, ... first.
+    ///
+    /// Only record files move: `MEMORY.md` (an index) and `SESSIONS.md` (the host's session
+    /// index) are not records and stay in their scope. A chosen suffix must be free in both
+    /// scopes, because the rename happens inside the source and the move replaces nothing.
     pub fn merge(
         &self,
         into: &ProjectId,
         from: &ProjectId,
     ) -> Result<MoveReport, MemoryServiceError> {
-        Ok(self.store.merge(into, from)?)
+        let source = Scope::Project(from.clone());
+        let target = Scope::Project(into.clone());
+        let mut report = MoveReport::default();
+        let mut target_names = record_names(self.files.list(&target)?);
+        let mut source_names = record_names(self.files.list(&source)?);
+        let mut names: Vec<String> = source_names.iter().cloned().collect();
+        names.sort();
+        for name in names {
+            let mut from_path = self.files.record_path(&source, &name);
+            let mut target_name = name.clone();
+            if target_names.contains(&target_name) {
+                let mut taken: std::collections::BTreeSet<String> =
+                    target_names.union(&source_names).cloned().collect();
+                target_name = unique_name(&name, &mut taken);
+                self.files
+                    .rename(&source, &name, &target_name)
+                    .map_err(MemoryServiceError::from)?;
+                source_names.remove(&name);
+                source_names.insert(target_name.clone());
+                from_path = self.files.record_path(&source, &target_name);
+                report.conflicts.push(name.clone());
+                report.renamed.push((name.clone(), target_name.clone()));
+            }
+            let to_path = self.files.record_path(&target, &target_name);
+            if to_path.exists() {
+                return Err(MemoryServiceError::AlreadyExists { name: target_name });
+            }
+            crate::ensure_private_dir(&self.files.scope_dir(&target)).map_err(|source| {
+                MemoryError::Open {
+                    path: self.files.scope_dir(&target),
+                    source,
+                }
+            })?;
+            std::fs::rename(&from_path, &to_path).map_err(|source| MemoryError::Open {
+                path: from_path.clone(),
+                source,
+            })?;
+            source_names.remove(&name);
+            target_names.insert(target_name.clone());
+            self.move_index_line(&source, &target, &name, &target_name)?;
+            report.moved.push(target_name);
+        }
+        Ok(report)
+    }
+
+    // ---- index maintenance ----
+
+    fn index_file_lines(&self, scope: &Scope) -> Result<Vec<String>, MemoryServiceError> {
+        Ok(self
+            .files
+            .read_index(scope)?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn write_index_lines(&self, scope: &Scope, lines: &[String]) -> Result<(), MemoryServiceError> {
+        let mut text = lines.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        self.files.write_index(scope, &text)?;
+        Ok(())
+    }
+
+    fn append_index_line(
+        &self,
+        scope: &Scope,
+        name: &str,
+        description: &str,
+    ) -> Result<(), MemoryServiceError> {
+        let file = format!("{name}.md");
+        let mut lines = self.index_file_lines(scope)?;
+        lines.retain(|line| line_file(line).as_deref() != Some(file.as_str()));
+        lines.push(format!("- [{name}]({file}) — {description}"));
+        self.write_index_lines(scope, &lines)
+    }
+
+    fn remove_index_file(&self, scope: &Scope, file: &str) -> Result<(), MemoryServiceError> {
+        let lines = self
+            .index_file_lines(scope)?
+            .into_iter()
+            .filter(|line| line_file(line).as_deref() != Some(file))
+            .collect::<Vec<_>>();
+        self.write_index_lines(scope, &lines)
+    }
+
+    fn move_index_line(
+        &self,
+        from: &Scope,
+        to: &Scope,
+        name: &str,
+        target_name: &str,
+    ) -> Result<(), MemoryServiceError> {
+        let old_file = format!("{name}.md");
+        let mut source_lines = Vec::new();
+        for line in self.index_file_lines(from)? {
+            if line_file(&line).as_deref() == Some(old_file.as_str()) {
+                let rewritten = if target_name == name {
+                    line
+                } else {
+                    line.replace(&format!("]({old_file})"), &format!("]({target_name}.md)"))
+                };
+                source_lines.push(rewritten);
+            }
+        }
+        let kept = self
+            .index_file_lines(from)?
+            .into_iter()
+            .filter(|line| line_file(line).as_deref() != Some(old_file.as_str()))
+            .collect::<Vec<_>>();
+        self.write_index_lines(from, &kept)?;
+        let mut target_lines = self.index_file_lines(to)?;
+        let target_file = format!("{target_name}.md");
+        target_lines.retain(|line| line_file(line).as_deref() != Some(target_file.as_str()));
+        target_lines.extend(source_lines);
+        self.write_index_lines(to, &target_lines)
+    }
+}
+
+/// The file field of one index line, or `None` for a line that is not in the form.
+fn line_file(line: &str) -> Option<String> {
+    match radian_memory::index_lines(line).into_iter().next()? {
+        radian_memory::IndexLine::Entry { file, .. } => Some(file),
+        radian_memory::IndexLine::Invalid { .. } => None,
+    }
+}
+
+/// The record names a [`FileStore::list`] result carries: a readable record's `name`, or an
+/// unreadable file's stem.
+fn record_names(entries: Vec<ListEntry>) -> std::collections::BTreeSet<String> {
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            ListEntry::Record(frontmatter) => frontmatter.name,
+            ListEntry::Unreadable { path, .. } => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The first free `<base>-N` name, `N` starting at 2.
+fn unique_name(base: &str, taken: &mut std::collections::BTreeSet<String>) -> String {
+    let mut n = 2u64;
+    loop {
+        let suffix = format!("-{n}");
+        let max = radian_memory::NAME_MAX.saturating_sub(suffix.chars().count());
+        let mut stem: String = base.chars().take(max).collect();
+        while stem.ends_with('-') {
+            stem.pop();
+        }
+        if stem.is_empty() {
+            stem.push_str("memory");
+        }
+        let candidate = format!("{stem}{suffix}");
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
@@ -555,9 +712,6 @@ mod tests {
         (dir, ws, service)
     }
 
-    /// `/tmp/…/<label>/ws` with a `.git` **directory**, which is what makes the workspace's
-    /// identity key come from a repository (`identity::project_identity_key`), without running
-    /// `git`.
     fn git_service(label: &str) -> (crate::test_support::TempDir, PathBuf, MemoryService) {
         let dir = scratch(label);
         let ws = dir.join("ws");
@@ -567,23 +721,14 @@ mod tests {
         (dir, ws, service)
     }
 
-    /// ADR 0021: a **write** in the default scope registers an unregistered git
-    /// workspace; a read before it registers nothing.
     #[test]
     fn a_write_registers_a_git_workspace_and_a_read_never_does() {
         let (dir, _ws, service) = git_service("auto-create");
-        assert!(
-            matches!(service.state().unwrap(), ProjectState::Unlinked { .. }),
-            "nothing is registered at open"
-        );
-        // Reads (and injection) do not register: the view is Global only and the registry file
-        // stays absent.
-        assert!(
-            service
-                .list(ScopeSelection::Default, false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(matches!(
+            service.state().unwrap(),
+            ProjectState::Unlinked { .. }
+        ));
+        assert!(service.list(ScopeSelection::Default).unwrap().is_empty());
         assert!(service.projects().unwrap().is_empty());
 
         let created = match service.project_for_write().unwrap() {
@@ -597,11 +742,9 @@ mod tests {
         assert!(notice.contains(&created.project.to_string()), "{notice}");
         assert!(notice.contains(&created.identity_key), "{notice}");
 
-        // The write now lands in the new project, and a second resolution is `Linked`.
-        let record = service
-            .add(WriteScope::Project, Kind::Fact, None, "p".into())
-            .unwrap();
-        assert_eq!(record.scope, Scope::Project(created.project.clone()));
+        let (scope, record) = service.add(WriteScope::Project, "note", "user").unwrap();
+        assert_eq!(scope, Scope::Project(created.project.clone()));
+        assert_eq!(record.frontmatter.source, "user");
         assert_eq!(
             service.project_for_write().unwrap(),
             ProjectForWrite::Linked(created.project)
@@ -609,8 +752,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ADR 0021: a directory that is not a git repository is **not** a project
-    /// workspace, so a write creates nothing and says so (and never suggests another scope).
     #[test]
     fn a_write_outside_a_repository_is_refused_and_creates_nothing() {
         let (dir, _ws, service) = service("not-a-workspace");
@@ -630,15 +771,12 @@ mod tests {
             "the refusal must not suggest another scope: {memory_not_saved}"
         );
         assert!(
-            !service.store().root().join("projects").exists(),
+            !service.root().join("projects").exists(),
             "a refused write registered a project"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ADR 0021: a likely previous project (a repository of the same name, from
-    /// before a move) does not block the write. The new project is created anyway, and the
-    /// notice points at `relink`/`merge`.
     #[test]
     fn a_write_still_creates_when_a_candidate_previous_project_exists() {
         let dir = scratch("moved-candidate");
@@ -646,15 +784,11 @@ mod tests {
         let before = dir.join("here").join("radian");
         std::fs::create_dir_all(before.join(".git")).unwrap();
         let previous = MemoryService::open(&before, &root);
-        let old_project = previous.project_for_write().unwrap();
-        let ProjectForWrite::Created(old_project) = old_project else {
+        let ProjectForWrite::Created(old_project) = previous.project_for_write().unwrap() else {
             panic!("the old workspace is a git workspace");
         };
-        previous
-            .add(WriteScope::Project, Kind::Fact, None, "old".into())
-            .unwrap();
+        previous.add(WriteScope::Project, "old", "user").unwrap();
 
-        // The same repository, moved: a new identity key, the same repository name.
         let after_dir = dir.join("moved").join("radian");
         std::fs::create_dir_all(after_dir.join(".git")).unwrap();
         let after = MemoryService::open(&after_dir, &root);
@@ -671,20 +805,14 @@ mod tests {
         );
         assert!(notice.contains("relink"), "{notice}");
         assert!(notice.contains("merge"), "{notice}");
-        // Both projects exist, and the old records stayed with the old project: nothing was
-        // moved or merged behind the user's back.
         assert_eq!(after.projects().unwrap().len(), 2);
         assert!(
-            after
-                .list(ScopeSelection::ProjectOnly, false)
-                .unwrap()
-                .is_empty()
+            after.list(ScopeSelection::ProjectOnly).unwrap().is_empty(),
+            "nothing moved behind the user's back"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A new workspace: the registry has no entry, so Project writes fail and **register
-    /// nothing**; Global still works. This is the ADR 0021 D2 "no silent identity" rule.
     #[test]
     fn an_unlinked_workspace_refuses_a_project_write_and_still_reads_global() {
         let (dir, _ws, service) = service("unlinked");
@@ -692,23 +820,17 @@ mod tests {
             service.state().unwrap(),
             ProjectState::Unlinked { .. }
         ));
-        // A Global add works.
-        service
-            .add(WriteScope::Global, Kind::Fact, None, "g".into())
-            .unwrap();
-        let global = service.list(ScopeSelection::Default, false).unwrap();
+        service.add(WriteScope::Global, "g", "user").unwrap();
+        let global = service.list(ScopeSelection::Default).unwrap();
         assert_eq!(global.len(), 1);
-        assert!(global[0].scope.is_global());
+        assert!(global[0].scope().is_global());
 
-        // A Project add is refused, and no project directory appears.
-        let error = service
-            .add(WriteScope::Project, Kind::Fact, None, "p".into())
-            .unwrap_err();
+        let error = service.add(WriteScope::Project, "p", "user").unwrap_err();
         assert!(
             matches!(error, MemoryServiceError::Unlinked { .. }),
             "{error}"
         );
-        assert!(!service.store().root().join("projects").exists());
+        assert!(!service.root().join("projects").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -716,26 +838,13 @@ mod tests {
     fn a_project_write_reads_back_after_creating_the_project() {
         let (dir, _ws, service) = service("create");
         let project = service.create_project().unwrap();
-        assert_eq!(service.project_id().unwrap(), project);
-        let record = service
-            .add(
-                WriteScope::Project,
-                Kind::Fact,
-                Some("k".into()),
-                "p".into(),
-            )
-            .unwrap();
-        assert_eq!(record.scope, Scope::Project(project));
-        assert_eq!(record.source, Source::User);
-        assert_eq!(
-            service.list(ScopeSelection::ProjectOnly, false).unwrap(),
-            vec![record.clone()]
-        );
+        let (scope, record) = service.add(WriteScope::Project, "note", "user").unwrap();
+        assert_eq!(scope, Scope::Project(project));
+        assert_eq!(record.frontmatter.source, "user");
+        assert_eq!(service.list(ScopeSelection::ProjectOnly).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A worktree (its `.git` file points at the main repository's common dir) resolves to the
-    /// same project as the main repository, with no `git` process.
     #[test]
     fn a_worktree_resolves_to_the_main_repositories_project() {
         let dir = scratch("worktree");
@@ -753,23 +862,18 @@ mod tests {
         let main_service = MemoryService::open(&main, &root);
         let project = main_service.create_project().unwrap();
         main_service
-            .add(WriteScope::Project, Kind::Fact, None, "shared".into())
+            .add(WriteScope::Project, "shared", "user")
             .unwrap();
 
         let wt_service = MemoryService::open(&wt, &root);
         assert_eq!(wt_service.project_id().unwrap(), project);
         assert_eq!(
-            wt_service
-                .list(ScopeSelection::ProjectOnly, false)
-                .unwrap()
-                .len(),
+            wt_service.list(ScopeSelection::ProjectOnly).unwrap().len(),
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Moving a repository changes its identity key. The old project must be offered as a
-    /// candidate (same repository name), and relinking must find the old records.
     #[test]
     fn relinking_after_a_move_finds_the_original_records() {
         let dir = scratch("relink");
@@ -778,9 +882,7 @@ mod tests {
         let root = dir.join("memory");
         let before = MemoryService::open(&old_ws, &root);
         let project = before.create_project().unwrap();
-        before
-            .add(WriteScope::Project, Kind::Fact, None, "kept".into())
-            .unwrap();
+        before.add(WriteScope::Project, "kept", "user").unwrap();
 
         let new_ws = dir.join("moved").join("radian");
         std::fs::create_dir_all(&new_ws).unwrap();
@@ -790,80 +892,101 @@ mod tests {
             panic!("expected Unlinked, got {state:?}");
         };
         assert_eq!(candidates, &vec![project.clone()]);
-        // No project write is possible until relinked.
         assert!(matches!(
-            after.add(WriteScope::Project, Kind::Fact, None, "x".into()),
+            after.add(WriteScope::Project, "x", "user"),
             Err(MemoryServiceError::Unlinked { .. })
         ));
         after.relink(&project).unwrap();
         assert_eq!(after.project_id().unwrap(), project);
-        let records = after.list(ScopeSelection::ProjectOnly, false).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].content, "kept");
+        let entries = after.list(ScopeSelection::ProjectOnly).unwrap();
+        assert_eq!(entries.len(), 1);
+        let ScopedEntry::Record { frontmatter, .. } = &entries[0] else {
+            panic!("expected a record");
+        };
+        assert_eq!(frontmatter.name, "kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A Global and a Project record with the same key: the Project one wins in the combined
-    /// view (ADR 0021 D1), and the Project scope is listed before Global.
     #[test]
-    fn a_project_record_overrides_a_global_one_with_the_same_key() {
-        let (dir, _ws, service) = service("override");
+    fn add_then_list_shows_the_skeleton_and_the_index_line() {
+        let (dir, _ws, service) = service("add-list");
         service.create_project().unwrap();
         service
-            .add(
-                WriteScope::Global,
-                Kind::Fact,
-                Some("k".into()),
-                "global".into(),
-            )
+            .add(WriteScope::Project, "note", "feedback")
             .unwrap();
-        service
-            .add(
-                WriteScope::Project,
-                Kind::Fact,
-                Some("k".into()),
-                "project".into(),
-            )
+        let entries = service.list(ScopeSelection::ProjectOnly).unwrap();
+        assert_eq!(entries.len(), 1);
+        let ScopedEntry::Record { frontmatter, .. } = &entries[0] else {
+            panic!("expected a record");
+        };
+        assert_eq!(frontmatter.name, "note");
+        assert_eq!(frontmatter.record_type, "feedback");
+        assert_eq!(frontmatter.source, "user");
+        let index = service
+            .files()
+            .read_index(&Scope::Project(service.project_id().unwrap()))
             .unwrap();
-        let all = service.list(ScopeSelection::Default, false).unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].content, "project");
+        assert!(index.contains("note.md"), "{index}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The archive/restore/confirm path keeps the source and bumps the revision.
     #[test]
-    fn user_commands_set_the_user_source_and_check_the_revision() {
-        let (dir, _ws, service) = service("revision");
+    fn forget_deletes_the_file_and_its_index_line() {
+        let (dir, _ws, service) = service("forget");
         service.create_project().unwrap();
-        let record = service
-            .add(WriteScope::Project, Kind::Fact, None, "v1".into())
-            .unwrap();
-        assert_eq!(record.source, Source::User);
-        assert!(record.verification.is_confirmed());
-        let revised = service
-            .edit(
-                WriteScope::Project,
-                &record.id,
-                record.revision,
-                "v2".into(),
-            )
-            .unwrap();
-        assert_eq!(revised.revision, record.revision + 1);
-        let error = service
-            .edit(
-                WriteScope::Project,
-                &record.id,
-                record.revision,
-                "stale".into(),
-            )
-            .unwrap_err();
+        let (scope, _) = service.add(WriteScope::Project, "note", "user").unwrap();
+        service.remove(&scope, "note").unwrap();
         assert!(
-            matches!(
-                error,
-                MemoryServiceError::Storage(MemoryError::RevisionConflict { .. })
-            ),
-            "{error}"
+            service
+                .list(ScopeSelection::ProjectOnly)
+                .unwrap()
+                .is_empty()
+        );
+        let index = service.files().read_index(&scope).unwrap();
+        assert!(!index.contains("note.md"), "{index}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_renames_a_collision_instead_of_overwriting() {
+        use radian_memory::NewRecord;
+        let dir = scratch("merge-collision");
+        let root = dir.join("memory");
+        let service = MemoryService::open(&dir.join("ws"), &root);
+        let project_a = service.registry().register("/work/a").unwrap();
+        let project_b = service.registry().register("/work/b").unwrap();
+        for project in [&project_a, &project_b] {
+            service
+                .files()
+                .write(
+                    &Scope::Project(project.clone()),
+                    NewRecord {
+                        name: "note".to_owned(),
+                        description: String::new(),
+                        record_type: "user".to_owned(),
+                        source: "user".to_owned(),
+                        provenance: None,
+                        body: String::new(),
+                    },
+                )
+                .unwrap();
+        }
+
+        let report = service.merge(&project_a, &project_b).unwrap();
+        assert_eq!(report.conflicts, vec!["note"]);
+        assert_eq!(
+            report.renamed,
+            vec![("note".to_owned(), "note-2".to_owned())]
+        );
+        assert_eq!(report.moved, vec!["note-2"]);
+        assert_eq!(
+            service
+                .files()
+                .list(&Scope::Project(project_a.clone()))
+                .unwrap()
+                .len(),
+            2,
+            "both files are in the merged project"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

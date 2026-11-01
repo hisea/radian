@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -65,6 +65,9 @@ pub(crate) struct Ui {
     streamed: AtomicBool,
     reasoning_open: AtomicBool,
     busy: AtomicBool,
+    /// The live `ModelRetrying` events this process saw, for `Result.run_metrics.retries`
+    /// (ADR 0010: a retry is live, never a journal record, so a resume counts only its own).
+    retries: AtomicU64,
     /// Resolves when a turn starts.
     pub(crate) started: Notify,
     /// Resolves when a turn ends.
@@ -99,6 +102,11 @@ impl Ui {
     /// True while a turn is in flight.
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::Relaxed)
+    }
+
+    /// The live `ModelRetrying` events this process saw.
+    pub(crate) fn retries(&self) -> u64 {
+        self.retries.load(Ordering::Relaxed)
     }
 
     /// Sets the turn-start hook (see the field). Overwrites any previous one.
@@ -174,6 +182,7 @@ impl EventSink for Ui {
                 delay,
                 reason,
             } => {
+                self.retries.fetch_add(1, Ordering::Relaxed);
                 // ADR 0017: the same line the TUI shows, on stderr, before the wait.
                 // The failed attempt's streamed text went to stdout and cannot be unwritten, so
                 // this only closes its line before the retry notice and the next attempt.

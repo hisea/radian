@@ -19,8 +19,8 @@
 | `radian-permissions` | 权限层：`ApprovalPolicy` + `ToolRuleSet` 合成一个 `Hooks` 实现，决定 allow / ask / deny。它本身不强制执行任何东西。 | `crates/radian-permissions/README.md` |
 | `radian-sandbox` | 操作系统沙箱后端（macOS `sandbox-exec`、Linux `bubblewrap`），按策略构造命令；没有经过验证的后端时**拒绝运行**。 | `crates/radian-sandbox/LIMITS.md` |
 | `radian-coding` | 内置编码工具：`read`（文件和目录）、`write`、`patch`（单处或原子的多处编辑）、`glob`、`grep`，在宿主提供工作区时挂载；`shell` 和 `job` 工具还需要沙箱。模型通过 `shell` 运行 git（在不受信任的项目里用 `GIT_CONFIG_*` 加固）。被截断的前台结果登记为普通 job id；保留输出还需要会话私有的输出目录。所有工具都限制在工作区路径内。 | `crates/radian-coding/README.md` |
-| `radian-memory` | 记忆存储层：Global/Project 两种作用域的日志和重放、来源规则（agent 不能改用户写的记录）、Forget/Purge、`projects.jsonl` 登记表、Markdown 导入导出视图。不依赖宿主：调用方传入 `~/.radian/memory/`。 | `crates/radian-memory/README.md` |
-| `radian-host` | TUI 和无头命令共用的宿主管道，保证两者不会走偏：`--header` 解析、会话 id、`--mcp-config` 文件、模型构造、启动说明、"内置工具 + MCP" 提供者、`~/.radian/` 目录布局和诊断、模型目录，以及记忆层（`MemoryService`、项目身份、agent 记忆工具、注入、共用的 `radian memory` / `/memory` 命令）。 | `crates/radian-host/README.md` |
+| `radian-memory` | 记忆存储层：一条记录一个 Markdown 文件（frontmatter 与正文）、每个作用域一个 `MEMORY.md` 索引、命名规则、原子写入、`projects.jsonl` 登记表，以及一次性的旧日志迁移。不依赖宿主：调用方传入 `~/.radian/memory/`。 | `crates/radian-memory/README.md` |
+| `radian-host` | TUI 和无头命令共用的宿主管道，保证两者不会走偏：`--header` 解析、会话 id、`--mcp-config` 文件、模型构造、启动说明、"内置工具 + MCP" 提供者、`~/.radian/` 目录布局和诊断、模型目录，以及记忆层（基于文件存储的 `MemoryService`、项目身份、索引注入、`/memory off` 开关、共用的 `radian memory` / `/memory` 命令）。 | `crates/radian-host/README.md` |
 | `radian-exec` | `radian exec` 背后的库：行提示聊天客户端，可选内置工具、MCP 服务器、会话管理命令和 `radian memory` 命令。 | `crates/radian-exec/README.md` |
 | `radian-tui` | `radian` 二进制：基于 `radian-runtime` 的全屏 TUI（只有全屏，没有内联模式），带斜杠命令层（`/help`、`/memory …`、`/access`、`/jobs`）和自己的对话滚动。 | `crates/radian-tui/README.md` |
 

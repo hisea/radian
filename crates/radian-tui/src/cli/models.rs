@@ -265,19 +265,24 @@ pub(super) fn memory_record_candidates(
     let Some(service) = memory else {
         return Vec::new();
     };
-    let Ok(records) = service.list(radian_host::memory::ScopeSelection::Default, false) else {
+    let Ok(entries) = service.list(radian_host::memory::ScopeSelection::Default) else {
         return Vec::new();
     };
-    records
+    entries
         .into_iter()
-        .map(|record| radian_tui::command::Candidate {
-            insert: record.id.as_str().to_owned(),
-            description: format!(
-                "{} {}",
-                record.kind.as_str(),
-                record_snippet(&record.content)
-            ),
-            current: false,
+        .filter_map(|entry| match entry {
+            radian_host::memory::ScopedEntry::Record { frontmatter, .. } => {
+                Some(radian_tui::command::Candidate {
+                    insert: frontmatter.name.clone(),
+                    description: format!(
+                        "{} {}",
+                        frontmatter.record_type,
+                        record_snippet(&frontmatter.description)
+                    ),
+                    current: false,
+                })
+            }
+            radian_host::memory::ScopedEntry::Unreadable { .. } => None,
         })
         .collect()
 }

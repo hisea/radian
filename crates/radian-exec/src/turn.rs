@@ -555,6 +555,25 @@ pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> LoopDone
                 if line == "/exit" || line == "/quit" {
                     break;
                 }
+                // `/memory off|on` (ADR 0021 D7): a session switch, not a message. It refuses
+                // memory writes at once and is recorded so a resume starts without the section.
+                if line == "/memory off" || line == "/memory on" {
+                    let off = line == "/memory off";
+                    match run.session.set_memory_off(off) {
+                        Ok(()) => eprintln!(
+                            "[memory] {}",
+                            if off {
+                                "off: this session refuses memory writes; the next session starts without the index"
+                            } else {
+                                "on: memory writes are allowed again"
+                            }
+                        ),
+                        Err(refused) => {
+                            eprintln!("[memory] cannot switch memory: {}", refused.reason)
+                        }
+                    }
+                    continue;
+                }
                 // `/compact [instructions]` is a control request, not a message (ADR 0018).
                 // Only a whole line whose first word is exactly `/compact` counts; `-p` mode
                 // has no such command.

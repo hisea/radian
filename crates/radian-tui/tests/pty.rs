@@ -5431,7 +5431,10 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
             "--workspace",
             ws.to_str().unwrap(),
         ],
-        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("EDITOR", "/usr/bin/true"),
+        ],
         30,
         110,
     );
@@ -5441,7 +5444,7 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
         pty.screen()
     );
 
-    pty.send(b"/memory add \"hello world\"\r");
+    pty.send(b"/memory add hello-world\r");
     assert!(
         pty.wait_for_screen("created project", wait_positive()),
         "the notice names the new project: {}",
@@ -5454,7 +5457,7 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
     );
     pty.send(b"/memory list\r");
     assert!(
-        pty.wait_for_screen("hello world", wait_positive()),
+        pty.wait_for_screen("hello-world", wait_positive()),
         "the record is in the new project: {}",
         pty.screen()
     );
@@ -5490,7 +5493,10 @@ async fn pty_memory_commands_run_without_a_model_request() {
             "--session-id",
             "memcmd",
         ],
-        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("EDITOR", "/usr/bin/true"),
+        ],
         30,
         110,
     );
@@ -5506,7 +5512,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
         "{}",
         pty.screen()
     );
-    pty.send(b"/memory add \"hello world\"\r");
+    pty.send(b"/memory add hello-world\r");
     assert!(
         pty.wait_for_screen("added", wait_positive()),
         "{}",
@@ -5514,7 +5520,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
     );
     pty.send(b"/memory list\r");
     assert!(
-        pty.wait_for_screen("hello world", wait_positive()),
+        pty.wait_for_screen("hello-world", wait_positive()),
         "{}",
         pty.screen()
     );
@@ -5550,7 +5556,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
 async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
     let dir = TempDir::new("memory-running");
     let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
-    let mut pty = Pty::spawn(
+    let mut pty = Pty::spawn_with_env(
         &[
             "--model",
             "mock",
@@ -5561,6 +5567,9 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
             "--session-id",
             "memrun",
         ],
+        // `add` opens the file after writing it. A no-op editor keeps the command from failing
+        // on a host with no platform opener (`xdg-open`) and never hides a write failure.
+        &[("EDITOR", "true")],
         30,
         110,
     );
@@ -5575,7 +5584,7 @@ async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
         "{}",
         pty.screen()
     );
-    pty.send(b"/memory add --global \"remembered\"\r");
+    pty.send(b"/memory add --global remembered\r");
     assert!(
         pty.wait_for_screen("added", wait_positive()),
         "{}",

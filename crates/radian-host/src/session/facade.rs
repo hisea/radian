@@ -64,6 +64,11 @@ pub trait SessionFacade: Send + Sync {
     /// capability as answering: it belongs to the interactive approver.
     fn set_approval(&self, policy: ApprovalPolicy) -> Result<(), CommandRefused>;
 
+    /// `/memory off|on` (ADR 0021 D7): the live switch refuses memory writes immediately and
+    /// the durable `ConfigChanged` (`{"memory":{"off":…}}`) makes a resume start without the
+    /// index section. The configuration file is never written.
+    fn set_memory_off(&self, off: bool) -> Result<(), CommandRefused>;
+
     /// Switch the session's permission tier in place (ADR 0038 slice 2's `/access`). The
     /// profile and the sandbox are rebuilt through the host's [`AccessBuilder`]; a failed
     /// sandbox probe is a refusal that changes nothing. The switch takes effect on the next

@@ -1,49 +1,31 @@
 //! `radian-memory`: the ADR 0021 memory storage layer.
 //!
-//! It is deliberately host-free: the caller passes the root directory (the host will pass
-//! `~/.radian/memory/`), and the crate never reads `HOME`. It provides:
+//! It is deliberately host-free: the caller passes the root directory (the host passes
+//! `~/.radian/memory/`), and the crate never reads `HOME`. A record is one Markdown file with
+//! YAML frontmatter; each scope has one `MEMORY.md` index. It provides:
 //!
-//! - [`FileStore`] and [`migrate_log`] — the file store beside the old logs: one Markdown
-//!   record per file, one `MEMORY.md` index per scope, and the one-time `log.jsonl` migration;
-//! - [`MemoryStore`] — Global and Project scope logs with CRUD, revision checks, the source
-//!   rules (an agent cannot touch a user record), Forget/Purge, split/merge primitives, and
-//!   the cross-scope view;
-//! - [`ProjectRegistry`] — the `projects.jsonl` identity-key → `ProjectId` registry;
-//! - [`search`] — keyword filtering and the deterministic order (ADR 0021 D6);
-//! - [`export`]/[`parse`] — the Markdown view.
+//! - [`FileStore`] — the record files and their indexes, with atomic writes and the name rule;
+//! - [`migrate_log`] — the one-time conversion of an old `log.jsonl` (ADR 0021 D3);
+//! - [`ProjectRegistry`] — the `projects.jsonl` identity-key → `ProjectId` registry.
 //!
-//! The log mechanics (single-writer flock, per-append fsync, torn-tail truncation, the
-//! critical/unknown-event policy) mirror `radian-session` (ADR 0006 §2.2/§7) without
-//! depending on it: the event schema and replay here are the memory's own (ADR 0021 D3).
+//! There is no model tool and no JSONL record store: writing a file is remembering and deleting
+//! it is forgetting.
 
 mod error;
-mod event;
 mod files;
 mod fs;
-mod log;
-mod markdown;
+mod migrate;
 mod model;
 mod registry;
-mod search;
-mod store;
 
-pub use error::{MemoryError, PurgeStep};
-pub use event::MemoryEvent;
+pub use error::MemoryError;
 pub use files::{
     DESCRIPTION_MAX, FileProvenance, FileStore, Frontmatter, IndexLine, ListEntry, NAME_MAX,
-    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, SESSIONS_INDEX_FILE, index_lines, migrate_log,
+    NewRecord, RECORD_SOURCES, RECORD_TYPES, Record, SESSIONS_INDEX_FILE, index_lines,
+    validate_record_name,
 };
+pub use migrate::migrate_log;
 #[doc(hidden)]
-pub use log::set_open_hook;
-pub use markdown::{ParsedRecord, export, parse};
-pub use model::{
-    Confirmer, Kind, MemoryId, MemoryRecord, ProjectId, Provenance, Scope, Source, Status,
-    Verification, now_utc,
-};
+pub use migrate::set_migration_crash_hook;
+pub use model::{ProjectId, Scope, now_utc};
 pub use registry::ProjectRegistry;
-pub use search::{SearchQuery, ranked, search};
-pub use store::{
-    ImportConflict, ImportRejection, ImportReport, MemoryStore, MoveConflict, MoveReport,
-};
-#[doc(hidden)]
-pub use store::{MovePhase, set_move_hook};

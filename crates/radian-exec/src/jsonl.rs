@@ -352,7 +352,8 @@ fn assistant_text(content: &[serde_json::Value]) -> String {
 /// suffix after the tee prefix: this process's own lines. Its `estimated` is always false:
 /// the resume re-pricing writes no journal record (it only folds in memory before the tee
 /// is installed), so the suffix never holds a re-priced old record — its fees are
-/// contemporary. The wake-budget ending adds `unhandled_job_notices`; every other ending
+/// contemporary. `run_metrics` is this process's own fold of the same suffix, in the object
+/// ADR 0044 §2 lists. The wake-budget ending adds `unhandled_job_notices`; every other ending
 /// omits it, so their field set is the fixture's field set. `model_error` is present only
 /// when the run ended because a turn failed on a `ModelError` (ADR 0044 §2b).
 pub(crate) fn result_line(
@@ -360,6 +361,7 @@ pub(crate) fn result_line(
     end: &ExecEnd,
     summary: &JournalSummary,
     run_summary: &JournalSummary,
+    run_metrics: &crate::metrics::RunMetrics,
     cost_estimated: bool,
     model_error: Option<&ModelError>,
 ) -> Vec<u8> {
@@ -413,6 +415,7 @@ pub(crate) fn result_line(
         "run_usage": run_usage,
         "run_cost": run_cost,
         "text": summary.last_text,
+        "run_metrics": run_metrics.to_value(),
     });
     if let Some(error) = model_error
         && outcome == "failed"
@@ -758,6 +761,7 @@ mod tests {
             &ExecEnd::Status(Some(RunStatus::BudgetExceeded)),
             &summary,
             &run_summary,
+            &crate::metrics::RunMetrics::default(),
             true,
             None,
         );
@@ -777,6 +781,7 @@ mod tests {
                 "run_usage": {"input": 5, "output": 2},
                 "run_cost": {"micros": 7, "incomplete": true, "estimated": false},
                 "text": "done",
+                "run_metrics": crate::metrics::RunMetrics::default().to_value(),
             })
         );
     }
@@ -852,6 +857,7 @@ mod tests {
             &end,
             &summary,
             &JournalSummary::default(),
+            &crate::metrics::RunMetrics::default(),
             false,
             None,
         );
@@ -871,6 +877,7 @@ mod tests {
                 "run_usage": {},
                 "run_cost": serde_json::Value::Null,
                 "text": "stuck",
+                "run_metrics": crate::metrics::RunMetrics::default().to_value(),
                 "unhandled_job_notices": 2,
             })
         );
@@ -890,6 +897,7 @@ mod tests {
             &end,
             &summary,
             &JournalSummary::default(),
+            &crate::metrics::RunMetrics::default(),
             false,
             None,
         );
@@ -920,6 +928,7 @@ mod tests {
             &end,
             &summary,
             &JournalSummary::default(),
+            &crate::metrics::RunMetrics::default(),
             false,
             None,
         );
@@ -1046,6 +1055,7 @@ mod tests {
             &ExecEnd::Status(Some(RunStatus::Failed)),
             &JournalSummary::default(),
             &JournalSummary::default(),
+            &crate::metrics::RunMetrics::default(),
             false,
             Some(&error),
         );
@@ -1074,6 +1084,7 @@ mod tests {
                 &end,
                 &JournalSummary::default(),
                 &JournalSummary::default(),
+                &crate::metrics::RunMetrics::default(),
                 false,
                 error,
             );
@@ -1193,6 +1204,7 @@ mod tests {
             &ExecEnd::Status(Some(RunStatus::Failed)),
             &summary,
             &summary,
+            &crate::metrics::RunMetrics::default(),
             false,
             stored.as_ref(),
         );
