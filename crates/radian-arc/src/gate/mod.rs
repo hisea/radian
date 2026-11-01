@@ -48,11 +48,11 @@ pub use exclusive::ExclusiveLock;
 pub use integration::{IntegrationRun, merge_ready};
 pub use review::{
     OWNED_EXEC_ARGS, PRE_EXISTING_WINDOW, PREVIOUS_ITEM_WINDOW, PreviousReview, REVIEW_BLOCKING,
-    REVIEW_FAILURE_REASONS, REVIEW_OUTPUT, REVIEW_RUNS, REVIEW_TIMEOUT, REVIEW_TOOLS,
-    REVIEW_UNAVAILABLE, ReviewRun, owned_name, parse_report,
+    REVIEW_FAILURE_REASONS, REVIEW_FINDINGS, REVIEW_OUTPUT, REVIEW_RUNS, REVIEW_TIMEOUT,
+    REVIEW_TOOLS, REVIEW_UNAVAILABLE, ReviewRun, owned_name, parse_report,
 };
 pub use verdict::{
-    CommandRecord, REVIEW_LEVELS, ReviewItem, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION,
-    Verdict, VerdictResult, attempt_dir, now_utc, required_passed, valid_verdicts, verdict_path,
-    verdict_set_digest,
+    CommandRecord, Finding, REVIEW_LEVELS, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION,
+    Verdict, VerdictResult, attempt_dir, level_rank, now_utc, required_passed, valid_verdicts,
+    verdict_path, verdict_set_digest,
 };

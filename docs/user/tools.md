@@ -7,6 +7,7 @@ description: The built-in file tools: `read`'s text, directory and image branche
 The model calls built-in tools for files, search and commands.
 Every tool name, argument and result is visible in the transcript.
 `read`, `write`, `patch`, `glob` and `grep` work inside the workspace;
+`read`, `grep`, `glob`, `write` and `patch` also reach the memory scope directories described in `permissions`;
 `read`, `grep` and `glob` also read the read-only roots described in `permissions`.
 A workspace path is a relative path, or an absolute path inside the workspace;
 see `permissions` for the exact rule.
@@ -18,7 +19,7 @@ see `permissions` for the exact rule.
 
 | Argument | Type | Default | What it does |
 |---|---|---|---|
-| `path` | string, required | — | A file, a directory, or an image. A workspace path, as `permissions` defines it; absolute or `~` for a read-only root. |
+| `path` | string, required | — | A file, a directory, or an image. A workspace path, as `permissions` defines it; absolute or `~` for a read-only root or a memory scope. |
 | `max_bytes` | integer, 1 to 1048576 | `16384` | Maximum bytes of text to read. |
 | `offset` | integer, 1-based, negative counts from the end | `1` | First text line to read. |
 | `limit` | integer, at least 1 for text and directory reads | `200` lines for a file, `500` entries for a directory | Maximum text lines to read. For a directory it caps entries instead, up to `5000`. Ignored for an image. |
@@ -67,10 +68,10 @@ A model that is not in the catalog, or whose entry has no input modalities, is t
 
 The same path rules apply to text and images.
 See `permissions` for which paths count as workspace paths.
-Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, and the manuals.
+Absolute and `~` paths read the cargo registry sources, the toolchain source trees, each skill's own directory, the two memory scope directories, and the manuals.
 In the `full` tier they also read any other path except the deny set.
-`write`, `patch` and shell working directories never leave the workspace.
-See `permissions` for the tiers and the deny set.
+`write`, `patch` and shell working directories never leave the workspace, except that `write` and `patch` reach a memory scope directory.
+See `permissions` for the tiers, the memory scopes and the deny set.
 
 ## `grep`
 

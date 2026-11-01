@@ -12,23 +12,24 @@
 //! repository's rules. A configured `prompt_file` is appended.
 //!
 //! A review that follows an earlier review of the same task is a rework round (ADR 0048
-//! decision 10): its prompt holds the brief, the previous review's blocking items, the commit
-//! list `<previous sha>..<sha>` and the increment, the lines the rework itself added or changed
-//! ([`build_rework_prompt`]). After its report is parsed, arc moves a blocking item to
-//! `suggestions` and marks it `pre_existing` ([`ReworkRound`]) unless it is within
-//! [`PRE_EXISTING_WINDOW`] lines of a line the task's own change added or changed (not the
-//! rework's increment), within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the previous
-//! review in the same file, a `critical` item, or an item without a `file` or a `line`; the
-//! stage then passes when no blocking item is left.
+//! decision 10): its prompt holds the brief, the previous review's failing findings, the
+//! commit list `<previous sha>..<sha>` and the increment, the lines the rework itself added or
+//! changed ([`build_rework_prompt`]). After its report is parsed, arc marks a finding
+//! `pre_existing` ([`ReworkRound`]) unless it is within [`PRE_EXISTING_WINDOW`] lines of a line
+//! the task's own change added or changed (not the rework's increment), within
+//! [`PREVIOUS_ITEM_WINDOW`] lines of a failing finding of the previous review in the same file,
+//! a `critical` finding, or a finding without a `file` or a `line`. `pre_existing` is arc's to
+//! set: a value the session's report carries is ignored.
 //!
 //! The session ends with one fenced `json` block ([`ReviewReport`]). arc parses the last such
-//! block. An empty `blocking` list passes the stage; any item fails it with reason
-//! `review_blocking`. No parsable block, a missing field, a timeout, or a session error makes
-//! the stage run the session once more; when the second run is unusable too the stage fails
-//! with `review_output` (or `review_timeout` when the last run timed out). A session whose
-//! `Result` carries `model_error.kind` `unavailable` or `usage_limit` is model unavailable: the
-//! stage does not run it again and fails at once with `review_unavailable` (ADR 0048 decision
-//! 9). The verdict records every run's session id and their summed cost.
+//! block. A finding at or above the reviewer's `fix_level` and not `pre_existing` fails the
+//! stage with reason `review_findings`; the rest is recorded. No parsable block, a missing
+//! field, a severity outside the closed list, a timeout, or a session error makes the stage run
+//! the session once more; when the second run is unusable too the stage fails with
+//! `review_output` (or `review_timeout` when the last run timed out). A session whose `Result`
+//! carries `model_error.kind` `unavailable` or `usage_limit` is model unavailable: the stage
+//! does not run it again and fails at once with `review_unavailable` (ADR 0048 decision 9). The
+//! verdict records every run's session id and their summed cost.
 //!
 //! A task whose own change is empty starts no session: the stage passes and its report says
 //! that there is nothing to review (ADR 0048 decision 10).
@@ -44,12 +45,12 @@ use serde_json::Value;
 
 use super::checkout::GateCheckout;
 use super::commands::kill_group;
-use super::config::Stage;
+use super::config::{DEFAULT_FIX_LEVEL, Stage};
 use super::error::GateError;
 use super::exclusive::SlotLock;
 use super::integration::candidate_for;
 use super::verdict::{
-    REVIEW_LEVELS, ReviewItem, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION, Verdict,
+    Finding, REVIEW_LEVELS, ReviewReport, ReviewSettings, VERDICT_SCHEMA_VERSION, Verdict,
     VerdictResult, attempt_dir, now_utc, verdict_path,
 };
 
@@ -66,7 +67,10 @@ pub const REVIEW_TOOLS: &str = "read,grep,glob";
 /// output is unusable (ADR 0048 decision 10).
 pub const REVIEW_RUNS: u32 = 2;
 
-/// A review stage failed with blocking items (ADR 0048 decision 10).
+/// A review stage failed at or above the reviewer's `fix_level` (ADR 0048 decision 10).
+pub const REVIEW_FINDINGS: &str = "review_findings";
+/// A review stage failed with blocking items before findings existed. Old verdicts and old
+/// task files still carry it; arc never writes it again (ADR 0048 decision 10).
 pub const REVIEW_BLOCKING: &str = "review_blocking";
 /// A review stage's two runs left no usable report (ADR 0048 decision 10).
 pub const REVIEW_OUTPUT: &str = "review_output";
@@ -80,15 +84,26 @@ pub const REVIEW_UNAVAILABLE: &str = "review_unavailable";
 /// Every reason a `review` stage can fail with. One closed list: the stage writes its entries,
 /// `show` reads them, and the manual's drift test names each one.
 pub const REVIEW_FAILURE_REASONS: &[&str] = &[
+    REVIEW_FINDINGS,
     REVIEW_BLOCKING,
     REVIEW_OUTPUT,
     REVIEW_TIMEOUT,
     REVIEW_UNAVAILABLE,
 ];
 
-/// The item level whose item always blocks a rework round, wherever it is (ADR 0048 decision
-/// 10): the window rules never move it.
+/// The severity whose finding always survives a rework round, wherever it is (ADR 0048
+/// decision 10): the window rules never mark it pre-existing.
 const CRITICAL: &str = "critical";
+
+/// The level the decision compares at: the reviewer's `fix_level`, or the default when an
+/// old verdict or a damaged setting carries one outside [`REVIEW_LEVELS`].
+fn effective_fix_level(fix_level: &str) -> &str {
+    if REVIEW_LEVELS.contains(&fix_level) {
+        fix_level
+    } else {
+        DEFAULT_FIX_LEVEL
+    }
+}
 
 /// The report of a review of a task whose own change is empty (ADR 0048 decision 10): no
 /// session starts, and the verdict's summary says why the stage passed.
@@ -96,22 +111,23 @@ const EMPTY_CHANGE_SUMMARY: &str = "The task's own change is empty: its tree is 
      main's tree. There is nothing for the review to check, so the stage passes without \
      starting a session.";
 
-/// A rework round: how far a blocking item may sit from a line the task's own change added or
-/// changed and still block (ADR 0048 decision 10, rule (a)).
+/// A rework round: how far a finding may sit from a line the task's own change added or
+/// changed and still fail (ADR 0048 decision 10, rule (a)).
 pub const PRE_EXISTING_WINDOW: u32 = 3;
 
-/// A rework round: how far a blocking item may sit from a blocking item of the previous review
-/// and still block (rule (b)), so an unfixed earlier item stays blocking.
+/// A rework round: how far a finding may sit from a failing finding of the previous review
+/// and still fail (rule (b)), so an unfixed earlier finding stays failing.
 pub const PREVIOUS_ITEM_WINDOW: u32 = 10;
 
 /// The review a rework round follows (ADR 0048 decision 10): the previous review's commit and
-/// the blocking items it reported.
+/// the failing findings it reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviousReview {
     /// The commit the previous review verified.
     pub sha: String,
-    /// The blocking items it reported; empty when its output was unusable.
-    pub blocking: Vec<ReviewItem>,
+    /// The failing findings it reported for its own `fix_level`; empty when its output was
+    /// unusable.
+    pub findings: Vec<Finding>,
 }
 
 /// One rework round's input: the previous review and the lines the task's own change added or
@@ -125,29 +141,29 @@ struct ReworkRound {
 }
 
 impl ReworkRound {
-    /// Whether a blocking item stays blocking (ADR 0048 decision 10, the rework round's
-    /// exceptions): a `critical` item always does, wherever it is; an item without a `file`
-    /// or a `line` does too, at its level; any other item does when its `file:line` is within
-    /// [`PRE_EXISTING_WINDOW`] lines of a line the task's own change added or changed, or it is
-    /// in the same file as and within [`PREVIOUS_ITEM_WINDOW`] lines of a blocking item of the
-    /// previous review.
-    fn keeps(&self, item: &ReviewItem) -> bool {
-        // A critical item blocks in every round, wherever it is: the position of a line does
+    /// Whether a finding stays failing (ADR 0048 decision 10, the rework round's exceptions):
+    /// a `critical` finding always does, wherever it is; a finding without a `file` or a
+    /// `line` does too, at its severity; any other finding does when its `file:line` is within
+    /// [`PRE_EXISTING_WINDOW`] lines of a line the task's own change added or changed, or it
+    /// is in the same file as and within [`PREVIOUS_ITEM_WINDOW`] lines of a failing finding
+    /// of the previous review.
+    fn keeps(&self, finding: &Finding) -> bool {
+        // A critical finding fails every round, wherever it is: the position of a line does
         // not prove that a problem is harmless or old.
-        if item.level.as_deref() == Some(CRITICAL) {
+        if finding.severity == CRITICAL {
             return true;
         }
-        // An item without a place is not demoted: the review prompt asks for `file` and
+        // A finding without a place is not demoted: the review prompt asks for `file` and
         // `line`, so a missing one is the session's omission, not evidence that the problem
         // is old.
-        let (Some(file), Some(line)) = (&item.file, item.line) else {
+        let (Some(file), Some(line)) = (&finding.file, finding.line) else {
             return true;
         };
         let near_change = self
             .changed
             .iter()
             .any(|(path, at)| path == file && at.abs_diff(line) <= PRE_EXISTING_WINDOW);
-        let near_previous = self.previous.blocking.iter().any(|earlier| {
+        let near_previous = self.previous.findings.iter().any(|earlier| {
             earlier.file.as_deref() == Some(file.as_str())
                 && earlier
                     .line
@@ -156,24 +172,17 @@ impl ReworkRound {
         near_change || near_previous
     }
 
-    /// Moves every blocking item [`ReworkRound::keeps`] does not keep to `suggestions`, marks
-    /// it `pre_existing`, and returns how many it moved. A moved item keeps its `level`, so
-    /// the follow-up task carries it at that level.
+    /// Marks every finding [`ReworkRound::keeps`] does not keep `pre_existing`, and returns
+    /// how many it marked. A demoted finding keeps its severity, so the follow-up task and
+    /// `show` carry it at that severity.
     fn mark_pre_existing(&self, report: &mut ReviewReport) -> u32 {
-        let mut kept = Vec::new();
         let mut moved = 0;
-        for item in std::mem::take(&mut report.blocking) {
-            if self.keeps(&item) {
-                kept.push(item);
-            } else {
+        for finding in &mut report.findings {
+            if !self.keeps(finding) {
+                finding.pre_existing = true;
                 moved += 1;
-                report.suggestions.push(ReviewItem {
-                    pre_existing: true,
-                    ..item
-                });
             }
         }
-        report.blocking = kept;
         moved
     }
 }
@@ -293,9 +302,9 @@ impl ReviewRun<'_> {
                 // and its report says why.
                 report = Some(ReviewReport {
                     summary: EMPTY_CHANGE_SUMMARY.to_owned(),
-                    blocking: Vec::new(),
-                    suggestions: Vec::new(),
+                    findings: Vec::new(),
                     verified: Vec::new(),
+                    old_blocking: None,
                 });
             } else {
                 let (prompt, round) =
@@ -340,16 +349,19 @@ impl ReviewRun<'_> {
                     break;
                 }
                 if let Some(found) = report.as_mut() {
-                    // A rework round's report is judged by arc, not by the session: an item
-                    // blocks only when it is near a line the task's own change added or
+                    // A rework round's report is judged by arc, not by the session: a finding
+                    // fails only when it is near a line the task's own change added or
                     // changed (the whole task, not just the rework's increment), near a
-                    // blocking item of the previous review, critical, or without a `file` or
-                    // a `line` (ADR 0048 decision 10).
+                    // failing finding of the previous review, critical, or without a `file`
+                    // or a `line` (ADR 0048 decision 10).
                     if let Some(round) = &round {
                         pre_existing = Some(round.mark_pre_existing(found));
                     }
-                    if !found.blocking.is_empty() {
-                        reason = Some(REVIEW_BLOCKING.to_owned());
+                    // The decision is the reviewer's `fix_level`: a finding at or above it
+                    // and not pre-existing sends the task back (ADR 0048 decision 10).
+                    let fix_level = effective_fix_level(&self.settings.fix_level);
+                    if !found.failing(fix_level).is_empty() {
+                        reason = Some(REVIEW_FINDINGS.to_owned());
                     }
                 } else if model_error.is_none() {
                     reason = Some(unusable.reason().to_owned());
@@ -692,36 +704,18 @@ fn last_result(path: &Path) -> Option<Value> {
 
 /// Parses the last fenced `json` block of a session's final message (ADR 0048 decision 10).
 ///
-/// The object must hold all four fields, with `summary` a string, `blocking` and `suggestions`
-/// lists of items, and `verified` a list of strings. An item is an object, or a plain string
-/// for an item with only its `text`. A missing field, a wrong type, a level outside
-/// [`REVIEW_LEVELS`], an unclosed block, or no `json` block at all is `None`.
+/// The object is the report shape: `summary` a string, `findings` a list of finding objects
+/// and `verified` a list of strings. A `findings` entry needs a `severity` in
+/// [`REVIEW_LEVELS`] and a `summary`; `file`, `line` and `trigger` may be absent. The old
+/// `blocking` / `suggestions` shape is mapped to findings, so a session that answers in it
+/// still reads. `pre_existing` is arc's to set, so a value the session supplies is ignored
+/// ([`ReviewReport::from_session_json`]). A missing field, a wrong type, a severity or level
+/// outside the list, an unclosed block, or no `json` block at all is `None`.
 #[must_use]
 pub fn parse_report(text: &str) -> Option<ReviewReport> {
     let block = last_json_block(text)?;
     let value: Value = serde_json::from_str(&block).ok()?;
-    Some(ReviewReport {
-        summary: value.get("summary")?.as_str()?.to_owned(),
-        blocking: items(value.get("blocking")?)?,
-        suggestions: items(value.get("suggestions")?)?,
-        verified: strings(value.get("verified")?)?,
-    })
-}
-
-fn items(value: &Value) -> Option<Vec<ReviewItem>> {
-    value
-        .as_array()?
-        .iter()
-        .map(ReviewItem::from_json)
-        .collect()
-}
-
-fn strings(value: &Value) -> Option<Vec<String>> {
-    value
-        .as_array()?
-        .iter()
-        .map(|item| item.as_str().map(str::to_owned))
-        .collect()
+    ReviewReport::from_session_json(&value)
 }
 
 /// The body of the last closed fence whose info string is `json`.
@@ -775,14 +769,15 @@ fn build_prompt(
          ```\n\n\
          Check the change against the brief and the rules of this repository: read AGENTS.md \
          and every ADR the brief names. Look for ways the change fails the brief, breaks a \
-         rule, is incomplete, or introduces a bug. Report only findings about this change.\n\n\
+         rule, is incomplete, or introduces a bug. List every problem you found, not only the \
+         first, and report only findings about this change.\n\n\
          {format}",
         format = report_format()
     )
 }
 
 /// The prompt of a rework round (ADR 0048 decision 10): the brief, the previous review's
-/// blocking items, the commits since it, and the increment instead of the full diff.
+/// failing findings, the commits since it, and the increment instead of the full diff.
 fn build_rework_prompt(
     task: &str,
     brief: &str,
@@ -792,13 +787,13 @@ fn build_rework_prompt(
     increment: &str,
 ) -> String {
     let previous_sha = &previous.sha;
-    let items = if previous.blocking.is_empty() {
+    let findings = if previous.findings.is_empty() {
         "- none".to_owned()
     } else {
         previous
-            .blocking
+            .findings
             .iter()
-            .map(|item| format!("- {item}"))
+            .map(|finding| format!("- {finding}"))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -807,8 +802,8 @@ fn build_rework_prompt(
          ## The brief\n\
          {brief}\n\n\
          ## The previous review (`{previous_sha}`)\n\
-         It reported these blocking items:\n\
-         {items}\n\n\
+         It reported these failing findings:\n\
+         {findings}\n\n\
          ## The commits (`{previous_sha}..{sha}`)\n\
          {commits}\n\n\
          ## The increment (`{previous_sha}..{sha}`)\n\
@@ -816,18 +811,19 @@ fn build_rework_prompt(
          ```diff\n\
          {increment}\n\
          ```\n\n\
-         This is a rework round. Check that each blocking item of the previous review is \
+         This is a rework round. Check that each failing finding of the previous review is \
          fixed. Review the increment for problems it introduces: ways it fails the brief, \
          breaks a rule of this repository, is incomplete, or is a bug. List every problem you \
-         find, not only the first, and give each one its `file` and `line`. The files are in \
-         the workspace; read them to confirm a finding.\n\n\
+         find, not only the first, and give each one its `severity`, `file` and `line`. The \
+         files are in the workspace; read them to confirm a finding.\n\n\
          {format}",
         format = report_format()
     )
 }
 
-/// The report format both prompts end with (ADR 0048 decision 10). The level list comes from
-/// [`REVIEW_LEVELS`], so the prompt and the parser cannot drift.
+/// The report format both prompts end with (ADR 0048 decision 10). The severity list comes
+/// from [`REVIEW_LEVELS`], so the prompt and the parser cannot drift. The examples calibrate
+/// the three severities; they are written from real verdicts and name no task, path or person.
 fn report_format() -> String {
     let levels = REVIEW_LEVELS
         .iter()
@@ -837,16 +833,37 @@ fn report_format() -> String {
     format!(
         "Finish with exactly one fenced ```json block and nothing after it:\n\n\
          ```json\n\
-         {{\"summary\": \"...\", \"blocking\": [{{\"level\": \"major\", \"file\": \"path\", \
-         \"line\": 1, \"text\": \"...\"}}], \"suggestions\": [], \"verified\": []}}\n\
+         {{\"summary\": \"...\", \"findings\": [{{\"severity\": \"major\", \"file\": \"path\", \
+         \"line\": 1, \"summary\": \"...\", \"trigger\": \"...\"}}], \"verified\": []}}\n\
          ```\n\n\
          - `summary`: 2 to 6 sentences on what the change does.\n\
-         - `blocking`: what must change before this can merge. An empty list passes the \
-         review.\n\
-         - `suggestions`: improvements that do not block.\n\
+         - `findings`: every problem you found, not only the first. A finding at or above the \
+         task's fix level sends the work back; one below it is recorded.\n\
          - `verified`: what you checked and found correct.\n\
-         - Each item of `blocking` and `suggestions` is an object: `text` is required, and \
-         `level` (one of {levels}), `file` and `line` are given when they apply.\n"
+         - Each finding is an object: `severity` (one of {levels}) and `summary` are required; \
+         `file` and `line` are given when they apply; `trigger` is the input or state that \
+         shows the problem.\n\
+         - `critical`: security, data loss or corruption, a state the program cannot recover \
+         from, a hang or a leak. Examples: a cancel signals only the direct child, so a \
+         command the wrapper started in another process group keeps running after the task is \
+         cancelled; a file the code reads whole is replaced by a FIFO, and the read blocks \
+         forever before any timeout applies; a struct that holds an API key derives `Debug`, \
+         so a panic or an error path prints the key.\n\
+         - `major`: a wrong result, a contradiction of the brief or an ADR, a manual sentence \
+         the code does not do, a test that fails or cannot fail. Examples: the test binary no \
+         longer compiles on Linux because a helper has no such method; a JSON `null` for a \
+         field deserializes as absent, so the documented \"a present value that is not an \
+         array is an error\" never fires; the manual says the flag is set only for a hook exit \
+         2, but an exit 0 with a block decision also sets it; a new edge-case test passes \
+         against the code before the change, so it proves nothing; attempt directories are \
+         sorted by name, so attempt 10 sorts before attempt 2 and the newest verdict is the \
+         wrong one.\n\
+         - `minor`: everything else: a rare edge case, wording, naming, style. Examples: a \
+         pronoun in a doc sentence can refer to two nouns, say which; the summary row's \
+         indentation no longer aligns under the id column after a column was inserted; a \
+         comment describes a key-handler arm that an earlier handler now intercepts, so the \
+         arm is unreachable; a tool's schema still says \"default: every plan\" after the \
+         default changed.\n"
     )
 }
 
@@ -1102,12 +1119,13 @@ fn deny_paths(repository: &Path, workspace: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    fn item(level: Option<&str>, file: Option<&str>, line: Option<u32>, text: &str) -> ReviewItem {
-        ReviewItem {
-            level: level.map(str::to_owned),
+    fn finding(severity: &str, file: Option<&str>, line: Option<u32>, summary: &str) -> Finding {
+        Finding {
+            severity: severity.to_owned(),
             file: file.map(str::to_owned),
             line,
-            text: text.to_owned(),
+            summary: summary.to_owned(),
+            trigger: String::new(),
             pre_existing: false,
         }
     }
@@ -1116,103 +1134,213 @@ mod tests {
     /// second. Mutation: read the first block → this test sees the stale summary.
     #[test]
     fn the_last_json_block_wins() {
-        let text = "first\n```json\n{\"summary\": \"old\", \"blocking\": [], \"suggestions\": [], \
-                    \"verified\": []}\n```\nthen\n```json\n{\"summary\": \"new\", \"blocking\": \
-                    [{\"level\": \"major\", \"file\": \"a.rs\", \"line\": 3, \"text\": \"b\"}], \
-                    \"suggestions\": [\"s\"], \"verified\": [\"v\"]}\n```\ndone";
+        let text = "first\n```json\n{\"summary\": \"old\", \"findings\": [], \
+                    \"verified\": []}\n```\nthen\n```json\n{\"summary\": \"new\", \"findings\": \
+                    [{\"severity\": \"major\", \"file\": \"a.rs\", \"line\": 3, \"summary\": \
+                    \"b\"}], \"verified\": [\"v\"]}\n```\ndone";
         let report = parse_report(text).expect("the last block parses");
         assert_eq!(report.summary, "new");
         assert_eq!(
-            report.blocking,
-            vec![item(Some("major"), Some("a.rs"), Some(3), "b")]
+            report.findings,
+            vec![finding("major", Some("a.rs"), Some(3), "b")]
         );
-        assert_eq!(report.suggestions, vec![ReviewItem::text("s")]);
         assert_eq!(report.verified, vec!["v".to_owned()]);
     }
 
-    /// A block with a missing field, a wrong type, a level outside the closed list, no fence,
-    /// or an unclosed fence has no report; the empty lists of a passing review are a valid
-    /// report.
+    /// A block with a missing field, a wrong type, a severity outside the closed list, no
+    /// fence, or an unclosed fence has no report; the empty lists of a passing review are a
+    /// valid report. The old shape's `level` is checked the same way.
     #[test]
     fn an_incomplete_or_unfenced_report_is_unusable() {
         for text in [
             "no block here",
-            "```json\n{\"summary\": \"s\", \"blocking\": []}\n```",
-            "```json\n{\"summary\": 1, \"blocking\": [], \"suggestions\": [], \"verified\": []}\n```",
-            "```json\n{\"summary\": \"s\", \"blocking\": \"none\", \"suggestions\": [], \
+            "```json\n{\"summary\": \"s\", \"findings\": []}\n```",
+            "```json\n{\"summary\": 1, \"findings\": [], \"verified\": []}\n```",
+            "```json\n{\"summary\": \"s\", \"findings\": \"none\", \"verified\": []}\n```",
+            // A finding needs a severity and a summary.
+            "```json\n{\"summary\": \"s\", \"findings\": [{\"file\": \"a.rs\"}], \
              \"verified\": []}\n```",
-            // An item needs its text.
-            "```json\n{\"summary\": \"s\", \"blocking\": [{\"file\": \"a.rs\"}], \
-             \"suggestions\": [], \"verified\": []}\n```",
-            // The level is the closed list.
+            "```json\n{\"summary\": \"s\", \"findings\": [{\"severity\": \"major\"}], \
+             \"verified\": []}\n```",
+            // The severity is the closed list.
+            "```json\n{\"summary\": \"s\", \"findings\": [{\"severity\": \"high\", \
+             \"summary\": \"b\"}], \"verified\": []}\n```",
+            // A line is a non-negative integer.
+            "```json\n{\"summary\": \"s\", \"findings\": [{\"severity\": \"major\", \
+             \"summary\": \"b\", \"line\": -1}], \"verified\": []}\n```",
+            // The old shape's level is the same closed list.
             "```json\n{\"summary\": \"s\", \"blocking\": [{\"level\": \"high\", \"text\": \"b\"}], \
              \"suggestions\": [], \"verified\": []}\n```",
-            // A line is a non-negative integer.
-            "```json\n{\"summary\": \"s\", \"blocking\": [{\"text\": \"b\", \"line\": -1}], \
-             \"suggestions\": [], \"verified\": []}\n```",
-            "```json\n{\"summary\": \"s\", \"blocking\": [], \"suggestions\": [], \
-             \"verified\": []}\n",
-            "```diff\n{\"summary\": \"s\", \"blocking\": [], \"suggestions\": [], \
-             \"verified\": []}\n```",
+            "```json\n{\"summary\": \"s\", \"findings\": [], \"verified\": []}\n",
+            "```diff\n{\"summary\": \"s\", \"findings\": [], \"verified\": []}\n```",
         ] {
             assert!(parse_report(text).is_none(), "{text}");
         }
-        let passing = parse_report(
-            "```json\n{\"summary\": \"s\", \"blocking\": [], \"suggestions\": [], \
-             \"verified\": []}\n```",
-        )
-        .expect("empty lists are a report");
-        assert!(passing.blocking.is_empty());
+        let passing =
+            parse_report("```json\n{\"summary\": \"s\", \"findings\": [], \"verified\": []}\n```")
+                .expect("empty lists are a report");
+        assert!(passing.findings.is_empty());
     }
 
-    /// A plain string is an item with only its text, and it serializes back to that string, so
-    /// a verdict written before the object form keeps its bytes (and its digest).
+    /// The old shape maps to findings: `blocking` at its own `level` else `major`, and
+    /// `suggestions` at its own `level` else `minor`. A plain string is a finding with only
+    /// its summary, and a leading tag that repeats an explicit level is dropped.
     #[test]
-    fn a_plain_string_item_is_an_item_with_only_its_text() {
-        let text = "```json\n{\"summary\": \"s\", \"blocking\": [\"rename the helper\"], \
-                    \"suggestions\": [], \"verified\": []}\n```";
-        let report = parse_report(text).expect("a string item parses");
-        assert_eq!(report.blocking, vec![ReviewItem::text("rename the helper")]);
+    fn the_old_shape_maps_to_findings() {
+        let text = "```json\n{\"summary\": \"s\", \"blocking\": [\"rename the helper\", \
+                    {\"level\": \"minor\", \"file\": \"a.rs\", \"line\": 4, \
+                    \"text\": \"[minor] a small problem\"}], \"suggestions\": [\"a nicer name\", \
+                    {\"level\": \"major\", \"text\": \"a bigger idea\"}], \
+                    \"verified\": []}\n```";
+        let report = parse_report(text).expect("the old shape parses");
         assert_eq!(
-            serde_json::to_string(&report.blocking[0]).expect("it serializes"),
-            "\"rename the helper\""
+            report.findings,
+            vec![
+                finding("major", None, None, "rename the helper"),
+                finding("minor", Some("a.rs"), Some(4), "a small problem"),
+                finding("minor", None, None, "a nicer name"),
+                finding("major", None, None, "a bigger idea"),
+            ]
         );
-        // The object form round-trips as an object, and `pre_existing` appears only when set.
-        let moved = ReviewItem {
-            pre_existing: true,
-            ..ReviewItem::text("old")
+    }
+
+    /// A session's report cannot mark a finding pre-existing: `pre_existing` is arc's to set.
+    /// A verdict arc wrote keeps its recorded value.
+    #[test]
+    fn a_session_cannot_mark_a_finding_pre_existing_but_a_verdict_keeps_it() {
+        let body = r#"{"summary": "s", "findings": [{"severity": "major", "summary": "m", "pre_existing": true}], "verified": []}"#;
+        let text = format!("```json\n{body}\n```");
+        let report = parse_report(&text).expect("the session's report parses");
+        assert!(!report.findings[0].pre_existing, "{report:?}");
+        let value: Value = serde_json::from_str(body).expect("the report is JSON");
+        let persisted = ReviewReport::from_json(&value).expect("the verdict reads");
+        assert!(persisted.findings[0].pre_existing, "{persisted:?}");
+    }
+
+    /// An old report read from a verdict records how many findings came from `blocking`, so a
+    /// `review_blocking` verdict's `minor` blocking item still fails and its `suggestions`
+    /// never do, whatever `fix_level` says; a session's old-shape report has no such record
+    /// and is decided by `fix_level` like any report.
+    #[test]
+    fn an_old_verdicts_blocking_items_fail_whatever_their_level() {
+        let value: Value = serde_json::from_str(
+            r#"{"summary": "s", "blocking": [{"level": "minor", "text": "a nit"}],
+               "suggestions": ["an idea"], "verified": []}"#,
+        )
+        .expect("the old report is JSON");
+        let persisted = ReviewReport::from_json(&value).expect("the verdict reads");
+        assert_eq!(persisted.old_blocking, Some(1), "{persisted:?}");
+        assert!(persisted.failing("major").is_empty());
+        assert_eq!(
+            persisted
+                .failing_in_old_verdict("minor")
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a nit"]
+        );
+        assert_eq!(
+            persisted
+                .rest_in_old_verdict("minor")
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["an idea"],
+            "an old verdict's suggestion was failing"
+        );
+        let text = format!("```json\n{value}\n```");
+        let session = parse_report(&text).expect("the session's report parses");
+        assert_eq!(session.old_blocking, None, "{session:?}");
+        assert!(session.failing("major").is_empty());
+    }
+
+    /// A finding serializes in the new shape, and `trigger` and `pre_existing` appear only
+    /// when set. A finding reads back.
+    #[test]
+    fn a_finding_round_trips_in_the_new_shape() {
+        let graded = Finding {
+            trigger: "pass a FIFO".to_owned(),
+            ..finding("minor", Some("src/x.rs"), Some(9), "x")
         };
-        assert_eq!(
-            serde_json::to_string(&moved).expect("it serializes"),
-            "{\"text\":\"old\",\"pre_existing\":true}"
-        );
-        let graded = item(Some("minor"), Some("src/x.rs"), Some(9), "x");
         let json = serde_json::to_string(&graded).expect("it serializes");
         assert_eq!(
             json,
-            "{\"level\":\"minor\",\"file\":\"src/x.rs\",\"line\":9,\"text\":\"x\"}"
+            "{\"severity\":\"minor\",\"file\":\"src/x.rs\",\"line\":9,\"summary\":\"x\",\
+             \"trigger\":\"pass a FIFO\"}"
         );
-        let read: ReviewItem = serde_json::from_str(&json).expect("it reads back");
+        let read: Finding = serde_json::from_str(&json).expect("it reads back");
         assert_eq!(read, graded);
+        let moved = Finding {
+            pre_existing: true,
+            ..finding("minor", None, None, "old")
+        };
+        assert_eq!(
+            serde_json::to_string(&moved).expect("it serializes"),
+            "{\"severity\":\"minor\",\"summary\":\"old\",\"pre_existing\":true}"
+        );
     }
 
-    /// The printed item is `[level] path:line text`, and the parts the item does not have are
-    /// left out.
+    /// The printed finding is `[severity] path:line summary — trigger`, the parts the finding
+    /// does not have are left out, and an empty trigger leaves out the ` — ` part.
     #[test]
-    fn an_item_prints_its_level_its_place_and_its_text() {
+    fn a_finding_prints_its_severity_its_place_its_summary_and_its_trigger() {
+        let full = Finding {
+            trigger: "the read blocks forever".to_owned(),
+            ..finding("major", Some("src/x.rs"), Some(12), "the bug")
+        };
         assert_eq!(
-            item(Some("major"), Some("src/x.rs"), Some(12), "the bug").to_string(),
+            full.to_string(),
+            "[major] src/x.rs:12 the bug — the read blocks forever"
+        );
+        assert_eq!(
+            finding("major", Some("src/x.rs"), Some(12), "the bug").to_string(),
             "[major] src/x.rs:12 the bug"
         );
         assert_eq!(
-            item(None, Some("src/x.rs"), None, "the bug").to_string(),
-            "src/x.rs the bug"
+            finding("major", Some("src/x.rs"), None, "the bug").to_string(),
+            "[major] src/x.rs the bug"
         );
-        assert_eq!(item(None, None, None, "the bug").to_string(), "the bug");
         assert_eq!(
-            item(Some("critical"), None, Some(4), "the bug").to_string(),
+            finding("critical", None, Some(4), "the bug").to_string(),
             "[critical] the bug"
         );
+        assert_eq!(
+            finding("minor", None, None, "[minor] the bug").to_string(),
+            "[minor] the bug"
+        );
+    }
+
+    /// The decision: a finding at or above `fix_level` and not pre-existing fails; one below
+    /// it, or pre-existing, is in the rest. `critical` above `major` above `minor`.
+    #[test]
+    fn the_failing_findings_are_at_or_above_the_fix_level_and_not_pre_existing() {
+        let report = ReviewReport {
+            summary: "s".to_owned(),
+            findings: vec![
+                finding("critical", None, None, "c"),
+                Finding {
+                    pre_existing: true,
+                    ..finding("critical", None, None, "an old critical")
+                },
+                finding("major", None, None, "m"),
+                finding("minor", None, None, "n"),
+            ],
+            verified: Vec::new(),
+            old_blocking: None,
+        };
+        let summaries = |findings: Vec<&Finding>| {
+            findings
+                .into_iter()
+                .map(|finding| finding.summary.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summaries(report.failing("major")), vec!["c", "m"]);
+        assert_eq!(
+            summaries(report.rest("major")),
+            vec!["an old critical", "n"]
+        );
+        assert_eq!(summaries(report.failing("critical")), vec!["c"]);
+        assert_eq!(summaries(report.failing("minor")), vec!["c", "m", "n"]);
     }
 
     /// The new-side lines of a diff are the context and added lines of the new file, with the
@@ -1288,278 +1416,251 @@ mod tests {
         );
     }
 
-    /// Rules (a) and (b): a blocking item near a line the task's own change touched, or near
-    /// an earlier blocking item, stays blocking; an item far from both is moved to `suggestions`
-    /// with `pre_existing`; an item without a place stays blocking at its level. Mutation:
-    /// demote an unplaced item again → the `vague` item moves.
+    /// Rules (a) and (b): a finding near a line the task's own change touched, or near an
+    /// earlier failing finding, keeps failing; a finding far from both is marked
+    /// `pre_existing`; a finding without a place stays failing at its severity. Mutation:
+    /// demote an unplaced finding again → the `vague` finding is marked.
     #[test]
-    fn a_pre_existing_item_is_moved_and_marked() {
+    fn a_pre_existing_finding_is_marked() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+                findings: vec![finding("major", Some("src/old.rs"), Some(40), "unfixed")],
             },
             changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
+            findings: vec![
                 // (a) two lines from a line the task's own change touched.
-                item(
-                    Some("major"),
-                    Some("src/new.rs"),
-                    Some(12),
-                    "near the change",
-                ),
-                // (b) seven lines from the previous item, in its file.
-                item(
-                    Some("minor"),
-                    Some("src/old.rs"),
-                    Some(47),
-                    "the same problem",
-                ),
+                finding("major", Some("src/new.rs"), Some(12), "near the change"),
+                // (b) seven lines from the previous finding, in its file.
+                finding("minor", Some("src/old.rs"), Some(47), "the same problem"),
                 // Neither: another file, another line.
-                item(Some("minor"), Some("src/old.rs"), Some(80), "untouched"),
+                finding("minor", Some("src/old.rs"), Some(80), "untouched"),
                 // No place at all: the session's omission, not evidence that it is old.
-                ReviewItem::text("vague"),
+                finding("minor", None, None, "vague"),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
-        let texts: Vec<&str> = report
-            .blocking
+        let marked: Vec<(&str, bool)> = report
+            .findings
             .iter()
-            .map(|item| item.text.as_str())
+            .map(|finding| (finding.summary.as_str(), finding.pre_existing))
             .collect();
-        assert_eq!(texts, vec!["near the change", "the same problem", "vague"]);
-        assert_eq!(report.suggestions.len(), 1);
-        assert!(
-            report.suggestions.iter().all(|item| item.pre_existing),
-            "{:?}",
-            report.suggestions
+        assert_eq!(
+            marked,
+            vec![
+                ("near the change", false),
+                ("the same problem", false),
+                ("untouched", true),
+                ("vague", false),
+            ]
         );
-        assert_eq!(report.suggestions[0].level.as_deref(), Some("minor"));
+        assert_eq!(report.findings[2].severity, "minor");
     }
 
-    /// A `critical` item blocks in every round, wherever it is: far from the task's changed
-    /// lines and far from every previous item. Mutation: let the window rule move it → this test
-    /// sees it in `suggestions`.
+    /// A `critical` finding fails in every round, wherever it is: far from the task's changed
+    /// lines and far from every previous finding. Mutation: let the window rule mark it → this
+    /// test sees it pre-existing.
     #[test]
-    fn a_critical_item_blocks_wherever_it_is() {
+    fn a_critical_finding_is_never_demoted() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+                findings: vec![finding("major", Some("src/old.rs"), Some(40), "unfixed")],
             },
             changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
-                item(
-                    Some("critical"),
+            findings: vec![
+                finding(
+                    "critical",
                     Some("src/far.rs"),
                     Some(900),
                     "a permission bypass",
                 ),
-                item(
-                    Some("critical"),
+                finding(
+                    "critical",
                     Some("src/old.rs"),
                     Some(400),
                     "a critical problem far from the previous one",
                 ),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
-        let texts: Vec<&str> = report
-            .blocking
+        let summaries: Vec<&str> = report
+            .findings
             .iter()
-            .map(|item| item.text.as_str())
+            .map(|finding| finding.summary.as_str())
             .collect();
         assert_eq!(
-            texts,
+            summaries,
             vec![
                 "a permission bypass",
                 "a critical problem far from the previous one"
             ]
         );
-        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+        assert!(report.findings.iter().all(|finding| !finding.pre_existing));
     }
 
-    /// An item without a place is not demoted: it stays in `blocking` at its level. Mutation:
-    /// demote it again → this test sees all three in `suggestions`.
+    /// A finding without a place is not demoted: it stays failing at its severity. Mutation:
+    /// demote it again → this test sees all three pre-existing.
     #[test]
-    fn an_item_without_a_place_stays_blocking_at_its_level() {
+    fn a_finding_without_a_place_stays_failing_at_its_severity() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+                findings: vec![finding("major", Some("src/old.rs"), Some(40), "unfixed")],
             },
             changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
-                item(Some("major"), None, None, "a major item with no place"),
-                item(
-                    Some("critical"),
+            findings: vec![
+                finding("major", None, None, "a major finding with no place"),
+                finding(
+                    "critical",
                     Some("src/far.rs"),
                     None,
-                    "a critical item with no line",
+                    "a critical finding with no line",
                 ),
-                item(None, None, Some(4), "an ungraded item with only a line"),
+                finding("minor", None, Some(4), "a minor finding with only a line"),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
-        assert_eq!(report.blocking.len(), 3, "{:?}", report.blocking);
-        assert_eq!(report.blocking[0].level.as_deref(), Some("major"));
-        assert_eq!(report.blocking[1].level.as_deref(), Some("critical"));
-        assert_eq!(report.blocking[2].level, None);
-        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+        assert_eq!(report.findings.len(), 3, "{:?}", report.findings);
+        assert_eq!(report.findings[0].severity, "major");
+        assert_eq!(report.findings[1].severity, "critical");
+        assert_eq!(report.findings[2].severity, "minor");
+        assert!(report.findings.iter().all(|finding| !finding.pre_existing));
     }
 
-    /// A `major` item outside both windows is still moved to `suggestions` with `pre_existing`,
-    /// and keeps its `level` so the follow-up carries it; `minor` items keep the same rule.
-    /// Mutation: drop the level of a moved item → this test loses `major`.
+    /// A `major` finding outside both windows is marked `pre_existing` and keeps its
+    /// severity, so the follow-up carries it; `minor` findings keep the same rule. Mutation:
+    /// drop the severity of a marked finding → this test loses `major`.
     #[test]
-    fn a_major_item_outside_the_windows_is_moved_and_keeps_its_level() {
+    fn a_major_finding_outside_the_windows_is_marked_and_keeps_its_severity() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: vec![item(Some("major"), Some("src/old.rs"), Some(40), "unfixed")],
+                findings: vec![finding("major", Some("src/old.rs"), Some(40), "unfixed")],
             },
             changed: [(String::from("src/new.rs"), 10)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
-                // Another file, and 40 lines from the previous item.
-                item(Some("major"), Some("src/old.rs"), Some(80), "untouched"),
-                item(Some("minor"), Some("src/other.rs"), Some(5), "a nit"),
+            findings: vec![
+                // Another file, and 40 lines from the previous finding.
+                finding("major", Some("src/old.rs"), Some(80), "untouched"),
+                finding("minor", Some("src/other.rs"), Some(5), "a nit"),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 2);
-        assert!(report.blocking.is_empty(), "{:?}", report.blocking);
-        assert_eq!(report.suggestions[0].level.as_deref(), Some("major"));
-        assert!(report.suggestions[0].pre_existing);
-        assert_eq!(report.suggestions[1].level.as_deref(), Some("minor"));
+        assert_eq!(report.findings[0].severity, "major");
+        assert!(report.findings[0].pre_existing);
+        assert_eq!(report.findings[1].severity, "minor");
+        assert!(report.findings[1].pre_existing);
     }
 
-    /// Rule (a) follows the task's own change, not the rework: an item on a line the task
-    /// added or changed in an earlier attempt keeps blocking even when the rework touched
-    /// nothing there. Mutation: measure against the rework's increment again → the item moves.
+    /// Rule (a) follows the task's own change, not the rework: a finding on a line the task
+    /// added or changed in an earlier attempt keeps failing even when the rework touched
+    /// nothing there. Mutation: measure against the rework's increment again → the finding is
+    /// marked.
     #[test]
-    fn an_item_on_a_line_the_task_changed_keeps_blocking() {
+    fn a_finding_on_a_line_the_task_changed_keeps_failing() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: Vec::new(),
+                findings: Vec::new(),
             },
             changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
+            findings: vec![
                 // Two lines from a line the task changed in an earlier attempt.
-                item(
-                    Some("major"),
-                    Some("src/kept.rs"),
-                    Some(22),
-                    "the task's own bug",
-                ),
+                finding("major", Some("src/kept.rs"), Some(22), "the task's own bug"),
                 // Exactly at the window's edge.
-                item(
-                    Some("minor"),
+                finding(
+                    "minor",
                     Some("src/kept.rs"),
                     Some(17),
                     "the edge of the window",
                 ),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 0);
-        assert_eq!(report.blocking.len(), 2, "{:?}", report.blocking);
-        assert!(report.suggestions.is_empty(), "{:?}", report.suggestions);
+        assert_eq!(report.findings.len(), 2, "{:?}", report.findings);
+        assert!(report.findings.iter().all(|finding| !finding.pre_existing));
     }
 
-    /// Rule (a) is per file: an item in a file the task's own change does not touch is demoted,
-    /// even at a line number a changed file has. Mutation: compare only the line, not the
-    /// path → the item in the other file stays blocking.
+    /// Rule (a) is per file: a finding in a file the task's own change does not touch is
+    /// marked, even at a line number a changed file has. Mutation: compare only the line, not
+    /// the path → the finding in the other file stays failing.
     #[test]
-    fn an_item_in_a_file_the_task_did_not_touch_is_demoted() {
+    fn a_finding_in_a_file_the_task_did_not_touch_is_demoted() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: Vec::new(),
+                findings: Vec::new(),
             },
             changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![item(
-                Some("major"),
+            findings: vec![finding(
+                "major",
                 Some("src/other.rs"),
                 Some(20),
                 "another file",
             )],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
-        assert!(report.blocking.is_empty(), "{:?}", report.blocking);
-        assert!(report.suggestions[0].pre_existing);
-        assert_eq!(report.suggestions[0].level.as_deref(), Some("major"));
+        assert!(report.findings[0].pre_existing);
+        assert_eq!(report.findings[0].severity, "major");
     }
 
     /// Rule (a) has a window per file: a line more than [`PRE_EXISTING_WINDOW`] from every
-    /// changed line of its file is demoted, though one at the edge stays. Mutation: keep any
-    /// item in a file the task changed, whatever its distance → the far item stays blocking.
+    /// changed line of its file is marked, though one at the edge stays failing. Mutation:
+    /// keep any finding in a file the task changed, whatever its distance → the far finding
+    /// stays failing.
     #[test]
-    fn an_item_more_than_the_window_from_a_changed_line_is_demoted() {
+    fn a_finding_more_than_the_window_from_a_changed_line_is_demoted() {
         let round = ReworkRound {
             previous: PreviousReview {
                 sha: "prev".to_owned(),
-                blocking: Vec::new(),
+                findings: Vec::new(),
             },
             changed: [(String::from("src/kept.rs"), 20)].into_iter().collect(),
         };
         let mut report = ReviewReport {
             summary: "s".to_owned(),
-            blocking: vec![
-                item(
-                    Some("minor"),
-                    Some("src/kept.rs"),
-                    Some(24),
-                    "four lines away",
-                ),
-                item(
-                    Some("minor"),
-                    Some("src/kept.rs"),
-                    Some(23),
-                    "three lines away",
-                ),
+            findings: vec![
+                finding("minor", Some("src/kept.rs"), Some(24), "four lines away"),
+                finding("minor", Some("src/kept.rs"), Some(23), "three lines away"),
             ],
-            suggestions: Vec::new(),
             verified: Vec::new(),
+            old_blocking: None,
         };
         assert_eq!(round.mark_pre_existing(&mut report), 1);
-        let texts: Vec<&str> = report
-            .blocking
-            .iter()
-            .map(|item| item.text.as_str())
-            .collect();
-        assert_eq!(texts, vec!["three lines away"]);
-        assert_eq!(report.suggestions.len(), 1);
-        assert_eq!(report.suggestions[0].text, "four lines away");
-        assert!(report.suggestions[0].pre_existing);
+        assert_eq!(report.findings[0].summary, "four lines away");
+        assert!(report.findings[0].pre_existing);
+        assert_eq!(report.findings[1].summary, "three lines away");
+        assert!(!report.findings[1].pre_existing);
     }
 
     /// The stage's own arguments are refused by name: an `exec_args` entry may not unmount
@@ -1601,11 +1702,15 @@ mod tests {
             "abc one",
             "+new",
             "\"summary\"",
-            "\"blocking\"",
-            "\"level\"",
+            "\"findings\"",
+            "\"severity\"",
             "\"file\"",
             "\"line\"",
+            "\"trigger\"",
             "`critical`, `major`, `minor`",
+            "a cancel signals only the direct child",
+            "the test binary no longer compiles on Linux",
+            "a pronoun in a doc sentence can refer to two nouns",
         ] {
             assert!(
                 prompt.contains(needle),
@@ -1614,13 +1719,13 @@ mod tests {
         }
     }
 
-    /// A rework round's prompt holds the previous items, the commits since them and the
-    /// increment, and it asks for the two checks of a rework round.
+    /// A rework round's prompt holds the previous failing findings, the commits since them
+    /// and the increment, and it asks for the two checks of a rework round.
     #[test]
-    fn the_rework_prompt_holds_the_previous_items_and_the_increment() {
+    fn the_rework_prompt_holds_the_previous_findings_and_the_increment() {
         let previous = PreviousReview {
             sha: "prev1".to_owned(),
-            blocking: vec![item(Some("major"), Some("src/x.rs"), Some(3), "the bug")],
+            findings: vec![finding("major", Some("src/x.rs"), Some(3), "the bug")],
         };
         let prompt = build_rework_prompt(
             "TK0001-a",
@@ -1636,9 +1741,9 @@ mod tests {
             "prev1..head2",
             "- [major] src/x.rs:3 the bug",
             "+new",
-            "Check that each blocking item of the previous review is fixed",
+            "Check that each failing finding of the previous review is fixed",
             "List every problem you find",
-            "\"level\"",
+            "\"severity\"",
         ] {
             assert!(
                 prompt.contains(needle),
@@ -1646,6 +1751,35 @@ mod tests {
             );
         }
         assert!(!prompt.contains("## The diff"), "{prompt}");
+    }
+
+    /// A finding with a trigger prints the ` — ` part in the rework prompt; one without a
+    /// trigger leaves it out.
+    #[test]
+    fn the_rework_prompt_leaves_out_an_empty_trigger() {
+        let previous = PreviousReview {
+            sha: "prev1".to_owned(),
+            findings: vec![
+                Finding {
+                    trigger: "the read blocks forever".to_owned(),
+                    ..finding("major", Some("src/x.rs"), Some(3), "the bug")
+                },
+                finding("minor", None, None, "a nit"),
+            ],
+        };
+        let prompt = build_rework_prompt(
+            "TK0001-a",
+            "the brief",
+            &previous,
+            "head2",
+            "def two",
+            "+new\n",
+        );
+        assert!(
+            prompt.contains("- [major] src/x.rs:3 the bug — the read blocks forever"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("- [minor] a nit"), "{prompt}");
     }
 
     fn run_for<'a>(attempt: &'a str, exec_args: &'a [String]) -> ReviewRun<'a> {

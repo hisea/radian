@@ -166,6 +166,12 @@ injection never call it**, so they only ever read Global on an unregistered work
 (`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). Every user
 command is `Source::User`.
 
+`file_tool_roots()` names the two scope directories the file tools may read and write in both
+tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,
+`<root>/projects/<ProjectId>/`. It resolves through `state()`, so a read never registers a
+project; an unlinked workspace gets the global directory only. Each directory is created 0700
+on first use (ADR 0021 D3).
+
 `candidate_name` is the comparison behind "同名仓库": the identity key's final path component,
 except that a git common dir (`.git`) is named by its parent directory — the repository name —
 so a moved repository still matches its old project.

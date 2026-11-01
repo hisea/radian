@@ -452,12 +452,15 @@ mod imp {
     /// Opens the file `parts` names (the last component with `O_NOFOLLOW` and the mode's
     /// flags) after walking its parents as directories. `create_parents` creates missing parent
     /// levels as [`walk_dirs`] describes (`write`); every other caller refuses a missing one.
+    /// `create_mode` is the mode of a file `O_CREAT` creates (the workspace uses `0o644`, a
+    /// memory scope `0o600`, ADR 0021 D3); it never changes an existing file's mode.
     pub fn open_file(
         root_fd: &File,
         root: &Path,
         parts: &[OsString],
         mode: OpenMode,
         create_parents: bool,
+        create_mode: u32,
     ) -> Result<File, SafeFsError> {
         let Some((name, parents)) = parts.split_last() else {
             return Err(SafeFsError::IsADirectory {
@@ -473,7 +476,7 @@ mod imp {
             OpenMode::WriteCreate => libc::O_WRONLY | libc::O_CREAT | base,
             OpenMode::WriteNew => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | base,
         };
-        openat(&dir, name, flags, 0o644)
+        openat(&dir, name, flags, create_mode as libc::c_int)
             .map_err(|error| map_open_error(error, &dir, parents, name, root, false))
     }
 
@@ -652,6 +655,7 @@ mod imp {
         parts: &[OsString],
         mode: OpenMode,
         create_parents: bool,
+        create_mode: u32,
     ) -> Result<File, SafeFsError> {
         let path = join(root, parts);
         if create_parents && let Some(parent) = path.parent() {
@@ -665,6 +669,8 @@ mod imp {
             OpenMode::WriteCreate => options.write(true).create(true),
             OpenMode::WriteNew => options.write(true).create_new(true),
         };
+        // Non-Unix has no `mode`; the memory scope's 0600 stays a Unix guarantee.
+        let _ = create_mode;
         options.open(&path).map_err(|e| io(parts, e))
     }
 
@@ -776,9 +782,20 @@ impl RootDir {
 
     /// Opens `user` (workspace-relative) as a file. Missing parent levels are refused.
     pub fn file(&self, user: &Path, mode: OpenMode) -> Result<File, SafeFsError> {
+        self.file_with_mode(user, mode, 0o644)
+    }
+
+    /// [`RootDir::file`] with an explicit mode for a file the open creates: the workspace
+    /// passes the default `0o644`, a memory scope passes `0o600` (ADR 0021 D3).
+    pub fn file_with_mode(
+        &self,
+        user: &Path,
+        mode: OpenMode,
+        create_mode: u32,
+    ) -> Result<File, SafeFsError> {
         let parts = components(user)?;
         run_resolve_hook();
-        open_file(&self.fd, &self.path, &parts, mode, false)
+        open_file(&self.fd, &self.path, &parts, mode, false, create_mode)
     }
 
     /// Opens `user` (workspace-relative) as a file, creating missing parent levels one at a
@@ -787,7 +804,7 @@ impl RootDir {
     pub fn file_creating_parents(&self, user: &Path, mode: OpenMode) -> Result<File, SafeFsError> {
         let parts = components(user)?;
         run_resolve_hook();
-        open_file(&self.fd, &self.path, &parts, mode, true)
+        open_file(&self.fd, &self.path, &parts, mode, true, 0o644)
     }
 
     /// Opens `user` (workspace-relative; `.` or empty is the root) as a directory.
