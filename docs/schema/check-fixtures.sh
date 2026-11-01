@@ -1111,6 +1111,7 @@ def check_fixture(name, exp):
 RESULT_FIELDS = {
     "type", "session_id", "outcome", "exit_code", "stop_reason",
     "turns", "usage", "cost", "run_turns", "run_usage", "run_cost", "text",
+    "run_metrics",
 }
 RESULT_OPTIONAL_FIELDS = {"model_error"}
 RESULT_MODEL_ERROR_FIELDS = {"kind", "status", "retry_after_secs"}
@@ -1151,13 +1152,112 @@ RESULT_STOP_REASONS = {
 }
 RESULT_USAGE_KEYS = {"input", "output", "cache_read", "cache_write"}
 
+# ADR 0044 §2 `run_metrics` (also ADR 0049 §6): the object's fixed field set, the counts that
+# are always integers, and the counters that are null when no record reported them (ADR 0007
+# J1). The definitions are `benchmarks/journal_metrics.py`'s `COLUMNS`.
+RUN_METRICS_FIELDS = {
+    "requests", "compaction_requests", "input_uncached", "cache_read", "cache_write",
+    "output", "reasoning", "fee_micros", "fee_incomplete", "peak_context",
+    "context_window", "compactions", "compaction_ms", "max_tokens_responses",
+    "model_errors", "retries", "tools", "models", "request_log",
+}
+RUN_METRICS_OPTIONAL = {"request_log_truncated"}
+RUN_METRICS_COUNTERS = ("requests", "compaction_requests", "compactions", "model_errors", "retries")
+RUN_METRICS_NULLABLE = (
+    "input_uncached", "cache_read", "cache_write", "output", "reasoning",
+    "fee_micros", "peak_context", "context_window", "compaction_ms",
+    "max_tokens_responses",
+)
+RUN_METRICS_TOOL_FIELDS = {"calls", "result_bytes", "failed", "denied"}
+RUN_METRICS_MODEL_FIELDS = {"provider", "model", "requests"}
+RUN_METRICS_LOG_FIELDS = {
+    "ts", "latency_ms", "kind", "input_uncached", "cache_read", "cache_write",
+    "output", "reasoning", "fee_micros", "stop_reason", "model",
+}
+RUN_METRICS_LOG_LIMIT = 500
+
+
+def _non_negative_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def check_run_metrics(metrics, label):
+    """ADR 0044 §2 / ADR 0049 §6: `run_metrics` 的键与类型，比照 `run_usage` 的检查。"""
+    if not isinstance(metrics, dict):
+        raise Corruption(f"{label}: run_metrics 不是对象")
+    if (
+        set(metrics) - RUN_METRICS_FIELDS - RUN_METRICS_OPTIONAL
+        or not RUN_METRICS_FIELDS <= set(metrics)
+    ):
+        raise Corruption(
+            f"{label}: run_metrics 字段集合不对（只允许可选的 request_log_truncated）: "
+            f"{sorted(metrics)}"
+        )
+    for key in RUN_METRICS_COUNTERS:
+        if not _non_negative_int(metrics[key]):
+            raise Corruption(f"{label}: run_metrics.{key} 不是非负整数")
+    for key in RUN_METRICS_NULLABLE:
+        value = metrics[key]
+        if value is not None and not _non_negative_int(value):
+            raise Corruption(f"{label}: run_metrics.{key} 不是 null 或非负整数")
+    if not isinstance(metrics["fee_incomplete"], bool):
+        raise Corruption(f"{label}: run_metrics.fee_incomplete 不是布尔值")
+    if "request_log_truncated" in metrics and metrics["request_log_truncated"] is not True:
+        raise Corruption(f"{label}: request_log_truncated 出现时必须是 true")
+    tools = metrics["tools"]
+    if not isinstance(tools, dict):
+        raise Corruption(f"{label}: run_metrics.tools 不是对象")
+    for name, tool in tools.items():
+        if not isinstance(name, str) or not isinstance(tool, dict):
+            raise Corruption(f"{label}: run_metrics.tools 的条目不是 名字->对象")
+        if set(tool) != RUN_METRICS_TOOL_FIELDS:
+            raise Corruption(f"{label}: run_metrics.tools.{name} 字段不对: {sorted(tool)}")
+        for key in RUN_METRICS_TOOL_FIELDS:
+            if not _non_negative_int(tool[key]):
+                raise Corruption(f"{label}: run_metrics.tools.{name}.{key} 不是非负整数")
+    models = metrics["models"]
+    if not isinstance(models, list):
+        raise Corruption(f"{label}: run_metrics.models 不是列表")
+    for entry in models:
+        if not isinstance(entry, dict) or set(entry) != RUN_METRICS_MODEL_FIELDS:
+            raise Corruption(f"{label}: run_metrics.models 的条目字段不对")
+        if not isinstance(entry["provider"], str) or not isinstance(entry["model"], str):
+            raise Corruption(f"{label}: run_metrics.models 的 provider/model 不是字符串")
+        if not _non_negative_int(entry["requests"]):
+            raise Corruption(f"{label}: run_metrics.models.requests 不是非负整数")
+    log = metrics["request_log"]
+    if not isinstance(log, list):
+        raise Corruption(f"{label}: run_metrics.request_log 不是列表")
+    if len(log) > RUN_METRICS_LOG_LIMIT:
+        raise Corruption(f"{label}: run_metrics.request_log 超过 {RUN_METRICS_LOG_LIMIT} 条")
+    for entry in log:
+        if not isinstance(entry, dict) or set(entry) != RUN_METRICS_LOG_FIELDS:
+            raise Corruption(f"{label}: run_metrics.request_log 的条目字段不对")
+        if not isinstance(entry["ts"], str) or not entry["ts"]:
+            raise Corruption(f"{label}: run_metrics.request_log.ts 不是非空字符串")
+        if entry["kind"] not in ("chat", "compaction"):
+            raise Corruption(f"{label}: run_metrics.request_log.kind {entry['kind']!r} 不在闭集")
+        if entry["latency_ms"] is not None and not _non_negative_int(entry["latency_ms"]):
+            raise Corruption(f"{label}: run_metrics.request_log.latency_ms 不是 null 或非负整数")
+        for key in (
+            "input_uncached", "cache_read", "cache_write", "output", "reasoning",
+            "fee_micros",
+        ):
+            if entry[key] is not None and not _non_negative_int(entry[key]):
+                raise Corruption(f"{label}: run_metrics.request_log.{key} 不是 null 或非负整数")
+        if entry["stop_reason"] is not None and not isinstance(entry["stop_reason"], str):
+            raise Corruption(f"{label}: run_metrics.request_log.stop_reason 不是 null 或字符串")
+        if entry["model"] is not None and not isinstance(entry["model"], str):
+            raise Corruption(f"{label}: run_metrics.request_log.model 不是 null 或字符串")
+    return metrics
+
 
 def check_one_result(ev, label):
     if not isinstance(ev, dict):
         raise Corruption(f"{label}: Result 不是对象: {type(ev)}")
     if set(ev) - RESULT_FIELDS - RESULT_OPTIONAL_FIELDS or not RESULT_FIELDS <= set(ev):
         raise Corruption(
-            f"{label}: 字段集合不是 Result 的十二个字段（只允许可选的 model_error）: "
+            f"{label}: 字段集合不是 Result 的十三个字段（只允许可选的 model_error）: "
             f"{sorted(ev)}"
         )
     if ev["type"] != "Result":
@@ -1234,6 +1334,7 @@ def check_one_result(ev, label):
                     raise Corruption(f"{label}: {key}.{field} 不是布尔值")
     if not isinstance(ev["text"], str):
         raise Corruption(f"{label}: text 不是字符串")
+    check_run_metrics(ev["run_metrics"], f"{label}.run_metrics")
     return ev
 
 

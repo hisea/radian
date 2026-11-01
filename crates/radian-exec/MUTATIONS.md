@@ -746,3 +746,18 @@ the source was restored from a backup under `.radian/`.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0286-M9 | `parse_extra_body` drops the oversized-output-cap refusal | ✅ 1 failed (rc=100) | `cli::a_bad_extra_body_stops_startup_with_the_named_error` (`5000000000` started instead of exit 2) |
+
+## TK0287: exec and ACP run metrics (2026-11-01)
+
+Branch `work/TK0287-run-metrics-in-exec-and-acp`. The mutations were applied to
+`src/metrics.rs` (the ACP one also rebuilt the `radian` binary), and each named test was run
+with `cargo nextest run -p radian-exec --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'`; the source was restored from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0287-M1 | `inputs` stops subtracting cache read/write for `input_includes_cache: true` | ✅ 1 failed (rc=100) | `metrics::tests::a_marked_input_subtracts_the_cache_and_an_unmarked_one_does_not` |
+| TK0287-M2 | `for_run` folds the whole journal instead of the suffix after the tee prefix | ✅ 1 failed (rc=100) | `metrics::tests::the_run_range_is_only_the_suffix_after_the_prefix` |
+| TK0287-M3 | `for_turn` ignores the turn range and folds every record | ✅ 1 failed (rc=100) | `acp::a_second_prompts_metrics_hold_only_its_turns_requests` |
+| TK0287-M4 | the request log's 500-entry cap is dropped | ✅ 1 failed (rc=100) | `metrics::tests::more_than_five_hundred_requests_truncate_the_log` |
+| TK0287-M5 | `compaction_ms` assigns each compaction's time instead of summing | ✅ 1 failed (rc=100) | `metrics::tests::compaction_ms_sums_every_compactions_summary_call` |

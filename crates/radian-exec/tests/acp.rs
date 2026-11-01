@@ -1877,6 +1877,61 @@ async fn a_prompt_reports_its_own_turns_cost_and_text_not_the_sessions() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// Edge case: two prompts on one session. Each answer's `_meta.radian.metrics` folds only
+/// its own turn, exactly as `cost` and `text` do.
+#[tokio::test]
+async fn a_second_prompts_metrics_hold_only_its_turns_requests() {
+    let server = MockServer::start(vec![
+        priced_text_reply("ONE", 100, 10),
+        priced_text_reply("TWO", 300, 30),
+    ])
+    .await;
+    let env = Env::fresh("prompt-metrics");
+    write_priced_catalog(&env.home);
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+
+    let first = acp.prompt(&session, "first", Decision::None).await;
+    let first_metrics = &first.result()["_meta"]["radian"]["metrics"];
+    assert_eq!(first_metrics["requests"], 1, "{}", first.response);
+    assert_eq!(first_metrics["input_uncached"], 100, "{}", first.response);
+
+    let second = acp.prompt(&session, "second", Decision::None).await;
+    let result = second.result();
+    let metrics = &result["_meta"]["radian"]["metrics"];
+    assert_eq!(result["_meta"]["radian"]["text"], "TWO", "{result}");
+    assert_eq!(metrics["requests"], 1, "{result}");
+    assert_eq!(
+        metrics["request_log"].as_array().map(Vec::len),
+        Some(1),
+        "only the second turn's request: {result}"
+    );
+    assert_eq!(metrics["input_uncached"], 300, "{result}");
+    assert_eq!(metrics["output"], 30, "{result}");
+    assert_eq!(
+        metrics["models"][0]["model"], "m",
+        "the route comes from SessionCreated, before the turn: {result}"
+    );
+    assert_eq!(metrics["request_log"][0]["model"], "m", "{result}");
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// ADR 0049 decision 4: a prompt that arrives while a wake turn runs is refused, and the wake
 /// turn's end never answers it. Once the wake turn is over, the prompt gets its own turn.
 #[tokio::test]

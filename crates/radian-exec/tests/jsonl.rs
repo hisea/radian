@@ -271,6 +271,34 @@ fn no_retry_config(env: &Env) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+/// Edge case: two retries before the successful request are counted from the live stream,
+/// not the journal (ADR 0010): a retry leaves no record.
+#[tokio::test]
+async fn two_retries_are_reported_from_the_live_stream() {
+    let server = MockServer::start(vec![
+        Reply::status(503, "busy"),
+        Reply::status(503, "busy"),
+        text_reply_with_usage("ok", 10, 2),
+    ])
+    .await;
+    let env = Env::fresh("retries");
+    let config = env.home.join("retries.toml");
+    std::fs::write(&config, "schema_version = 1\n[model]\nretries = 2\n").unwrap();
+    let (code, _, _, result, err) = run_jsonl(
+        &server.base_url,
+        &env,
+        "retries",
+        &["--config", config.to_str().unwrap()],
+        "hi",
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(result["run_metrics"]["retries"], 2, "{result}");
+    assert_eq!(result["run_metrics"]["requests"], 1, "{result}");
+}
+
 /// The golden stdout: every durable line is byte-identical to the journal file, live lines
 /// carry only their deltas, and the `Result` line matches its fixture's field set.
 #[tokio::test]
@@ -313,9 +341,16 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
         })
         .collect();
     assert_eq!(streamed, "hello jsonl");
-    // The `Result` line folds the run and the session totals.
+    // The `Result` line folds the run and the session totals. The per-request log carries a
+    // real timestamp and latency, so it is asserted field by field rather than whole.
+    let mut without_metrics = result.clone();
+    let metrics = without_metrics
+        .as_object_mut()
+        .expect("the Result is an object")
+        .remove("run_metrics")
+        .expect("the Result carries run_metrics");
     assert_eq!(
-        result,
+        without_metrics,
         json!({
             "type": "Result",
             "session_id": "golden",
@@ -331,6 +366,23 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
             "text": "hello jsonl",
         }),
         "the Result line carries the run and the session totals"
+    );
+    assert_eq!(metrics["requests"], 1, "{metrics}");
+    assert_eq!(metrics["compaction_requests"], 0, "{metrics}");
+    assert_eq!(metrics["input_uncached"], 10, "{metrics}");
+    assert_eq!(metrics["output"], 4, "{metrics}");
+    assert_eq!(metrics["peak_context"], 10, "{metrics}");
+    assert!(metrics["cache_read"].is_null(), "{metrics}");
+    assert!(metrics["fee_micros"].is_null(), "{metrics}");
+    assert_eq!(metrics["models"][0]["model"], "m", "{metrics}");
+    assert_eq!(metrics["models"][0]["requests"], 1, "{metrics}");
+    assert_eq!(metrics["request_log"][0]["kind"], "chat", "{metrics}");
+    assert_eq!(metrics["request_log"][0]["input_uncached"], 10, "{metrics}");
+    assert_eq!(metrics["request_log"][0]["output"], 4, "{metrics}");
+    assert_eq!(metrics["request_log"][0]["model"], "m", "{metrics}");
+    assert!(
+        metrics["request_log"][0]["latency_ms"].is_u64(),
+        "a request after TurnStarted has a latency: {metrics}"
     );
     // ... and its field set is the checked-in fixture's field set (each fixture line that
     // carries no `model_error`: that optional field belongs to a failed run only, ADR 0044 §2b).
@@ -364,6 +416,69 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
         );
     }
     assert!(checked >= 2, "the completed fixture lines were checked");
+}
+
+/// Edge case: the reference checker refuses a `run_metrics.requests` that is not an integer,
+/// the way it refuses a malformed `run_usage`. The checked-in fixture passes; a copy whose
+/// first `requests` is a string fails and the message names the field.
+#[test]
+fn the_checker_rejects_a_non_integer_run_metrics_requests() {
+    let repo = repo_root();
+    let schema = repo.join("docs/schema");
+    let dir = common::process_dir("radian-metrics-checker");
+    let copy_schema = dir.join("docs/schema");
+    std::fs::create_dir_all(copy_schema.join("fixtures")).unwrap();
+    std::fs::copy(
+        schema.join("check-fixtures.sh"),
+        copy_schema.join("check-fixtures.sh"),
+    )
+    .unwrap();
+    for entry in std::fs::read_dir(schema.join("fixtures")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(
+            entry.path(),
+            copy_schema.join("fixtures").join(entry.file_name()),
+        )
+        .unwrap();
+    }
+    let core_source = dir.join("crates/radian-core/src");
+    std::fs::create_dir_all(&core_source).unwrap();
+    std::fs::copy(
+        repo.join("crates/radian-core/src/model.rs"),
+        core_source.join("model.rs"),
+    )
+    .unwrap();
+    let script = copy_schema.join("check-fixtures.sh");
+
+    let pass = std::process::Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("bash runs");
+    assert!(
+        pass.status.success(),
+        "the fixture must pass:\n{}",
+        String::from_utf8_lossy(&pass.stdout)
+    );
+
+    let fixture = copy_schema.join("fixtures/exec-result.jsonl");
+    let text = std::fs::read_to_string(&fixture).unwrap();
+    let changed = text.replacen("\"requests\": 1", "\"requests\": \"1\"", 1);
+    assert_ne!(changed, text, "the fixture names requests");
+    std::fs::write(&fixture, changed).unwrap();
+
+    let fail = std::process::Command::new("bash")
+        .arg(&script)
+        .output()
+        .expect("bash runs");
+    let stdout = String::from_utf8_lossy(&fail.stdout);
+    assert!(
+        !fail.status.success(),
+        "a string requests must fail the checker:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL") && stdout.contains("run_metrics.requests"),
+        "the checker names the field:\n{stdout}"
+    );
 }
 
 /// Runs one `-p` turn with `--output jsonl` on a resumed session and splits stdout the
@@ -458,6 +573,22 @@ async fn resume_run_usage_counts_only_this_process() {
     assert_eq!(result.get("cost"), Some(&Value::Null));
     assert_eq!(result.get("run_cost"), Some(&Value::Null));
     assert_eq!(result.get("text"), Some(&json!("second")));
+    // Edge case: `run_metrics` folds this process's suffix like `run_usage`, never the
+    // resumed history. The full journal holds two requests; this run wrote one.
+    let journal = std::fs::read_to_string(env.sessions.join("rsess.jsonl")).unwrap();
+    let session_requests = journal
+        .lines()
+        .filter(|line| line.contains("\"event\":\"ModelUsageRecorded\""))
+        .count();
+    assert_eq!(session_requests, 2, "the whole session has two requests");
+    assert_eq!(
+        result["run_metrics"]["requests"], 1,
+        "run_metrics counts only this process: {result}"
+    );
+    assert_eq!(
+        result["run_metrics"]["input_uncached"], 5,
+        "run_metrics folds only the resumed turn's tokens: {result}"
+    );
 }
 
 /// Without `--resume` the two groups are byte-identical in the `Result` line.

@@ -145,6 +145,9 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // the answer to a trust question. `-p` and piped input are both non-interactive here, so
     // they take the untrusted default and the one-line hint.
     let trust_interactive = cli.prompt.is_none() && std::io::stdin().is_terminal();
+    // `run_metrics.context_window` reports the window this process resolved (ADR 0018), the
+    // same value `radian acp` sends as `usage_update.size`.
+    let jsonl_window = setup.window.context;
     let opened = super::host::open_host_session(
         setup,
         &cli,
@@ -239,6 +242,8 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         interactive_loop(&mut run, &lines).await
     };
     ui.end_of_turn();
+    // The live retry count is read before the UI is dropped.
+    let run_retries = ui.retries();
     // Flush the audit: dropping the session drops the agent and the hooks, and dropping the
     // last sender closes the channel; the task writes what is left before it ends. The UI is
     // dropped here too: in `--output jsonl` mode it holds a live-line sender, and the
@@ -255,11 +260,18 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         let _ = printer.await;
         let summary = jsonl::summarize_journal(&jsonl_journal_path);
         let run_summary = jsonl::summarize_journal_from(&jsonl_journal_path, jsonl_prefix_len);
+        let run_metrics = super::metrics::for_run(
+            &jsonl_journal_path,
+            jsonl_prefix_len,
+            run_retries,
+            jsonl_window,
+        );
         let line = jsonl::result_line(
             &jsonl_session_id,
             &done.end,
             &summary,
             &run_summary,
+            &run_metrics,
             jsonl_cost_estimated,
             last_model_error.lock().unwrap().as_ref(),
         );

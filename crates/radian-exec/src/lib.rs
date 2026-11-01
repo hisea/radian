@@ -21,6 +21,7 @@ mod inspect;
 mod jsonl;
 /// `radian login` / `radian logout` (ADR 0026 D3).
 mod login;
+mod metrics;
 mod profile;
 mod redact;
 mod setup;

@@ -160,6 +160,31 @@ The waiting Stop verdicts are counted in `unhandled_stop_notices`; `unhandled_jo
 {"model_error": {"kind": "usage_limit", "status": null, "retry_after_secs": 6240}}
 ```
 
+`Result.run_metrics` reports one run's own metrics, folded from the journal records this process wrote: with `--resume` it counts only the resumed part, like `run_turns`, `run_usage` and `run_cost`. Its definitions are the ones `benchmarks/journal_metrics.py`'s `COLUMNS` use for the fields the two share. A counter no record reported is `null`, never `0` (a reported zero stays `0`).
+
+| Member | Type | Unit | Meaning |
+|---|---|---|---|
+| `requests` | number | requests | `ModelUsageRecorded` plus `CompactionUsageRecorded` records; `0` when the run made none. |
+| `compaction_requests` | number | requests | the `CompactionUsageRecorded` part of `requests`. |
+| `input_uncached` | number or null | tokens | input billed at the full price. A record marked `input_includes_cache: true` subtracts both cache counters from `input`; `false` and an unmarked old record use `input` as it is. `null` when no record reported input. |
+| `cache_read` | number or null | tokens | cache-read tokens, summed. |
+| `cache_write` | number or null | tokens | cache-write tokens, summed. |
+| `output` | number or null | tokens | reported output tokens, summed. |
+| `reasoning` | number or null | tokens | the reasoning part of the output, summed. |
+| `fee_micros` | number or null | micro-dollars | recorded call fees, summed. |
+| `fee_incomplete` | boolean | — | `true` when any recorded fee was incomplete. |
+| `peak_context` | number or null | tokens | the largest prompt of one request (input including cache). |
+| `context_window` | number or null | tokens | the window this process resolved; `null` when it is unknown. |
+| `compactions` | number | compactions | `ContextCompacted` records. |
+| `compaction_ms` | number or null | milliseconds | the summary-call time of the run's compactions, from the journal record before a compaction's first summary usage to its `ContextCompacted`, summed; `null` when the run had no compaction or a timestamp could not be read. |
+| `max_tokens_responses` | number or null | responses | usage records whose stop reason is `max_tokens`; `null` when no record carries a stop reason. |
+| `model_errors` | number | errors | `TurnFailed` records. |
+| `retries` | number | retries | the live `ModelRetrying` events this process saw (a retry is never a journal record); a resumed run counts only its own. |
+| `tools` | object | — | one `{calls, result_bytes, failed, denied}` per tool name. A call is counted when it settles and attributed through its start; a denied call counts in `calls` and `denied`, not in `failed`; `result_bytes` is the UTF-8 size of the result's text parts. |
+| `models` | array | — | `{provider, model, requests}` in first-use order; the route comes from `SessionCreated.config_snapshot` and every later `ConfigChanged` that switches provider or model. |
+| `request_log` | array | — | one entry per request in order, at most 500: `{ts, latency_ms, kind, input_uncached, cache_read, cache_write, output, reasoning, fee_micros, stop_reason, model}`. `latency_ms` runs from the previous journal record's `ts` to the usage record's `ts` (null when either is missing); `kind` is `chat` or `compaction`; `ts` and `stop_reason` are null when the record did not carry them. |
+| `request_log_truncated` | `true` | — | present only when the run made more than 500 requests: the log keeps the first 500. |
+
 ## `radian acp`
 
 `radian acp` serves the same session over the Agent Client Protocol on stdio.

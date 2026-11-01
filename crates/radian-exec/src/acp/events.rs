@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use radian_core::{AgentEvent, EventSink, Message, MessageId, ModelUsage, RunStatus};
@@ -171,6 +171,9 @@ pub(crate) struct AcpEvents {
     /// inventing a size would be worse than staying silent.
     window: Option<u64>,
     busy: AtomicBool,
+    /// The live `ModelRetrying` events this process saw (ADR 0010), for `_meta.radian`
+    /// `metrics.retries`.
+    retries: AtomicU64,
     ledger: Arc<TurnLedger>,
     /// `call_id -> (tool name, arguments)` from the committed assistant message, so
     /// `ToolStarted` can report the title, kind, locations and raw input.
@@ -191,6 +194,7 @@ impl AcpEvents {
             workspace,
             window,
             busy: AtomicBool::new(false),
+            retries: AtomicU64::new(0),
             ledger,
             tool_calls: Mutex::new(HashMap::new()),
         }
@@ -198,6 +202,16 @@ impl AcpEvents {
 
     pub(crate) fn busy(&self) -> bool {
         self.busy.load(Ordering::Acquire)
+    }
+
+    /// The context window this process resolved, when known.
+    pub(crate) fn window(&self) -> Option<u64> {
+        self.window
+    }
+
+    /// The live `ModelRetrying` events this process saw.
+    pub(crate) fn retries(&self) -> u64 {
+        self.retries.load(Ordering::Acquire)
     }
 
     fn notify(&self, update: serde_json::Value) {
@@ -293,6 +307,9 @@ impl EventSink for AcpEvents {
             AgentEvent::ModelResponseReceived {
                 usage: Some(usage), ..
             } => self.usage(&usage),
+            AgentEvent::ModelRetrying { .. } => {
+                self.retries.fetch_add(1, Ordering::Acquire);
+            }
             AgentEvent::CompactionUsage { usage, .. } => self.usage(&usage),
             AgentEvent::RunFinished { status } => {
                 self.busy.store(false, Ordering::Release);
