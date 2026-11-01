@@ -6226,9 +6226,9 @@ fn the_selection_skips_a_runs_second_row_and_opens_the_detail_below_it() {
 
 /// A record whose metrics carry only a field the tab draws no counter for (a fee, or a cache
 /// write) must not look like a run that reported metrics: it draws the one plain row, and the
-/// reader's `predate metrics` note agrees with it. Mutation: classify a run by `fee_micros` or
-/// `cache_write` while the counters draw none, so the first row promises a second that never
-/// comes.
+/// `predate metrics` note counts exactly the runs drawn that way. Mutation: classify a run by
+/// `fee_micros` or `cache_write` while the counters draw none, so the first row promises a second
+/// that never comes.
 #[test]
 fn a_run_with_no_drawable_counter_draws_one_plain_row() {
     let fixture = Fixture::new();
@@ -6266,10 +6266,6 @@ fn a_run_with_no_drawable_counter_draws_one_plain_row() {
             rows[index].contains("no token metrics recorded"),
             "a run with no counter draws the plain row:\n{text}"
         );
-        assert!(
-            !rows[index].contains('$'),
-            "the plain row draws no cost:\n{text}"
-        );
         let next = rows[index + 1];
         assert!(
             !next.contains("req") && !next.contains("cache") && !next.contains("123"),
@@ -6277,8 +6273,116 @@ fn a_run_with_no_drawable_counter_draws_one_plain_row() {
         );
     }
     assert!(
-        text.contains("1 runs predate metrics"),
-        "the fee-only run is the one the reader counts as predating metrics:\n{text}"
+        text.contains("2 runs predate metrics"),
+        "the note counts both plain rows:\n{text}"
+    );
+}
+
+/// A record with a route or a fee but no counter the second row draws keeps its row one detail:
+/// the plain row names `<provider/model> · <cost>` before the weak note. Mutation: draw the plain
+/// row without the record's route and cost, so a reported fee appears nowhere on the page.
+#[test]
+fn a_run_without_a_drawable_counter_still_draws_its_route_and_cost() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"fee_micros": 120_000})),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        Some(json!({"models": [{"provider": "acme", "model": "m1", "requests": 1}]})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    let rows: Vec<&str> = text.lines().collect();
+    let fee_row = rows
+        .iter()
+        .find(|row| row.contains("no token metrics recorded") && row.contains('$'))
+        .expect("the fee-only run draws its cost");
+    assert!(
+        fee_row.contains("$0.120"),
+        "the reported fee is drawn: {fee_row:?}"
+    );
+    assert!(
+        fee_row.contains("anthropic/m"),
+        "the route the record names is drawn: {fee_row:?}"
+    );
+    let model_row = rows
+        .iter()
+        .find(|row| row.contains("acme/m1"))
+        .expect("the models-only run draws its route");
+    assert!(
+        model_row.contains("no token metrics recorded"),
+        "the route keeps the one plain row: {model_row:?}"
+    );
+    assert!(
+        text.contains("2 runs predate metrics"),
+        "both runs are counted as plain rows:\n{text}"
+    );
+}
+
+/// Only a run drawn as the one plain row is counted in `runs predate metrics`: a run with a
+/// single counter the second row draws is not, and the note is singular for one run. Mutation:
+/// count the reader's `unreported_runs` again, so a peak-context run is counted and a zero-request
+/// run is counted while both draw a counter row.
+#[test]
+fn only_a_run_with_no_drawable_counter_predates_metrics() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_worker_metrics(
+        &fixture,
+        &task,
+        1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:10Z",
+        Some(json!({"peak_context": 5_000, "context_window": 10_000})),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        2,
+        "2026-01-01T00:01:00Z",
+        "2026-01-01T00:01:10Z",
+        Some(json!({"requests": 0})),
+    );
+    write_worker_metrics(
+        &fixture,
+        &task,
+        3,
+        "2026-01-01T00:02:00Z",
+        "2026-01-01T00:02:10Z",
+        Some(json!({"model_errors": 0})),
+    );
+
+    let mut app = fixture.app();
+    open_metrics(&mut app, &fixture, "e");
+    let text = screen(&mut app, 140, 40);
+    assert!(
+        text.contains("ctx 5.0K/10K"),
+        "the peak-context run draws its counter:\n{text}"
+    );
+    assert!(
+        text.contains("0 req"),
+        "the zero-request run draws its counter:\n{text}"
+    );
+    assert!(
+        text.contains("1 run predates metrics"),
+        "only the plain row is counted, singular:\n{text}"
+    );
+    assert!(
+        !text.contains("runs predate metrics"),
+        "one run does not take the plural:\n{text}"
     );
 }
 
