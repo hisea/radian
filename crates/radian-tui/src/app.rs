@@ -215,6 +215,9 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
+    /// `/memory off|on` (ADR 0021 D7): the loop calls the facade, which flips the live switch
+    /// and queues the durable `ConfigChanged` for the next resume. `true` = off.
+    SetMemory { off: bool },
     /// Switch the session's permission tier (ADR 0038 slice 2). The loop calls the facade
     /// (`set_access`), which rebuilds the profile and the sandbox through the host's builder;
     /// a failed probe is a refusal. `remember` also writes the per-project record. The answer
@@ -323,6 +326,7 @@ impl PartialEq for Effect {
             (Cancel, Cancel) | (Quit, Quit) => true,
             (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
+            (SetMemory { off: a }, SetMemory { off: b }) => a == b,
             (
                 SetAccess {
                     tier: at,

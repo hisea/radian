@@ -42,7 +42,7 @@ Each line names one page and what it covers.
 - `hooks`: run your own commands when a tool runs or the model stops.
 - `mcp`: add MCP tool servers that run as local processes over standard input and output.
 - `skills`: find reusable prompt packages, read them, and run them.
-- `memory`: save facts across sessions and search them by keyword.
+- `memory`: save durable memory as Markdown files, and the commands that manage them.
 
 ## Reference
 

@@ -327,6 +327,11 @@ impl LocalSession {
         self.config_queue.push(change);
     }
 
+    /// `/memory off|on` (ADR 0021 D7), the inherent form the line host calls.
+    pub fn set_memory_off(&self, off: bool) -> Result<(), CommandRefused> {
+        <Self as SessionFacade>::set_memory_off(self, off)
+    }
+
     /// The journal, for host work that reads the session file (`/export`, `/sessions`).
     pub fn journal(&self) -> &Arc<SessionJournal> {
         &self.journal
@@ -695,6 +700,24 @@ impl SessionFacade for LocalSession {
         self.hooks.set_approval(policy);
         self.config_queue
             .push(serde_json::json!({ "approval": policy.as_str() }));
+        Ok(())
+    }
+
+    fn set_memory_off(&self, off: bool) -> Result<(), CommandRefused> {
+        if !self
+            .capabilities
+            .contains(&SessionCapability::AnswerRequest)
+        {
+            return Err(CommandRefused {
+                command: "set-memory".into(),
+                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
+                reason: "this session does not declare the `answer` capability".into(),
+            });
+        }
+        self.memory_injection.set_off(off);
+        // Durable at the next turn boundary, like the approval switch; a resume reads it.
+        self.config_queue
+            .push(serde_json::json!({ "memory": { "off": off } }));
         Ok(())
     }
 

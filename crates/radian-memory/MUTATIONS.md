@@ -78,3 +78,13 @@ then restored from `.radian/files.rs.bak` and `.radian/fs.rs.bak`; `git status -
 | TK0268-M8 | `RECORD_TYPES` gains a value the docs do not list | `files::the_documented_closed_sets_are_the_constants` | ✅ failed |
 
 5/5 caught.
+
+## TK0274: the file store's rename rewrites the name line (2026-10-31)
+
+Branch `work/TK0274-memory-commands`. The mutation was applied in place and the named test run
+with `cargo nextest run -p radian-memory --locked --profile sandbox --test files -E
+'test(<name>)'`, then restored from `.radian/mut-backup/files.rs`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0274-M1 | `replace_name` returns the text unchanged, so the new file keeps the old `name:` | ✅ 1 failed (rc=100) | `rename_rewrites_only_the_name_line_and_keeps_the_rest` (reading the new stem fails with "name ... does not match the file stem") |

@@ -531,15 +531,17 @@ fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
     let rows = app.completion().expect("a list").to_vec();
     assert!(rows.len() >= 2, "need at least two rows: {rows:?}");
     assert_eq!(app.completion_cursor, 0, "the first row is highlighted");
-    let second = rows[1].insert.clone();
+    assert_eq!(rows[0].insert, "list", "the first row is `list`");
 
     app.on_key(key(KeyCode::Down));
     assert_eq!(app.completion_cursor, 1);
+    // Back to `list`, whose level takes no further host answer, so Enter accepts it here.
+    app.on_key(key(KeyCode::Up));
+    assert_eq!(app.completion_cursor, 0);
     let result = app.on_key(key(KeyCode::Enter));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(
-        app.input,
-        format!("/memory {second} ").as_str(),
+        app.input, "/memory list ",
         "Enter accepts the highlighted row"
     );
 

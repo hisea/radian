@@ -114,9 +114,8 @@ impl HostTools {
         self
     }
 
-    /// Mounts the memory aging hook (ADR 0021 D3/D4). Independent of `memory_search`: the
-    /// hook records a model read of a memory record file even when the search tool is not
-    /// advertised.
+    /// Mounts the memory aging hook (ADR 0021 D3/D4). The hook records a model read of a
+    /// memory record file.
     pub fn with_memory_touch(mut self, touch: MemoryTouch) -> Self {
         self.memory_touch = Some(touch);
         self

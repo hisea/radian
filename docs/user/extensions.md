@@ -67,8 +67,7 @@ follows on demand, not for always-on directions.
 
 ## Memory in one example
 
-Type `/memory add The deploy needs the vpn profile "office".` The record
-persists across sessions. Later turns find it with `/memory search vpn`.
+Type `/memory add deploy-notes --type project` in the interface, then edit the file it opens. The record persists across sessions; the project's index reaches later turns, and the model reads the body with `read`.
 Use memory for facts, use context files for directions.
 
 ## MCP server in one example
