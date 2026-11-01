@@ -487,7 +487,7 @@ A hub is one process that manages every repository registered on this machine. T
 | `/v1/repos/<name>/items/<task>/report` | `GET` | `{"attempt": "<attempt id>", "text": "<the last assistant message>"}`, the same `result.jsonl` record the hand-off of decision 7 reads. No attempt or no message: `204`. |
 | `/v1/repos/<name>/items/<task>/verdicts` | `GET` | One array for the newest attempt: `{"stage", "result", "reason", "path", "verdict"}`, in stage order. `result` is `pass` or `fail`; `path` is the verdict file; `verdict` is its JSON. |
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `{"path", "added", "removed"}`, from the `git diff --numstat` of `read.rs` for the task's own change. |
-| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `{"path", "truncated", "text"}`: that file's unified diff, cut at 256 KiB with `truncated: true`. A path not in the list is `404`. |
+| `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `{"path", "truncated", "text"}`: that file's unified diff, cut at 256 KiB with `truncated: true`. A path not in the list is `404`, and so is a git that cannot produce the diff (it exits non-zero): the route never answers `200` with an empty text for a failed read. |
 | `/v1/events` | `GET` | The event stream: `Content-Type: text/event-stream`, one `event: transition` per state change, each with the `data` object below, and a `: keep-alive` comment every 15 s. |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | The owner action `confirm`, `merge`, `cancel`, `pause`, `reverify`, `reject`, `auto` or `priority`; see below. |
 
