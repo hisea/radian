@@ -21,7 +21,7 @@ use radian_arc::gate::Verdict;
 use radian_arc::hub::Registry;
 use radian_arc::review;
 use radian_arc::store::model::TaskState;
-use radian_arc::store::{Store, config, plan_ops};
+use radian_arc::store::{LOCK_WAIT, Store, config, plan_ops};
 use serde_json::Value;
 
 /// A `radian` command with the same isolated environment the hub uses.
@@ -174,8 +174,17 @@ fn http_with_body(
     stream
         .write_all(request.as_bytes())
         .expect("the request is written");
+    read_response(&mut stream)
+}
+
+/// Reads one response from `stream`, which the caller has already written to.
+fn read_response(stream: &mut TcpStream) -> Response {
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).expect("the response reads");
+    parse_response(&raw)
+}
+
+fn parse_response(raw: &[u8]) -> Response {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -191,6 +200,23 @@ fn http_with_body(
         status,
         body: raw[split + 4..].to_vec(),
     }
+}
+
+/// Sends `request` as given and then reads the response within `timeout`, writing no body after
+/// the header block. Used to prove the hub answers before a declared body arrives.
+fn http_head_only(port: u16, request: &str, timeout: Duration) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the hub accepts a connection");
+    stream
+        .set_read_timeout(Some(timeout))
+        .expect("a read timeout is settable");
+    stream
+        .write_all(request.as_bytes())
+        .expect("the request headers are written");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .expect("the response arrives before the body is sent");
+    parse_response(&raw)
 }
 
 /// The hub home inside a repository's scratch root.
@@ -902,7 +928,7 @@ fn every_action_on_a_held_state_lock_is_409_with_no_file_change() {
             "{action}"
         );
         assert!(
-            elapsed < Duration::from_secs(10),
+            elapsed < LOCK_WAIT + Duration::from_secs(2),
             "{action} waited {elapsed:?}, past the CLI's lock wait"
         );
         assert_eq!(
@@ -1063,6 +1089,60 @@ fn a_cancel_through_the_route_is_the_cli_cancel() {
     assert_eq!(run_files(&a), run_files(&b), "the same run files");
 }
 
+// ---- reverify: a verification that refuses -------------------------------------------------
+
+#[test]
+fn a_reverify_whose_verification_refuses_returns_the_claims_line_and_its_error() {
+    let a = Repo::new("hub-write-reverify-fail");
+    let b = Repo::new("hub-write-reverify-fail-copy");
+    let (sa, _plan, task) = setup(&a);
+    let (sb, _plan_b, task_b) = setup(&b);
+    let base_a = a.main_sha();
+    let base_b = b.main_sha();
+    // No `work/<task>` branch is pushed, so the claim succeeds and the verification refuses
+    // with the moved-branch error the CLI prints after the claim's line.
+    set_attempt(&sa, &task, &base_a, &base_a);
+    set_attempt(&sb, &task_b, &base_b, &base_b);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    let response = hub.post("a", &task, "reverify", "{}");
+    assert_eq!(response.status, 409, "{:?}", response.json());
+    let body = response.json();
+    assert_eq!(body["ok"], false);
+    let text = body["text"].as_str().expect("the body carries the text");
+    assert!(
+        text.starts_with(&format!("{task}-2 reverify -> review.verifying")),
+        "the claim's line comes first: {text}"
+    );
+    assert!(
+        text.contains("no branch for `work/"),
+        "the verification's own error follows: {text}"
+    );
+
+    let _lock = hold_runner_lock(&b);
+    let cli = b.radian(&["arc", "reverify", task_b.as_str()]);
+    assert_eq!(cli.code, 3, "{cli:?}");
+    let message = cli
+        .stderr
+        .trim_end()
+        .strip_prefix("radian arc: ")
+        .expect("the CLI prefixes its error");
+    // The two repositories are separate clones, so their base commits differ; the route's
+    // message names the hub repository's sha where the CLI's names the copy's.
+    assert_eq!(
+        text.replace(&base_a, &base_b),
+        format!("{}\n{message}", cli.stdout.trim_end()),
+        "the route's text is the CLI's claim line and error"
+    );
+    assert_eq!(
+        task_state(&sa, &task),
+        ("review".to_owned(), "verifying".to_owned()),
+        "a refused verification leaves the claimed task verifying"
+    );
+}
+
 // ---- edge case 10: no token on a write route ----------------------------------------------
 
 #[test]
@@ -1079,6 +1159,52 @@ fn a_write_route_without_a_token_is_401_and_changes_nothing() {
     assert_eq!(response.status, 401);
     assert_eq!(response.body, b"{}".to_vec());
     assert_eq!(arc_files(&a), before, "nothing changed without a token");
+}
+
+// ---- the request body's limit and the order of authorization ------------------------------
+
+#[test]
+fn an_unauthorized_request_is_answered_before_its_body_is_read() {
+    let a = Repo::new("hub-body-auth-first");
+    let (_store, plan, _task) = setup(&a);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+
+    // The body is declared and never sent. A hub that read the body first would wait for it,
+    // and the read below would time out.
+    let request = format!(
+        "POST /v1/repos/a/items/{plan}/confirm HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\nConnection: close\r\nContent-Type: application/json\r\n\
+         Content-Length: 100000000\r\n\r\n",
+        hub.port,
+    );
+    let response = http_head_only(hub.port, &request, Duration::from_secs(5));
+    assert_eq!(response.status, 401);
+    assert_eq!(response.body, b"{}".to_vec());
+}
+
+#[test]
+fn a_body_over_the_limit_is_413_and_changes_nothing() {
+    let a = Repo::new("hub-body-limit");
+    let (store, _plan, task) = setup(&a);
+    set_review(&store, &task);
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start(&home);
+    let before = arc_files(&a);
+
+    let oversized = format!(
+        "{{\"note\": \"{}\"}}",
+        "x".repeat(radian_arc::hub::http::REQUEST_BODY_LIMIT)
+    );
+    let response = hub.post("a", &task, "reject", &oversized);
+    assert_eq!(response.status, 413, "{:?}", response.json());
+    assert_eq!(
+        response.json(),
+        serde_json::json!({"error": "request body too large"})
+    );
+    assert_eq!(arc_files(&a), before, "an oversized body changes nothing");
 }
 
 // ---- the token file ----------------------------------------------------------------------

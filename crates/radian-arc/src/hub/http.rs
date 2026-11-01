@@ -116,9 +116,22 @@ pub fn serve(port: u16) -> Result<(), Error> {
                             .get(AUTHORIZATION)
                             .and_then(|value| value.to_str().ok())
                             .map(str::to_owned);
-                        let body = request_body(request.into_body()).await;
+                        // Authorization is decided before the body is read: an unauthenticated
+                        // request never makes the hub buffer the body it sends.
+                        if !authorized(&tokens, header).await {
+                            return Ok::<_, Infallible>(unauthorized_response());
+                        }
+                        let body = match request_body(request.into_body()).await {
+                            RequestBody::Bytes(body) => body,
+                            RequestBody::TooLarge => {
+                                return Ok::<_, Infallible>(error_response(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "request body too large",
+                                ));
+                            }
+                        };
                         let response = tokio::task::spawn_blocking(move || {
-                            handle(method, &path, header.as_deref(), &body, &registry, &tokens)
+                            handle(method, &path, &body, &registry)
                         })
                         .await
                         .unwrap_or_else(|_| {
@@ -371,25 +384,7 @@ fn decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn handle(
-    method: Method,
-    path: &str,
-    header: Option<&str>,
-    body: &[u8],
-    registry: &Registry,
-    tokens: &Mutex<TokenState>,
-) -> Response<ResponseBody> {
-    let authorized = tokens
-        .lock()
-        .map(|mut state| state.authorized(header))
-        .unwrap_or(false);
-    if !authorized {
-        let mut response = json_response(StatusCode::UNAUTHORIZED, json!({}));
-        response
-            .headers_mut()
-            .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        return response;
-    }
+fn handle(method: Method, path: &str, body: &[u8], registry: &Registry) -> Response<ResponseBody> {
     let route = route(path);
     if matches!(route, Route::Unknown) {
         return error_response(StatusCode::NOT_FOUND, "no such route");
@@ -425,19 +420,58 @@ fn handle(
     }
 }
 
-/// The whole request body. The write routes take a small JSON object, so buffering it is
-/// safe; a read request has none.
-async fn request_body(mut body: hyper::body::Incoming) -> Bytes {
+/// Whether `header` carries the token the file holds now. The token's `stat` and any re-read
+/// run on a blocking thread, like the route work.
+async fn authorized(tokens: &Arc<Mutex<TokenState>>, header: Option<String>) -> bool {
+    let tokens = Arc::clone(tokens);
+    tokio::task::spawn_blocking(move || {
+        tokens
+            .lock()
+            .map(|mut state| state.authorized(header.as_deref()))
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// The most request-body bytes the hub keeps. Every write route's body is `{}` or one short
+/// string field; a larger body is refused with `413` instead of being read into memory.
+pub const REQUEST_BODY_LIMIT: usize = 64 * 1024;
+
+/// One request body, up to [`REQUEST_BODY_LIMIT`].
+enum RequestBody {
+    Bytes(Bytes),
+    TooLarge,
+}
+
+/// The whole request body, up to [`REQUEST_BODY_LIMIT`]. A body over the limit is drained
+/// without being kept, so the client can read its `413` and the hub never holds more than the
+/// limit. Authorization has already run, so no unauthenticated body is read at all.
+async fn request_body(mut body: hyper::body::Incoming) -> RequestBody {
     let mut bytes = Vec::new();
+    let mut too_large = false;
     while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
         let Ok(frame) = frame else {
             break;
         };
-        if let Ok(data) = frame.into_data() {
-            bytes.extend_from_slice(&data);
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if too_large {
+            continue;
         }
+        if bytes.len().saturating_add(data.len()) > REQUEST_BODY_LIMIT {
+            bytes = Vec::new();
+            too_large = true;
+            continue;
+        }
+        bytes.extend_from_slice(&data);
     }
-    Bytes::from(bytes)
+    if too_large {
+        RequestBody::TooLarge
+    } else {
+        RequestBody::Bytes(Bytes::from(bytes))
+    }
 }
 
 // ---- the owner's write routes ------------------------------------------------------------
@@ -538,7 +572,12 @@ fn run_action(
             let text = reverified.lines().join("\n");
             match &reverified.verification {
                 Ok(_) => Ok(ActionResult::success(text)),
-                Err(error) => Ok(ActionResult::failed(action_status(error), text)),
+                // The CLI prints the claim's lines on stdout and the verification's own error
+                // on stderr with its exit code; the body carries both, line for line.
+                Err(error) => Ok(ActionResult::failed(
+                    action_status(error),
+                    format!("{text}\n{}", error.message()),
+                )),
             }
         }
         OwnerAction::Reject => {
@@ -895,6 +934,14 @@ fn bytes_response(status: StatusCode, bytes: Vec<u8>) -> Response<ResponseBody> 
 
 fn json_response(status: StatusCode, value: Value) -> Response<ResponseBody> {
     response(status, Some(serde_json::to_vec(&value).unwrap_or_default()))
+}
+
+fn unauthorized_response() -> Response<ResponseBody> {
+    let mut response = json_response(StatusCode::UNAUTHORIZED, json!({}));
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<ResponseBody> {
