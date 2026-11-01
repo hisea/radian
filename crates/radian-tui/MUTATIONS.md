@@ -3471,3 +3471,19 @@ under `.radian/mut/` (`cmp` found it identical).
 | TK0266-M4 | `draw_attempts` draws the first `visible` rows and ignores `attempt_scroll` (`rows.into_iter().take(visible)`), so the window no longer reaches what the row scroll counts | `arc_tui::the_attempts_tab_reaches_a_finding_below_the_terminal` (the last finding stayed clipped below the fifth `minor` row) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0291: a wrapped attempts row fits the frame, and a heading needs a finding (2026-10-31, branch `work/TK0291-reviewer-profiles-findings-followups`)
+
+`push_nested` subtracts the rail's two remaining columns from the wrap width, so a wrapped finding
+or trigger row no longer loses its last characters at the terminal's right edge, and the
+no-findings test asserts the heading's drawn form. Each mutation was applied by hand to
+`src/arc/render.rs`, the named test ran with `cargo nextest run -p radian-tui --locked --profile
+sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored from a copy under
+`.radian/tmp/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0291-M2 | `push_nested` wraps to `inner - indent` again, so a wrapped row spends two columns past the terminal | `arc_tui::a_wrapped_trigger_keeps_its_last_characters_inside_the_frame` (52 of the trigger's 54 characters were drawn) | ✅ 1 failed |
+| TK0291-M3 | `draw_attempts` draws a severity heading before its `findings.is_empty()` check | `arc_tui::the_attempts_tab_draws_a_heading_only_for_a_severity_that_has_findings` (the screen carried `│   critical` beside the `minor` row) | ✅ 1 failed |
+
+2/2 caught.

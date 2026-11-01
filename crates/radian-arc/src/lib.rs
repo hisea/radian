@@ -20,6 +20,8 @@
 //! - [`worker_args`]: the worker's `radian acp` command line, parsed with the `radian acp`
 //!   parser before `start`, a `run` pass or `confirm` acts.
 //! - [`mcp`]: the MCP server the lead writes plans and tasks through (`radian arc mcp`).
+//! - [`transitions`]: the poller behind the MCP channel and the hub's event stream: which
+//!   task and plan changes are sent, read every five seconds.
 //! - [`hub`]: the hub's repository registry (`~/.radian/hub/repos.toml`), its `hub.lock`, its
 //!   bearer token, its HTTP API on loopback (ADR 0048 decision 16), and the scheduling loop
 //!   that runs one pass per registered repository.
@@ -44,6 +46,7 @@ pub mod run;
 pub mod store;
 #[cfg(test)]
 mod test_support;
+pub mod transitions;
 pub mod work;
 pub mod worker_args;
 

@@ -11,10 +11,10 @@
 //! The HTTP accept loop runs on a thread of its own; the scheduling loop (ADR 0048 decision 13)
 //! runs on this thread, holding `hub.lock` for its life, so one slow pass delays no request.
 //!
-//! Every route is a `GET`; the router is hand-written and each route answers JSON. The list
-//! and show bodies come from [`crate::store::cli::list_json_text`] and
-//! [`crate::store::cli::show_json_text`], the same functions the CLI prints, so a field change
-//! in the CLI changes the route.
+//! Every route is a `GET`; the router is hand-written and each route answers JSON, except
+//! `GET /v1/events`, which is a server-sent-event stream. The list and show bodies come from
+//! [`crate::store::cli::list_json_text`] and [`crate::store::cli::show_json_text`], the same
+//! functions the CLI prints, so a field change in the CLI changes the route.
 //!
 //! The route work (files, git, the token's `stat`) runs on `spawn_blocking`, never on the
 //! runtime's async threads, so the scheduling loop's threads (ADR 0048 decision 13) are not
@@ -28,11 +28,12 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use hyper::body::{Body, Bytes, Frame, SizeHint};
 use hyper::header::{
-    AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE,
+    AUTHORIZATION, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue,
+    WWW_AUTHENTICATE,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -40,6 +41,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use crate::gate::Stage;
 use crate::gate::Verdict;
@@ -49,6 +51,10 @@ use crate::hub::token;
 use crate::read;
 use crate::store::attempt_ops;
 use crate::store::{Error, Store, cli, model};
+use crate::transitions::{CHANNEL_INTERVAL_SECS, Poller, Repo, Transition};
+
+/// The gap between two `: keep-alive` comments on an event stream that has nothing to send.
+pub const KEEP_ALIVE_SECS: u64 = 15;
 
 /// The API version `GET /v1/version` reports. It names the route set and its behavior; the
 /// plan and task file shape is `schema_version` (ADR 0048 decision 5) and changes on its own.
@@ -347,7 +353,7 @@ fn handle(
         Route::Verdicts(name, task) => verdicts(registry, &name, &task),
         Route::Diff(name, task) => diff(registry, &name, &task),
         Route::DiffFile(name, task, path) => diff_file(registry, &name, &task, &path),
-        Route::Events => error_response(StatusCode::NOT_FOUND, "not built yet"),
+        Route::Events => events(registry),
         Route::Unknown => unreachable!("an unknown route returned above"),
     }
 }
@@ -589,10 +595,157 @@ fn cap(text: &str, limit: usize) -> (&str, bool) {
     (&text[..end], true)
 }
 
+// ---- the event stream --------------------------------------------------------------------
+
+/// `GET /v1/events`: one `event: transition` per state change since the previous read, and a
+/// `: keep-alive` comment while nothing changes. The stream is not durable: it starts with
+/// the current lists as its baseline, so a client that reconnects re-reads them instead of
+/// asking for a replay.
+///
+/// The read happens on a thread of its own, never on the runtime's async threads, and stops
+/// when the response body is dropped (the client went away) or the process ends. The
+/// registry is re-read every interval, so a repository registered while the stream is open
+/// is picked up with a baseline of its own.
+fn events(registry: &Registry) -> Response<ResponseBody> {
+    let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
+    let registry = registry.clone();
+    let _ = std::thread::Builder::new()
+        .name("hub-events".to_owned())
+        .spawn(move || stream_events(registry, sender));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header(CACHE_CONTROL, "no-cache")
+        .body(ResponseBody::Stream(receiver))
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "no body"))
+}
+
+/// One transition frame: `event: transition` and its one-line JSON object.
+fn event_frame(repo: &str, transition: &Transition) -> Bytes {
+    let data = match transition {
+        Transition::Task { id, task, previous } => json!({
+            "repo": repo,
+            "kind": "task",
+            "id": id,
+            "field": "state",
+            "previous": previous,
+            "value": task.full,
+        }),
+        Transition::Plan { id, event } => json!({
+            "repo": repo,
+            "kind": "plan",
+            "id": id,
+            "field": event.field,
+            "previous": event.previous,
+            "value": event.value,
+        }),
+    };
+    Bytes::from(format!("event: transition\ndata: {data}\n\n"))
+}
+
+/// The event stream's producer: poll every [`event_poll_interval`], write every transition,
+/// and write a keep-alive comment after [`event_keep_alive_interval`] with nothing sent. A
+/// closed receiver is the client going away, so the thread ends there.
+fn stream_events(registry: Registry, sender: mpsc::Sender<Result<Frame<Bytes>, Infallible>>) {
+    let poll = event_poll_interval();
+    let keep_alive = event_keep_alive_interval();
+    let mut poller = Poller::new();
+    let mut next_poll = Instant::now();
+    let mut last_sent = Instant::now();
+    loop {
+        if sender.is_closed() {
+            return;
+        }
+        let now = Instant::now();
+        if now >= next_poll {
+            next_poll = now + poll;
+            for (repo, transition) in read_transitions(&registry, &mut poller) {
+                if sender
+                    .blocking_send(Ok(Frame::data(event_frame(&repo, &transition))))
+                    .is_err()
+                {
+                    return;
+                }
+                last_sent = Instant::now();
+            }
+        }
+        if last_sent.elapsed() >= keep_alive {
+            if sender
+                .blocking_send(Ok(Frame::data(Bytes::from_static(b": keep-alive\n\n"))))
+                .is_err()
+            {
+                return;
+            }
+            last_sent = Instant::now();
+        }
+        let now = Instant::now();
+        let wake = next_poll.min(last_sent + keep_alive);
+        if wake > now {
+            std::thread::sleep(wake - now);
+        } else {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// One round of the event stream's read: every store the registry names right now. A registry
+/// that cannot be read or a store that cannot be opened is left out this round; the next
+/// round tries again.
+fn read_transitions(registry: &Registry, poller: &mut Poller) -> Vec<(String, Transition)> {
+    let Ok(entries) = registry.repos() else {
+        return Vec::new();
+    };
+    let repos: Vec<Repo> = entries
+        .into_iter()
+        .map(|entry| Repo {
+            name: entry.name,
+            store: Store::at(entry.path),
+        })
+        .collect();
+    poller.poll(&repos)
+}
+
+/// The event stream's read interval. Test-only: `RADIAN_HUB_EVENTS_POLL_SECS` shortens the
+/// channel's five-second cadence so a test does not wait a whole interval per transition; no
+/// user sets it.
+fn event_poll_interval() -> Duration {
+    test_interval(
+        std::env::var("RADIAN_HUB_EVENTS_POLL_SECS").ok(),
+        CHANNEL_INTERVAL_SECS,
+    )
+}
+
+/// The keep-alive gap. Test-only: `RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS` shortens the fifteen
+/// seconds so a test can see a keep-alive without waiting; no user sets it.
+fn event_keep_alive_interval() -> Duration {
+    test_interval(
+        std::env::var("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS").ok(),
+        KEEP_ALIVE_SECS,
+    )
+}
+
+/// `value` as seconds, when it holds a positive integer; `default` otherwise. The two readers
+/// above are the only callers, and both variables exist only for tests.
+fn test_interval(value: Option<String>, default: u64) -> Duration {
+    let secs = value
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(default);
+    Duration::from_secs(secs)
+}
+
 // ---- responses ---------------------------------------------------------------------------
 
-/// A response body that is one byte string, or nothing (a `204`).
-struct ResponseBody(Option<Bytes>);
+/// How many event frames may wait for the connection to take them. A client that stops reading
+/// blocks this producer on a full queue; a client that goes away closes the receiver.
+const EVENT_QUEUE: usize = 64;
+
+/// A response body: one byte string (a JSON route, or nothing for a `204`), or the frames of
+/// an event stream.
+enum ResponseBody {
+    Once(Option<Bytes>),
+    Stream(mpsc::Receiver<Result<Frame<Bytes>, Infallible>>),
+}
 
 impl Body for ResponseBody {
     type Data = Bytes;
@@ -600,18 +753,26 @@ impl Body for ResponseBody {
 
     fn poll_frame(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(self.get_mut().0.take().map(|bytes| Ok(Frame::data(bytes))))
+        match self.get_mut() {
+            ResponseBody::Once(bytes) => {
+                Poll::Ready(bytes.take().map(|bytes| Ok(Frame::data(bytes))))
+            }
+            ResponseBody::Stream(receiver) => receiver.poll_recv(cx),
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.0.is_none()
+        match self {
+            ResponseBody::Once(bytes) => bytes.is_none(),
+            ResponseBody::Stream(_) => false,
+        }
     }
 
     fn size_hint(&self) -> SizeHint {
         let mut hint = SizeHint::new();
-        if let Some(bytes) = &self.0 {
+        if let ResponseBody::Once(Some(bytes)) = self {
             hint.set_exact(bytes.len() as u64);
         }
         hint
@@ -628,12 +789,12 @@ fn response(status: StatusCode, body: Option<Vec<u8>>) -> Response<ResponseBody>
                 .header(CONTENT_TYPE, "application/json")
                 .header(CONTENT_LENGTH, bytes.len().to_string());
             builder
-                .body(ResponseBody(Some(Bytes::from(bytes))))
-                .unwrap_or_else(|_| Response::new(ResponseBody(None)))
+                .body(ResponseBody::Once(Some(Bytes::from(bytes))))
+                .unwrap_or_else(|_| Response::new(ResponseBody::Once(None)))
         }
         None => builder
-            .body(ResponseBody(None))
-            .unwrap_or_else(|_| Response::new(ResponseBody(None))),
+            .body(ResponseBody::Once(None))
+            .unwrap_or_else(|_| Response::new(ResponseBody::Once(None))),
     }
 }
 

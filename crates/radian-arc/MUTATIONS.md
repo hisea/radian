@@ -1989,6 +1989,22 @@ under `.radian/mut/`, which `cmp` found identical.
 | TK0282-M7 | `machine_room` counts every registered repository with `?` again, so one unreadable store fails another repository's pass | `hub_loop::a_broken_task_file_in_one_repository_does_not_stop_another` (`the healthy repository schedules its task did not happen in 10s`) | ✅ 1 failed |
 | TK0282-M8 | the hub's interval wait ignores the shared stop flag (`&|| false`) | `hub_loop::a_rebuilt_binary_restarts_the_hub_without_waiting_out_an_idle_interval` (`the hub waited out an idle interval before the exec (after 6.01s)`) | ✅ 1 failed |
 | TK0282-M9 | every loop that sees the changed binary prints the restart line (unconditional `restart.store`) | `hub_loop::a_binary_replacement_prints_one_restart_line_for_the_hub` (2 stdout lines, expected 1) | ✅ 1 failed |
+## TK0285: the hub's event stream (2026-10-31, branch `work/TK0285-hub-sse-and-notifications`)
+
+`GET /v1/events` streams the shared poller's transitions for every registered repository: one
+`event: transition` per change on ADR 0048 decision 11's closed list, with the repository's
+registry name, and no replay when a client connects. Each mutation was applied by hand to the
+named working file, `radian` was rebuilt with `cargo build -p radian-tui --bin radian` because
+the integration test drives the real binary, the named test ran alone with
+`cargo nextest run -p radian-arc --locked --profile sandbox --test hub_http -E '<the test
+below>'`, and the file was restored from a copy under `.radian/backup/` with `cp`, which
+`cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0285-M1 | `doing.running` joins the closed `CHANNEL_PHASES` list, so a transition the channel does not send is streamed | `hub_http::a_transition_the_channel_does_not_send_produces_no_event` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
+| TK0285-M2 | the poller compares the first read with an empty snapshot, so a client that connects after a transition receives it as a replay | `hub_http::a_client_that_connects_after_a_transition_gets_no_replay_and_the_lists_show_it` (`expected a keep-alive comment, got "event: transition"`) | ✅ 1 failed |
+| TK0285-M3 | `event_frame` drops the `repo` key from a task event's data | `hub_http::one_transition_in_each_repository_arrives_with_its_repository_and_the_channels_fields` (the left object had no `repo`; the right had `"repo": "a"`) | ✅ 1 failed |
 ## TK0266: the follow-up collects what did not fail each review round (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
 
 The follow-up reads every review round of a collected task, oldest attempt first, and keeps the
@@ -2021,3 +2037,17 @@ sandbox --test <binary> -E 'test(<name>)'`, and the file was restored from a cop
 | TK0267-M3 | `TaskFile::from_text` accepts any `review_fix_level` (the `REVIEW_LEVELS` check dropped) | `store::a_review_fix_level_outside_the_set_fails_the_list_like_a_bad_allow_noop` (`blocker` read as a task, so `load_task` succeeded) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0291: an old-shape verdict is decided by its report (2026-10-31, branch `work/TK0291-reviewer-profiles-findings-followups`)
+
+`Verdict::review_failing` and `review_rest` choose the old-shape rule by `ReviewReport::old_blocking`
+instead of the verdict's `reason`, so a passing old verdict's `suggestions` stay in the rest on the
+merge page and in the follow-up. The mutation was applied by hand to the working file, the named
+test ran with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E 'test(<name>)'`,
+and the file was restored from a copy under `.radian/tmp/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0291-M1 | `review_failing` / `review_rest` dispatch on `self.reason == Some(REVIEW_BLOCKING)` again, so a passing old verdict's `major` suggestion is decided by `fix_level` | `gate::review::tests::a_passing_old_verdicts_major_suggestion_stays_in_the_rest` (the `major` suggestion was returned as failing) | ✅ 1 failed |
+
+1/1 caught.

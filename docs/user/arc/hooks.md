@@ -38,14 +38,6 @@ Each point is an array of shell command lines, default `[]`:
 | `ARC_STATE` | The state and phase the point fires for: `done.merged`, a `failed.*` phase, `review.rework_pending`, `review.awaiting_human`, or `todo.proposed`. It is the phase the point's own write entered, even if the task moved again before the hook ran. |
 | `ARC_HOOK` | The point name. |
 
-**A phone notification.** This `after_awaiting_human` command sends only the repository name, task id and phase; it carries no transcript, command text, model, usage or cost:
-
-```toml
-[hooks]
-after_awaiting_human = [
-  "curl -s -X POST https://example.com/arc -H 'Content-Type: application/json' -d \"{\\\"repo\\\":\\\"\"$(basename \"$PWD\")\"\\\",\\\"task\\\":\\\"$ARC_TASK\\\",\\\"phase\\\":\\\"$ARC_STATE\\\"}\"",
-]
-```
-
-The hook runs in the repository root; `$(basename "$PWD")` is its directory name. `after_fail` and `after_proposed` are the other points a notification usually watches.
+**A phone notification.** The [hub page](hub.md#notifications) has `after_awaiting_human` lines for ntfy and Bark; they send only the repository name, task id and phase, with no transcript, command text, model, usage or cost.
+`after_fail` and `after_proposed` are the other points a notification usually watches.
 

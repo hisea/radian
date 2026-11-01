@@ -236,6 +236,14 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_HUB_INTERVAL_SECS",
         "read in radian-arc/src/hub/loop.rs: a hub test's interval below the documented five-second minimum, so one repository's slow pass can be shown not to gate another",
     ),
+    (
+        "RADIAN_HUB_EVENTS_POLL_SECS",
+        "read in radian-arc/src/hub/http.rs: seconds between two reads of the hub's event stream, so a test does not wait the channel's five seconds per transition; unset uses the channel's interval",
+    ),
+    (
+        "RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS",
+        "read in radian-arc/src/hub/http.rs: seconds between keep-alive comments on an event stream with nothing to send, so a test does not wait fifteen seconds",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row
