@@ -162,7 +162,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 
 只在 `workspace` 档装过滤器，`full` 不传 `--seccomp`。过滤器 fd 的生命期绑在返回的 `SandboxCommand` 上（每条命令一条新 pipe，drop 即关）：不用 `pre_exec`（shell 工具随后为 `setsid` 注册自己的 `pre_exec`，会整体替换掉）；也不在进程间共享 pipe（读偏移共享，第二条命令会读到 EOF 而 `EINVAL`，已实测）。macOS 的 seatbelt 路径白名单不变。
 
-## 逃逸清单（两平台各 48 例，全部带"关掉沙箱后成功"的对照）
+## 逃逸清单（macOS 51 例、Linux 48 例，全部带"关掉沙箱后成功"的对照）
 
 `radian-sandbox` 的 `harness`（`testing` feature）跑同一套矩阵：每条"应当失败"的用例都在
 `WorkspaceWrite` 下跑一次、在 `FullAccess` 对照下跑同一命令。`Case::passed()` 要求
