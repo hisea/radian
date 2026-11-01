@@ -47,7 +47,11 @@ on every write), `last_used` (RFC 3339 UTC or absent, which means never read), a
 fixed at its first write: replacing a file keeps its existing `source` and ignores the
 caller's new value, so the caller's `source` is judged only when the file is new. `add` and
 the migration set `source` themselves; the model writes the other files directly and sets
-`source: model` as its prompt tells it, so the host does not supply that value. `touch_last_used` rewrites only the `last_used` line, or inserts one after
+`source: model` as its prompt tells it. The host judges that one value in the memory write
+guard (`radian-host`, ADR 0021 invariant 6): a file-tool `write` or `patch` that would declare
+`source: user` is refused, and so is one whose target already declares it, so the claim can
+neither impersonate nor overwrite a user record. `declared_source` reads the value for that
+check, decoding it as the parser does and needing only a closed frontmatter. `touch_last_used` rewrites only the `last_used` line, or inserts one after
 `modified`; every other byte stays. `rename` rewrites only the `name` line; `modified`,
 `created`, `source` and the body stay byte for byte. The two closed sets are the slices the
 parser, the writer and the docs drift test read.
@@ -92,8 +96,10 @@ attaches a key to an existing project.
   touch_last_used, scope_dir, record_path, index_path}` — the record store and its indexes.
 - `ProjectRegistry::{register, resolve, relink, projects, identity_keys}` — the registry.
 - `migrate_log` — the one-time old-log migration.
-- `validate_record_name` — the name rule's message, for a command that validates before it
+- `validate_record_name` — the name rule's reason, for a command that validates before it
   writes.
+- `declared_source` — the `source` a record text declares, decoded as the parser decodes it, for
+  the host's memory write guard (ADR 0021 invariant 6).
 - The closed sets `RECORD_TYPES` and `RECORD_SOURCES`, and `NAME_MAX`/`DESCRIPTION_MAX`.
 
 `MemoryStore`, `MemoryEvent`, `SearchQuery`, `search`, `export` and `parse` are gone.

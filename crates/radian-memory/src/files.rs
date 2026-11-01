@@ -26,7 +26,9 @@ use crate::model::{Scope, now_utc};
 /// The closed `type` set (ADR 0021 D4). The parser, the writer and the docs drift test read it.
 pub const RECORD_TYPES: &[&str] = &["user", "feedback", "project", "reference"];
 
-/// The closed `source` set (ADR 0021 D4). The host sets the value; the model never does.
+/// The closed `source` set (ADR 0021 D4). `add` writes `user`, the migration `import`, and the
+/// model `model` on its own files; the memory write guard refuses a model write or patch that
+/// would declare `user`.
 pub const RECORD_SOURCES: &[&str] = &["model", "user", "import"];
 
 /// The longest record name, in characters.
@@ -227,31 +229,72 @@ impl FileStore {
     }
 }
 
+/// The `source` one record text declares, decoded as [`FileStore::read`] decodes it.
+///
+/// Only the frontmatter fences and a top-level `source` line are needed, not a whole valid
+/// record: the memory write guard judges a `write` whose frontmatter is still missing a field,
+/// and a `patch` before it lands. A later `source` line wins, as the parser's builder does.
+/// `None` when the text has no closed frontmatter or no readable `source` line.
+pub fn declared_source(text: &str) -> Option<String> {
+    let first = line_at(text, 0);
+    if first.text.trim() != "---" {
+        return None;
+    }
+    let mut cursor = first.next;
+    let mut source = None;
+    while cursor < text.len() {
+        let line = line_at(text, cursor);
+        let trimmed = line.text.trim();
+        if trimmed == "---" {
+            return source;
+        }
+        if !trimmed.is_empty()
+            && !line.text.starts_with(' ')
+            && !line.text.starts_with('\t')
+            && let Some((key, value)) = line.text.split_once(':')
+            && key.trim() == "source"
+        {
+            source = parse_scalar(value, 0).ok();
+        }
+        cursor = line.next;
+    }
+    None
+}
+
 fn record_path_in(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.md"))
 }
 
-fn validate_name(name: &str) -> Result<(), MemoryError> {
+/// The name rule's reason, or `None` for a name the store accepts.
+fn name_reason(name: &str) -> Option<String> {
     if name_fits(name) {
-        return Ok(());
+        return None;
     }
-    let reason = if name.is_empty() {
+    Some(if name.is_empty() {
         "the name is empty".to_owned()
     } else if name.chars().count() > NAME_MAX {
         format!("the name is longer than {NAME_MAX} characters")
     } else {
         "a name may contain only a-z, 0-9 and -".to_owned()
-    };
-    Err(MemoryError::InvalidName {
-        name: name.to_owned(),
-        reason,
     })
 }
 
-/// The name rule's message, or `Ok` for a name the store accepts. The commands use this so a
-/// bad `add` name is a usage error before anything is written.
+fn validate_name(name: &str) -> Result<(), MemoryError> {
+    match name_reason(name) {
+        None => Ok(()),
+        Some(reason) => Err(MemoryError::InvalidName {
+            name: name.to_owned(),
+            reason,
+        }),
+    }
+}
+
+/// The name rule's reason, or `Ok` for a name the store accepts. The commands use this so a
+/// bad `add` name is a usage error before anything is written; a caller that reports the whole
+/// message builds [`MemoryError::InvalidName`] from the name and this reason, so the prefix is
+/// printed once.
 pub fn validate_record_name(name: &str) -> Result<(), String> {
-    validate_name(name).map_err(|error| error.to_string())
+    name_reason(name).map_or(Ok(()), Err)
 }
 
 fn validate_timestamp(field: &str, value: &str) -> Result<(), String> {

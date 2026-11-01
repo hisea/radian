@@ -2050,3 +2050,35 @@ sandbox --no-fail-fast -E 'test(<name>)'`, and the source restored from `.radian
 | TK0293-M2 | `split` joins each given name into a path without `validate_record_name` | ✅ 1 failed (rc=100) | `memory::service::tests::split_refuses_an_absolute_name` (the absolute name reached `record_path`) |
 | TK0293-M3 | `split` validates each name inside the move loop, so the first name is renamed before the second is checked | ✅ 1 failed (rc=100) | `memory::service::tests::split_validates_every_name_before_it_moves_any` (the valid earlier name had moved) |
 | TK0293-M4 | the command path propagates a `split` `InvalidName` with `?` instead of `add_error` (exit 1) | ✅ 1 failed (rc=100) | `memory::commands::tests::split_with_an_invalid_name_is_a_usage_error_and_moves_nothing` (`left: 1, right: 2`) |
+
+## TK0297: the record-name reason is not wrapped twice (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. The mutation was applied in place
+to `crates/radian-memory/src/files.rs`, the named tests were run with `cargo nextest run -p
+radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(memory::service::tests::split_refuses)'`,
+and the file was restored from `.radian/files.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M1 | `validate_record_name` returns `MemoryError::InvalidName`'s whole `Display` string again, so the caller's own `InvalidName` prints the prefix twice | ✅ 4 failed (rc=100) | `memory::service::tests::split_refuses_the_session_index_name` (`one refusal, one prefix: invalid memory record name "SESSIONS": invalid memory record name "SESSIONS": a name may contain only a-z, 0-9 and -`) |
+
+## TK0297: the memory guard protects user records (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. Each mutation was applied in
+place to `crates/radian-host/src/memory/guard.rs`, the guard tests were run with `cargo
+nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E
+'test(memory::guard)'`, and the file was restored from `.radian/bak/guard.rs`, which `cmp`
+found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M4 | the target's declared source is not read, so a `write` or `patch` of a user record is allowed | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_and_a_patch_of_a_user_record_are_refused` (both calls returned `Ok`) |
+| TK0297-M5 | a `write`'s content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_that_declares_source_user_is_refused` (the claimed user record was accepted, in all four spellings) |
+| TK0297-M6 | a `patch`'s resulting content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_patch_that_would_declare_source_user_is_refused` (the source line was rewritten to `user`) |
+
+Follow-up (invariant 3): the guard also refuses a source change. The mutation was applied in
+place and the file restored from `.radian/bak/guard2.rs`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M8 | `same_source` is never called, so a `write` or `patch` may declare a different source than the file already has | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_or_patch_that_would_change_the_source_is_refused` (the write from `import` to `model` and the patch of the `source` line returned `Ok`) |

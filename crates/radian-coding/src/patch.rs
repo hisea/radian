@@ -270,8 +270,6 @@ struct ResolvedEdit {
     replacement: String,
 }
 
-/// Locates one edit in the unchanged file and builds its replacement. A failure names the edit
-/// by its 1-based number when the call carries more than one.
 /// Locates every edit against `content` and rejects a conflict, all before anything is written.
 /// [`run`] and [`patched_content`] share this so the guard judges exactly what the tool writes.
 fn resolve_all(
@@ -315,6 +313,8 @@ fn apply_all(
     (updated, replacements)
 }
 
+/// Locates one edit in the unchanged file and builds its replacement. A failure names the edit
+/// by its 1-based number when the call carries more than one.
 fn resolve_edit(
     view: &LfView,
     content: &str,

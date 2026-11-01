@@ -774,3 +774,17 @@ named test was run with `cargo nextest run -p radian-exec --locked --profile san
 | TK0287-M6 | `TurnLedger::retries` sums every turn's retries instead of reading the answering turn's | ✅ 1 failed (rc=100) | `acp::a_clean_prompt_after_a_retrying_one_reports_no_retries` (`retries: 2` on the clean second prompt) |
 | TK0287-M7 | `SessionCreated.config_snapshot` drops `provider_id`, leaving only the adapter kind in `provider` | ✅ 1 failed (rc=100) | `jsonl::a_fresh_run_names_the_configured_route_not_the_adapter_kind` (`provider: "openai-compatible"` instead of `"corp"`) |
 
+
+## TK0297: the `--type` rows of the memory table (2026-11-01)
+
+Branch `work/TK0297-memory-model-written-files-followups-3`. The drift check now matches a flag
+named in any cell but the last (the `radian memory` table lists subcommands first), and a
+default in a table with no Default column must follow the word `default`. Both mutations were
+applied to `docs/user/cli.md`, the named test was run with `cargo nextest run -p radian-exec
+--lib --locked --profile sandbox --no-fail-fast -E 'test(cli_option_values_and_defaults_appear_in_cli_md)'`,
+and the page was restored from `.radian/cli.md.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M2 | the `--type` row drops `reference` from its value list | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing value reference`) |
+| TK0297-M3 | the `--type` row's `(default `user`)` becomes `(default `feedback`)` | ✅ 1 failed (rc=100) | `tests::cli_option_values_and_defaults_appear_in_cli_md` (`--type row is missing default user`) |

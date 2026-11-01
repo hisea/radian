@@ -600,7 +600,7 @@ impl Hooks for MemoryHooks {
             }
         }
 
-        // ADR 0021 D6: one audit record when the section is built.
+        // ADR 0021 D6: one audit record when at least one index was injected.
         if let Some(indexes) = self.injection.take_indexes(&section)
             && let Some(journal) = &self.injection.journal
             && let Err(error) = journal.append_memory_injected_indexes(indexes).await

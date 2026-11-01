@@ -22,8 +22,8 @@ pub struct HostTools {
     /// The memory aging hook (ADR 0021 D3/D4): set by `open_session` whenever memory is on.
     /// It never changes a tool result.
     memory_touch: Option<MemoryTouch>,
-    /// The memory write guards (ADR 0021 invariant 4): set by `open_session` whenever memory
-    /// is on. They refuse a `write`/`patch` before the coding tools see it.
+    /// The memory write guards (ADR 0021 invariants 4 and 6): set by `open_session` whenever
+    /// memory is on. They refuse a `write`/`patch` before the coding tools see it.
     memory_guard: Option<MemoryWriteGuard>,
     /// `goal` (ADR 0047). Host-level like `ask_user`: mounted always, so the model's
     /// write end of the persistent goal exists in every session; without an active goal
@@ -121,8 +121,8 @@ impl HostTools {
         self
     }
 
-    /// Mounts the memory write guards (ADR 0021 invariant 4). They run before the built-in
-    /// `write`/`patch` and never change any other tool's result.
+    /// Mounts the memory write guards (ADR 0021 invariants 4 and 6). They run before the
+    /// built-in `write`/`patch` and never change any other tool's result.
     pub fn with_memory_guard(mut self, guard: MemoryWriteGuard) -> Self {
         self.memory_guard = Some(guard);
         self
@@ -295,8 +295,8 @@ impl ToolSession for HostSession {
         call: &ToolCall,
         cx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolFailure> {
-        // ADR 0021 invariant 4: the memory write guards are a host decision and run before
-        // the built-in tools open, create or truncate the target.
+        // ADR 0021 invariants 4 and 6: the memory write guards are a host decision and run
+        // before the built-in tools open, create or truncate the target.
         if let Some(guard) = &self.memory_guard
             && let Err(failure) = guard.check(call)
         {

@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use common::TempDir;
 use radian_memory::{
     FileProvenance, FileStore, IndexLine, ListEntry, MemoryError, NewRecord, RECORD_SOURCES,
-    RECORD_TYPES, Scope, index_lines,
+    RECORD_TYPES, Scope, declared_source, index_lines,
 };
 
 fn global() -> Scope {
@@ -550,5 +550,45 @@ fn the_documented_closed_sets_are_the_constants() {
             .collect::<Vec<_>>(),
         RECORD_SOURCES,
         "ADR 0021 D4 lists a different `source` set than RECORD_SOURCES"
+    );
+}
+
+/// The memory write guard's reader (ADR 0021 invariant 6) decodes the value exactly as the
+/// record parser does, needs no other field, and sees only a closed frontmatter.
+#[test]
+fn declared_source_reads_the_decoded_frontmatter_value() {
+    assert_eq!(
+        declared_source("---\nsource: user\n---\nbody\n").as_deref(),
+        Some("user")
+    );
+    assert_eq!(
+        declared_source("---\nsource: \"user\"\n---\n").as_deref(),
+        Some("user")
+    );
+    assert_eq!(
+        declared_source("---\nsource: \"us\\u0065r\"\n---\n").as_deref(),
+        Some("user"),
+        "a quoted escape is decoded, not read literally"
+    );
+    assert_eq!(
+        declared_source("---\nsource: model\nsource: user\n---\n").as_deref(),
+        Some("user"),
+        "a later line wins, as the parser's builder does"
+    );
+    assert_eq!(declared_source("---\nname: x\n---\n").as_deref(), None);
+    assert_eq!(
+        declared_source("source: user\n").as_deref(),
+        None,
+        "no frontmatter"
+    );
+    assert_eq!(
+        declared_source("---\nsource: user\n").as_deref(),
+        None,
+        "an unclosed frontmatter declares nothing"
+    );
+    assert_eq!(
+        declared_source("---\n provenance:\n  source: user\n---\n").as_deref(),
+        None,
+        "an indented key is provenance's, not the record's"
     );
 }
