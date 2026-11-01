@@ -14,10 +14,11 @@
 //! - **Secret guard**: the content (for `patch`, the content the edit would produce and each
 //!   inserted replacement) runs through the ADR 0008 §3.2 rule-2 heuristic in
 //!   [`crate::config`]. A hit refuses the write and names the matched prefix, never the value.
-//! - **User-record guard** (ADR 0021 invariant 6): a `write` or `patch` of a file whose
+//! - **User-record guard** (ADR 0021 invariants 3 and 6): a `write` or `patch` of a file whose
 //!   frontmatter already declares `source: user` is refused, and so is one that would give a
-//!   record that source. The model writes `model`; `user` belongs to the user commands, so a
-//!   claimed user source can neither impersonate nor overwrite a user record.
+//!   record that source; a call that declares a different source than the file already has is
+//!   refused too. The model writes `model`; `user` belongs to the user commands, so a claimed
+//!   user source can neither impersonate nor overwrite a user record.
 //!
 //! The scope directories are the same ones the file tools may reach (ADR 0039 decision 4);
 //! the whole `memory/` tree is not covered, so this guard can never refuse a write the tools
@@ -50,6 +51,11 @@ pub const USER_SOURCE: &str =
 /// The refusal for a file-tool `write` or `patch` of a file that already declares
 /// `source: user` (ADR 0021 invariant 6).
 pub const USER_RECORD: &str = "memory write refused: the record is user-created (invariant 6)";
+
+/// The refusal for a file-tool `write` or `patch` that would declare a source other than the
+/// one the file already has (ADR 0021 invariant 3): the write that created the file fixed it.
+pub const SOURCE_CHANGE: &str =
+    "memory write refused: a record's source is fixed by the write that created it (invariant 3)";
 
 /// What the secret guard names for the 40-character half of the heuristic, which has no
 /// prefix of its own.
@@ -120,22 +126,29 @@ impl MemoryWriteGuard {
         // it is a user record, and the model may neither overwrite nor patch it; a call that
         // would give a record that source is a claim the host refuses, so the model can never
         // make its own record look like a user record and inherit the protection.
-        if record_prefix(&target)
-            .and_then(|text| declared_source(&text))
-            .as_deref()
-            == Some("user")
-        {
+        let existing_source = record_prefix(&target).and_then(|text| declared_source(&text));
+        if existing_source.as_deref() == Some("user") {
             return Err(ToolFailure::new("memory_write_refused", USER_RECORD));
         }
+        // ADR 0021 invariant 3: the write that creates the file fixes its source, so a model
+        // `write` or `patch` must declare the source the file already has.
+        let same_source = |declared: Option<&str>| match (&existing_source, declared) {
+            (Some(existing), Some(declared)) if existing != declared => {
+                Err(ToolFailure::new("memory_write_refused", SOURCE_CHANGE))
+            }
+            _ => Ok(()),
+        };
 
         let refuse = |prefix: &'static str| {
             ToolFailure::new("memory_write_refused", format!("{SECRET_GUARD} ({prefix})"))
         };
         if call.name == "write" {
             if let Some(content) = call.arguments.get("content").and_then(Value::as_str) {
-                if declared_source(content).as_deref() == Some("user") {
+                let declared = declared_source(content);
+                if declared.as_deref() == Some("user") {
                     return Err(ToolFailure::new("memory_write_refused", USER_SOURCE));
                 }
+                same_source(declared.as_deref())?;
                 if let Some(prefix) = secret_hit(content) {
                     return Err(refuse(prefix));
                 }
@@ -150,9 +163,11 @@ impl MemoryWriteGuard {
         // text checked on its own, so a secret cannot be written either way.
         match patch_result_content(&target, &call.arguments) {
             Some(result) => {
-                if declared_source(&result).as_deref() == Some("user") {
+                let declared = declared_source(&result);
+                if declared.as_deref() == Some("user") {
                     return Err(ToolFailure::new("memory_write_refused", USER_SOURCE));
                 }
+                same_source(declared.as_deref())?;
                 if let Some(prefix) = secret_hit(&result) {
                     return Err(refuse(prefix));
                 }
@@ -589,6 +604,54 @@ mod tests {
             .check(&patch)
             .expect_err("a user record is not patched");
         assert_eq!(refusal.message, USER_RECORD);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0021 invariant 3: the write that creates a file fixes its source, so a later model
+    /// `write` or `patch` that declares a different one is refused; the same source, or a body
+    /// patch that leaves the source alone, still passes.
+    #[test]
+    fn a_write_or_patch_that_would_change_the_source_is_refused() {
+        let (dir, guard, root) = guard("source-change");
+        let memory = root.join("global/x.md");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, record("import")).unwrap();
+        let write = guard
+            .check(&call("write", &memory, &record("model")))
+            .expect_err("a write may not change the source");
+        assert_eq!(write.message, SOURCE_CHANGE);
+        let changed = ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": memory.to_str().unwrap(),
+                "old": "source: import",
+                "new": "source: model",
+            }),
+        };
+        let refusal = guard
+            .check(&changed)
+            .expect_err("a patch may not change the source");
+        assert_eq!(refusal.message, SOURCE_CHANGE);
+        assert!(
+            guard
+                .check(&call("write", &memory, &record("import")))
+                .is_ok(),
+            "rewriting with the same source is allowed"
+        );
+        let body = ToolCall {
+            id: "c2".into(),
+            name: "patch".into(),
+            arguments: json!({
+                "path": memory.to_str().unwrap(),
+                "old": "body",
+                "new": "changed",
+            }),
+        };
+        assert!(
+            guard.check(&body).is_ok(),
+            "a body patch leaves the source alone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -58,6 +58,10 @@ decides which paths they may reach.
   claim source: user (invariant 6)`, so the model cannot create a record that
   looks like a user's and then edit it. The value is read as the record parser
   reads it, so a quoted or escaped spelling is the same claim.
+- A record's source never changes after the file is created. A `write` or `patch`
+  that would declare a different source than the file already has is refused with
+  `memory write refused: a record's source is fixed by the write that created it
+  (invariant 3)`.
 
 ## Memory files and `last_used`
 

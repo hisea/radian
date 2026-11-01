@@ -2075,3 +2075,10 @@ found identical.
 | TK0297-M4 | the target's declared source is not read, so a `write` or `patch` of a user record is allowed | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_and_a_patch_of_a_user_record_are_refused` (both calls returned `Ok`) |
 | TK0297-M5 | a `write`'s content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_that_declares_source_user_is_refused` (the claimed user record was accepted, in all four spellings) |
 | TK0297-M6 | a `patch`'s resulting content is not checked for a declared `source: user` | ✅ 1 failed (rc=100) | `memory::guard::tests::a_patch_that_would_declare_source_user_is_refused` (the source line was rewritten to `user`) |
+
+Follow-up (invariant 3): the guard also refuses a source change. The mutation was applied in
+place and the file restored from `.radian/bak/guard2.rs`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0297-M8 | `same_source` is never called, so a `write` or `patch` may declare a different source than the file already has | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_or_patch_that_would_change_the_source_is_refused` (the write from `import` to `model` and the patch of the `source` line returned `Ok`) |

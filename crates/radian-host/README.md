@@ -155,8 +155,10 @@ provides, and a result the runtime produced without running it (`cancelled`,
 record); or the content — for `patch`, the content the edit would produce (the inserted
 replacement only when the tool itself would write nothing) — declares `source: user`, or
 matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value. The
-source check is invariant 6: `user` belongs to the user commands, so a model cannot overwrite or
-patch a user record, nor claim that source for its own. The permission profile's memory rule is
+source checks are invariants 3 and 6: a call whose target declares `source: user` is refused,
+and so is one that would declare `user` or a different source than the file already has, because
+`user` belongs to the user commands and the write that created a file fixed its source. The
+permission profile's memory rule is
 separate and unchanged: these guards can only refuse a write the tools would otherwise allow,
 never grant one.
 
@@ -217,6 +219,7 @@ so a moved repository still matches its old project.
 | A model `write` that declares `source: user` is refused | `a_write_that_declares_source_user_is_refused` | `src/memory/guard.rs` |
 | A model `patch` whose result would declare `source: user` is refused | `a_patch_that_would_declare_source_user_is_refused` | `src/memory/guard.rs` |
 | A user record is refused to `write` and to `patch` | `a_write_and_a_patch_of_a_user_record_are_refused` | `src/memory/guard.rs` |
+| A `write` or `patch` that would change an existing record's source is refused | `a_write_or_patch_that_would_change_the_source_is_refused` | `src/memory/guard.rs` |
 | A merge collision renames the moved file | `merge_renames_a_collision_instead_of_overwriting` | `src/memory/service.rs` |
 
 End to end through the CLI: `radian-exec/tests/cli.rs` (`memory_…`), including a real
