@@ -457,7 +457,7 @@ fn the_minimal_fixture_mcp_server_is_wired() {
         config.skipped
     );
 }
-/// `memory.toml` (ADR 0021 D6): the four `[memory]` keys are read; the injected
+/// `memory.toml` (ADR 0021 D6): the five `[memory]` keys are read; the injected
 /// configuration is the documented default for anything the file leaves out.
 #[test]
 fn the_memory_keys_are_read() {
@@ -470,11 +470,13 @@ fn the_memory_keys_are_read() {
     );
     assert_eq!(config.memory.index_max_lines, Some(200));
     assert_eq!(config.memory.index_max_bytes, Some(25600));
+    assert_eq!(config.memory.sessions_index_max_lines, Some(1000));
     let injection = config.memory.injection();
     assert!(injection.enabled);
     assert_eq!(injection.scopes, ["project", "global"]);
     assert_eq!(injection.index_max_lines, 200);
     assert_eq!(injection.index_max_bytes, 25600);
+    assert_eq!(injection.sessions_index_max_lines, 1000);
     assert!(config.skipped.is_empty(), "{:?}", config.skipped);
 }
 

@@ -1255,6 +1255,43 @@ mod tests {
         assert!(session.failing("major").is_empty());
     }
 
+    /// A passing old-shape verdict has no `review_blocking` reason, but its report is still in
+    /// the old shape: its `suggestions` stay in the rest whatever their level, so the merge
+    /// page and the follow-up see the suggestion the build that wrote the verdict did. The
+    /// report shape decides, not the reason. Mutation: dispatch on `reason ==
+    /// review_blocking` → the `major` suggestion becomes a failing finding.
+    #[test]
+    fn a_passing_old_verdicts_major_suggestion_stays_in_the_rest() {
+        let report = ReviewReport::from_json(
+            &serde_json::from_str(
+                r#"{"summary": "s", "blocking": [],
+                   "suggestions": [{"level": "major", "text": "a big idea"}], "verified": []}"#,
+            )
+            .expect("the old report is JSON"),
+        )
+        .expect("the report reads");
+        assert_eq!(report.old_blocking, Some(0), "{report:?}");
+        let mut verdict = Verdict::human("sha", true, None);
+        verdict.stage = Stage::Review;
+        verdict.review = Some(report);
+        assert_eq!(verdict.result, VerdictResult::Pass);
+        assert_eq!(verdict.reason, None);
+        assert!(
+            verdict.review_failing().is_empty(),
+            "a passing old verdict's suggestion became failing: {:?}",
+            verdict.review_failing()
+        );
+        assert_eq!(
+            verdict
+                .review_rest()
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a big idea"],
+            "the old shape's suggestion is not in the rest"
+        );
+    }
+
     /// A finding serializes in the new shape, and `trigger` and `pre_existing` appear only
     /// when set. A finding reads back.
     #[test]

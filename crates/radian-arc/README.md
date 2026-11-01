@@ -565,10 +565,11 @@ carries is ignored (`ReviewReport::from_session_json`), and only a verdict arc w
 finding at or above the
 task's effective `fix_level` (`review_fix_level` when its file carries one, else the reviewer's)
 and not `pre_existing` fails with `review_findings`; the rest is
-recorded (`ReviewReport::failing` / `rest`). A verdict that failed with `review_blocking` was
-decided before findings existed: every item of its old `blocking` list fails whatever its level
-and whatever `fix_level` says (`ReviewReport::failing_in_old_verdict`, `Verdict::review_failing`),
-its `suggestions` never fail, and `fix_level` decides a report that carries `findings`. A report in the old `blocking` / `suggestions`
+recorded (`ReviewReport::failing` / `rest`). A verdict whose report is in the old
+`blocking` / `suggestions` shape, whatever its `reason` says, is decided by that shape: every
+item of its `blocking` list fails whatever its level and whatever `fix_level` says
+(`ReviewReport::failing_in_old_verdict`, `Verdict::review_failing`), its `suggestions` never
+fail, and `fix_level` decides a report that carries `findings`. A report in the old `blocking` / `suggestions`
 shape maps to findings: `blocking` at its own `level` else `major`, `suggestions` at its own
 `level` else `minor`, `text` as the summary, no trigger. The digest is computed from the
 re-serialized verdict. Unusable output (no block, a missing field, a `severity` outside
@@ -581,8 +582,8 @@ its source key) and, in a rework round, `review_pre_existing`.
 A review that follows an earlier review of the task, of a different commit, is a rework round
 (`review::previous_review`); a review of the same commit (a `reverify` of an unchanged head)
 gets the first review's prompt, though it reads the reviewer's own settings rather than its
-`first` table. A rework round's prompt holds the previous round's failing findings (an old
-`review_blocking` verdict contributes every item of its `blocking` list, never a `suggestion`), the commits
+`first` table. A rework round's prompt holds the previous round's failing findings (a report
+in the old shape contributes every item of its `blocking` list, never a `suggestion`), the commits
 `<previous sha>..<sha>` and the increment, the hunks of the task's own diff that hold a line
 `git diff <previous sha> <sha>` also has. arc, not the session, marks a finding `pre_existing`
 unless its `file:line` is within 3 lines of a line the task's own change added or changed, or
@@ -772,3 +773,11 @@ a
 task's attempts and verdicts, a task's diff, and the merge page's stage rows, review and
 commits). The owner's keys there are the same library calls as the CLI's subcommands. The
 gate stages `mutation` and `ci` are refused until they are built.
+
+## Hand tests
+
+- **A phone on the tailnet.** Expose the hub with `tailscale serve` (the phone has no ssh
+  client), pair with `radian hub pair`, and from the phone browse the plans and tasks of two
+  registered repositories, do one owner action, and receive one lock-screen notification from
+  an `after_awaiting_human` hook. The hub binds `127.0.0.1` only; the tailnet exposure is the
+  proxy's.

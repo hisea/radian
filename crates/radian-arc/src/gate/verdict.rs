@@ -19,7 +19,6 @@ use sha2::{Digest, Sha256};
 
 use super::config::{DEFAULT_FIX_LEVEL, Profile, Stage, StageSpec, effective_stages};
 use super::error::GateError;
-use super::review::REVIEW_BLOCKING;
 use crate::store::config::IntegrationStyle;
 
 /// The verdict schema version this crate writes and accepts.
@@ -318,8 +317,8 @@ pub struct ReviewReport {
     /// `Some(n)` when the report was read from an old verdict's `blocking` / `suggestions`
     /// shape: the first `n` [`findings`](Self::findings) came from its `blocking` list, and
     /// the rest from its `suggestions`. `None` for a report that carries `findings`, which a
-    /// verdict written now and a session's report always do. Never serialized. Only an old
-    /// verdict that failed with `review_blocking` uses it, because every item of that list
+    /// verdict written now and a session's report always do. Never serialized. A verdict read
+    /// in the old shape uses it whatever its `reason` says, because every item of that list
     /// failed whatever its level, and the `fix_level` rule belongs to a report with
     /// `findings`.
     #[serde(skip)]
@@ -384,12 +383,12 @@ impl ReviewReport {
         self.failing_with(fix_level, false)
     }
 
-    /// The failing findings of a verdict that failed with `review_blocking` before findings
-    /// existed: every item of its old `blocking` list is failing, whatever its level and
-    /// whatever `fix_level` says, because that verdict already decided it. Its `suggestions`
-    /// are never failing, and `fix_level` does not decide them either. A report that carries
-    /// `findings` is decided by `fix_level` whatever its reason, because the `fix_level` rule
-    /// belongs to a report with `findings`.
+    /// The failing findings of a verdict whose report is in the old shape: every item of its
+    /// old `blocking` list is failing, whatever its level and whatever `fix_level` says,
+    /// because that verdict already decided it. Its `suggestions` are never failing, and
+    /// `fix_level` does not decide them either. A report that carries `findings` is decided by
+    /// `fix_level` whatever its reason, because the `fix_level` rule belongs to a report with
+    /// `findings`.
     #[must_use]
     pub fn failing_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
         self.failing_with(fix_level, true)
@@ -414,7 +413,7 @@ impl ReviewReport {
         self.rest_with(fix_level, false)
     }
 
-    /// The rest of a verdict that failed with `review_blocking`: its old `blocking` items are
+    /// The rest of a verdict whose report is in the old shape: its old `blocking` items are
     /// never here, and its `suggestions` always are, whatever their level.
     #[must_use]
     pub fn rest_in_old_verdict(&self, fix_level: &str) -> Vec<&Finding> {
@@ -626,16 +625,18 @@ impl Verdict {
 
     /// The failing findings of this review verdict (ADR 0048 decision 10): at or above the
     /// `fix_level` it recorded (the default when it recorded none, or a damaged one) and not
-    /// `pre_existing`. A verdict that failed with `review_blocking` was decided before
-    /// findings existed, so every item of its old `blocking` list is failing whatever its
-    /// level, and its `suggestions` never are. Empty for a verdict with no report.
+    /// `pre_existing`. A verdict whose report is in the old `blocking` / `suggestions` shape
+    /// was decided before findings existed, so every item of its old `blocking` list is
+    /// failing whatever its level, and its `suggestions` never are; its `reason` does not
+    /// decide this, because a verdict that passed under the old build carries no
+    /// `review_blocking` reason yet still has that shape. Empty for a verdict with no report.
     #[must_use]
     pub fn review_failing(&self) -> Vec<&Finding> {
         let Some(report) = &self.review else {
             return Vec::new();
         };
         let fix_level = self.recorded_fix_level();
-        if self.reason.as_deref() == Some(REVIEW_BLOCKING) {
+        if report.old_blocking.is_some() {
             report.failing_in_old_verdict(fix_level)
         } else {
             report.failing(fix_level)
@@ -643,15 +644,15 @@ impl Verdict {
     }
 
     /// The rest of this review verdict's findings: below the `fix_level`, or `pre_existing`;
-    /// for a verdict that failed with `review_blocking`, its old `suggestions`. Empty for a
-    /// verdict with no report.
+    /// for a verdict whose report is in the old shape, its old `suggestions`, whatever their
+    /// level. Empty for a verdict with no report.
     #[must_use]
     pub fn review_rest(&self) -> Vec<&Finding> {
         let Some(report) = &self.review else {
             return Vec::new();
         };
         let fix_level = self.recorded_fix_level();
-        if self.reason.as_deref() == Some(REVIEW_BLOCKING) {
+        if report.old_blocking.is_some() {
             report.rest_in_old_verdict(fix_level)
         } else {
             report.rest(fix_level)

@@ -7938,6 +7938,458 @@ async fn linked_project(env: &MemoryEnv, ws: &Path) -> String {
         .to_owned()
 }
 
+// ---------- the project session index, `SESSIONS.md` (ADR 0021 D3) ----------
+
+/// A workspace that is a repository without needing `git`: the identity and the repository
+/// root only look for `.git`, and these tests run no git command.
+fn repository(ws: &Path) {
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+}
+
+fn session_index_path(env: &MemoryEnv, project: &str) -> PathBuf {
+    env.home
+        .join("memory/projects")
+        .join(project)
+        .join("SESSIONS.md")
+}
+
+fn session_index_lines(env: &MemoryEnv, project: &str) -> Vec<String> {
+    std::fs::read_to_string(session_index_path(env, project))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn memory_session_envs(env: &MemoryEnv) -> [(&str, &str); 2] {
+    [
+        ("RADIAN_HOME", env.home.to_str().unwrap()),
+        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
+    ]
+}
+
+fn session_started_at(env: &MemoryEnv, id: &str) -> String {
+    let session = radian_session::Session::open(env.sessions.join(format!("{id}.jsonl"))).unwrap();
+    session.events().first().unwrap().ts.clone()
+}
+
+/// Edge case 1 end to end: a session ends and `SESSIONS.md` gains one line whose id, start
+/// time and first user line match the journal; the workspace column is `.` at the repository
+/// root and `crates/x` in a directory below it.
+#[tokio::test]
+async fn a_session_end_appends_one_line_with_the_journal_facts() {
+    let env = MemoryEnv::sandboxed("mem-sessions-line");
+    repository(&env.ws);
+    let nested = env.ws.join("crates/x");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let envs = memory_session_envs(&env);
+    for (id, workspace, prompt) in [
+        ("root-session", env.ws.as_path(), "hello from root"),
+        ("nested-session", nested.as_path(), "hello from nested"),
+    ] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--session-id",
+                    id,
+                    "-p",
+                    prompt,
+                ],
+                &envs,
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+
+    let lines = session_index_lines(&env, &project);
+    assert_eq!(lines.len(), 2, "one line per ended session: {lines:?}");
+    assert_eq!(
+        lines[0],
+        format!(
+            "- root-session {} . — hello from root",
+            session_started_at(&env, "root-session")
+        )
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "- nested-session {} crates/x — hello from nested",
+            session_started_at(&env, "nested-session")
+        )
+    );
+}
+
+/// Edge case 2: a session that never commits a user message writes nothing. First a session
+/// in the same project writes its line, so the env and the session-end path are proven to work;
+/// then a run whose input ends before a turn opens leaves the index byte for byte as it was.
+/// A model error after the first step cannot be this case: the Core commits the turn's input
+/// before the model call (ADR 0006), so the line would legitimately exist.
+#[tokio::test]
+async fn a_session_without_a_committed_user_message_appends_nothing() {
+    let env = MemoryEnv::sandboxed("mem-sessions-empty");
+    repository(&env.ws);
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+    let envs = memory_session_envs(&env);
+
+    // The same project and the same env do index an ended session that committed a message.
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "has-message",
+                "-p",
+                "hello",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let before = std::fs::read_to_string(session_index_path(&env, &project))
+        .expect("the first session wrote the index");
+    assert!(before.contains("has-message"), "{before}");
+    assert_eq!(session_index_lines(&env, &project).len(), 1, "{before}");
+
+    // A run whose input ends before a turn opens commits no user message at all.
+    let server = MockServer::start(Vec::new()).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "no-message",
+            ],
+            &envs,
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let session = radian_session::Session::open(env.sessions.join("no-message.jsonl")).unwrap();
+    assert!(
+        !session
+            .events()
+            .iter()
+            .any(|event| event.event == "MessageAppended"),
+        "the session has no committed message"
+    );
+    assert_eq!(server.requests().len(), 0, "no model call was made");
+    let after = std::fs::read_to_string(session_index_path(&env, &project))
+        .expect("the first session's index is still there");
+    assert_eq!(
+        after, before,
+        "a session with no committed user message writes nothing"
+    );
+    assert_eq!(session_index_lines(&env, &project).len(), 1, "{after}");
+}
+
+/// Edge case 3: a session in another workspace is another project, so it never appears in
+/// this project's file.
+#[tokio::test]
+async fn another_workspace_session_is_not_in_this_projects_file() {
+    let env = MemoryEnv::sandboxed("mem-sessions-project");
+    let here = env.workspace("here");
+    let there = env.workspace("there");
+    repository(&here);
+    repository(&there);
+    for ws in [&here, &there] {
+        let (code, _, stderr) = env.run_in(ws, &["project", "new"]).await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+    let here_project = linked_project(&env, &here).await;
+    let there_project = linked_project(&env, &there).await;
+    assert_ne!(here_project, there_project);
+
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let envs = memory_session_envs(&env);
+    for (id, workspace, prompt) in [
+        ("here-session", here.as_path(), "here work"),
+        ("there-session", there.as_path(), "there work"),
+    ] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--session-id",
+                    id,
+                    "-p",
+                    prompt,
+                ],
+                &envs,
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+
+    let here_lines = session_index_lines(&env, &here_project);
+    let there_lines = session_index_lines(&env, &there_project);
+    assert_eq!(here_lines.len(), 1, "{here_lines:?}");
+    assert_eq!(there_lines.len(), 1, "{there_lines:?}");
+    assert!(here_lines[0].contains("here-session"), "{here_lines:?}");
+    assert!(there_lines[0].contains("there-session"), "{there_lines:?}");
+}
+
+/// Edge case 4 end to end: a resumed session that ends again replaces its line instead of
+/// appending a second one.
+#[tokio::test]
+async fn a_resumed_session_replaces_its_line() {
+    let env = MemoryEnv::sandboxed("mem-sessions-resume");
+    repository(&env.ws);
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let envs = memory_session_envs(&env);
+    let base = [
+        "--model",
+        "m",
+        "--base-url",
+        server.base_url.as_str(),
+        "--workspace",
+        env.ws.to_str().unwrap(),
+    ];
+    let mut first: Vec<&str> = base.to_vec();
+    first.extend(["--session-id", "resume-me", "-p", "first task"]);
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&first, &envs), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let before = session_index_lines(&env, &project);
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    let mut second: Vec<&str> = base.to_vec();
+    second.extend(["--resume", "resume-me", "-p", "second task"]);
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&second, &envs), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let after = session_index_lines(&env, &project);
+    assert_eq!(after.len(), 1, "one replaced line, not two: {after:?}");
+    assert!(after[0].contains("first task"), "{after:?}");
+}
+
+/// Edge case 9: an unlinked workspace writes no file and creates no project. A linked project
+/// in the same home indexes its own ended session first, so the env and the session-end path
+/// are proven to work; the unlinked run also commits a user message, so the missing line can
+/// only be the missing link.
+#[tokio::test]
+async fn an_unlinked_workspace_writes_no_session_index_and_creates_no_project() {
+    let env = MemoryEnv::sandboxed("mem-sessions-unlinked");
+    let linked = env.workspace("linked");
+    let unlinked = env.workspace("unlinked");
+    repository(&linked);
+    repository(&unlinked);
+    let (code, _, stderr) = env.run_in(&linked, &["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &linked).await;
+
+    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
+    let envs = memory_session_envs(&env);
+    for (id, workspace, prompt) in [
+        ("linked-session", linked.as_path(), "linked work"),
+        ("unlinked-session", unlinked.as_path(), "unlinked work"),
+    ] {
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--session-id",
+                    id,
+                    "-p",
+                    prompt,
+                ],
+                &envs,
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{stderr}");
+    }
+
+    // The unlinked run had a message to index; only the missing link explains the missing line.
+    let unlinked_session =
+        radian_session::Session::open(env.sessions.join("unlinked-session.jsonl")).unwrap();
+    assert!(
+        unlinked_session
+            .events()
+            .iter()
+            .any(|event| event.event == "MessageAppended"),
+        "the unlinked session committed a user message"
+    );
+
+    let lines = session_index_lines(&env, &project);
+    assert_eq!(
+        lines.len(),
+        1,
+        "only the linked session is indexed: {lines:?}"
+    );
+    assert!(lines[0].contains("linked-session"), "{lines:?}");
+    assert!(!lines[0].contains("unlinked-session"), "{lines:?}");
+
+    let registry =
+        std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap_or_default();
+    assert_eq!(
+        registry
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1,
+        "only the linked project is registered: {registry}"
+    );
+    let projects: Vec<_> = std::fs::read_dir(env.home.join("memory/projects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        projects.len(),
+        1,
+        "the unlinked run created a project directory: {projects:?}"
+    );
+}
+
+/// Edge case 7: the model may `read` `SESSIONS.md`; `write` and `patch` to it are refused with
+/// the host's reason in both tiers.
+#[tokio::test]
+async fn the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers() {
+    let env = MemoryEnv::sandboxed("mem-sessions-read-only");
+    repository(&env.ws);
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let project = linked_project(&env, &env.ws).await;
+
+    let prep = MockServer::start(vec![text_reply("one")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &prep.base_url,
+                "--workspace",
+                env.ws.to_str().unwrap(),
+                "--session-id",
+                "prep-session",
+                "-p",
+                "prepare the index",
+            ],
+            &memory_session_envs(&env),
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let index = session_index_path(&env, &project);
+    assert!(
+        std::fs::read_to_string(&index)
+            .unwrap()
+            .contains("prep-session"),
+        "the preparation session wrote the index"
+    );
+    let target = serde_json::to_string(index.to_str().unwrap()).unwrap();
+
+    for (tier, id) in [("workspace", "read-workspace"), ("full", "read-full")] {
+        let server = MockServer::start(vec![
+            tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
+            tool_reply(
+                "w1",
+                "write",
+                &format!("{{\"path\":{target},\"content\":\"nope\\n\"}}"),
+            ),
+            tool_reply(
+                "p1",
+                "patch",
+                &format!("{{\"path\":{target},\"old\":\"prep-session\",\"new\":\"nope\"}}"),
+            ),
+            text_reply("done"),
+        ])
+        .await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    env.ws.to_str().unwrap(),
+                    "--profile",
+                    tier,
+                    "--yes",
+                    "--session-id",
+                    id,
+                    "-p",
+                    "read then write the index",
+                ],
+                &memory_session_envs(&env),
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{tier}: {stderr}");
+        let read = tool_result_for(&server, 1, "r1");
+        assert!(
+            read.contains("prep-session"),
+            "{tier}: the read returned the index: {read}"
+        );
+        let write = tool_result_for(&server, 2, "w1");
+        assert!(
+            write.contains("SESSIONS.md is maintained by radian"),
+            "{tier}: the write names the host: {write}"
+        );
+        let patch = tool_result_for(&server, 3, "p1");
+        assert!(
+            patch.contains("SESSIONS.md is maintained by radian"),
+            "{tier}: the patch names the host: {patch}"
+        );
+        let after = std::fs::read_to_string(&index).unwrap();
+        assert!(
+            after.contains("prep-session"),
+            "{tier}: the existing line is untouched: {after}"
+        );
+        assert!(
+            !after.contains("nope"),
+            "{tier}: the refused write changed nothing: {after}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn memory_split_and_merge_move_records_between_projects() {
     let env = MemoryEnv::new("mem-split");

@@ -1957,6 +1957,19 @@ empty).
 | TK0276-M1 | the input guard's flag is never set (the `guard.note_mcp_result()` call removed from the MCP branch) | ✅ 1 failed (rc=100) | `cli::a_memory_write_is_refused_after_an_mcp_result_and_allowed_before` (the write after the MCP result changed the file to `after\n`) |
 | TK0276-M2 | the secret guard covers `write` only (the `patch` branch skips its content and inserted text) | ✅ 1 failed (rc=100) | `cli::a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged` (the file gained `sk-abcdefghijklmnopqrst`) |
 | TK0276-M3 | U+FEFF stays in place (`0xFEFF` removed from `is_default_ignorable`) | ✅ 1 failed (rc=100) | `memory::injection::tests::invisible_characters_and_a_fake_marker_are_neutralized_before_injection` (the injected line kept the byte-order mark) |
+## TK0278: the project session index file (2026-10-31)
+
+Branch `work/TK0278-session-index-file`. Each mutation was applied in place and the source restored
+from a copy under `.radian/mut/` (`cmp` empty). The host mutation ran with `cargo nextest run -p
+radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(<name>)'`; the two CLI
+mutations rebuilt `radian` (`cargo build -p radian-tui --bin radian`, the CLI tests refuse a stale
+one) and ran `cargo nextest run -p radian-exec --test cli ... -E 'test(<name>)'`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0278-M1 | the same-id replacement is removed (`upsert_session_line` always pushes) | ✅ 2 failed (rc=100) | `memory::sessions::tests::a_second_line_for_the_same_session_replaces_the_first` (two lines) and `cli::a_resumed_session_replaces_its_line` (the resumed session's end left two lines) |
+| TK0278-M2 | the cap is off by one (`max_lines + 1`) | ✅ 1 failed (rc=100) | `memory::sessions::tests::the_cap_drops_the_oldest_lines_and_keeps_the_newest_last` (1001 lines kept) |
+| TK0278-M3 | the `SESSIONS.md` write refusal in `radian-coding` is removed | ✅ 1 failed (rc=100) | `cli::the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers` (the `write` succeeded and the index content changed) |
 ## TK0275: the memory role block (2026-10-31)
 
 Branch `work/TK0275-memory-role-rules`. Each mutation was applied in place and the named test

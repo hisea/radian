@@ -67,6 +67,9 @@ pub struct InjectionConfig {
     pub index_max_lines: u64,
     /// The per-index byte cap.
     pub index_max_bytes: u64,
+    /// `[memory] sessions_index_max_lines`: how many lines a project's `SESSIONS.md` keeps
+    /// (ADR 0021 D3). The host applies it when a session ends, not at injection.
+    pub sessions_index_max_lines: u64,
 }
 
 impl Default for InjectionConfig {
@@ -79,6 +82,7 @@ impl Default for InjectionConfig {
                 .collect(),
             index_max_lines: DEFAULT_INDEX_MAX_LINES,
             index_max_bytes: DEFAULT_INDEX_MAX_BYTES,
+            sessions_index_max_lines: super::sessions::DEFAULT_SESSIONS_INDEX_MAX_LINES,
         }
     }
 }
@@ -209,6 +213,7 @@ impl MemoryInjection {
         };
         let mut section = Section::default();
 
+        let files = FileStore::open(service.store().root());
         // The project scope this workspace maps to. `state()` never creates a project (ADR 0021
         // D2): an unlinked workspace is simply "no project index".
         let project = match service.state() {
@@ -219,6 +224,9 @@ impl MemoryInjection {
                 None
             }
         };
+        let session_index = project
+            .as_ref()
+            .map(|scope| files.sessions_index_path(scope));
         let mut selected: Vec<(&str, Option<Scope>)> = Vec::new();
         if self.config.scope_enabled("project") {
             selected.push(("project", project));
@@ -230,7 +238,6 @@ impl MemoryInjection {
             return Section::default();
         }
 
-        let files = FileStore::open(service.store().root());
         section.text.push_str(INJECTION_HEADER);
         for (name, scope) in selected {
             let title = if name == "project" {
@@ -289,6 +296,15 @@ impl MemoryInjection {
                     ));
                 }
             }
+        }
+        // ADR 0021 D6: after the global index, one line names the project's session index. The
+        // file itself is never injected.
+        if let Some(path) = session_index {
+            section.text.push_str(&format!(
+                "\nPast sessions of this project are listed in {}; read it when the request refers \
+                 to earlier work.\n",
+                path.display()
+            ));
         }
         section
     }
@@ -624,6 +640,53 @@ mod tests {
         assert!(warnings.lock().unwrap().is_empty(), "{warnings:?}");
     }
 
+    /// Edge 8: after the global index one line names `SESSIONS.md`; the file's own content is
+    /// never injected.
+    #[tokio::test]
+    async fn the_session_index_is_mentioned_after_the_global_index_and_not_injected() {
+        let dir = TempDir::new("init-sessions");
+        let ws = workspace(&dir);
+        let root = dir.join("memory");
+        let service = MemoryService::open(&ws, &root);
+        let project = project_of(&service);
+        let files = FileStore::open(&root);
+        let project_text = "project one\n";
+        let global_text = "global one\n";
+        project_index(&files, &project, project_text);
+        global_index(&files, global_text);
+        let sessions = files.sessions_index_path(&Scope::Project(project.clone()));
+        files
+            .write_sessions_index(
+                &Scope::Project(project),
+                "- sid 2026-10-31T00:00:00Z . — SESSION-SENTINEL\n",
+            )
+            .unwrap();
+
+        let (warn, warnings) = warn_sink();
+        let hooks = MemoryHooks::new(Some(service), InjectionConfig::default(), warn, None, None);
+        let mut req = request();
+        hooks.before_model_call(&context(), &mut req).await.unwrap();
+        let system = req.system_prompt.unwrap();
+
+        let mention = format!(
+            "Past sessions of this project are listed in {}; read it when the request refers to \
+             earlier work.",
+            sessions.display()
+        );
+        let mention_at = system.find(&mention).unwrap_or_else(|| {
+            panic!("no session-index mention in {system}");
+        });
+        assert!(
+            system.find(global_text).unwrap() < mention_at,
+            "the mention follows the global index: {system}"
+        );
+        assert!(
+            !system.contains("SESSION-SENTINEL"),
+            "the session index itself is never injected: {system}"
+        );
+        assert!(warnings.lock().unwrap().is_empty(), "{warnings:?}");
+    }
+
     #[tokio::test]
     async fn a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent() {
         let dir = TempDir::new("init-line-cap");
@@ -725,7 +788,7 @@ mod tests {
         assert!(system.contains("aaa\n"), "{system}");
         assert!(system.contains("bbb\n"), "{system}");
         assert!(
-            !system.contains("ccc"),
+            !system.lines().any(|line| line == "ccc"),
             "the third line does not fit: {system}"
         );
         let notice = inbox.claim_next_step().await.expect("a notice");
