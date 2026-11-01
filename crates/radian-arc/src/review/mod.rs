@@ -3697,6 +3697,10 @@ pub(crate) fn next_integration_label(
 
 // ---- reject --------------------------------------------------------------------------
 
+/// The message an empty note is refused with, a usage error (exit 2). The hub's write route
+/// answers it with `400`, so it reads this constant rather than repeating the text.
+pub const EMPTY_REJECT_NOTE: &str = "the reject note is empty";
+
 /// `radian arc reject <task> --note <text>`: the owner's refusal of a `review.awaiting_human`
 /// task (ADR 0048 decision 11).
 ///
@@ -3709,7 +3713,7 @@ pub(crate) fn next_integration_label(
 /// arc.
 pub fn reject(store: &Store, task_id: &str, note: &str) -> Result<Rejected, Error> {
     if note.trim().is_empty() {
-        return Err(Error::Usage("the reject note is empty".to_owned()));
+        return Err(Error::Usage(EMPTY_REJECT_NOTE.to_owned()));
     }
     let loaded = store.load_task(task_id)?;
     if loaded.changed_outside_arc {

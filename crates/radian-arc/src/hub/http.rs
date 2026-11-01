@@ -1,6 +1,6 @@
 //! `radian hub`'s HTTP API (ADR 0048 decision 16): loopback only, a bearer token on every
-//! request, and the read routes that return exactly what `radian arc list --json` and
-//! `radian arc show --json` print.
+//! request, the read routes that return exactly what `radian arc list --json` and
+//! `radian arc show --json` print, and the owner's write routes.
 //!
 //! The listener binds `127.0.0.1:<[hub] port>` and nothing else. The server takes `hub.lock`
 //! before it binds, so a second hub is refused by the lock and not by the port; a port another
@@ -8,10 +8,11 @@
 //! re-read whenever its mtime changed, one `stat` per request, so `radian hub token rotate`
 //! takes effect on the next request without a restart.
 //!
-//! Every route is a `GET`; the router is hand-written and each route answers JSON. The list
-//! and show bodies come from [`crate::store::cli::list_json_text`] and
-//! [`crate::store::cli::show_json_text`], the same functions the CLI prints, so a field change
-//! in the CLI changes the route.
+//! The read routes are `GET`; the owner actions are `POST /v1/repos/<name>/items/<id>/<action>`.
+//! The router is hand-written and each route answers JSON. The list and show bodies come from
+//! [`crate::store::cli::list_json_text`] and [`crate::store::cli::show_json_text`], and the
+//! write routes call the same library functions the arc TUI calls, so a field or behavior
+//! change in the CLI changes the route.
 //!
 //! The route work (files, git, the token's `stat`) runs on `spawn_blocking`, never on the
 //! runtime's async threads, so the scheduling loop's threads (ADR 0048 decision 13) are not
@@ -19,6 +20,7 @@
 
 use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
+use std::future::poll_fn;
 use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -34,7 +36,7 @@ use hyper::header::{
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -45,7 +47,8 @@ use crate::hub::registry::{HUB_LOCK, Registry};
 use crate::hub::token;
 use crate::read;
 use crate::store::attempt_ops;
-use crate::store::{Error, Store, cli, model};
+use crate::store::{Error, Store, cli, model, plan_ops};
+use crate::{attempt, review};
 
 /// The API version `GET /v1/version` reports. It names the route set and its behavior; the
 /// plan and task file shape is `schema_version` (ADR 0048 decision 5) and changes on its own.
@@ -106,8 +109,16 @@ pub fn serve(port: u16) -> Result<(), Error> {
                     let registry = registry.clone();
                     let tokens = Arc::clone(&tokens);
                     async move {
+                        let method = request.method().clone();
+                        let path = request.uri().path().to_owned();
+                        let header = request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let body = request_body(request.into_body()).await;
                         let response = tokio::task::spawn_blocking(move || {
-                            handle(request, &registry, &tokens)
+                            handle(method, &path, header.as_deref(), &body, &registry, &tokens)
                         })
                         .await
                         .unwrap_or_else(|_| {
@@ -280,7 +291,40 @@ enum Route {
     Diff(String, String),
     DiffFile(String, String, String),
     Events,
+    Action(String, String, OwnerAction),
     Unknown,
+}
+
+/// One owner action of the hub's write route (ADR 0048 decision 16). It is the set the TUI
+/// offers, without `start` and `reset-budget`: those are not routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerAction {
+    Confirm,
+    Merge,
+    Cancel,
+    Pause,
+    Reverify,
+    Reject,
+    Auto,
+    Priority,
+}
+
+impl OwnerAction {
+    /// The action `name` names, or `None` for anything else (`start` and `reset-budget`
+    /// included, so the router answers `404` for them).
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "confirm" => OwnerAction::Confirm,
+            "merge" => OwnerAction::Merge,
+            "cancel" => OwnerAction::Cancel,
+            "pause" => OwnerAction::Pause,
+            "reverify" => OwnerAction::Reverify,
+            "reject" => OwnerAction::Reject,
+            "auto" => OwnerAction::Auto,
+            "priority" => OwnerAction::Priority,
+            _ => return None,
+        })
+    }
 }
 
 fn route(path: &str) -> Route {
@@ -298,6 +342,10 @@ fn route(path: &str) -> Route {
         ["v1", "repos", name, "items", id, "diff", rest @ ..] if !rest.is_empty() => {
             Route::DiffFile(decode(name), decode(id), decode(&rest.join("/")))
         }
+        ["v1", "repos", name, "items", id, action] => match OwnerAction::parse(&decode(action)) {
+            Some(action) => Route::Action(decode(name), decode(id), action),
+            None => Route::Unknown,
+        },
         _ => Route::Unknown,
     }
 }
@@ -324,20 +372,16 @@ fn decode(text: &str) -> String {
 }
 
 fn handle(
-    request: Request<hyper::body::Incoming>,
+    method: Method,
+    path: &str,
+    header: Option<&str>,
+    body: &[u8],
     registry: &Registry,
     tokens: &Mutex<TokenState>,
 ) -> Response<ResponseBody> {
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let header = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
     let authorized = tokens
         .lock()
-        .map(|mut state| state.authorized(header.as_deref()))
+        .map(|mut state| state.authorized(header))
         .unwrap_or(false);
     if !authorized {
         let mut response = json_response(StatusCode::UNAUTHORIZED, json!({}));
@@ -346,9 +390,15 @@ fn handle(
             .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return response;
     }
-    let route = route(&path);
+    let route = route(path);
     if matches!(route, Route::Unknown) {
         return error_response(StatusCode::NOT_FOUND, "no such route");
+    }
+    if let Route::Action(name, id, action) = route {
+        if method != Method::POST {
+            return error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+        }
+        return action_route(registry, &name, &id, action, body);
     }
     if method != Method::GET {
         return error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
@@ -369,8 +419,190 @@ fn handle(
         Route::Diff(name, task) => diff(registry, &name, &task),
         Route::DiffFile(name, task, path) => diff_file(registry, &name, &task, &path),
         Route::Events => error_response(StatusCode::NOT_FOUND, "not built yet"),
-        Route::Unknown => unreachable!("an unknown route returned above"),
+        Route::Action(..) | Route::Unknown => {
+            unreachable!("an action or unknown route returned above")
+        }
     }
+}
+
+/// The whole request body. The write routes take a small JSON object, so buffering it is
+/// safe; a read request has none.
+async fn request_body(mut body: hyper::body::Incoming) -> Bytes {
+    let mut bytes = Vec::new();
+    while let Some(frame) = poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+        let Ok(frame) = frame else {
+            break;
+        };
+        if let Ok(data) = frame.into_data() {
+            bytes.extend_from_slice(&data);
+        }
+    }
+    Bytes::from(bytes)
+}
+
+// ---- the owner's write routes ------------------------------------------------------------
+
+/// What one owner action did: the CLI's stdout text, and the status/`ok` pair the API answers.
+struct ActionResult {
+    status: StatusCode,
+    text: String,
+}
+
+impl ActionResult {
+    fn success(text: String) -> Self {
+        Self {
+            status: StatusCode::OK,
+            text,
+        }
+    }
+
+    fn failed(status: StatusCode, text: String) -> Self {
+        Self { status, text }
+    }
+}
+
+/// One `POST /v1/repos/<name>/items/<id>/<action>` (ADR 0048 decision 16).
+///
+/// A held `state.lock` is answered before the action runs, so the route changes no file when
+/// the lock is refused; the wait is the CLI's own [`crate::store::LOCK_WAIT`]. Otherwise the
+/// action is the library call the TUI makes, and its outcome is the API's status and body.
+fn action_route(
+    registry: &Registry,
+    name: &str,
+    id: &str,
+    action: OwnerAction,
+    body: &[u8],
+) -> Response<ResponseBody> {
+    let store = match registry.store_for(name) {
+        Ok(store) => store,
+        Err(error) => return action_response(&error),
+    };
+    if let Err(error) = store.check_state_lock() {
+        return action_response(&error);
+    }
+    match run_action(&store, id, action, body) {
+        Ok(result) => json_response(
+            result.status,
+            json!({ "ok": result.status == StatusCode::OK, "text": result.text }),
+        ),
+        Err(error) => action_response(&error),
+    }
+}
+
+/// The `{"ok": false, "text": "<message>"}` body of a failed action, at its mapped status.
+fn action_response(error: &Error) -> Response<ResponseBody> {
+    json_response(
+        action_status(error),
+        json!({ "ok": false, "text": error.message() }),
+    )
+}
+
+/// Runs one owner action through the same library function the TUI calls (ADR 0048
+/// decisions 11 and 16). `body` is the request's JSON; a field the action takes is read from
+/// it, and a missing one is the empty string, which the library refuses the way the CLI does.
+fn run_action(
+    store: &Store,
+    id: &str,
+    action: OwnerAction,
+    body: &[u8],
+) -> Result<ActionResult, Error> {
+    match action {
+        OwnerAction::Confirm => {
+            let confirmed = plan_ops::confirm(store, id)?;
+            Ok(ActionResult::success(confirmed.line()))
+        }
+        OwnerAction::Merge => {
+            let merged = review::merge(store, id)?;
+            let mut text = merged.line();
+            if let Some(warning) = &merged.warning {
+                text.push_str(&format!("\nwarning: {warning}"));
+            }
+            Ok(if merged.pending {
+                // The CLI prints the same line and exits `3`: the task stays
+                // `review.integrating` and a later merge continues it.
+                ActionResult::failed(StatusCode::CONFLICT, text)
+            } else {
+                ActionResult::success(text)
+            })
+        }
+        OwnerAction::Cancel => {
+            let canceled = attempt::cancel_any(store, id)?;
+            Ok(ActionResult::success(canceled.lines().join("\n")))
+        }
+        OwnerAction::Pause => {
+            plan_ops::pause(store, id)?;
+            Ok(ActionResult::success(format!("{id} auto off")))
+        }
+        OwnerAction::Reverify => {
+            let reverified = review::reverify(store, id)?;
+            let text = reverified.lines().join("\n");
+            match &reverified.verification {
+                Ok(_) => Ok(ActionResult::success(text)),
+                Err(error) => Ok(ActionResult::failed(action_status(error), text)),
+            }
+        }
+        OwnerAction::Reject => {
+            let note = body_string(body, "note");
+            let rejected = review::reject(store, id, &note)?;
+            Ok(ActionResult::success(rejected.line()))
+        }
+        OwnerAction::Auto => {
+            let level = body_string(body, "level");
+            plan_ops::set_auto(store, id, &level)?;
+            Ok(ActionResult::success(format!("{id} auto {level}")))
+        }
+        OwnerAction::Priority => {
+            let priority = body_string(body, "priority");
+            // `set_priority` refuses a value outside the CLI's set with exit `3`. That is a
+            // validation error, so the route answers `422`; `check_priority` is the same
+            // check and message, so the two can never drift.
+            if let Err(error) = plan_ops::check_priority(&priority) {
+                return Ok(ActionResult::failed(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    error.message(),
+                ));
+            }
+            plan_ops::set_priority(store, id, &priority)?;
+            Ok(ActionResult::success(format!("{id} priority {priority}")))
+        }
+    }
+}
+
+/// The string field `field` of the request's JSON object, or the empty string. A body that is
+/// not JSON, or a field that is not a string, reads as empty and is refused by the library.
+fn body_string(body: &[u8], field: &str) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get(field).and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// The status code the API answers for one CLI outcome (ADR 0048 decision 16), one row per
+/// outcome: success `200`, an empty reject note `400`, a usage or validation error `422`, a
+/// held lock or a refused state change `409`, an unknown item `404`, and anything else `500`.
+fn action_status(error: &Error) -> StatusCode {
+    if unknown_target(error) {
+        return StatusCode::NOT_FOUND;
+    }
+    match error {
+        Error::Usage(message) if message == review::EMPTY_REJECT_NOTE => StatusCode::BAD_REQUEST,
+        Error::Usage(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        Error::Locked(_) => StatusCode::CONFLICT,
+        Error::NotInitialized | Error::ChangedOutsideArc(_) | Error::Refused(_) => {
+            StatusCode::CONFLICT
+        }
+        Error::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Whether the CLI's message names no registered repository or no stored item: `no repository
+/// named`, `no plan or task`, `no plan` or `no task`.
+fn unknown_target(error: &Error) -> bool {
+    matches!(error, Error::Failed(message)
+        if message.starts_with("no repository named `")
+            || message.starts_with("no plan or task `")
+            || message.starts_with("no plan `")
+            || message.starts_with("no task `"))
 }
 
 // ---- the read routes ---------------------------------------------------------------------
@@ -710,5 +942,72 @@ mod tests {
         let (whole, truncated) = cap("abc", 3);
         assert!(!truncated);
         assert_eq!(whole, "abc");
+    }
+
+    #[test]
+    fn the_action_route_takes_the_eight_owner_actions_and_not_start_or_reset_budget() {
+        for name in [
+            "confirm", "merge", "cancel", "pause", "reverify", "reject", "auto", "priority",
+        ] {
+            assert!(
+                OwnerAction::parse(name).is_some(),
+                "`{name}` is an owner action"
+            );
+        }
+        for name in ["start", "reset-budget", "explode", ""] {
+            assert!(
+                OwnerAction::parse(name).is_none(),
+                "`{name}` is not a write route"
+            );
+        }
+    }
+
+    /// The mapping table, one assertion per outcome (ADR 0048 decision 16). A mutating change
+    /// to one row fails here before the integration suite sees it.
+    #[test]
+    fn every_owner_action_outcome_maps_to_its_status() {
+        assert_eq!(
+            action_status(&Error::Usage(review::EMPTY_REJECT_NOTE.to_owned())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            action_status(&Error::Usage("`sometimes` is not an auto level".to_owned())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            action_status(&Error::Locked(crate::store::STATE_LOCK)),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            action_status(&Error::Refused("task is doing.running".to_owned())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            action_status(&Error::ChangedOutsideArc("TK0001-x".to_owned())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(action_status(&Error::NotInitialized), StatusCode::CONFLICT);
+        assert_eq!(
+            action_status(&Error::Failed("no plan or task `TK9999-x`".to_owned())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            action_status(&Error::Failed(
+                "no repository named `nope` is registered".to_owned()
+            )),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            action_status(&Error::Failed("no task `TK9999-x`".to_owned())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            action_status(&Error::Failed("no plan `PL9999-x`".to_owned())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            action_status(&Error::Failed("the push failed".to_owned())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
