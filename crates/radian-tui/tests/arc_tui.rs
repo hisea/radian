@@ -2381,12 +2381,88 @@ fn the_attempts_tab_draws_nothing_for_a_verdict_with_no_findings() {
     app.on_key(&key(KeyCode::Char('l')));
     let text = screen(&mut app, 120, 30);
     assert!(text.contains("✓ review"), "{text}");
-    for absent in ["│ critical", "│ major", "│ minor"] {
+    // The heading is drawn inside the rail as `  │   <severity>` (the rail, then the heading's
+    // own two-space indent), so the absence check names that drawn form.
+    for absent in ["│   critical", "│   major", "│   minor"] {
         assert!(
             !text.contains(absent),
             "a heading with no finding is drawn (`{absent}`):\n{text}"
         );
     }
+}
+
+/// A severity that has no finding draws no heading: only a founded severity gets one.
+/// Mutation: `draw_attempts` draws the heading before its `findings.is_empty()` check → the
+/// screen carries `│   critical` and `│   major` beside the `minor` row.
+#[test]
+fn the_attempts_tab_draws_a_heading_only_for_a_severity_that_has_findings() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(&fixture, &task, 1, &[("commands", true, None)]);
+    write_review_findings(
+        &fixture,
+        &task,
+        1,
+        vec![Finding {
+            severity: "minor".to_owned(),
+            file: Some("src/x.rs".to_owned()),
+            line: Some(1),
+            summary: "a nit".to_owned(),
+            trigger: String::new(),
+            pre_existing: false,
+        }],
+    );
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    let text = screen(&mut app, 120, 30);
+    assert!(text.contains("│   minor"), "the minor heading:\n{text}");
+    for absent in ["│   critical", "│   major"] {
+        assert!(
+            !text.contains(absent),
+            "a heading with no finding is drawn (`{absent}`):\n{text}"
+        );
+    }
+}
+
+/// A wrapped finding or trigger row stays inside the frame: `rail` already spends four
+/// columns, so a trigger wide enough to wrap must not lose its last characters at the
+/// terminal's right edge. Mutation: wrap to `inner - indent` again → the two last characters
+/// of the first row are clipped and never drawn.
+#[test]
+fn a_wrapped_trigger_keeps_its_last_characters_inside_the_frame() {
+    let fixture = Fixture::new();
+    let task = fixture.id("e").to_owned();
+    write_verdicts(&fixture, &task, 1, &[("commands", true, None)]);
+    let trigger = "Z".repeat(54);
+    write_review_findings(
+        &fixture,
+        &task,
+        1,
+        vec![Finding {
+            severity: "minor".to_owned(),
+            file: Some("src/x.rs".to_owned()),
+            line: Some(1),
+            summary: "a finding".to_owned(),
+            trigger: trigger.clone(),
+            pre_existing: false,
+        }],
+    );
+    let mut app = fixture.app();
+    app.task_sel = fixture.pos("e");
+    app.open_task();
+    app.on_key(&key(KeyCode::Char('l')));
+    app.on_key(&key(KeyCode::Char('l')));
+    // 60 columns: the frame is 58 wide and the rail spends four, so the trigger's indent of
+    // four leaves 52 columns and the 54 characters wrap onto a second row.
+    let text = screen(&mut app, 60, 30);
+    assert_eq!(
+        text.matches('Z').count(),
+        trigger.len(),
+        "the wrapped trigger loses characters at the frame edge:\n{text}"
+    );
 }
 
 /// The attempts tab's window counts the finding rows, not only the attempt rows: a verdict
