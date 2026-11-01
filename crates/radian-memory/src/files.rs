@@ -1,5 +1,5 @@
 //! The file store (ADR 0021 D3/D4): one Markdown record per file and one `MEMORY.md` index per
-//! scope, beside the old JSONL logs.
+//! scope. The old JSONL record store is gone; only the one-time migration still reads a log.
 //!
 //! A record file is YAML frontmatter between two `---` lines and then the body. The frontmatter
 //! is flat except for the optional `provenance` map, and every scalar is on one line: plain, or
@@ -10,10 +10,9 @@
 //! never share a name. A write goes through a temporary file in the scope directory and an
 //! atomic rename, like the registry; a crash leaves either the old file or the new one.
 //!
-//! `migrate_log` converts one scope's old `log.jsonl` once, with the old reader, then renames
-//! the log to `log.jsonl.migrated`.
+//! `migrate_log` (in `migrate`) converts one scope's old `log.jsonl` once, with the old
+//! reader, then renames the log to `log.jsonl.migrated`.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,10 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::DateTime;
 
 use crate::error::MemoryError;
-use crate::event::MemoryEvent;
 use crate::fs::{create_private_file, ensure_private_dir};
-use crate::log::Log;
-use crate::model::{Kind, MemoryRecord, Scope, Source, now_utc};
+use crate::model::{Scope, now_utc};
 
 /// The closed `type` set (ADR 0021 D4). The parser, the writer and the docs drift test read it.
 pub const RECORD_TYPES: &[&str] = &["user", "feedback", "project", "reference"];
@@ -39,8 +36,6 @@ pub const NAME_MAX: usize = 64;
 pub const DESCRIPTION_MAX: usize = 120;
 
 const INDEX_FILE: &str = "MEMORY.md";
-const LOG_FILE: &str = "log.jsonl";
-const MIGRATED_LOG_FILE: &str = "log.jsonl.migrated";
 
 /// The optional `provenance` map of a record. Both keys are optional and there are no others.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -168,6 +163,35 @@ impl FileStore {
         delete_named(&self.scope_dir(scope), name)
     }
 
+    /// Whether `<name>.md` exists. A name outside the rule is a refusal, like every other call.
+    pub fn exists(&self, scope: &Scope, name: &str) -> Result<bool, MemoryError> {
+        validate_name(name)?;
+        Ok(record_path_in(&self.scope_dir(scope), name).is_file())
+    }
+
+    /// Renames `<name>.md` to `<new_name>.md`, rewriting only the `name` frontmatter line.
+    /// `modified`, `created`, `source` and the body stay byte for byte. The new name must obey
+    /// the rule, the old file must exist, and the new path must not.
+    pub fn rename(&self, scope: &Scope, name: &str, new_name: &str) -> Result<(), MemoryError> {
+        validate_name(name)?;
+        validate_name(new_name)?;
+        let dir = self.scope_dir(scope);
+        let from = record_path_in(&dir, name);
+        let to = record_path_in(&dir, new_name);
+        if to.exists() {
+            return Err(invalid(format!(
+                "a memory file named {new_name:?} already exists"
+            )));
+        }
+        let text = std::fs::read_to_string(&from).map_err(|error| MemoryError::io(&from, error))?;
+        parse_record(&text, Some(name)).map_err(|error| frontmatter_error(from.clone(), error))?;
+        let renamed = replace_name(&text, new_name)
+            .map_err(|error| frontmatter_error(from.clone(), error))?;
+        atomic_write(&to, renamed.as_bytes())?;
+        std::fs::remove_file(&from).map_err(|error| MemoryError::io(&from, error))?;
+        fsync_dir(&dir)
+    }
+
     /// Sets `last_used` to `at`, rewriting only that line. Every other byte is unchanged.
     pub fn touch_last_used(&self, scope: &Scope, name: &str, at: &str) -> Result<(), MemoryError> {
         touch_last_used(&self.scope_dir(scope), name, at)
@@ -189,22 +213,26 @@ fn record_path_in(dir: &Path, name: &str) -> PathBuf {
 }
 
 fn validate_name(name: &str) -> Result<(), MemoryError> {
+    if name_fits(name) {
+        return Ok(());
+    }
     let reason = if name.is_empty() {
         "the name is empty".to_owned()
     } else if name.chars().count() > NAME_MAX {
         format!("the name is longer than {NAME_MAX} characters")
-    } else if !name
-        .chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        "a name may contain only a-z, 0-9 and -".to_owned()
     } else {
-        return Ok(());
+        "a name may contain only a-z, 0-9 and -".to_owned()
     };
     Err(MemoryError::InvalidName {
         name: name.to_owned(),
         reason,
     })
+}
+
+/// The name rule's message, or `Ok` for a name the store accepts. The commands use this so a
+/// bad `add` name is a usage error before anything is written.
+pub fn validate_record_name(name: &str) -> Result<(), String> {
+    validate_name(name).map_err(|error| error.to_string())
 }
 
 fn validate_timestamp(field: &str, value: &str) -> Result<(), String> {
@@ -615,7 +643,7 @@ fn parse_record(text: &str, expected_name: Option<&str>) -> Result<Record, Parse
     })
 }
 
-fn name_fits(name: &str) -> bool {
+pub(crate) fn name_fits(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= NAME_MAX
         && name
@@ -733,7 +761,11 @@ fn write_new(dir: &Path, new: NewRecord) -> Result<Record, MemoryError> {
     })
 }
 
-fn write_record(dir: &Path, frontmatter: &Frontmatter, body: &str) -> Result<(), MemoryError> {
+pub(crate) fn write_record(
+    dir: &Path,
+    frontmatter: &Frontmatter,
+    body: &str,
+) -> Result<(), MemoryError> {
     validate_frontmatter(frontmatter)?;
     atomic_write(
         &record_path_in(dir, &frontmatter.name),
@@ -920,11 +952,11 @@ fn read_index_dir(dir: &Path) -> Result<String, MemoryError> {
     }
 }
 
-fn write_index_dir(dir: &Path, text: &str) -> Result<(), MemoryError> {
+pub(crate) fn write_index_dir(dir: &Path, text: &str) -> Result<(), MemoryError> {
     atomic_write(&dir.join(INDEX_FILE), text.as_bytes())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MemoryError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MemoryError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     ensure_private_dir(dir).map_err(|error| MemoryError::io(dir, error))?;
     let temp = temp_path(path);
@@ -953,7 +985,7 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn fsync_dir(dir: &Path) -> Result<(), MemoryError> {
+pub(crate) fn fsync_dir(dir: &Path) -> Result<(), MemoryError> {
     let handle = std::fs::File::open(dir).map_err(|error| MemoryError::io(dir, error))?;
     handle
         .sync_all()
@@ -961,7 +993,7 @@ fn fsync_dir(dir: &Path) -> Result<(), MemoryError> {
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> Result<(), MemoryError> {
+pub(crate) fn fsync_dir(_dir: &Path) -> Result<(), MemoryError> {
     Ok(())
 }
 
@@ -999,170 +1031,39 @@ fn parse_index_line(line: &str) -> Option<(String, String, String)> {
     Some((title.to_owned(), file.to_owned(), description.to_owned()))
 }
 
-/// Converts one scope's old `log.jsonl` into files and an index, once. A missing log or an
-/// existing `log.jsonl.migrated` is a no-op; a crash before the rename leaves the log, and the
-/// next call writes the same files again (the writes are idempotent).
-pub fn migrate_log(scope_dir: impl AsRef<Path>) -> Result<(), MemoryError> {
-    let dir = scope_dir.as_ref();
-    let log_path = dir.join(LOG_FILE);
-    let migrated = dir.join(MIGRATED_LOG_FILE);
-    if migrated.exists() || !log_path.exists() {
-        return Ok(());
+/// Replaces the `name` frontmatter line, leaving every other byte alone. The caller has already
+/// parsed the file, so the line exists.
+fn replace_name(text: &str, new_name: &str) -> Result<String, ParseError> {
+    let first = line_at(text, 0);
+    if first.text.trim() != "---" {
+        return Err(ParseError::new(1, "the frontmatter must start with `---`"));
     }
-
-    // Replay with today's reader. The `Log` (and its writer lock) is dropped before any file
-    // write; the events are the whole input.
-    let Some((_, events)) = Log::open_existing(&log_path, MemoryEvent::NAMES)? else {
-        return Ok(());
-    };
-    let mut records: BTreeMap<crate::model::MemoryId, MemoryRecord> = BTreeMap::new();
-    let mut forgotten = BTreeSet::new();
-    for accepted in &events {
-        let event = MemoryEvent::from_data(&accepted.event, &accepted.data).map_err(|error| {
-            MemoryError::Corrupt {
-                path: log_path.clone(),
-                line: accepted.line,
-                column: 0,
-                message: error.to_string(),
-            }
-        })?;
-        event
-            .apply(&mut records, &mut forgotten)
-            .map_err(|message| MemoryError::Corrupt {
-                path: log_path.clone(),
-                line: accepted.line,
-                column: 0,
-                message,
-            })?;
-    }
-
-    let mut taken = BTreeSet::new();
-    let mut index = String::new();
-    for record in records.values() {
-        if !record.is_active() {
-            continue;
-        }
-        let name = unique_name(&base_name(record), &mut taken);
-        let description = description_of(&record.content);
-        let frontmatter = Frontmatter {
-            name: name.clone(),
-            description: description.clone(),
-            record_type: type_for_kind(&record.kind).to_owned(),
-            source: source_for_source(&record.source),
-            created: record.created_at.clone(),
-            modified: record.updated_at.clone(),
-            last_used: None,
-            provenance: provenance_of(record),
-        };
-        write_record(dir, &frontmatter, &record.content)?;
-        index.push_str(&format!("- [{name}]({name}.md) — {description}\n"));
-    }
-    write_index_dir(dir, &index)?;
-
-    if crate::store::run_move_hook(crate::store::MovePhase::MigrationBeforeLogRename) {
-        return Err(MemoryError::SimulatedCrash);
-    }
-    std::fs::rename(&log_path, &migrated).map_err(|error| MemoryError::io(&migrated, error))?;
-    fsync_dir(dir)
-}
-
-fn base_name(record: &MemoryRecord) -> String {
-    if let Some(key) = &record.key
-        && name_fits(key)
-    {
-        return key.clone();
-    }
-    slug_of(&record.content)
-}
-
-fn description_of(content: &str) -> String {
-    content
-        .split(['\n', '\r'])
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take(DESCRIPTION_MAX)
-        .collect()
-}
-
-fn slug_of(content: &str) -> String {
-    let mut slug = String::new();
-    for word in content.split_whitespace().take(8) {
-        if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-        for ch in word.chars() {
-            let lower = ch.to_ascii_lowercase();
-            if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
-                slug.push(lower);
-            } else if !slug.ends_with('-') {
-                slug.push('-');
-            }
-        }
-    }
-    let mut slug = slug.trim_matches('-').to_owned();
-    if slug.chars().count() > NAME_MAX {
-        slug = slug.chars().take(NAME_MAX).collect();
-        slug = slug.trim_end_matches('-').to_owned();
-    }
-    if slug.is_empty() {
-        slug.push_str("memory");
-    }
-    slug
-}
-
-fn unique_name(base: &str, taken: &mut BTreeSet<String>) -> String {
-    let base = if base.is_empty() { "memory" } else { base };
-    if taken.insert(base.to_owned()) {
-        return base.to_owned();
-    }
-    let mut n = 2u64;
+    let mut cursor = first.next;
     loop {
-        let suffix = format!("-{n}");
-        let max = NAME_MAX.saturating_sub(suffix.chars().count());
-        let mut stem: String = base.chars().take(max).collect();
-        while stem.ends_with('-') {
-            stem.pop();
+        if cursor >= text.len() {
+            return Err(ParseError::new(
+                1,
+                "the frontmatter is not closed with `---`",
+            ));
         }
-        if stem.is_empty() {
-            stem.push_str("memory");
+        let line = line_at(text, cursor);
+        if line.text.trim() == "---" {
+            return Err(ParseError::new(1, "the frontmatter has no `name` line"));
         }
-        let candidate = format!("{stem}{suffix}");
-        if taken.insert(candidate.clone()) {
-            return candidate;
+        if !line.text.starts_with(' ')
+            && !line.text.starts_with('\t')
+            && line.text.starts_with("name:")
+        {
+            let ending = &text[line.content_end..line.next];
+            let mut replacement = format!("name: {}", render_scalar(new_name));
+            replacement.push_str(ending);
+            return Ok(format!(
+                "{}{}{}",
+                &text[..line.start],
+                replacement,
+                &text[line.next..]
+            ));
         }
-        n += 1;
+        cursor = line.next;
     }
-}
-
-fn type_for_kind(kind: &Kind) -> &'static str {
-    match kind {
-        Kind::Preference => "user",
-        // An unknown old kind has no new counterpart; `project` is the general factual bucket.
-        Kind::Decision | Kind::Fact | Kind::Unknown(_) => "project",
-        Kind::Lesson => "feedback",
-    }
-}
-
-fn source_for_source(source: &Source) -> String {
-    match source {
-        Source::User => "user".to_owned(),
-        Source::Agent => "model".to_owned(),
-        Source::Import => "import".to_owned(),
-        // A value a newer old writer defined is kept when it is already a new source.
-        Source::Unknown(raw) if RECORD_SOURCES.contains(&raw.as_str()) => raw.clone(),
-        Source::Unknown(_) => "import".to_owned(),
-    }
-}
-
-fn provenance_of(record: &MemoryRecord) -> Option<FileProvenance> {
-    let session_id = record.provenance.session_id.clone();
-    let turn_id = record.provenance.turn_id.clone();
-    if session_id.is_none() && turn_id.is_none() {
-        return None;
-    }
-    Some(FileProvenance {
-        session_id,
-        turn_id,
-    })
 }

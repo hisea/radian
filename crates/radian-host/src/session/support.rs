@@ -216,6 +216,21 @@ pub(super) fn memory_notice(memory: &Option<MemoryService>, config: &InjectionCo
     }
 }
 
+/// The `/memory off` switch a **resume** restores (ADR 0021 D7): the last `ConfigChanged`
+/// whose change carries `memory.off`. `false` when the journal has none.
+pub(super) fn resumed_memory_off(parsed: &radian_session::Session) -> bool {
+    let mut off = false;
+    for event in parsed.events() {
+        if let radian_session::EventData::ConfigChanged { change, .. } = &event.data
+            && let Some(value) = change.get("memory").and_then(|memory| memory.get("off"))
+            && let Some(value) = value.as_bool()
+        {
+            off = value;
+        }
+    }
+    off
+}
+
 /// The model route a **resume** would restore (ADR 0026 D8): the journal's last model
 /// `ConfigChanged`. `None` when the file has none — the caller then falls back to the config
 /// and, failing that, requires `--model`. Reads the session file line by line; it is the one

@@ -400,18 +400,8 @@ mod tests {
     #[test]
     fn the_builtin_role_names_no_tool_identifier() {
         for tool in [
-            "read",
-            "write",
-            "patch",
-            "glob",
-            "grep",
-            "shell",
-            "job",
-            "memory_search",
-            "ask_user",
-            "skill",
-            "subagent",
-            "goal",
+            "read", "write", "patch", "glob", "grep", "shell", "job", "ask_user", "skill",
+            "subagent", "goal",
         ] {
             assert!(
                 !DEFAULT_ROLE.contains(&format!("`{tool}`")),

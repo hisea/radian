@@ -1,9 +1,10 @@
-//! The storage errors. `Corrupt`/`UnknownCritical`/`BadSeq` name the 1-based line, like
-//! `radian-session` (ADR 0006 §2.2/§7).
+//! The storage errors. The record store names a file and, for a broken file, its 1-based line;
+//! the JSONL paths the registry and the one-time migration still read name a line too (ADR
+//! 0021 D3/D4).
 
 use std::path::PathBuf;
 
-use crate::model::{MemoryId, Scope, Source};
+use crate::model::ProjectId;
 
 /// Why a memory operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -13,10 +14,8 @@ pub enum MemoryError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("{path}: already locked by another writer; a memory log allows exactly one writer")]
+    #[error("{path}: already locked by another writer")]
     Locked { path: PathBuf },
-    #[error("{path}: the file was replaced repeatedly while opening; giving up")]
-    Raced { path: PathBuf },
     #[error("{path}: line {line}: JSON parse failure (column {column}): {message}")]
     Corrupt {
         path: PathBuf,
@@ -45,41 +44,8 @@ pub enum MemoryError {
         line: u64,
         message: String,
     },
-    #[error("this store was not opened for scope {0:?}")]
-    ScopeNotOpen(Scope),
-    #[error("no memory record {id}")]
-    NotFound { id: MemoryId },
     #[error("no project {0}")]
-    UnknownProject(crate::model::ProjectId),
-    #[error("record {id} has an unknown {field} value; it cannot be changed by this version")]
-    UnknownRecordField { id: MemoryId, field: &'static str },
-    #[doc(hidden)]
-    #[error("simulated crash (test seam)")]
-    SimulatedCrash,
-    #[error("key {key:?} is already held by {id} at revision {revision}")]
-    KeyConflict {
-        key: String,
-        id: MemoryId,
-        revision: u64,
-    },
-    #[error("record {id} is at revision {found}, but revision {expected} was expected")]
-    RevisionConflict {
-        id: MemoryId,
-        expected: u64,
-        found: u64,
-    },
-    #[error("a {actor:?} writer may not modify {id}, which is a {existing:?} record")]
-    SourceProtected {
-        id: MemoryId,
-        actor: Source,
-        existing: Source,
-    },
-    #[error("markdown is not in the export format: line {line}, column {column}: {message}")]
-    Markdown {
-        line: usize,
-        column: usize,
-        message: String,
-    },
+    UnknownProject(ProjectId),
     #[error("invalid memory record name {name:?}: {reason}")]
     InvalidName { name: String, reason: String },
     #[error("invalid memory record: {message}")]
@@ -90,6 +56,9 @@ pub enum MemoryError {
         line: usize,
         message: String,
     },
+    #[doc(hidden)]
+    #[error("simulated crash (test seam)")]
+    SimulatedCrash,
 }
 
 impl MemoryError {
@@ -99,19 +68,4 @@ impl MemoryError {
             source,
         }
     }
-}
-
-/// Where a Purge was interrupted, for the crash-at-every-step test seam (ADR 0021 D3). A real
-/// crash leaves the same on-disk state: the atomic rename means the path holds either the old
-/// log or the new one, never a half-written file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PurgeStep {
-    /// The temporary file has been written but not fsynced.
-    TempWritten,
-    /// The temporary file has been fsynced.
-    TempFsynced,
-    /// The rename happened but the directory was not fsynced.
-    Renamed,
-    /// Fully done.
-    DirFsynced,
 }

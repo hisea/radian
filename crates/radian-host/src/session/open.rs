@@ -15,7 +15,9 @@ use radian_sandbox::{Sandbox, SandboxSlot};
 use super::facade::{DriverEnd, SessionError};
 use super::local::{DriverTask, LocalSession};
 use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQueue, SessionSetup};
-use super::support::{FileRoots, build_coding_tools, memory_notice, open_journal, session_hooks};
+use super::support::{
+    FileRoots, build_coding_tools, memory_notice, open_journal, resumed_memory_off, session_hooks,
+};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
 use crate::memory::{MemoryHooks, MemoryInjection, MemoryService};
@@ -440,6 +442,10 @@ pub async fn open_session(
         Some(Arc::clone(&journal)),
         Some(Arc::clone(&inbox)),
     );
+    // A resumed `/memory off` starts this process with no section and no memory writes.
+    if parsed.as_ref().is_some_and(resumed_memory_off) {
+        injection.set_off(true);
+    }
     let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =

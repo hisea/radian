@@ -1929,3 +1929,16 @@ test run with `cargo nextest run -p radian-host --lib --locked --profile sandbox
 | TK0271-M1 | the line cap is off by one (`taken > max_lines` instead of `taken >= max_lines`) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (line-201 was injected) |
 | TK0271-M2 | the rewrite notice is returned on every call (the `notices_sent` guard is removed) | ✅ 1 failed (rc=100) | `memory::injection::tests::a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent` (the third call got a second notice) |
 | TK0271-M3 | global is selected before project (`selected` push order swapped) | ✅ 1 failed (rc=100) | `memory::injection::tests::two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte` (the global section came first) |
+
+## TK0274: memory commands run on files, and `/memory off` (2026-10-31)
+
+Branch `work/TK0274-memory-commands`. Each mutation was applied in place, the named test run
+with `cargo nextest run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'` (or `-p radian-exec --profile sandbox` for the CLI test), and the source
+restored from `.radian/mut-backup/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0274-M1 | `MemoryService::remove` deletes the file but skips `remove_index_file` | ✅ 1 failed (rc=100) | `memory::service::tests::forget_deletes_the_file_and_its_index_line` (the index still holds `note.md`) |
+| TK0274-M2 | `MemoryHooks::before_tool_call` returns `Allow` without checking the off switch | ✅ 1 failed (rc=100) | `cli::memory_off_refuses_a_model_write_until_memory_on` (the first write's tool result has no `memory is off for this session`) |
+| TK0274-M3 | `MemoryService::merge` overwrites a collision instead of renaming the moved file | ✅ 1 failed (rc=100) | `memory::service::tests::merge_renames_a_collision_instead_of_overwriting` (one `note` remained and no `note-2` was reported) |

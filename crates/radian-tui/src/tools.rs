@@ -404,13 +404,6 @@ pub fn renderer_for(name: &str) -> ToolRender {
             body: plain_body,
             compact: false,
         },
-        // The memory tool (ADR 0021): operation and record id, the tool's own record
-        // summary as the body.
-        "memory_search" => ToolRender {
-            head: memory_head,
-            body: plain_body,
-            compact: false,
-        },
         _ => ToolRender {
             head: generic_head,
             body: generic_body,
@@ -530,10 +523,6 @@ mod tests {
         assert_eq!(
             renderer_for("shell").head(&card("shell", json!({"command": "ls"})), ""),
             "$ ls"
-        );
-        assert_eq!(
-            renderer_for("memory_search").head(&card("memory_search", json!({"ids": ["m1"]})), ""),
-            "m1"
         );
     }
 
@@ -805,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ask_and_memory_heads() {
+    fn the_ask_head() {
         let ask = card(
             "ask_user",
             json!({"questions": [{"id": "q1"}, {"id": "q2"}]}),
@@ -813,18 +802,6 @@ mod tests {
         assert_eq!(ask_head(&ask, ""), "2 questions");
         let ask1 = card("ask_user", json!({"questions": [{"id": "q1"}]}));
         assert_eq!(ask_head(&ask1, ""), "1 question");
-        assert_eq!(
-            memory_head(&card("memory_search", json!({"ids": ["mem-7"]})), ""),
-            "mem-7"
-        );
-        assert_eq!(
-            memory_head(&card("memory_search", json!({"ids": ["a", "b"]})), ""),
-            "2 records"
-        );
-        assert_eq!(
-            memory_head(&card("memory_search", json!({"query": "auth flow"})), ""),
-            "auth flow"
-        );
         // The search tools are small tools with a title naming what was searched.
         assert_eq!(
             grep_head(&card("grep", json!({"pattern": "fn main"})), ""),

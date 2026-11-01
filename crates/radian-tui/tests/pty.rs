@@ -5428,7 +5428,10 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
             "--workspace",
             ws.to_str().unwrap(),
         ],
-        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("EDITOR", "/usr/bin/true"),
+        ],
         30,
         110,
     );
@@ -5438,7 +5441,7 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
         pty.screen()
     );
 
-    pty.send(b"/memory add \"hello world\"\r");
+    pty.send(b"/memory add hello-world\r");
     assert!(
         pty.wait_for_screen("created project", wait_positive()),
         "the notice names the new project: {}",
@@ -5451,7 +5454,7 @@ async fn pty_a_memory_add_shows_the_created_project_notice() {
     );
     pty.send(b"/memory list\r");
     assert!(
-        pty.wait_for_screen("hello world", wait_positive()),
+        pty.wait_for_screen("hello-world", wait_positive()),
         "the record is in the new project: {}",
         pty.screen()
     );
@@ -5487,7 +5490,10 @@ async fn pty_memory_commands_run_without_a_model_request() {
             "--session-id",
             "memcmd",
         ],
-        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &[
+            ("RADIAN_HOME", home.to_str().unwrap()),
+            ("EDITOR", "/usr/bin/true"),
+        ],
         30,
         110,
     );
@@ -5503,7 +5509,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
         "{}",
         pty.screen()
     );
-    pty.send(b"/memory add \"hello world\"\r");
+    pty.send(b"/memory add hello-world\r");
     assert!(
         pty.wait_for_screen("added", wait_positive()),
         "{}",
@@ -5511,7 +5517,7 @@ async fn pty_memory_commands_run_without_a_model_request() {
     );
     pty.send(b"/memory list\r");
     assert!(
-        pty.wait_for_screen("hello world", wait_positive()),
+        pty.wait_for_screen("hello-world", wait_positive()),
         "{}",
         pty.screen()
     );

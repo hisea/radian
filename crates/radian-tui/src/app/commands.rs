@@ -75,18 +75,17 @@ impl App {
             // stored objective is re-sent verbatim every turn). Changes journal through
             // the loop; `Show` only reads.
             command::Outcome::Goal(command) => self.goal_command(command),
-            command::Outcome::Memory(command) => {
-                // The interface has no stdin: a bare `-` writes nothing. Show the
-                // one notice and keep the typed line so it can be edited in place.
-                if let Some(notice) = command::stdin_dash_notice(&command) {
-                    self.input = line.into();
-                    self.push_notice(notice.to_owned());
-                    return UpdateResult::dirty();
-                }
-                UpdateResult::effect(Effect::RunMemoryCommand {
-                    command,
-                    confirmed: false,
-                })
+            command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
+                command,
+                confirmed: false,
+            }),
+            command::Outcome::MemorySwitch(off) => {
+                self.push_notice(if off {
+                    "memory off: this session records no memory, and memory writes are refused"
+                } else {
+                    "memory on: memory writes are allowed again"
+                });
+                UpdateResult::effect(Effect::SetMemory { off })
             }
             // `/compact` is asynchronous: the loop runs it on the runtime between turns and the
             // result comes back as `Input::CompactDone`.
@@ -397,7 +396,6 @@ impl App {
                 let command = radian_host::memory::commands::MemoryCommand::List {
                     global: false,
                     project: false,
-                    all: false,
                     json: false,
                 };
                 self.push_modal(Modal::ConfirmCommand(PendingCommand {

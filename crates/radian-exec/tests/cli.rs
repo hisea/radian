@@ -7261,7 +7261,7 @@ struct MemoryEnv {
 
 impl MemoryEnv {
     fn new(name: &str) -> Self {
-        let dir = scratch(name);
+        let dir = ScratchDir(common::process_dir(&format!("radian-exec-memory-{name}")));
         let ws = dir.join("ws");
         let home = dir.join("radian");
         let sessions = dir.join("sessions");
@@ -7291,10 +7291,6 @@ impl MemoryEnv {
         self.run_with_input_in(ws, args, "").await
     }
 
-    async fn run_with_input(&self, args: &[&str], input: &str) -> (i32, String, String) {
-        self.run_with_input_in(&self.ws, args, input).await
-    }
-
     async fn run_with_input_in(
         &self,
         ws: &Path,
@@ -7317,8 +7313,9 @@ impl MemoryEnv {
         feed_and_wait(spawn_radian_top(&refs, &envs), input).await
     }
 
-    /// The log of the only project in this home.
-    fn project_log(&self) -> PathBuf {
+    /// The directory of the only project in this home.
+    #[allow(dead_code)]
+    fn project_dir(&self) -> PathBuf {
         let projects = self.home.join("memory/projects");
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(&projects)
             .unwrap()
@@ -7326,16 +7323,8 @@ impl MemoryEnv {
             .collect();
         dirs.sort();
         assert_eq!(dirs.len(), 1, "expected one project, found {dirs:?}");
-        dirs[0].join("log.jsonl")
+        dirs[0].clone()
     }
-}
-
-/// The id from a line like `added mem-… (revision 1)`.
-fn memory_id(line: &str) -> String {
-    line.split_whitespace()
-        .nth(1)
-        .unwrap_or_else(|| panic!("no id in {line:?}"))
-        .to_owned()
 }
 
 fn git_available() -> bool {
@@ -7374,153 +7363,185 @@ async fn memory_commands_do_not_need_a_model_or_create_a_session() {
 }
 
 #[tokio::test]
-async fn memory_add_list_edit_confirm_export_import_show_round_trip() {
+async fn memory_add_list_show_edit_round_trip() {
     let env = MemoryEnv::new("mem-roundtrip");
     let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
 
-    let (code, stdout, stderr) = env
-        .run(&["add", "--key", "style", "tabs over spaces"])
-        .await;
+    let (code, stdout, stderr) = env.run(&["add", "--type", "feedback", "style"]).await;
     assert_eq!(code, 0, "{stderr}");
-    let id = memory_id(&stdout);
+    assert!(stdout.contains("added style"), "{stdout}");
+    assert!(
+        stdout.contains("no editor was opened"),
+        "off a terminal, add says so: {stdout}"
+    );
+
+    // The file exists with the skeleton: source user, created/modified, empty body.
+    let project = linked_project(&env, &env.ws).await;
+    let path = env
+        .home
+        .join("memory/projects")
+        .join(&project)
+        .join("style.md");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("source: user"), "{text}");
+    assert!(text.contains("type: feedback"), "{text}");
+    assert!(text.contains("created:"), "{text}");
+    assert!(text.contains("modified:"), "{text}");
 
     let (code, stdout, stderr) = env.run(&["list"]).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains(&id), "{stdout}");
-    assert!(stdout.contains("style"), "{stdout}");
     assert!(
-        stdout.contains("project:"),
-        "default write scope is Project: {stdout}"
-    );
-    assert!(
-        stdout.contains("confirmed"),
-        "a user record is confirmed: {stdout}"
+        stdout.contains("project\tstyle\tfeedback\tuser"),
+        "{stdout}"
     );
 
-    let (code, stdout, _) = env.run(&["show", &id]).await;
+    let (code, stdout, _) = env.run(&["show", "style"]).await;
     assert_eq!(code, 0);
     assert!(
-        stdout.contains("source: user"),
-        "user commands write Source::User: {stdout}"
+        stdout.contains("name: style"),
+        "show prints the file as stored: {stdout}"
     );
 
-    let (code, _, stderr) = env.run(&["edit", &id, "--revision", "1", "revised"]).await;
+    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
     assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run(&["confirm", &id, "--revision", "2"]).await;
-    assert_eq!(code, 0, "{stderr}");
+    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
+    let record = &value.as_array().unwrap()[0];
+    assert_eq!(record["name"], "style");
+    assert_eq!(record["type"], "feedback");
+    assert_eq!(record["source"], "user");
+    assert!(record["created"].is_string());
+    assert!(record["modified"].is_string());
 
-    let (code, exported, stderr) = env.run(&["export"]).await;
+    // `edit` without an editor on a pipe prints the path and says no editor ran.
+    let (code, stdout, stderr) = env.run(&["edit", "style"]).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(exported.contains("revised"), "{exported}");
-    let edited = exported.replace("revised", "imported");
-    let (code, stdout, stderr) = env.run_with_input(&["import", "-"], &edited).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stdout.contains("revised 1"),
-        "the import became a revision: {stdout}"
-    );
-
-    let (code, stdout, _) = env.run(&["show", &id]).await;
-    assert_eq!(code, 0);
-    assert!(stdout.contains("imported"), "{stdout}");
+    assert!(stdout.contains("style.md"), "{stdout}");
+    assert!(stdout.contains("no editor was opened"), "{stdout}");
 }
 
 #[tokio::test]
-async fn memory_edit_with_the_wrong_revision_exits_one_and_reports_the_current_one() {
-    let env = MemoryEnv::new("mem-conflict");
+async fn memory_add_refuses_a_bad_or_existing_name_and_writes_nothing() {
+    let env = MemoryEnv::new("mem-add-refusal");
     let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, stdout, _) = env.run(&["add", "v1"]).await;
-    let id = memory_id(&stdout);
+    let (code, _, stderr) = env.run(&["add", "Bad Name"]).await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
 
-    let (code, _, stderr) = env.run(&["edit", &id, "--revision", "99", "v2"]).await;
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("is at revision 1"), "{stderr}");
-    let (_, stdout, _) = env.run(&["show", &id]).await;
-    assert!(stdout.contains("v1"), "{stdout}");
-    assert!(
-        !stdout.contains("v2"),
-        "a conflict writes nothing: {stdout}"
-    );
+    let (code, _, stderr) = env.run(&["add", "note"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = env.run(&["add", "note"]).await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+    let (_, stdout, _) = env.run(&["list"]).await;
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
 }
 
 #[tokio::test]
 async fn memory_forget_needs_confirmation_off_a_terminal() {
     let env = MemoryEnv::new("mem-forget");
     let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, stdout, _) = env.run(&["add", "keep me"]).await;
-    let id = memory_id(&stdout);
+    let (_, _, _) = env.run(&["add", "keep"]).await;
 
-    let (code, _, stderr) = env.run(&["forget", &id]).await;
+    let (code, _, stderr) = env.run(&["forget", "keep"]).await;
     assert_eq!(code, 2, "non-tty without --yes refuses: {stderr}");
     assert!(stderr.contains("--yes"), "{stderr}");
-    let (code, _, _) = env.run(&["show", &id]).await;
-    assert_eq!(code, 0, "the record is still there");
+    let (code, _, _) = env.run(&["show", "keep"]).await;
+    assert_eq!(code, 0, "the file is still there");
 
-    let (code, stdout, stderr) = env.run(&["forget", "--yes", &id]).await;
+    let (code, stdout, stderr) = env.run(&["forget", "--yes", "keep"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("forgot"), "{stdout}");
-    let (code, _, _) = env.run(&["show", &id]).await;
-    assert_eq!(code, 1, "the record is gone");
+    let (code, _, _) = env.run(&["show", "keep"]).await;
+    assert_eq!(code, 1, "the file is gone");
 }
 
 #[tokio::test]
-async fn memory_purge_removes_the_forgotten_content_from_the_log() {
-    let env = MemoryEnv::new("mem-purge");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, stdout, _) = env.run(&["add", "TOPSECRET-12345"]).await;
-    let id = memory_id(&stdout);
-    let (code, _, stderr) = env.run(&["forget", "--yes", &id]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let log = env.project_log();
-    let before = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        before.contains("TOPSECRET-12345"),
-        "forget keeps the bytes on disk: {before}"
-    );
+async fn the_removed_memory_commands_exit_two_and_name_the_current_set() {
+    let env = MemoryEnv::new("mem-removed");
+    for command in ["purge", "export", "confirm"] {
+        let (code, _, stderr) = env.run(&[command]).await;
+        assert_eq!(code, 2, "{command}: {stderr}");
+        assert!(
+            stderr.contains("list, show, add, edit, forget, open, project, relink, split, merge"),
+            "{command}: {stderr}"
+        );
+        assert!(stderr.contains("were removed"), "{command}: {stderr}");
+    }
+}
 
-    let (code, stdout, stderr) = env.run(&["purge", "--yes"]).await;
+#[tokio::test]
+async fn memory_open_off_a_terminal_prints_the_directory_and_exits_zero() {
+    let env = MemoryEnv::new("mem-open");
+    let (code, _, stderr) = env.run(&["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("purged 1"), "{stdout}");
-    let after = std::fs::read_to_string(&log).unwrap();
+    let project = linked_project(&env, &env.ws).await;
+    let (code, stdout, stderr) = env.run(&["open"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    let expected = env.home.join("memory/projects").join(project);
+    assert_eq!(stdout.trim(), expected.to_string_lossy(), "{stdout}");
+}
+
+#[tokio::test]
+async fn memory_show_of_a_bad_file_names_the_line_and_list_still_lists_the_others() {
+    let env = MemoryEnv::new("mem-bad-frontmatter");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let (_, _, _) = env.run(&["add", "good"]).await;
+    let project = linked_project(&env, &env.ws).await;
+    let bad = env
+        .home
+        .join("memory/projects")
+        .join(&project)
+        .join("bad.md");
+    std::fs::write(
+        &bad,
+        "---\nname: bad\ndescription: x\ntype: nope\nsource: user\ncreated: 2026-10-31T12:00:00.000000Z\nmodified: 2026-10-31T12:00:00.000000Z\n---\nbody\n",
+    )
+    .unwrap();
+
+    let (code, _, stderr) = env.run(&["show", "bad"]).await;
+    assert_eq!(code, 1, "{stderr}");
     assert!(
-        !after.contains("TOPSECRET-12345"),
-        "purge removes the bytes: {after}"
+        stderr.contains("line 4"),
+        "the error names the line: {stderr}"
     );
+    let (code, stdout, stderr) = env.run(&["list"]).await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("good"), "{stdout}");
+    assert!(stdout.contains("unreadable"), "{stdout}");
 }
 
 #[tokio::test]
 async fn memory_json_output_is_parseable_and_has_stable_fields() {
     let env = MemoryEnv::new("mem-json");
     let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, _, _) = env.run(&["add", "json body"]).await;
+    let (_, _, _) = env.run(&["add", "json-note", "--type", "reference"]).await;
 
     let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
     assert_eq!(code, 0, "{stderr}");
     let value: Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
     let record = &value.as_array().unwrap()[0];
     for field in [
-        "id",
         "scope",
-        "kind",
-        "content",
+        "name",
+        "description",
+        "type",
         "source",
-        "verification",
-        "status",
-        "created_at",
-        "updated_at",
-        "revision",
+        "created",
+        "modified",
     ] {
         assert!(record.get(field).is_some(), "missing {field}: {record}");
     }
-    assert_eq!(record["kind"], "fact");
-    assert_eq!(record["content"], "json body");
+    assert_eq!(record["name"], "json-note");
+    assert_eq!(record["type"], "reference");
     assert_eq!(record["source"], "user");
-    assert_eq!(record["status"], "active");
-    assert!(
-        record["scope"]["project"].is_string(),
-        "project scope is a tagged value: {record}"
-    );
+    assert_eq!(record["scope"], "project");
+
+    let (code, stdout, _) = env.run(&["show", "json-note", "--json"]).await;
+    assert_eq!(code, 0);
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["frontmatter"]["name"], "json-note");
+    assert_eq!(value["body"], "");
 
     let (code, stdout, _) = env.run(&["project", "--json"]).await;
     assert_eq!(code, 0);
@@ -7533,11 +7554,11 @@ async fn memory_json_output_is_parseable_and_has_stable_fields() {
 #[tokio::test]
 async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
     let env = MemoryEnv::new("mem-unlinked");
-    let (code, _, stderr) = env.run(&["add", "--global", "a global note"]).await;
+    let (code, _, stderr) = env.run(&["add", "--global", "global-note"]).await;
     assert_eq!(code, 0, "{stderr}");
     let (code, stdout, stderr) = env.run(&["list"]).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("a global note"), "{stdout}");
+    assert!(stdout.contains("global-note"), "{stdout}");
     assert!(
         stderr.contains("not linked"),
         "a default-scope list says the workspace is unlinked: {stderr}"
@@ -7547,7 +7568,7 @@ async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
         "no candidate projects yet: {stderr}"
     );
 
-    let (code, _, stderr) = env.run(&["add", "a project note"]).await;
+    let (code, _, stderr) = env.run(&["add", "project-note"]).await;
     assert_eq!(code, 1, "{stderr}");
     assert!(
         stderr.contains("not a project workspace"),
@@ -7582,7 +7603,7 @@ async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
     let env = MemoryEnv::new("mem-auto-create");
     git(&env.ws, &["init", "-q"]);
 
-    let (code, _, stderr) = env.run(&["add", "a project note"]).await;
+    let (code, _, stderr) = env.run(&["add", "project-note"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
         stderr.contains("[memory] created project"),
@@ -7602,14 +7623,13 @@ async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
         stderr.contains(&project),
         "the notice names the project it created: {stderr}"
     );
-    // The record went into that project.
+    // The file went into that project.
     let (code, stdout, stderr) = env.run(&["list"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.contains("project:"),
-        "the record is a project record: {stdout}"
+        stdout.contains("project\tproject-note"),
+        "the file is a project record: {stdout}"
     );
-    assert!(stdout.contains("a project note"), "{stdout}");
     let registry = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
     assert_eq!(
         registry
@@ -7621,7 +7641,7 @@ async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
     );
 
     // Already linked: the second add says nothing about projects.
-    let (code, _, stderr) = env.run(&["add", "a second note"]).await;
+    let (code, _, stderr) = env.run(&["add", "second-note"]).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(
         stderr.is_empty(),
@@ -7634,7 +7654,7 @@ async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
     git(&other, &["init", "-q"]);
     let (code, stdout, stderr) = env.run_in(&other, &["list"]).await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(!stdout.contains("a project note"), "{stdout}");
+    assert!(!stdout.contains("project-note"), "{stdout}");
     let after = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
     assert_eq!(after, registry, "a read registered a project");
 }
@@ -7716,46 +7736,154 @@ async fn linked_project(env: &MemoryEnv, ws: &Path) -> String {
 }
 
 #[tokio::test]
-async fn memory_split_and_merge_move_records_between_projects() {
+async fn memory_split_and_merge_move_files_and_rename_a_collision() {
     let env = MemoryEnv::new("mem-split");
     let a = env.workspace("a");
     let b = env.workspace("b");
+    // A `.git` directory makes each workspace its own project: a real repository, with no
+    // `git` process. Without it, a scratch path under this worktree would resolve to the
+    // worktree's own project and both `a` and `b` would be one project.
+    std::fs::create_dir_all(a.join(".git")).unwrap();
+    std::fs::create_dir_all(b.join(".git")).unwrap();
     let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
     let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
     assert_eq!(code, 0, "{stderr}");
-    let (_, out, _) = env.run_in(&a, &["add", "moved record"]).await;
-    let id = memory_id(&out);
+    env.run_in(&a, &["add", "moved-record"]).await;
+    env.run_in(&a, &["add", "note"]).await;
+    env.run_in(&b, &["add", "note"]).await;
     let project_a = linked_project(&env, &a).await;
     let project_b = linked_project(&env, &b).await;
 
     // `split` needs confirmation: off a terminal, without --yes it refuses and moves nothing.
     let (code, _, stderr) = env
-        .run_in(&a, &["split", &project_a, &project_b, &id])
+        .run_in(&a, &["split", &project_a, &project_b, "moved-record"])
         .await;
     assert_eq!(code, 2, "{stderr}");
     let (_, out, _) = env.run_in(&b, &["list"]).await;
     assert!(
-        !out.contains("moved record"),
+        !out.contains("moved-record"),
         "the refused split moved it: {out}"
     );
 
     let (code, out, stderr) = env
-        .run_in(&a, &["split", "--yes", &project_a, &project_b, &id])
+        .run_in(
+            &a,
+            &["split", "--yes", &project_a, &project_b, "moved-record"],
+        )
         .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("moved"), "{out}");
+    assert!(out.contains("moved moved-record"), "{out}");
     let (_, out, _) = env.run_in(&b, &["list"]).await;
-    assert!(out.contains("moved record"), "the target has it: {out}");
+    assert!(out.contains("moved-record"), "the target has it: {out}");
+    // The index line moved too.
+    let b_index = env
+        .home
+        .join("memory/projects")
+        .join(&project_b)
+        .join("MEMORY.md");
+    assert!(
+        std::fs::read_to_string(&b_index)
+            .unwrap()
+            .contains("moved-record.md"),
+        "the target index has the line"
+    );
 
-    // `merge` the same project back, exercising the second move command.
+    // `merge` every file from b into a: `note` exists in both, so b's copy is `note-2`.
     let (code, out, stderr) = env
         .run_in(&b, &["merge", "--yes", &project_a, &project_b])
         .await;
     assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("moved"), "{out}");
+    assert!(out.contains("renamed it to note-2"), "{out}");
     let (_, out, _) = env.run_in(&a, &["list"]).await;
-    assert!(out.contains("moved record"), "{out}");
+    assert!(out.contains("note"), "{out}");
+    assert!(out.contains("note-2"), "{out}");
+    assert!(out.contains("moved-record"), "{out}");
+}
+
+#[tokio::test]
+async fn memory_off_refuses_a_model_write_until_memory_on() {
+    let env = MemoryEnv::new("mem-off");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let project = linked_project(&env, &env.ws).await;
+    let target = env
+        .home
+        .join("memory/projects")
+        .join(&project)
+        .join("off-note.md");
+    let path = serde_json::to_string(target.to_str().unwrap()).unwrap();
+    let write = |call: &str| {
+        tool_reply(
+            call,
+            "write",
+            &format!("{{\"path\":{path},\"content\":\"NOTE\\n\"}}"),
+        )
+    };
+    let server = MockServer::start(vec![
+        write("w1"),
+        text_reply("first"),
+        write("w2"),
+        text_reply("second"),
+    ])
+    .await;
+    let args = memory_args(&env, &server, "mem-off", None, None);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(&refs, &memory_envs(&env)),
+        "/memory off\nwrite it\n/memory on\nwrite it\n/exit\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    let refused = tool_result_for(&server, 1, "w1");
+    assert!(
+        refused.contains("memory is off for this session"),
+        "the off reason reaches the model: {refused}"
+    );
+    let allowed = tool_result_for(&server, 3, "w2");
+    assert!(
+        !allowed.contains("memory is off for this session"),
+        "after /memory on the write runs: {allowed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "NOTE\n",
+        "only the on write reached the disk"
+    );
+}
+
+#[tokio::test]
+async fn a_session_resumed_after_memory_off_has_no_memory_section() {
+    let env = MemoryEnv::new("mem-off-resume");
+    let (_, _, _) = env.run(&["project", "new"]).await;
+    let project = linked_project(&env, &env.ws).await;
+    let index = project_index_path(&env, &project);
+    write_index(&index, "- [r](r.md) — REMEMBER-ME\n");
+
+    let first = MockServer::start(vec![text_reply("off")]).await;
+    let mut args = memory_args(&env, &first, "mem-off-resume", None, None);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(&refs, &memory_envs(&env)),
+        "/memory off\nhello\n/exit\n",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+
+    // Resume: the recorded switch means this process starts without the section.
+    let second = MockServer::start(vec![text_reply("resumed")]).await;
+    args = memory_args(&env, &second, "unused", Some("hi"), None);
+    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
+    args[at] = "--resume".to_owned();
+    args[at + 1] = "mem-off-resume".to_owned();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, _, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    let system = system_prompt(&second, 0);
+    assert!(
+        !system.contains("REMEMBER-ME") && !system.contains("Memory indexes"),
+        "a resumed off session injects no memory section: {system}"
+    );
 }
 
 // ---------- memory index injection (ADR 0021 D6) ----------
@@ -10001,8 +10129,8 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
     // built-in `skill` (its `theme-import` skill is compiled in), `subagent` (ADR 0043
     // decision 1a — a parent mounts it even with no workspace; only `explore` needs one) and
     // `goal` (ADR 0047 — host-level like `ask_user`, answering `no_active_goal` without one),
-    // and nothing else. `memory_search` mounts only past the injection budget (ADR 0021 D7),
-    // so an empty memory does not list it; `memory_save`/`memory_revise` do not exist.
+    // and nothing else. No memory tool exists: `memory_search`, `memory_save` and
+    // `memory_revise` are unknown names.
     let mut got = names.clone();
     got.sort();
     assert_eq!(

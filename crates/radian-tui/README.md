@@ -573,7 +573,7 @@ keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model
 openai-compatible).
 
 The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
-subcommands, the record ids of `show`/`edit`/`archive`/`restore`/`forget`/`confirm` (listed by
+subcommands, the file names of `show`/`edit`/`forget` (listed by the host — `update` never
 the host — `update` never does I/O), `/export`'s `md|json` and `--force`, `/copy`'s `code`
 selector, and free text for `/sessions`, `/compact` and `/queue`. A future `/model` (provider → model, ADR 0026) or `/login` is one
 more entry in the same tree.
@@ -591,18 +591,21 @@ the rest is sent as an ordinary message.
 | `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
-| `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `search`, `show`, `add`, `edit`, `archive`, `restore`, `forget`, `purge`, `confirm`, `export`, `import`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `show`, `add`, `edit`, `forget`, `open`, `project` / `project new`, `relink`, `split`, `merge` |
+| `/memory off\|on` | refuse memory writes for the rest of this process (`off`) or allow them again (`on`); the switch is recorded in the session for a resume and never written to the config file |
 | `/jobs [kill <id\|all>]` | list this session's running background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill <id>` sends SIGTERM to the whole session, then SIGKILL after 3 s; `kill all` sends SIGKILL at once; the model gets a completion message on the busy/idle lane |
 | `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
 | `/queue <text>` | queue a message for the next turn as an `Inbox::followup`, even while a turn runs (Enter steers then; idle it opens a turn at once). The footer's `queued` item shows the waiting count |
 | `/retry` | resend the last user message, but only when idle and the previous turn ended in a model error; anything else is a `nothing to retry` notice. The `turn failed` notice ends with `/retry to resend` |
 | `/copy [code]` | copy the last committed assistant message's markdown source (a streaming entry never counts), or with `code` only its last fenced block without the fence lines, through `tui.clipboard` |
 
-- Arguments are split with shell quoting, so `/memory add "two words"` is one argument.
-  Unbalanced quotes are an error notice.
+- Arguments are split with shell quoting, so one argument may contain spaces when a command
+  takes free text. Unbalanced quotes are an error notice.
 - The output is shown as transcript notices (scrollable); `--json` is shown verbatim.
-- `forget`, `purge`, `split` and `merge` ask first: a notice shows the prompt, `y` runs it and
-  `n`/`Esc` cancels. While the prompt is up, keys do not type into the input box.
+- `forget`, `split` and `merge` ask first: a notice shows the prompt, `y` runs it and
+  `n`/`Esc` cancels. While the prompt is up, keys do not type into the input box. `add`,
+  `edit` and `open` open the file or directory with `$EDITOR` (or the platform opener) and
+  start it detached.
 - A **read** command runs while a turn is running and does not interrupt it; a **write** takes
   effect at the next model request (ADR 0021 D6).
 - `/compact [note]` asks the runtime to summarize the history now (ADR 0018); the driver runs
@@ -810,7 +813,7 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   like a terminal's scrollback search, and does Esc leave you where you were? pty automation
   asserts the jump and the status, not the feel.
 - **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
-  `/memory forget <id>` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
+  `/memory forget note` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
 - **the composer's feel**: type a paragraph and edit in the middle — does Left/Right/Home/End
   (Ctrl-A/Ctrl-E) land where you expect, does a word jump (Ctrl-Left) feel right, and do
@@ -1678,7 +1681,6 @@ looked up by name in a compile-time registry with a generic fallback:
 | `patch` | the path (`+N −M` in the meta) | the numbered `-old` / `+new` rows, one hunk per replaced range (the `hunks` structured field), no invented context |
 | `write` | the path (`+N −M` in the meta) | the content written |
 | `ask_user` | the open `╭─ ask …` frame | one `prompt → answer` line per question, the chosen option marked `◉` |
-| `memory_search` / `_save` / `_revise` | the record id, the ids read, or the query | the tool's record summary |
 | anything else (MCP included) | the name and the arguments' JSON summary | the result text |
 
 The diff body (ADR 0028) is `│ ` + a right-aligned 4-cell line number +

@@ -777,9 +777,9 @@ mod tests {
                     } else {
                         Vec::new()
                     };
-                    // `--kind` parses through `parse_kind`, not a `ValueEnum`.
-                    if id == "kind" {
-                        values = radian_host::memory::commands::KIND_NAMES
+                    // `--type` parses through `parse_type`, not a `ValueEnum`.
+                    if id == "type" {
+                        values = radian_host::memory::commands::TYPE_NAMES
                             .iter()
                             .map(|name| name.to_string())
                             .collect();

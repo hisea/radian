@@ -26,7 +26,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use radian_core::{HookContext, HookError, Hooks, InputSource, Message, ModelRequest};
+use radian_core::{
+    HookContext, HookError, Hooks, InputSource, Message, ModelRequest, ToolCall, ToolDecision,
+};
 use radian_memory::{FileStore, Scope};
 use radian_runtime::Inbox;
 use radian_session::{MemoryInjectedIndex, SessionJournal};
@@ -105,6 +107,8 @@ pub struct Section {
 struct State {
     /// The section, computed by the first caller and reused byte for byte afterwards.
     built: Option<Arc<Section>>,
+    /// `/memory off`: this session refuses memory writes and, on the next session, injection.
+    off: bool,
     /// The rewrite notices were put on the inject lane (once per process/session).
     notices_sent: bool,
     /// The `MemoryInjected` record was written (once per process/session).
@@ -126,6 +130,9 @@ pub struct MemoryInjection {
     journal: Option<Arc<SessionJournal>>,
     /// Where a rewrite notice goes. `None` in a caller that has no inbox (the unit-only shape).
     inbox: Option<Arc<Inbox>>,
+    /// The scope directories a write may name, canonicalized. Empty when this process has no
+    /// memory root.
+    roots: Vec<std::path::PathBuf>,
     state: Mutex<State>,
 }
 
@@ -137,14 +144,40 @@ impl MemoryInjection {
         journal: Option<Arc<SessionJournal>>,
         inbox: Option<Arc<Inbox>>,
     ) -> Arc<Self> {
+        let roots = memory_roots(service.as_ref());
         Arc::new(Self {
             service,
             config,
             warn,
             journal,
             inbox,
+            roots,
             state: Mutex::new(State::default()),
         })
+    }
+
+    /// Whether `/memory off` is in force for this session.
+    pub fn off(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).off
+    }
+
+    /// Sets the session switch. `off` also freezes injection for the rest of this process
+    /// (the section is computed once); a resume records it so the next process starts without
+    /// the section.
+    pub fn set_off(&self, off: bool) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).off = off;
+    }
+
+    /// Whether a `write`/`patch` call names a path under one of this session's memory scopes.
+    fn is_memory_write(&self, call: &ToolCall) -> bool {
+        if call.name != "write" && call.name != "patch" {
+            return false;
+        }
+        let Some(path) = call.arguments.get("path").and_then(|value| value.as_str()) else {
+            return false;
+        };
+        let path = expand_tilde(path);
+        self.roots.iter().any(|root| path.starts_with(root))
     }
 
     pub fn config(&self) -> &InjectionConfig {
@@ -154,6 +187,9 @@ impl MemoryInjection {
     /// The section, computed **once per process** and reused byte for byte (ADR 0021 D6,
     /// ADR 0036).
     pub fn section(&self) -> Arc<Section> {
+        if self.off() {
+            return Arc::new(Section::default());
+        }
         if let Some(built) = self
             .state
             .lock()
@@ -230,7 +266,7 @@ impl MemoryInjection {
             return Section::default();
         }
 
-        let files = FileStore::open(service.store().root());
+        let files = FileStore::open(service.root());
         section.text.push_str(INJECTION_HEADER);
         for (name, scope) in selected {
             let title = if name == "project" {
@@ -380,6 +416,30 @@ impl MemoryHooks {
     }
 }
 
+/// One canonical path per memory scope directory, for the session-off write check.
+fn memory_roots(service: Option<&MemoryService>) -> Vec<std::path::PathBuf> {
+    service
+        .map(|service| {
+            service
+                .file_tool_roots()
+                .into_iter()
+                .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Expands a leading `~` against `HOME`; every other spelling is unchanged.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~")
+        && let Some(home) = crate::home::user_home()
+    {
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
 impl Hooks for MemoryHooks {
     async fn before_model_call(
         &self,
@@ -413,6 +473,21 @@ impl Hooks for MemoryHooks {
             (self.injection.warn)(&format!("MemoryInjected could not be written: {error}"));
         }
         Ok(())
+    }
+
+    /// `/memory off`: a model write or patch into a memory scope is refused with the session
+    /// reason. The file tools have already passed permissions, so this runs after them.
+    async fn before_tool_call(
+        &self,
+        _cx: &HookContext,
+        call: &ToolCall,
+    ) -> Result<ToolDecision, HookError> {
+        if self.injection.off() && self.injection.is_memory_write(call) {
+            return Ok(ToolDecision::Deny {
+                reason: "memory is off for this session".to_owned(),
+            });
+        }
+        Ok(ToolDecision::Allow)
     }
 }
 
