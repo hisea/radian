@@ -463,7 +463,7 @@ A hub is one process that manages every repository registered on this machine. T
 
 **Pairing.** `radian hub pair` prints `http://127.0.0.1:<port>`, the token, and a QR code of `radian://hub?url=<url>&token=<token>` rendered as Unicode half blocks. `--no-qr` prints the text only, and a terminal that is not a TTY gets the text only.
 
-**The API.** The routes carry the `/v1/` prefix and an integer `api_version`, `1` in this decision. `api_version` names the route set and its behavior; `schema_version` (decision 5) names the plan and task file shape and changes on its own, so a route can be added without touching a file and a file field can be added while `api_version` stays `1`. `GET /v1/version` returns `{"api_version": 1, "schema_version": 1}`. Every body is `application/json`; a `204` has no body. The read bodies are produced by the same functions the CLI prints, so a field change in `radian arc list --json` or `radian arc show --json` changes the route with it.
+**The API.** The routes carry the `/v1/` prefix and an integer `api_version`, `1` in this decision. `api_version` names the route set and its behavior; `schema_version` (decision 5) names the plan and task file shape and changes on its own, so a route can be added without touching a file and a file field can be added while `api_version` stays `1`. `GET /v1/version` returns `{"api_version": 1, "schema_version": 1}`. Every body is `application/json` except the event stream's `text/event-stream`; a `204` has no body. The read bodies are produced by the same functions the CLI prints, so a field change in `radian arc list --json` or `radian arc show --json` changes the route with it.
 
 | Route | Method | Body |
 |---|---|---|
