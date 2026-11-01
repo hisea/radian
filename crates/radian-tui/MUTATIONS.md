@@ -3567,3 +3567,19 @@ from a copy under `.radian/`, which `cmp` found identical.
 | TK0298-M3 | `total_line` counts `unreported_runs` again and does not pluralize | `arc_tui::only_a_run_with_no_drawable_counter_predates_metrics` (the total did not read `1 run predates metrics`) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0300: the metrics tab's detail tables (2026-11-01, branch `work/TK0300-tui-metrics-detail-tables`)
+
+The tool table and the request log share one column layout, a sub-cent fee keeps four decimals, and
+a run without metrics cannot be selected. Each mutation was applied by hand to
+`crates/radian-tui/src/arc/metrics.rs`, the named `arc_tui` test ran with `cargo nextest run -p
+radian-tui --locked --profile sandbox --test arc_tui -E 'test(<name>)'`, and the file was restored
+from a copy under `.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0300-M1 | `Table::lines` left-aligns every column, so the numbers lose their right edge | `arc_tui::the_tool_table_lines_up_every_column` (a calls field no longer ended in its value) | ✅ 1 failed |
+| TK0300-M2 | `format_fee` uses three decimals below one cent too | `arc_tui::the_request_log_lines_up_and_formats_sub_cent_fees` (the row read `$0.000` instead of `$0.0004`) | ✅ 1 failed |
+| TK0300-M3 | `run_has_metrics` returns true, so an old run is selectable again | `arc_tui::a_page_of_old_runs_selects_nothing` (a `❯` appeared and `Enter` opened a detail) | ✅ 1 failed |
+
+3/3 caught.

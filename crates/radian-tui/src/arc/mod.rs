@@ -600,6 +600,8 @@ pub struct TaskPage {
     pub metric_follow: bool,
     /// The selected run's detail is open (`Enter`).
     pub metric_open: bool,
+    /// The open detail's request log is expanded (`r`); it opens collapsed.
+    pub metric_requests: bool,
     /// The open detail's first frame: it anchors the list on the selected run.
     metric_open_shown: bool,
     /// The run the selection last pointed at, so a moved selection is revealed.
@@ -660,6 +662,7 @@ impl TaskPage {
             metric_scroll: 0,
             metric_follow: false,
             metric_open: false,
+            metric_requests: false,
             metric_open_shown: false,
             metric_shown: None,
             pending_scroll: 0,
@@ -689,14 +692,44 @@ impl TaskPage {
     fn set_tab(&mut self, tab: TaskTab) {
         if self.tab == TaskTab::Metrics && tab != TaskTab::Metrics {
             self.metric_open = false;
+            self.metric_requests = false;
         }
         self.tab = tab;
     }
 
     fn clamp_metric_sel(&mut self) {
-        self.metric_sel = self
-            .metric_sel
-            .min(self.metric_run_count().saturating_sub(1));
+        let Some(metrics) = self.metrics.as_ref() else {
+            self.metric_sel = 0;
+            self.metric_open = false;
+            self.metric_requests = false;
+            return;
+        };
+        match metrics::selectable_run(metrics, self.metric_sel) {
+            Some(index) => self.metric_sel = index,
+            None => {
+                self.metric_sel = 0;
+                self.metric_open = false;
+                self.metric_requests = false;
+            }
+        }
+    }
+
+    /// The run index the metrics tab selects, or `None` when no run on the page has metrics.
+    fn metric_selection(&self) -> Option<usize> {
+        self.metrics
+            .as_ref()
+            .and_then(|metrics| metrics::selectable_run(metrics, self.metric_sel))
+    }
+
+    /// Moves the metrics selection to the next run with metrics, in the direction `forward`, and
+    /// stops at the first or the last one.
+    fn move_metric_selection(&mut self, forward: bool) {
+        let Some(metrics) = self.metrics.as_ref() else {
+            return;
+        };
+        if let Some(index) = metrics::step_selectable(metrics, self.metric_sel, forward) {
+            self.metric_sel = index;
+        }
     }
 
     /// Whether a run of the task is active, so the metrics tab re-reads on the 2-second
@@ -2123,6 +2156,7 @@ impl ArcApp {
         if self.page == Page::Task && self.task.as_ref().is_some_and(|page| page.metric_open) {
             if let Some(page) = self.task.as_mut() {
                 page.metric_open = false;
+                page.metric_requests = false;
             }
             return ArcKey::Redraw;
         }
@@ -2734,10 +2768,7 @@ impl ArcApp {
                     if page.metric_open {
                         page.metric_scroll = page.metric_scroll.saturating_add(1);
                     } else {
-                        page.metric_sel = page
-                            .metric_sel
-                            .saturating_add(1)
-                            .min(page.metric_run_count().saturating_sub(1));
+                        page.move_metric_selection(true);
                     }
                     ArcKey::Redraw
                 }
@@ -2766,7 +2797,7 @@ impl ArcApp {
                     if page.metric_open {
                         page.metric_scroll = page.metric_scroll.saturating_sub(1);
                     } else {
-                        page.metric_sel = page.metric_sel.saturating_sub(1);
+                        page.move_metric_selection(false);
                     }
                     ArcKey::Redraw
                 }
@@ -2787,9 +2818,27 @@ impl ArcApp {
             }
             KeyCode::Enter => {
                 // A run's detail opens below its row and closes again on `Enter`; `Esc` closes
-                // it first, then leaves the page (ADR 0048 §13).
-                if page.tab == TaskTab::Metrics && page.metric_run_count() > 0 {
-                    page.metric_open = !page.metric_open;
+                // it first, then leaves the page (ADR 0048 §13). Only a run that reported metrics
+                // can be selected, so `Enter` does nothing while none can.
+                if page.tab == TaskTab::Metrics {
+                    if let Some(index) = page.metric_selection() {
+                        page.metric_sel = index;
+                        page.metric_open = !page.metric_open;
+                        page.metric_requests = false;
+                        page.metric_follow = false;
+                        ArcKey::Redraw
+                    } else {
+                        ArcKey::Ignored
+                    }
+                } else {
+                    ArcKey::Ignored
+                }
+            }
+            KeyCode::Char('r') => {
+                // The request log opens collapsed (`r to expand`); `r` toggles it while the
+                // selected run's detail is open.
+                if page.tab == TaskTab::Metrics && page.metric_open {
+                    page.metric_requests = !page.metric_requests;
                     page.metric_follow = false;
                     ArcKey::Redraw
                 } else {
