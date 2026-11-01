@@ -21,18 +21,19 @@
 //!   `bytes.<tool>` (a call is counted at `ToolExecutionSettled`, attributed through its
 //!   `ToolExecutionStarted`); `denied` counts a `PermissionResolved` with `decision: deny`,
 //!   and a denied call is not also counted in `failed`.
-//! - `models`: the route each request ran under, in first-use order. The route is read from
-//!   `SessionCreated.config_snapshot.model.provider`/`.model` when the snapshot nests a
-//!   `model` object (the configured route name), else from its top-level
-//!   `provider`/`model` (the adapter kind the exec host writes), and from every
-//!   `ConfigChanged.change.model.provider`/`.model` after it (the configured route name).
+//! - `models`: the route each request ran under, in first-use order. The route is the
+//!   configured provider name, never the adapter kind: `SessionCreated.config_snapshot`
+//!   carries it in `provider_id`, or nested as `model.provider`/`model.model`, or, for the
+//!   TUI and older records, directly in the top-level `provider`/`model`; every later
+//!   `ConfigChanged.change.model.provider`/`.model` switches it.
 //! - `request_log`: one entry per request, with `latency_ms` from the previous journal
 //!   record's `ts` to the usage record's `ts`, cut at 500 entries
 //!   (`request_log_truncated` then says so).
 //!
 //! A counter no record reported is `None` ("not reported", never 0, ADR 0007 J1). `retries`
-//! counts the live `ModelRetrying` events this process saw (ADR 0010: they are not journal
-//! records), so a resumed run counts only its own retries.
+//! counts the live `ModelRetrying` events of the folded range (ADR 0010: they are not journal
+//! records): an exec run counts its own process's, a resumed run only the resumed part, and an
+//! ACP turn only its own turn's.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -501,9 +502,11 @@ impl Folder {
     }
 }
 
-/// The route a `SessionCreated.config_snapshot` names. A snapshot that nests
-/// `model.provider`/`model.model` carries the configured route name; the exec host writes
-/// top-level `provider`/`model`, where `provider` is the adapter kind.
+/// The route a `SessionCreated.config_snapshot` names, as the configured provider name (never
+/// the adapter kind). The exec host writes `provider_id` (the configured route) beside the
+/// adapter kind in `provider`; a nested `model.provider`/`model.model` and the TUI's direct
+/// top-level `provider`/`model` name the route too. An older exec snapshot carries only the
+/// adapter kind, which is then the best available answer.
 fn route_from_snapshot(snapshot: &Value) -> Option<(String, String)> {
     if let Some(model) = snapshot.get("model")
         && let (Some(provider), Some(name)) = (
@@ -513,8 +516,11 @@ fn route_from_snapshot(snapshot: &Value) -> Option<(String, String)> {
     {
         return Some((provider.to_owned(), name.to_owned()));
     }
-    let provider = snapshot.get("provider").and_then(Value::as_str)?;
     let model = snapshot.get("model").and_then(Value::as_str)?;
+    let provider = snapshot
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .or_else(|| snapshot.get("provider").and_then(Value::as_str))?;
     Some((provider.to_owned(), model.to_owned()))
 }
 

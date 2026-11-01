@@ -36,6 +36,15 @@ impl Env {
         let sessions = scratch(&format!("{prefix}-sessions"));
         Self { home, sessions }
     }
+
+    /// A scratch tree under the process temp dir, for a test that does not need the short
+    /// `/tmp` path the rest of this file uses: when the workspace sandbox runs the suite,
+    /// `$TMPDIR` sits inside the workspace, so this test runs there too.
+    fn under_temp(prefix: &str) -> Self {
+        let home = common::process_dir(&format!("radian-exec-jsonl-{prefix}-home"));
+        let sessions = common::process_dir(&format!("radian-exec-jsonl-{prefix}-sessions"));
+        Self { home, sessions }
+    }
 }
 
 /// Spawns `radian exec <args>` in `env`, plus [`common::fast_catalog_url`], so
@@ -133,7 +142,7 @@ async fn run_jsonl(
     let mut lines: Vec<String> = out.lines().map(str::to_owned).collect();
     assert!(
         !lines.is_empty(),
-        "jsonl stdout must end with a Result line"
+        "jsonl stdout must end with a Result line: {err}"
     );
     let result: Value = serde_json::from_str(lines.pop().unwrap().as_str())
         .expect("the last stdout line is the Result record");
@@ -297,6 +306,75 @@ async fn two_retries_are_reported_from_the_live_stream() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(result["run_metrics"]["retries"], 2, "{result}");
     assert_eq!(result["run_metrics"]["requests"], 1, "{result}");
+}
+
+/// Writes an `auth.json` entry for a named provider (ADR 0026 D10): the route name and the
+/// wire adapter are different, which is what `models[].provider` must report.
+fn write_named_provider(env: &Env, name: &str, base_url: &str) {
+    let dir = env.home.join("credentials");
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let entry = json!({
+        name: {
+            "type": "api_key",
+            "key": "sk-test",
+            "env": {"RADIAN_BASE_URL": base_url, "RADIAN_KIND": "openai-compatible"},
+        }
+    });
+    let path = dir.join("auth.json");
+    std::fs::write(&path, entry.to_string()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// Rework: `models[].provider` is the configured route name, never the adapter kind. A fresh
+/// run has no `ConfigChanged`, so `SessionCreated.config_snapshot` alone names the route.
+#[tokio::test]
+async fn a_fresh_run_names_the_configured_route_not_the_adapter_kind() {
+    let server = MockServer::start(vec![text_reply_with_usage("ok", 10, 2)]).await;
+    let env = Env::under_temp("route");
+    write_named_provider(&env, "corp", &server.base_url);
+    // A named provider owns its endpoint, so `--base-url` (which `run_jsonl` always passes)
+    // is refused; the endpoint comes from the `auth.json` entry.
+    let (code, out, err) = feed(
+        spawn(
+            &[
+                "--model",
+                "m",
+                "--provider",
+                "corp",
+                "--session-id",
+                "route",
+                "--output",
+                "jsonl",
+                "-p",
+                "hi",
+            ],
+            &env,
+        ),
+        "",
+    )
+    .await;
+
+    assert_eq!(code, 0, "{err}");
+    let result: Value = serde_json::from_str(out.lines().last().expect("a Result line"))
+        .expect("the last stdout line is the Result record");
+    assert_eq!(
+        result["run_metrics"]["models"][0]["provider"], "corp",
+        "the configured route, not `openai-compatible`: {result}"
+    );
+    assert_eq!(result["run_metrics"]["models"][0]["model"], "m", "{result}");
+    assert_eq!(
+        result["run_metrics"]["models"][0]["requests"], 1,
+        "{result}"
+    );
 }
 
 /// The golden stdout: every durable line is byte-identical to the journal file, live lines

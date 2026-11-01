@@ -97,7 +97,7 @@ carries what ACP has no field for:
 |---|---|
 | `cost` | `{ "micros", "incomplete", "estimated" }`, the fee of the turn that answered the prompt, or `null` when no call of that turn had a price. `estimated` is always `false`: a turn this process ran priced each call as it arrived. |
 | `text` | The last assistant message's text, in full — for a prompt, the text of the turn that answered it; empty when that turn appended none. |
-| `metrics` | The answering turn's run metrics, in the object `radian exec`'s `Result.run_metrics` carries. The keys, their types, units and when each is absent are in [the `Result` record](cli.md#the-output-jsonl-result-record); the fold covers only the answering turn's records, exactly as `cost` and `text` do, and `retries` counts this process's live retry events. |
+| `metrics` | The answering turn's run metrics, in the object `radian exec`'s `Result.run_metrics` carries. The keys, their types, units and when each is absent are in [the `Result` record](cli.md#the-output-jsonl-result-record); the fold covers only the answering turn's records, exactly as `cost` and `text` do, and `retries` counts the answering turn's live retry events (an earlier turn's retry never carries over). |
 | `error` | Present only on a `refusal` caused by a model or hook error of that turn: the masked error text. |
 
 A client that does not read `_meta` ignores it.

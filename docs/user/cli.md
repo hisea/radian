@@ -181,7 +181,7 @@ The waiting Stop verdicts are counted in `unhandled_stop_notices`; `unhandled_jo
 | `model_errors` | number | errors | `TurnFailed` records. |
 | `retries` | number | retries | the live `ModelRetrying` events this process saw (a retry is never a journal record); a resumed run counts only its own. |
 | `tools` | object | — | one `{calls, result_bytes, failed, denied}` per tool name. A call is counted when it settles and attributed through its start; a denied call counts in `calls` and `denied`, not in `failed`; `result_bytes` is the UTF-8 size of the result's text parts. |
-| `models` | array | — | `{provider, model, requests}` in first-use order; the route comes from `SessionCreated.config_snapshot` and every later `ConfigChanged` that switches provider or model. |
+| `models` | array | — | `{provider, model, requests}` in first-use order; `provider` is the configured route name (a `[providers.<name>]` name or a built-in provider id), never the wire adapter. The route comes from `SessionCreated.config_snapshot` and every later `ConfigChanged` that switches provider or model. |
 | `request_log` | array | — | one entry per request in order, at most 500: `{ts, latency_ms, kind, input_uncached, cache_read, cache_write, output, reasoning, fee_micros, stop_reason, model}`. `latency_ms` runs from the previous journal record's `ts` to the usage record's `ts` (null when either is missing); `kind` is `chat` or `compaction`; `ts` and `stop_reason` are null when the record did not carry them. |
 | `request_log_truncated` | `true` | — | present only when the run made more than 500 requests: the log keeps the first 500. |
 

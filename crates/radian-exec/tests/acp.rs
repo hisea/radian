@@ -1932,6 +1932,55 @@ async fn a_second_prompts_metrics_hold_only_its_turns_requests() {
     assert_eq!(code, 0, "{stderr}");
 }
 
+/// Rework: a retry is a live event of one turn (ADR 0010), so a clean prompt after a retrying
+/// one must not inherit the earlier turn's count: `retries` belongs to the answering turn,
+/// exactly like the rest of the metrics object.
+#[tokio::test]
+async fn a_clean_prompt_after_a_retrying_one_reports_no_retries() {
+    let server = MockServer::start(vec![
+        Reply::status(503, "busy"),
+        Reply::status(503, "busy"),
+        priced_text_reply("ONE", 100, 10),
+        priced_text_reply("TWO", 200, 20),
+    ])
+    .await;
+    let env = Env::fresh("prompt-retries");
+    let config = env.home.join("retries.toml");
+    std::fs::write(&config, "schema_version = 1\n[model]\nretries = 2\n").unwrap();
+    let mut acp = Acp::spawn(
+        &[
+            "--model",
+            "m",
+            "--base-url",
+            &server.base_url,
+            "--config",
+            config.to_str().unwrap(),
+            "--workspace",
+            env.workspace.to_str().unwrap(),
+        ],
+        &env,
+    );
+    acp.initialize().await;
+    let new = acp.new_session(&env.workspace).await;
+    let session = new["result"]["sessionId"]
+        .as_str()
+        .expect("a session id")
+        .to_owned();
+
+    let first = acp.prompt(&session, "first", Decision::None).await;
+    let first_metrics = &first.result()["_meta"]["radian"]["metrics"];
+    assert_eq!(first_metrics["retries"], 2, "{}", first.response);
+
+    let second = acp.prompt(&session, "second", Decision::None).await;
+    let result = second.result();
+    assert_eq!(
+        result["_meta"]["radian"]["metrics"]["retries"], 0,
+        "the clean second turn owns no retry: {result}"
+    );
+    let (code, stderr) = acp.finish().await;
+    assert_eq!(code, 0, "{stderr}");
+}
+
 /// ADR 0049 decision 4: a prompt that arrives while a wake turn runs is refused, and the wake
 /// turn's end never answers it. Once the wake turn is over, the prompt gets its own turn.
 #[tokio::test]

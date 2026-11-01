@@ -761,3 +761,16 @@ with `cargo nextest run -p radian-exec --locked --profile sandbox --no-fail-fast
 | TK0287-M3 | `for_turn` ignores the turn range and folds every record | ✅ 1 failed (rc=100) | `acp::a_second_prompts_metrics_hold_only_its_turns_requests` |
 | TK0287-M4 | the request log's 500-entry cap is dropped | ✅ 1 failed (rc=100) | `metrics::tests::more_than_five_hundred_requests_truncate_the_log` |
 | TK0287-M5 | `compaction_ms` assigns each compaction's time instead of summing | ✅ 1 failed (rc=100) | `metrics::tests::compaction_ms_sums_every_compactions_summary_call` |
+
+## TK0287: rework 2, per-turn retries and the configured route (2026-11-01)
+
+Branch `work/TK0287-run-metrics-in-exec-and-acp` (rework 2). The mutations were applied to
+`src/acp/events.rs` and `src/host.rs`; the ACP one also rebuilt the `radian` binary, and each
+named test was run with `cargo nextest run -p radian-exec --locked --profile sandbox
+--no-fail-fast -E 'test(<name>)'`; the source was restored from a backup under `.radian/`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0287-M6 | `TurnLedger::retries` sums every turn's retries instead of reading the answering turn's | ✅ 1 failed (rc=100) | `acp::a_clean_prompt_after_a_retrying_one_reports_no_retries` (`retries: 2` on the clean second prompt) |
+| TK0287-M7 | `SessionCreated.config_snapshot` drops `provider_id`, leaving only the adapter kind in `provider` | ✅ 1 failed (rc=100) | `jsonl::a_fresh_run_names_the_configured_route_not_the_adapter_kind` (`provider: "openai-compatible"` instead of `"corp"`) |
+
