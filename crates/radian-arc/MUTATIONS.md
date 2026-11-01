@@ -1958,3 +1958,19 @@ restored from a copy under `.radian/`, which `diff -q` found identical.
 `cargo nextest run -p radian-arc --locked --profile sandbox --test review -E '…'`. Each file was
 restored from `.radian/mut/` and `cmp` found it identical to the backup. M7 was added in the
 second fix round and ran the same way against `.radian/mut/verdict.rs.m7`.
+
+## TK0266: the follow-up collects what did not fail each review round (2026-10-31, branch `work/TK0266-followup-and-tui-by-severity`)
+
+The follow-up reads every review round of a collected task, oldest attempt first, and keeps the
+findings below that round's recorded `fix_level` or `pre_existing`; the findings that failed a
+round are fixed before the merge and are not collected. Each mutation was applied by hand to the
+working file and the named test ran with `cargo nextest run -p radian-arc --locked --profile
+sandbox --test review -E 'test(…)'`; the file was restored from a copy under `.radian/mut/` and
+`cmp` found it identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0266-M1 | `ReviewReport::rest_with` keeps every finding (`_ => true`), so the below-`fix_level` filter is gone | `review::a_major_that_failed_a_round_and_was_fixed_is_not_collected` (the fixed `major` was collected and the merge proposed `TK0002-p-followups`) | ✅ 1 failed |
+| TK0266-M2 | `followup_item_key` ignores `summary` (the third part is `String::new()`), so two findings at the same `file:line` collapse | `review::an_old_shape_round_and_a_new_round_merge_into_one_list` (the brief held two `- ` lines instead of three, and the old round's second note disappeared) | ✅ 1 failed |
+
+2/2 caught.
