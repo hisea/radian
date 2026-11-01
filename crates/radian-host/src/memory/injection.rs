@@ -187,9 +187,6 @@ impl MemoryInjection {
     /// The section, computed **once per process** and reused byte for byte (ADR 0021 D6,
     /// ADR 0036).
     pub fn section(&self) -> Arc<Section> {
-        if self.off() {
-            return Arc::new(Section::default());
-        }
         if let Some(built) = self
             .state
             .lock()
@@ -198,6 +195,12 @@ impl MemoryInjection {
             .clone()
         {
             return built;
+        }
+        // A section already built stays frozen for this process, even after `/memory off`;
+        // the switch's injection effect is the next session (or an `off` before the first
+        // call, which builds no section at all).
+        if self.off() {
+            return Arc::new(Section::default());
         }
         // Build outside the lock: reading two files must not serialize another reader, and a
         // racing caller simply keeps the first section (the bytes are deterministic).
