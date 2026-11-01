@@ -8,6 +8,7 @@ use radian_core::{
 use radian_sandbox::{Sandbox, SandboxMode, SandboxSlot};
 
 use crate::deny::DenySet;
+use crate::memory_roots::MemoryRoots;
 use crate::read_roots::ReadRoots;
 use crate::workspace::{WorkspaceError, WorkspaceRoot};
 use crate::{fail, foreground, glob, grep, jobs, patch, read, shell, write};
@@ -263,8 +264,20 @@ impl CodingTools {
         read_roots: ReadRoots,
         deny: DenySet,
     ) -> Result<Self, WorkspaceError> {
+        Self::with_roots_and_deny(root, read_roots, MemoryRoots::none(), deny)
+    }
+
+    /// [`CodingTools::with_read_roots_and_deny`] with the writable memory scopes the host
+    /// passed (ADR 0039 decision 4). The tier source is empty, which reads as the `workspace`
+    /// tier; the memory scopes are read and written in both tiers.
+    pub fn with_roots_and_deny(
+        root: impl AsRef<std::path::Path>,
+        read_roots: ReadRoots,
+        memory_roots: MemoryRoots,
+        deny: DenySet,
+    ) -> Result<Self, WorkspaceError> {
         Ok(Self::from_root(
-            WorkspaceRoot::with_access(root, read_roots, deny, SandboxSlot::empty())?,
+            WorkspaceRoot::with_roots(root, read_roots, memory_roots, deny, SandboxSlot::empty())?,
             SandboxSlot::empty(),
             None,
         ))
@@ -308,7 +321,20 @@ impl CodingTools {
         read_roots: ReadRoots,
         deny: DenySet,
     ) -> Result<Self, CodingToolsError> {
-        let root = WorkspaceRoot::with_access(root, read_roots, deny, sandbox.clone())?;
+        Self::with_sandbox_slot_and_roots(root, sandbox, read_roots, MemoryRoots::none(), deny)
+    }
+
+    /// [`CodingTools::with_sandbox_slot_and_access`] with the writable memory scopes the host
+    /// passed (ADR 0039 decision 4).
+    pub fn with_sandbox_slot_and_roots(
+        root: impl AsRef<std::path::Path>,
+        sandbox: SandboxSlot,
+        read_roots: ReadRoots,
+        memory_roots: MemoryRoots,
+        deny: DenySet,
+    ) -> Result<Self, CodingToolsError> {
+        let root =
+            WorkspaceRoot::with_roots(root, read_roots, memory_roots, deny, sandbox.clone())?;
         if let Some(current) = sandbox.get()
             && current.policy().workspace != root.root()
         {
