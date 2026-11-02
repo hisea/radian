@@ -146,11 +146,11 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`, and so is a git that cannot produce the diff: a failed read is never a `200` with an empty text. | `200`, `401`, `404` |
 | `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
-| `/v1/repos/<name>/sessions` | `GET` | `sessions` (array), the repository's sessions, live and ended, newest activity first; see [Sessions](#sessions). | `200`, `401`, `404` |
-| `/v1/repos/<name>/sessions/<id>/transcript` | `GET` | `session` (string) and `entries` (array): the journal folded into [transcript entries](#transcript-entries). | `200`, `401`, `404` |
-| `/v1/repos/<name>/sessions/<id>/events` | `GET` | A server-sent-event stream of the session's changes; see [the session event stream](#the-session-event-stream). | `200`, `401`, `404`, `409` |
-| `/v1/repos/<name>/sessions/<id>/models` | `GET` | `models` (array): the control port's `models` answer, grouped by provider with the current route marked. | `200`, `401`, `404`, `409`, `502` |
-| `/v1/repos/<name>/items/<task>/conversation` | `GET` | `task` (string), `attempt` (integer or `null`) and `entries` (array): one attempt's `result.jsonl` folded with the ACP fold. `?attempt=<n>` picks an attempt by number. | `200`, `400`, `401`, `404` |
+| `/v1/repos/<name>/sessions` | `GET` | `sessions` (array), the repository's sessions, live and ended, newest activity first; see [Sessions](#sessions). | `200`, `401`, `404`, `500` |
+| `/v1/repos/<name>/sessions/<id>/transcript` | `GET` | `session` (string) and `entries` (array): the journal folded into [transcript entries](#transcript-entries). | `200`, `401`, `404`, `500` |
+| `/v1/repos/<name>/sessions/<id>/events` | `GET` | A server-sent-event stream of the session's changes; see [the session event stream](#the-session-event-stream). | `200`, `401`, `404`, `409`, `500` |
+| `/v1/repos/<name>/sessions/<id>/models` | `GET` | `models` (array): the control port's `models` answer, grouped by provider with the current route marked. | `200`, `401`, `404`, `409`, `500`, `502` |
+| `/v1/repos/<name>/items/<task>/conversation` | `GET` | `task` (string), `attempt` (integer or `null`) and `entries` (array): one attempt's `result.jsonl` folded with the ACP fold. `?attempt=<n>` picks an attempt by number. | `200`, `400`, `401`, `404`, `500` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
 `<path>` in the last read route is percent-encoded, so a file whose name contains `/` stays one path.
@@ -256,7 +256,7 @@ The body is one object with a `sessions` array; each entry has these fields:
 | `model` | object or `null` | The model route in force, `{"provider": string, "model": string}`, as the live session's port reports it; `null` for an ended session, whose route no process reports. |
 
 A live session whose journal the index has not caught up with is still listed, with `created`, `last_activity` and `title` `null`.
-An unknown repository is `404`; a session directory that cannot be read is `500`.
+An unknown repository is `404`; a session directory or its index that cannot be read is `500`.
 
 ### `GET /v1/repos/<name>/sessions/<id>/transcript`
 
