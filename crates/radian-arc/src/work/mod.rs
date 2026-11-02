@@ -1920,16 +1920,23 @@ const VERDICT_COPY_LIMIT: u64 = 1024 * 1024;
 /// The directory in the worker's worktree that holds the copies (ADR 0048 decision 7).
 const VERDICT_COPY_DIR: &str = ".radian/arc-verdicts";
 
+/// What the copies' directory's own ignore file holds: every name in it, itself included, so
+/// git ignores the copies whatever the repository's own ignore rules say (ADR 0048 decision 7).
+const VERDICT_COPY_IGNORE: &[u8] = b"*\n";
+
 /// Copies every attempt file a brief names under `arc/runs/` into the worker's worktree and
 /// rewrites its path to the copy (ADR 0048 decision 7). A path that cannot be copied stays in
 /// the text as it is and gets one note line for the attempt record; nothing here fails the
 /// attempt. The copy is keyed by the path's own `runs/<task>/attempts/<attempt>/` segments, so
-/// a follow-up task can name another task's verdict.
+/// a follow-up task can name another task's verdict. When at least one copy is written, the
+/// copies' directory gets its own `.gitignore` holding `*`, so git ignores it in every
+/// repository; a brief that names no copy writes nothing at all.
 fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<String>) {
     let runs = arc.join("runs");
     let prefix = format!("{}/", runs.display());
     let mut text = String::with_capacity(brief.len());
     let mut notes = Vec::new();
+    let mut copied = false;
     let mut rest = brief;
     while let Some(start) = rest.find(&prefix) {
         text.push_str(&rest[..start]);
@@ -1941,7 +1948,10 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
             .unwrap_or(tail.len());
         let named = &tail[..end];
         match copy_verdict(named, &runs, worktree) {
-            Ok(relative) => text.push_str(&relative.display().to_string()),
+            Ok(relative) => {
+                copied = true;
+                text.push_str(&relative.display().to_string());
+            }
             Err(reason) => {
                 text.push_str(named);
                 notes.push(format!("verdict copy skipped: {named}: {reason}"));
@@ -1950,7 +1960,19 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
         rest = &tail[end..];
     }
     text.push_str(rest);
+    if copied
+        && let Err(reason) =
+            write_verdict_copy(worktree, &verdict_ignore_path(), VERDICT_COPY_IGNORE)
+    {
+        notes.push(format!("verdict copy ignore file skipped: {reason}"));
+    }
     (text, notes)
+}
+
+/// The ignore file the copies' directory carries, written the same no-symlink way as the
+/// copies themselves (ADR 0048 decision 7).
+fn verdict_ignore_path() -> PathBuf {
+    Path::new(VERDICT_COPY_DIR).join(".gitignore")
 }
 
 /// Whether `c` ends a path in a brief. The briefs wrap a path in backticks; prose around one

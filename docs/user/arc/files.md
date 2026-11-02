@@ -31,8 +31,10 @@ A file over 32 KiB (32,768 bytes), a file that is not UTF-8, a path that is not 
 The worker never reads the file itself: its sandbox denies `.radian/arc/`, and the wrapper puts the content on the worker's stdin.
 
 A brief that points at a file under `.radian/arc/runs/` gets a copy as well: when the wrapper composes the brief, it copies the file into the worker's worktree at `.radian/arc-verdicts/<task>/<attempt>/<file>` and puts that worktree-relative path in the brief, so the worker reads the copy and the sandbox rule does not change.
+The copies' directory holds a `.gitignore` that the wrapper writes with the content `*`, so git ignores the copies in every repository, whatever that repository's own ignore rules say; arc writes no `.git/info/exclude` line and no committed `.gitignore` for them.
 The task file keeps the absolute path.
 A file that is missing, is not a regular file, is larger than 1 MiB, or cannot be copied stays in the brief as the path it already had, and the attempt record carries `verdict copy skipped: <path>: <reason>` in its notes, next to the `worker-brief.md skipped:` line.
+A `.gitignore` that cannot be written leaves the copies unignored and does not fail the attempt: the record carries `verdict copy ignore file skipped: <reason>` as well.
 
 ## Plan and task files
 
