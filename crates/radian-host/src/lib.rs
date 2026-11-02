@@ -15,6 +15,7 @@ pub mod btw;
 mod catalog;
 pub mod chatgpt_usage;
 pub mod command_footer;
+pub mod compose;
 pub mod config;
 pub mod context;
 pub mod context_estimate;

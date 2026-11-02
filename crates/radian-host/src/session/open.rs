@@ -431,6 +431,10 @@ pub async fn open_session(
         intent_stop_warning,
         hook_stop_warning,
     ));
+    // ADR 0011 L2: a turn runs with the source of the input that opened it. The control port
+    // may queue an owner input while another turn runs (it must not raise that turn's source),
+    // so the reset happens at the claim, not at the enqueue.
+    command_hooks.set_turn_source_hooks(Arc::downgrade(&hooks));
     // ADR 0045 §4: the permission layer asks the same command hooks to answer an `ask`
     // before any approver (and before the non-human denial). The permission crate holds
     // only the trait; this is the one place the two sides meet, so `radian-permissions`
