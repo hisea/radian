@@ -2340,3 +2340,22 @@ which `cmp` found identical.
 1/1 caught.
 
 3/3 caught.
+
+## TK0310 rework 2: a prompt's scan can miss a port that is listening (2026-11-02, branch `work/TK0310-tui-hub-marker-and-takeover`)
+
+The hub's prompt route treated a port that was bound but not yet serving as no host: its
+`list_sessions` probe read-timed out, so the route started a hub-held child, which the new
+one-process-per-journal refusal rejected with exit 2, and the route answered `502`. The route
+now scans the control sockets before it starts anything (`locate`) and, when a child it did
+start fails, probes again and sends the message through the process that holds the journal.
+The mutation was applied by hand to `crates/radian-arc/src/hub/sessions.rs`, run with `cargo
+nextest run -p radian-arc --test hub_session_write --locked -E
+'test(a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it)'` outside the workspace
+sandbox (which denies socket connects), and restored from `.radian/sessions.rs.bak`, which
+`cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0310-M2 | `start_for` returns the spawn failure instead of probing the sockets again for the holder | `hub_session_write::a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it` (`502` `the session process exited before its control port answered (exit status: 2)` instead of `200`) | ✅ 1 failed |
+
+1/1 caught.

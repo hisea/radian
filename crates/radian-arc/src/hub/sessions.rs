@@ -454,23 +454,42 @@ impl SessionHub {
             Ok(_) => Ok(self.socket_for(pid)),
             Err(error) => {
                 self.forget_held(pid);
-                Err(error)
+                // The child may have been refused by the one-process-per-journal check: the
+                // process that hosts the session was listening but too slow to answer this
+                // scan, and answered the child's own scan (which is what makes it refuse, or
+                // what makes its `--resume` find the journal locked). Probe again and route
+                // through that process instead of failing the prompt (ADR 0048 §16).
+                match self.probe_hosts(id) {
+                    Some(socket) => Ok(socket),
+                    None => Err(error),
+                }
             }
         }
     }
 
     /// The socket of a process that already hosts `id`, if one does. This is the
     /// one-process-per-journal check: the scanner's cache answers first, but only through
-    /// `alive`, because a process can exit between two scans; on a miss every socket is probed
-    /// afresh, so a process the two-second scan has not seen yet is still found. A fresh row is
-    /// not recorded: the scanner owns the cache and the subscription that goes with it.
+    /// `alive`, because a process can exit between two scans; when the cached socket is dead,
+    /// or on a cache miss, every socket is probed afresh, so a process the two-second scan has
+    /// not seen yet is still found. A fresh row is not recorded: the scanner owns the cache and
+    /// the subscription that goes with it.
     ///
-    /// A `None` from `alive` or a port that reports another id is no host, and the caller then
+    /// A `None` from `alive`, or a port that reports another id, is no host, and the caller then
     /// starts the process.
     fn hosting(&self, id: &str, alive: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-        if let Some((socket, live)) = self.live(id) {
-            return (live.id == id && alive(&socket)).then_some(socket);
+        if let Some((socket, live)) = self.live(id)
+            && live.id == id
+            && alive(&socket)
+        {
+            return Some(socket);
         }
+        self.probe_hosts(id)
+    }
+
+    /// A fresh scan of the run directory for a socket whose port reports `id`, ignoring the
+    /// scanner's cache. Used when a cached row is stale or a port that was silent has to be
+    /// asked again; a fresh row is not recorded (the scanner owns the cache).
+    fn probe_hosts(&self, id: &str) -> Option<PathBuf> {
         for socket in self.sockets() {
             if let Ok(Some(live)) = probe(&socket)
                 && live.id == id
@@ -1163,6 +1182,11 @@ fn send_input(
 /// second prompt for the same ended session finds the process the first one started (the
 /// hub's one-start lock), so only one process ever opens the journal.
 ///
+/// The route checks the control sockets directly before it starts anything (`locate`), the
+/// same probe the opener and the `hub_holder` refusal use: a process the two-second scan has
+/// not seen yet still hosts the session, and starting a second one would only be refused by
+/// the one-process-per-journal rule.
+///
 /// # Errors
 ///
 /// [`SessionError::Bad`]/[`SessionError::Invalid`] for a refused body, [`SessionError::Unknown`]
@@ -1171,10 +1195,10 @@ pub fn prompt(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<Va
     let input = parse_input(body)?;
     // The session must be this repository's before anything starts.
     journal_for(repo, id)?;
-    if let Some((socket, _)) = hub.live(id) {
+    if let Some((socket, _)) = hub.locate(id) {
         match send_input(hub, id, &socket, &input) {
-            // The cached socket died between the scan and this send: resume, the same way an
-            // ended session is. A `Gone` connect already dropped the stale entry.
+            // The socket this row names died between the scan and this send: resume, the same
+            // way an ended session is.
             Err(SessionError::NotLive(_)) => {}
             other => return other,
         }

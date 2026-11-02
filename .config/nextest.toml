@@ -73,7 +73,7 @@ test-group = "pty"
 #    tests exercise without a socket (the transcript, the conversation, the router,
 #    the version) run in the sandbox.
 #
-# 7. The hub's session write routes (16 names). Each test binds or connects to a
+# 7. The hub's session write routes (17 names). Each test binds or connects to a
 #    control socket at `<home>/run/<pid>.sock`, so its home must be short enough for
 #    `sun_path` and the connect must be allowed: `/tmp` is the only short base that is
 #    writable outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside
@@ -408,6 +408,7 @@ not (
   | test(=a_created_session_sends_its_first_message_as_the_owner_with_the_hub_origin)
   | test(=a_prompt_to_an_ended_session_resumes_the_same_journal)
   | test(=a_prompt_to_a_live_process_outside_the_hub_uses_its_socket)
+  | test(=a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it)
   | test(=two_concurrent_prompts_to_an_ended_session_start_one_process)
   | test(=an_approval_waits_in_the_queue_and_proceeds_after_the_hub_answers)
   | test(=a_late_answer_is_conflict_and_nothing_changes)

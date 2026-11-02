@@ -14,15 +14,16 @@ mod common;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_provider_openai_compatible::testing::{Reply, chunk};
 use common::{Mock, Repo, fast_catalog_url, radian_bin};
+use fs2::FileExt;
 use radian_arc::hub::Registry;
 use serde_json::{Value, json};
 
@@ -764,6 +765,197 @@ fn a_prompt_to_a_live_process_outside_the_hub_uses_its_socket() {
 
     let _ = unsafe { libc::kill(child.pid() as libc::pid_t, libc::SIGTERM) };
     child.wait();
+}
+
+/// A control port that is listening but does not answer until the test lets it: the state a
+/// process is in between binding its socket and serving its first request. The hub's probe
+/// reads time out, so a prompt's scan can miss it entirely.
+struct SlowPort {
+    path: PathBuf,
+    child: Child,
+    enabled: Arc<AtomicBool>,
+    followups: Arc<Mutex<Vec<Value>>>,
+}
+
+impl SlowPort {
+    fn bind(run: &Path, id: &str, workspace: &str) -> Self {
+        // A live pid names the socket: `sockets()` skips a file whose pid is gone.
+        let child = Command::new("sleep")
+            .arg("300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a pid to name the fake socket");
+        let path = run.join(format!("{}.sock", child.id()));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("the fake control socket binds");
+        listener
+            .set_nonblocking(true)
+            .expect("the fake listener is non-blocking");
+        let enabled = Arc::new(AtomicBool::new(false));
+        let followups = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::clone(&enabled);
+        let seen = Arc::clone(&followups);
+        let session = id.to_owned();
+        let workspace = workspace.to_owned();
+        std::thread::spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let answers = Arc::clone(&answers);
+                        let seen = Arc::clone(&seen);
+                        let session = session.clone();
+                        let workspace = workspace.clone();
+                        std::thread::spawn(move || {
+                            serve_slow(stream, &answers, &seen, &session, &workspace);
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Self {
+            path,
+            child,
+            enabled,
+            followups,
+        }
+    }
+
+    /// The `followup` requests the port received, in order.
+    fn followups(&self) -> Vec<Value> {
+        self.followups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+impl Drop for SlowPort {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Answers one connection, once the test has enabled the port, the way a hub-held process's
+/// control port would: its `list_sessions` row names the hub as the holder.
+fn serve_slow(
+    mut stream: UnixStream,
+    enabled: &AtomicBool,
+    followups: &Mutex<Vec<Value>>,
+    id: &str,
+    workspace: &str,
+) {
+    let deadline = Instant::now() + WAIT;
+    while !enabled.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut reader = BufReader::new(stream.try_clone().expect("the fake connection clones"));
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    let request: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
+    let mut answer = |value: Value| {
+        let mut bytes = value.to_string().into_bytes();
+        bytes.push(b'\n');
+        let _ = stream.write_all(&bytes);
+        let _ = stream.flush();
+    };
+    match request.get("verb").and_then(Value::as_str) {
+        Some("list_sessions") => answer(json!({
+            "id": 1,
+            "ok": true,
+            "sessions": [{
+                "id": id,
+                "kind": "main",
+                "workspace": workspace,
+                "model": { "provider": "p", "model": "m" },
+                "state": "idle",
+                "pending": 0,
+                "holder": "hub",
+            }],
+        })),
+        Some("followup") => {
+            followups
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(request);
+            answer(json!({ "id": 1, "ok": true, "message_id": "hub-1" }));
+        }
+        _ => answer(json!({ "id": 1, "ok": false, "error": "unknown verb" })),
+    }
+}
+
+/// The prompt's scan can miss a port that is listening but too slow to answer within the probe
+/// timeout. The hub must still not start a second process for the session: the child it starts
+/// is refused by the one-process-per-journal check, and the route probes again and sends the
+/// message through the holder (ADR 0048 §16).
+#[test]
+fn a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it() {
+    let fixture = Fixture::new("scan-missed", vec![text_reply("created")], "", Some(60));
+    let id = fixture.create(json!({"text": "create it"}));
+    fixture.wait_journal(&id, "the creating turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    // The session is ended, but its journal stays the repository's.
+    fixture.stop_sessions();
+    let workspace = fixture
+        .repo
+        .canonical_clone()
+        .to_string_lossy()
+        .into_owned();
+    let port = SlowPort::bind(&fixture.home.run(), &id, &workspace);
+    // Hold the journal the child would resume: whether it sees the fake port's holder row or
+    // reaches the lock, its start must fail, so the route has to rescan for the holder.
+    let journal = fs::File::open(fixture.journal(&id)).expect("the journal opens");
+    journal
+        .try_lock_exclusive()
+        .expect("the test holds the journal lock");
+
+    // The child binds `<pid>.sock` before it checks the holders; the port starts answering as
+    // soon as that socket appears, so the child's own scan finds the holder.
+    let run = fixture.home.run();
+    let fake = port.path.clone();
+    let enabled = Arc::clone(&port.enabled);
+    let watcher = std::thread::spawn(move || {
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            if sockets(&run).iter().any(|socket| socket != &fake) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        enabled.store(true, Ordering::SeqCst);
+    });
+
+    let response = fixture.prompt(&id, json!({"text": "from the hub"}));
+    watcher.join().expect("the watcher joins");
+    assert_eq!(
+        response.status,
+        200,
+        "{:?}\n--- hub stderr ---\n{}",
+        String::from_utf8_lossy(&response.body),
+        fs::read_to_string(fixture.home.path().join("hub.stderr.log")).unwrap_or_default()
+    );
+    let followups = port.followups();
+    assert_eq!(
+        followups.len(),
+        1,
+        "the prompt reached the process hosting the session: {followups:?}"
+    );
+    assert_eq!(followups[0].get("text"), Some(&json!("from the hub")));
+    assert_eq!(followups[0].get("verb"), Some(&json!("followup")));
 }
 
 /// A child process killed on drop, so a panicking test cannot leak a session process into the
