@@ -223,7 +223,7 @@ The registry file, every subcommand, the pairing and token rules, every route an
 | `add <PATH>` | `--name <NAME>` (default: the directory's base name) | Register a directory that has a `.radian/arc/`. It prints `added <name>  <path>`. |
 | `remove <NAME>` | — | Remove a registered repository. It prints `removed <name>`. |
 | `list` | `--json` | Print one line per repository (`name  path`), or a JSON array of `{name, path}`. |
-| `pair` | `--no-qr` | Print the URL, the token, and a QR code for a client (text only off a terminal or with `--no-qr`). |
+| `pair` | `--url <URL>`, `--no-qr` | Print the URL, the token, and a QR code for a client (text only off a terminal or with `--no-qr`). `--url` puts a reachable address in the code, as in `--url https://mac.example.ts.net` for `tailscale serve`. |
 | `token rotate` | — | Write a new token and print `rotated`; the old token fails on the next request. |
 
 A registry or startup error exits `1`; a usage error exits `2`.

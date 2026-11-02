@@ -29,7 +29,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::future::poll_fn;
 use std::io::IsTerminal;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -357,30 +357,281 @@ async fn serve_http(
     }
 }
 
-/// Prints what `radian hub pair` prints: the URL, the token, and (on a terminal, unless
-/// `no_qr`) the QR code of `radian://hub?url=<url>&token=<token>` as Unicode half blocks. A
-/// pipe or file gets the two text lines only.
+/// Prints what `radian hub pair` prints (ADR 0048 §16): the pairing URL, the token, one
+/// `other: <url>` line per other candidate address when the URL is not loopback, and (on a
+/// terminal, unless `no_qr`) the QR code of [`payload`] as Unicode half blocks. A pipe or file
+/// gets the text lines only.
 ///
 /// # Errors
 ///
-/// The token cannot be prepared, the QR code cannot be built, or stdout cannot be written.
-pub fn pair(port: u16, no_qr: bool) -> Result<(), Error> {
+/// `--url` is not an absolute `http` or `https` URL with a host (a usage error), the token
+/// cannot be prepared, the QR code cannot be built, or stdout cannot be written.
+pub fn pair(bind: IpAddr, port: u16, no_qr: bool, url: Option<&str>) -> Result<(), Error> {
+    // Before the token: a refused `--url` changes no file.
+    let pairing = pairing(bind, port, url, &interface_addresses())?;
     let registry = Registry::open()?;
     let value = token::ensure(registry.dir())?;
-    let url = format!("http://127.0.0.1:{port}");
-    radian_host::write_line(&url)
+    radian_host::write_line(&pairing.url)
         .map_err(|error| Error::Failed(format!("cannot print the hub URL: {error}")))?;
     radian_host::write_line(&value)
         .map_err(|error| Error::Failed(format!("cannot print the hub token: {error}")))?;
+    for other in &pairing.others {
+        radian_host::write_line(&format!("other: {other}"))
+            .map_err(|error| Error::Failed(format!("cannot print the hub URL: {error}")))?;
+    }
+    if pairing.fallback {
+        eprintln!(
+            "hub: no LAN address found; the pairing URL is {}",
+            pairing.url
+        );
+    }
     if no_qr || !std::io::stdout().is_terminal() {
         return Ok(());
     }
-    let payload = format!("radian://hub?url={url}&token={value}");
-    let code = qrcode::QrCode::new(payload.as_bytes())
+    let code = qrcode::QrCode::new(payload(&pairing.url, &value).as_bytes())
         .map_err(|error| Error::Failed(format!("cannot build the pairing QR code: {error}")))?;
     let art = code.render::<qrcode::render::unicode::Dense1x2>().build();
     radian_host::write_stdout(&format!("{art}\n"))
         .map_err(|error| Error::Failed(format!("cannot print the pairing QR code: {error}")))
+}
+
+/// The QR payload a phone reads: `radian://hub?url=<url>&token=<token>`, with the URL
+/// percent-encoded so a path or a query survives the QR reader (ADR 0048 §16).
+#[must_use]
+pub fn payload(url: &str, token: &str) -> String {
+    format!("radian://hub?url={}&token={token}", percent_encode(url))
+}
+
+/// Percent-encodes every byte but an unreserved URL character (RFC 3986 §2.3), so `:` and `/`
+/// in the URL reach the phone as data rather than as separators.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// One IPv4 address an interface of this machine carries, in interface order, with the one flag
+/// the LAN chooser reads (ADR 0048 §16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanCandidate {
+    /// The address the interface carries.
+    pub address: Ipv4Addr,
+    /// Whether the interface is up (`IFF_UP`).
+    pub up: bool,
+}
+
+/// What `radian hub pair` prints: the URL the first line and the QR code carry, the other
+/// addresses this machine answers on, and whether an unspecified bind found no LAN address and
+/// fell back to loopback (ADR 0048 §16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pairing {
+    /// The URL the first stdout line and the QR payload carry.
+    pub url: String,
+    /// The other candidate addresses, as URLs, one per line after the token.
+    pub others: Vec<String>,
+    /// True when `[hub] bind` is unspecified and this machine has no LAN address, so `url` is
+    /// loopback and one stderr line says so.
+    pub fallback: bool,
+}
+
+/// The pairing URL for `[hub] bind`, `[hub] port`, an optional `--url` and this machine's
+/// candidate addresses (ADR 0048 §16): `--url` when given, else loopback for a loopback IPv4
+/// bind, else the bind's own address, else the first eligible LAN address for an unspecified
+/// bind, else loopback with `fallback` set.
+///
+/// # Errors
+///
+/// `url` is not an absolute `http` or `https` URL with a host: a usage error that names
+/// `--url`.
+pub fn pairing(
+    bind: IpAddr,
+    port: u16,
+    url: Option<&str>,
+    candidates: &[LanCandidate],
+) -> Result<Pairing, Error> {
+    let (url, fallback) = match url {
+        Some(url) => (pairing_url(url)?, false),
+        None => match bind {
+            IpAddr::V4(address) if address.is_loopback() => (loopback_url(port), false),
+            IpAddr::V4(address) if address.is_unspecified() => unspecified_url(port, candidates),
+            IpAddr::V6(address) if address.is_unspecified() => unspecified_url(port, candidates),
+            IpAddr::V4(address) => (format!("http://{address}:{port}"), false),
+            IpAddr::V6(address) => (format!("http://[{address}]:{port}"), false),
+        },
+    };
+    let others = if url_host_is_loopback(&url) {
+        Vec::new()
+    } else {
+        let mut others: Vec<String> = Vec::new();
+        // Loopback first: it is the address that always answers, whatever the network is.
+        let loopback = loopback_url(port);
+        if loopback != url {
+            others.push(loopback);
+        }
+        for candidate in candidates.iter().filter(|candidate| eligible(candidate)) {
+            let candidate = format!("http://{}:{port}", candidate.address);
+            if candidate != url && !others.contains(&candidate) {
+                others.push(candidate);
+            }
+        }
+        others
+    };
+    Ok(Pairing {
+        url,
+        others,
+        fallback,
+    })
+}
+
+/// `http://127.0.0.1:<port>`: the URL a loopback bind answers on.
+fn loopback_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The URL for an unspecified bind (`0.0.0.0` or `::`): the first eligible LAN address, or
+/// loopback with the fallback flag when this machine has none.
+fn unspecified_url(port: u16, candidates: &[LanCandidate]) -> (String, bool) {
+    match lan_address(candidates) {
+        Some(address) => (format!("http://{address}:{port}"), false),
+        None => (loopback_url(port), true),
+    }
+}
+
+/// The first address `pair` may print for an unspecified bind (ADR 0048 §16): the first
+/// candidate that is up, not loopback and not link-local, in interface order. `None` when the
+/// list has no such address, and for an empty list.
+#[must_use]
+pub fn lan_address(candidates: &[LanCandidate]) -> Option<Ipv4Addr> {
+    candidates
+        .iter()
+        .find(|candidate| eligible(candidate))
+        .map(|candidate| candidate.address)
+}
+
+/// Whether a candidate may be the LAN address: up, not loopback, not link-local.
+fn eligible(candidate: &LanCandidate) -> bool {
+    candidate.up && !candidate.address.is_loopback() && !is_link_local(candidate.address)
+}
+
+/// Whether `address` is in `169.254.0.0/16`, the link-local range an interface picks when no
+/// DHCP server answered; such an address is often not reachable from the phone's network.
+fn is_link_local(address: Ipv4Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    first == 169 && second == 254
+}
+
+/// Every IPv4 address this machine's interfaces carry, in interface order, from `getifaddrs`.
+/// An interface that is down is kept with `up` false, so the chooser's rule is one list rather
+/// than a filter here.
+fn interface_addresses() -> Vec<LanCandidate> {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `getifaddrs` writes one pointer to a list it allocated, and 0 means it wrote one.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let mut cursor = list;
+    while !cursor.is_null() {
+        // SAFETY: every node of the list `getifaddrs` returned is valid until `freeifaddrs`,
+        // and each `ifa_next` either points at the next node or is null.
+        let entry = unsafe { &*cursor };
+        if !entry.ifa_addr.is_null() {
+            // SAFETY: a non-null `ifa_addr` points at one `sockaddr` whose family decides its
+            // shape; only the `AF_INET` shape is read below.
+            let family = unsafe { (*entry.ifa_addr).sa_family as i32 };
+            if family == libc::AF_INET {
+                // SAFETY: `AF_INET` means the `sockaddr` is a `sockaddr_in`.
+                let address = unsafe { (*(entry.ifa_addr as *const libc::sockaddr_in)).sin_addr };
+                candidates.push(LanCandidate {
+                    address: Ipv4Addr::from(u32::from_be(address.s_addr)),
+                    up: entry.ifa_flags & libc::IFF_UP as libc::c_uint != 0,
+                });
+            }
+        }
+        cursor = entry.ifa_next;
+    }
+    // SAFETY: `list` is the head `getifaddrs` returned, freed once.
+    unsafe { libc::freeifaddrs(list) };
+    candidates
+}
+
+/// Checks a `--url` value (ADR 0048 §16): an absolute `http` or `https` URL with a host,
+/// minus a trailing `/`.
+///
+/// # Errors
+///
+/// The text is not such a URL: a usage error that names `--url` and exits `2`.
+fn pairing_url(url: &str) -> Result<String, Error> {
+    if url_host(url).is_none() {
+        return Err(Error::Usage(format!(
+            "--url must be an absolute http or https URL with a host: {url:?}"
+        )));
+    }
+    Ok(url.trim_end_matches('/').to_owned())
+}
+
+/// The host of an absolute `http` or `https` URL, or `None` when `url` is not one: a scheme
+/// other than `http`/`https`, no authority, an empty host, or a port that is not a number from
+/// 0 to 65535.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = if url
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    {
+        &url[7..]
+    } else if url
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        &url[8..]
+    } else {
+        return None;
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    // A userinfo part (`user:password@`) is not the host; the host is what follows the last `@`.
+    let host_port = match rest[..end].rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => &rest[..end],
+    };
+    if let Some(after_bracket) = host_port.strip_prefix('[') {
+        // An IPv6 literal: `[...]` and an optional `:port`.
+        let close = after_bracket.find(']')?;
+        let tail = &after_bracket[close + 1..];
+        if !tail.is_empty() && !valid_port(tail.strip_prefix(':')?) {
+            return None;
+        }
+        let host = &after_bracket[..close];
+        return (!host.is_empty()).then_some(host);
+    }
+    let (host, port) = match host_port.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (host_port, None),
+    };
+    if port.is_some_and(|port| !valid_port(port)) {
+        return None;
+    }
+    (!host.is_empty()).then_some(host)
+}
+
+/// Whether `port` is 1 to 5 digits in 0..=65535.
+fn valid_port(port: &str) -> bool {
+    !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit()) && {
+        port.parse::<u16>().is_ok()
+    }
+}
+
+/// Whether the URL's host is a loopback IP address. A host name is not one: `localhost` is a
+/// name, and the owner who wrote it can reach the hub by it.
+fn url_host_is_loopback(url: &str) -> bool {
+    url_host(url)
+        .and_then(|host| host.parse::<IpAddr>().ok())
+        .is_some_and(|address| address.is_loopback())
 }
 
 /// Writes a new token and prints `rotated`. A running hub re-reads the file on its next
@@ -1780,6 +2031,147 @@ mod tests {
         assert!(warning.contains("tailscale serve"), "{warning}");
         let v6 = bind_warning(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).expect(":: warns");
         assert!(v6.contains("unencrypted"), "{v6}");
+    }
+
+    /// A fixed interface list, in interface order: loopback, link-local, a down interface, then
+    /// two eligible addresses. The chooser is tested on it so no test depends on this machine.
+    fn candidate(address: [u8; 4], up: bool) -> LanCandidate {
+        LanCandidate {
+            address: Ipv4Addr::from(address),
+            up,
+        }
+    }
+
+    fn lan_candidates() -> Vec<LanCandidate> {
+        vec![
+            candidate([127, 0, 0, 1], true),
+            candidate([169, 254, 3, 4], true),
+            candidate([10, 0, 0, 5], false),
+            candidate([192, 0, 2, 10], true),
+            candidate([192, 0, 2, 11], true),
+        ]
+    }
+
+    #[test]
+    fn the_lan_chooser_skips_loopback_link_local_and_down_interfaces() {
+        assert_eq!(
+            lan_address(&lan_candidates()),
+            Some(Ipv4Addr::new(192, 0, 2, 10))
+        );
+        assert_eq!(lan_address(&[]), None, "an empty list has no address");
+        assert_eq!(
+            lan_address(&lan_candidates()[..3]),
+            None,
+            "loopback, link-local and a down interface are all skipped"
+        );
+    }
+
+    #[test]
+    fn a_url_flag_sets_the_pairing_url_and_drops_a_trailing_slash() {
+        let chosen = pairing(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            7341,
+            Some("https://mac.example.ts.net/"),
+            &[],
+        )
+        .expect("an absolute https URL with a host");
+        assert_eq!(chosen.url, "https://mac.example.ts.net");
+        assert!(!chosen.fallback);
+        assert_eq!(
+            payload(&chosen.url, "abc"),
+            "radian://hub?url=https%3A%2F%2Fmac.example.ts.net&token=abc"
+        );
+        assert_eq!(
+            chosen.others,
+            vec!["http://127.0.0.1:7341".to_owned()],
+            "a URL that is not loopback lists the other addresses"
+        );
+    }
+
+    #[test]
+    fn a_url_flag_that_is_not_an_absolute_http_url_is_a_usage_error() {
+        for url in [
+            "ftp://x",
+            "mac.local",
+            "",
+            "http://",
+            "http:///hub",
+            "http://:7341",
+            "http://host:",
+            "https://host:70000",
+        ] {
+            let error =
+                pairing(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341, Some(url), &[]).expect_err(url);
+            assert_eq!(error.exit(), crate::store::Exit::Usage, "{url}");
+            assert!(
+                error.message().contains("--url"),
+                "{url}: {}",
+                error.message()
+            );
+        }
+        for url in [
+            "http://127.0.0.1:7341",
+            "HTTPS://mac.example.ts.net",
+            "http://[::1]:7341",
+            "https://mac.example.ts.net/hub?x=1",
+        ] {
+            assert!(
+                pairing(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341, Some(url), &[]).is_ok(),
+                "{url} is an absolute http or https URL with a host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loopback_bind_keeps_the_loopback_url() {
+        let chosen = pairing(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            7341,
+            None,
+            &lan_candidates(),
+        )
+        .unwrap();
+        assert_eq!(chosen.url, "http://127.0.0.1:7341");
+        assert!(chosen.others.is_empty(), "{chosen:?}");
+        assert!(!chosen.fallback);
+        // `::1` is a specific address, so its URL is its own, in brackets.
+        let v6 = pairing(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 7341, None, &[]).unwrap();
+        assert_eq!(v6.url, "http://[::1]:7341");
+    }
+
+    #[test]
+    fn a_specific_bind_prints_that_address() {
+        let chosen = pairing(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 7341, None, &[]).unwrap();
+        assert_eq!(chosen.url, "http://192.0.2.10:7341");
+        assert!(!chosen.fallback);
+    }
+
+    #[test]
+    fn an_unspecified_bind_prints_the_first_lan_address() {
+        for bind in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        ] {
+            let chosen = pairing(bind, 7341, None, &lan_candidates()).unwrap();
+            assert_eq!(chosen.url, "http://192.0.2.10:7341", "{bind}");
+            assert!(!chosen.fallback);
+            assert_eq!(
+                chosen.others,
+                vec![
+                    "http://127.0.0.1:7341".to_owned(),
+                    "http://192.0.2.11:7341".to_owned()
+                ],
+                "{bind}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unspecified_bind_without_a_lan_address_falls_back_to_loopback() {
+        let chosen = pairing(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7341, None, &[]).unwrap();
+        assert_eq!(chosen.url, "http://127.0.0.1:7341");
+        assert!(chosen.fallback, "the command prints one line saying so");
+        assert!(chosen.others.is_empty());
     }
 
     #[test]

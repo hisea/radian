@@ -43,6 +43,13 @@ impl Scratch {
         self.home().join("hub/repos.toml")
     }
 
+    /// Writes `$RADIAN_HOME/config/config.toml`: the file `[hub] bind` is read from.
+    fn config(&self, text: &str) {
+        let dir = self.home().join("config");
+        fs::create_dir_all(&dir).expect("the config directory is creatable");
+        fs::write(dir.join("config.toml"), text).expect("the config is writable");
+    }
+
     fn run(&self, args: &[&str]) -> Run {
         let output = Command::new(env!("CARGO_BIN_EXE_radian"))
             .current_dir(&self.dir)
@@ -248,6 +255,85 @@ fn pair_off_a_terminal_prints_the_url_and_token_without_a_qr() {
         "a pipe gets no QR: {}",
         run.out
     );
+}
+
+#[test]
+fn pair_with_a_url_prints_it_without_the_trailing_slash() {
+    let scratch = Scratch::new("pair-url");
+    let run = scratch.run(&["hub", "pair", "--url", "https://mac.example.ts.net/"]);
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let token = fs::read_to_string(scratch.home().join("hub/token"))
+        .expect("pair creates the token")
+        .trim()
+        .to_owned();
+    let mut lines = run.out.lines();
+    assert_eq!(
+        lines.next(),
+        Some("https://mac.example.ts.net"),
+        "the trailing slash is dropped: {}",
+        run.out
+    );
+    assert_eq!(lines.next(), Some(token.as_str()), "{}", run.out);
+    assert_eq!(
+        lines.next(),
+        Some("other: http://127.0.0.1:7341"),
+        "a URL that is not loopback lists the other addresses: {}",
+        run.out
+    );
+}
+
+#[test]
+fn pair_refuses_a_url_that_is_not_an_absolute_http_url() {
+    let scratch = Scratch::new("pair-url-bad");
+    for url in ["ftp://x", "mac.local", ""] {
+        let run = scratch.run(&["hub", "pair", "--url", url]);
+        assert_eq!(run.code, Some(2), "{url:?}: {run:?}");
+        assert!(run.err.contains("--url"), "{url:?}: {}", run.err);
+        assert!(
+            run.err.contains("absolute http or https URL"),
+            "{url:?} is refused by the URL check, not as an unknown flag: {}",
+            run.err
+        );
+        assert!(run.out.is_empty(), "{url:?} prints no URL: {}", run.out);
+    }
+    assert!(
+        !scratch.home().join("hub/token").exists(),
+        "a refused --url creates no token"
+    );
+}
+
+#[test]
+fn pair_prints_the_configured_bind_address() {
+    let scratch = Scratch::new("pair-bind");
+    scratch.config("schema_version = 1\n[hub]\nbind = \"192.0.2.10\"\n");
+    let run = scratch.run(&["hub", "pair"]);
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let mut lines = run.out.lines();
+    assert_eq!(
+        lines.next(),
+        Some("http://192.0.2.10:7341"),
+        "the bind's own address, not loopback: {}",
+        run.out
+    );
+}
+
+#[test]
+fn pair_for_a_wildcard_bind_prints_a_lan_address_and_not_the_wildcard() {
+    let scratch = Scratch::new("pair-wildcard");
+    scratch.config("schema_version = 1\n[hub]\nbind = \"0.0.0.0\"\n");
+    let run = scratch.run(&["hub", "pair"]);
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let url = run.out.lines().next().expect("a URL line");
+    assert!(url.starts_with("http://"), "{url}");
+    assert!(url.ends_with(":7341"), "{url}");
+    assert!(!url.contains("0.0.0.0"), "a phone cannot reach {url}");
+    if url == "http://127.0.0.1:7341" {
+        assert!(
+            run.err.contains("no LAN address"),
+            "a fallback says so on stderr: {}",
+            run.err
+        );
+    }
 }
 
 #[test]

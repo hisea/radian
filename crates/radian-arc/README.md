@@ -831,10 +831,11 @@ gate stages `mutation` and `ci` are refused until they are built.
 ## Hand tests
 
 - **A phone on the tailnet.** Expose the hub with `tailscale serve` (the phone has no ssh
-  client), pair with `radian hub pair`, and from the phone browse the plans and tasks of two
-  registered repositories, do one owner action, and receive one lock-screen notification from
-  an `after_awaiting_human` hook. The hub's default `[hub] bind` is `127.0.0.1`; this test
-  exposes it through the proxy.
+  client), pair with `radian hub pair --url https://<mac>.<tailnet>.ts.net`, and from the
+  phone browse the plans and tasks of two registered repositories, do one owner action, and
+  receive one lock-screen notification from an `after_awaiting_human` hook. The hub's default
+  `[hub] bind` is `127.0.0.1`; this test exposes it through the proxy, and `--url` puts the
+  tailnet name in the QR code.
 - **The phone driving a TUI session** (ADR 0048 §16). With a `radian` session open on the Mac
   and the hub running, from the phone send one message, answer one approval, switch the model
   and send a photo. The TUI must show the message with the dim ` · hub` suffix, close the

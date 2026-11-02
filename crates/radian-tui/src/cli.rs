@@ -485,6 +485,10 @@ enum HubCommand {
         /// Print the URL and the token only; no QR code.
         #[arg(long)]
         no_qr: bool,
+        /// The URL a phone should reach the hub by, as in `https://mac.example.ts.net` for
+        /// `tailscale serve`: an absolute `http` or `https` URL with a host.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
     },
     /// Manage the bearer token every request must carry.
     Token {
@@ -1240,12 +1244,21 @@ fn run_hub(
         return hub_result(radian_arc::hub::http::serve(port, config));
     };
     match command {
-        HubCommand::Pair { no_qr } => {
+        HubCommand::Pair { no_qr, url } => {
             let port = match hub_port(port, config) {
                 Ok(port) => port,
                 Err(code) => return code,
             };
-            hub_result(radian_arc::hub::http::pair(port, no_qr))
+            let bind = match hub_bind(config) {
+                Ok(bind) => bind,
+                Err(code) => return code,
+            };
+            hub_result(radian_arc::hub::http::pair(
+                bind,
+                port,
+                no_qr,
+                url.as_deref(),
+            ))
         }
         HubCommand::Token {
             command: TokenCommand::Rotate,
@@ -1328,6 +1341,18 @@ fn hub_port(port: Option<u16>, config: Option<&std::path::Path>) -> Result<u16, 
     }
     match radian_host::load_config(config) {
         Ok(config) => Ok(config.hub.port),
+        Err(error) => {
+            eprintln!("radian hub: config: {error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// The address the hub binds: `[hub] bind` (ADR 0048 §16), which `radian hub pair` needs for
+/// the URL it prints. A configuration error exits `1` and names the key.
+fn hub_bind(config: Option<&std::path::Path>) -> Result<std::net::IpAddr, ExitCode> {
+    match radian_host::load_config(config) {
+        Ok(config) => Ok(config.hub.bind),
         Err(error) => {
             eprintln!("radian hub: config: {error}");
             Err(ExitCode::from(1))

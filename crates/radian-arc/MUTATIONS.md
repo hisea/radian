@@ -2383,3 +2383,19 @@ found identical. M5-M7 ran inside the workspace sandbox; M8's strengthened hook 
 | TK0314-M8 | the timeout path kills only the shell (`child.kill()`) instead of the process group (`kill_group(pid)`) | `hub::hooks::tests::a_command_past_its_timeout_is_killed_and_logged` (the background `sleep` child stayed alive) | ✅ 1 failed |
 
 4/4 caught.
+
+## TK0316: the pairing URL
+
+`radian hub pair` now prints a URL a phone can reach: `--url`, else the bind's own address, else
+a LAN address for a wildcard bind, and it lists the other candidate addresses. The URL-check
+mutation was applied by hand to `crates/radian-arc/src/hub/http.rs` (`pairing_url` accepts any
+text) and the chooser mutation to the same file (`lan_address` returns the first candidate); each
+was run with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E
+'test(hub::http::tests)'` and restored from `.radian/http.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0316-M1 | `pairing_url` accepts any text, so `--url ftp://x`, `--url mac.local` and `--url ""` reach the QR code | `hub::http::tests::a_url_flag_that_is_not_an_absolute_http_url_is_a_usage_error`; the command-line test `hub::pair_refuses_a_url_that_is_not_an_absolute_http_url` fails the same way | ✅ 1 failed |
+| TK0316-M2 | `lan_address` returns the first candidate, ignoring the up, loopback and link-local rules | `hub::http::tests::the_lan_chooser_skips_loopback_link_local_and_down_interfaces` (the answer was `127.0.0.1`) and `hub::http::tests::an_unspecified_bind_prints_the_first_lan_address` (a `127.0.0.1` URL) | ✅ 2 failed |
+
+2/2 caught.
