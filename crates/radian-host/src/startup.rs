@@ -104,8 +104,8 @@ fn session_dir_with(
 
 /// The workspace a session belongs to: `root` when the host has one, else the current
 /// directory, canonicalized and validated by the shared [`resolve_workspace`] rule (dogfooding
-/// D1). `--list` filters by the same value, so a session is only listed in the workspace it was
-/// created in.
+/// D1). `--list` filters by the same directory, so a session is only listed in the workspace it
+/// was created in (a recorded spelling that resolves to the same directory counts).
 ///
 /// The host resolves `root` itself: the TUI applies its two coding-root exceptions (`$HOME`
 /// becomes `$HOME/tmp`, the filesystem root is refused), while the

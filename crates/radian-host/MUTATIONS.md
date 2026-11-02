@@ -2082,3 +2082,14 @@ place and the file restored from `.radian/bak/guard2.rs`, which `cmp` found iden
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0297-M8 | `same_source` is never called, so a `write` or `patch` may declare a different source than the file already has | ✅ 1 failed (rc=100) | `memory::guard::tests::a_write_or_patch_that_would_change_the_source_is_refused` (the write from `import` to `model` and the patch of the `source` line returned `Ok`) |
+
+## TK0302: a session's recorded workspace is compared as a directory (2026-11-01)
+
+Branch `work/TK0302-resume-workspace-canonical-and-gitleaks`. Each mutation was applied in
+place to `crates/radian-host/src/sessions.rs`, the sessions tests were run with `cargo nextest
+run -p radian-host --lib --locked --profile sandbox --no-fail-fast -E 'test(sessions)'`, and
+the file was restored from `.radian/bak/sessions.rs`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0302-M1 | `same_directory` compares the two values as raw strings again (no canonicalization) | ✅ 4 failed (rc=100) | `sessions::tests::a_symlinked_workspace_spelling_is_not_a_mismatch`, `sessions::tests::in_workspace_follows_the_symlinked_spelling`, `sessions::tests::list_finds_a_session_recorded_under_a_symlinked_spelling`, `sessions::tests::search_finds_a_session_recorded_under_a_symlinked_spelling` |

@@ -447,11 +447,12 @@ async fn open_session_request(
     };
     let workspace_key = workspace.to_string_lossy().into_owned();
     // ADR 0049 decision 11 / ADR 0006 §4: a session is loaded only in the workspace it was
-    // created in, the rule `--export` and `--resume` apply (`SessionCreated.workspace`). Both
-    // are canonical paths (`resolve_workspace`), so a workspace reached through a symlink
-    // matches. The check reads the journal before `setup`, so a refusal writes nothing and
-    // leaves the process able to load another session; a file the reader cannot open or that
-    // has no `SessionCreated` is left to the opener, whose error names the id.
+    // created in, the rule `--export` and `--resume` apply (`SessionCreated.workspace`). The
+    // recorded value and the process workspace are compared as directories, so a workspace
+    // reached through a symlink matches and an older spelling still opens. The check reads the
+    // journal before `setup`, so a refusal writes nothing and leaves the process able to load
+    // another session; a file the reader cannot open or that has no `SessionCreated` is left to
+    // the opener, whose error names the id.
     if let Some(session_id) = &load
         && let Ok(dir) = radian_host::session_dir(common.session_dir.as_deref().map(Path::new))
         && let Some(message) =

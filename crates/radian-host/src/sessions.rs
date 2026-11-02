@@ -6,6 +6,7 @@
 //! terminal. Nothing here writes a session file: the JSONL files are the authority (ADR 0006
 //! §10) and the index is a disposable cache.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use radian_session::{ExportOptions, Index, Session, export_json, export_markdown};
@@ -84,12 +85,34 @@ pub fn open_index(dir: &Path) -> Result<Option<Index>, String> {
     Ok(Some(index))
 }
 
-/// The sessions of `workspace`, newest activity first, with their summaries.
+/// Whether two workspace values name the same directory. Each side is canonicalized when the
+/// filesystem can, so macOS's `/var` → `/private/var` symlink, a symlinked project directory,
+/// and a session recorded under either spelling are one workspace. A side that cannot be
+/// canonicalized (a recorded directory that no longer exists) is compared as written.
+fn same_directory(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The sessions of `workspace`, newest activity first, with their summaries. The index stores
+/// the workspace as recorded, so the filter runs in Rust and compares directories: `--list`
+/// must show a session `--resume` accepts, even when it was recorded under another spelling of
+/// the same directory.
 pub fn list(index: &Index, workspace: &str) -> Result<Vec<SessionRow>, String> {
     let t = std::time::Instant::now();
-    let sessions = index
-        .list(Some(workspace))
-        .map_err(|e| format!("cannot list sessions: {e}"))?;
+    let sessions: Vec<_> = index
+        .list(None)
+        .map_err(|e| format!("cannot list sessions: {e}"))?
+        .into_iter()
+        .filter(|session| {
+            session
+                .workspace
+                .as_deref()
+                .is_some_and(|recorded| same_directory(recorded, workspace))
+        })
+        .collect();
     radian_session::trace::took("picker/list", t);
     let t_sum = std::time::Instant::now();
     let out: Result<Vec<SessionRow>, String> = sessions
@@ -117,14 +140,40 @@ pub fn search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchRow>, String> {
-    let hits = index
-        .search(query, Some(workspace), limit)
-        .map_err(|e| format!("cannot search: {e}"))?;
+    // The index filters by the stored string, which misses another spelling of the same
+    // directory. Take the matching sessions (and their timestamps) first, then search once per
+    // recorded spelling they use. A session's hits all come from one call, and a stable sort by
+    // session id restores the index's `(session_id, seq)` order across them.
+    let sessions: Vec<_> = index
+        .list(None)
+        .map_err(|e| format!("cannot list sessions: {e}"))?
+        .into_iter()
+        .filter(|session| {
+            session
+                .workspace
+                .as_deref()
+                .is_some_and(|recorded| same_directory(recorded, workspace))
+        })
+        .collect::<Vec<_>>();
+    let mut spellings: Vec<String> = sessions
+        .iter()
+        .filter_map(|session| session.workspace.clone())
+        .collect();
+    spellings.sort();
+    spellings.dedup();
+    let mut hits = Vec::new();
+    for spelling in &spellings {
+        hits.extend(
+            index
+                .search(query, Some(spelling), limit)
+                .map_err(|e| format!("cannot search: {e}"))?,
+        );
+    }
+    hits.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    hits.truncate(limit);
     // `SearchHit` does not carry the session's timestamp; take it from the same list `--list`
     // uses. Building it once per search keeps a hit's row aligned with the list view.
-    let times: std::collections::HashMap<String, Option<String>> = index
-        .list(Some(workspace))
-        .map_err(|e| format!("cannot list sessions: {e}"))?
+    let times: HashMap<String, Option<String>> = sessions
         .into_iter()
         .map(|session| (session.session_id, session.last_ts))
         .collect();
@@ -188,14 +237,15 @@ pub fn session_workspace(session: &Session) -> Option<String> {
     })
 }
 
-/// Whether a session belongs to `workspace`: its `SessionCreated.workspace` is exactly that
-/// value. Both were written by `resolve_workspace`, so both are canonical paths and a
-/// workspace reached through a symlink matches the directory it names.
+/// Whether a session belongs to `workspace`: its `SessionCreated.workspace` names the same
+/// directory. The recorded value may be an older spelling of the process workspace (a
+/// pre-canonicalisation build, a symlinked home or project, macOS's `/var` → `/private/var`),
+/// so the two sides are compared after canonicalizing each (see [`same_directory`]).
 ///
 /// This is the rule [`export`] refuses on and `radian acp`'s `session/load` applies before it
 /// opens the journal.
 pub fn in_workspace(session: &Session, workspace: &str) -> bool {
-    session_workspace(session).is_some_and(|recorded| recorded == workspace)
+    session_workspace(session).is_some_and(|recorded| same_directory(&recorded, workspace))
 }
 
 /// The workspace recorded by the session file `session_id` in `dir`, read without opening the
@@ -221,11 +271,12 @@ pub fn other_workspace(dir: &Path, session_id: &str, workspace: &str) -> Option<
 }
 
 /// The refusal for a session whose `SessionCreated.workspace` is `recorded` while the process
-/// workspace is `workspace`; `None` when it belongs there. `--resume` and `radian acp`'s
-/// `session/load` both answer with this message; `--export` applies the same equality with its
-/// own wording.
+/// workspace is `workspace`; `None` when they name the same directory (see [`same_directory`]).
+/// The message prints the recorded value as it was recorded. `--resume` and `radian acp`'s
+/// `session/load` both answer with this message; `--export` applies the same rule with its own
+/// wording.
 pub fn workspace_mismatch(session_id: &str, recorded: &str, workspace: &str) -> Option<String> {
-    (recorded != workspace).then(|| {
+    (!same_directory(recorded, workspace)).then(|| {
         format!(
             "session {session_id:?} is not in this workspace; it was created in {recorded:?} and \
              is only opened there"
@@ -270,6 +321,134 @@ fn truncate_summary(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "radian-host-sessions-unit-{}-{label}-{n}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A readable session file whose `SessionCreated.workspace` is `workspace` verbatim.
+    fn write_session(dir: &Path, id: &str, workspace: &str, user_text: &str) -> std::path::PathBuf {
+        let ts = "2026-10-13T00:00:00.000000Z";
+        let lines = [
+            serde_json::json!({"schema_version":1,"session_id":id,"seq":0,"ts":ts,
+                "event":"SessionCreated","critical":true,
+                "data":{"workspace":workspace,"config_snapshot":{}}}),
+            serde_json::json!({"schema_version":1,"session_id":id,"seq":1,"ts":ts,
+                "event":"MessageAppended","critical":true,
+                "data":{"index":0,"message":{"user":{"content":[{"text":{"text":user_text}}]}}}}),
+        ];
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&line.to_string());
+            text.push('\n');
+        }
+        let path = dir.join(format!("{id}.jsonl"));
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// `<tmp>/real/ws` and `<tmp>/link/ws` where `link -> real`, as lossy strings.
+    fn symlink_pair(dir: &TempDir) -> (String, String) {
+        let real = dir.path().join("real").join("ws");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
+        let linked_ws = link.join("ws");
+        (
+            linked_ws.to_string_lossy().into_owned(),
+            real.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn a_symlinked_workspace_spelling_is_not_a_mismatch() {
+        let dir = TempDir::new("symlink-belongs");
+        let (recorded, process) = symlink_pair(&dir);
+        assert_eq!(
+            workspace_mismatch("s", &recorded, &process),
+            None,
+            "{recorded} and {process} are the same directory"
+        );
+    }
+
+    #[test]
+    fn a_recorded_workspace_that_is_gone_is_refused_as_written() {
+        let dir = TempDir::new("gone");
+        let process = dir.path().join("real");
+        std::fs::create_dir_all(&process).unwrap();
+        let missing = dir.path().join("gone");
+        let missing_text = missing.to_string_lossy().into_owned();
+        let process_text = process.to_string_lossy().into_owned();
+        let message = workspace_mismatch("s", &missing_text, &process_text)
+            .expect("a recorded directory that is gone cannot be the process workspace");
+        assert!(
+            message.contains(&format!("{missing_text:?}")),
+            "the message must name the recorded path as written: {message}"
+        );
+    }
+
+    #[test]
+    fn two_different_existing_directories_are_refused() {
+        let dir = TempDir::new("different");
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert!(workspace_mismatch("s", &a.to_string_lossy(), &b.to_string_lossy()).is_some());
+    }
+
+    #[test]
+    fn in_workspace_follows_the_symlinked_spelling() {
+        let dir = TempDir::new("in-workspace");
+        let (recorded, process) = symlink_pair(&dir);
+        let path = write_session(dir.path(), "link-ws", &recorded, "hello");
+        let session = Session::open(&path).unwrap();
+        assert!(in_workspace(&session, &process));
+    }
+
+    #[test]
+    fn list_finds_a_session_recorded_under_a_symlinked_spelling() {
+        let dir = TempDir::new("list-symlink");
+        let (recorded, process) = symlink_pair(&dir);
+        write_session(dir.path(), "link-ws", &recorded, "hello");
+        let index = open_index(dir.path()).unwrap().unwrap();
+        let rows = list(&index, &process).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].session_id, "link-ws");
+    }
+
+    #[test]
+    fn search_finds_a_session_recorded_under_a_symlinked_spelling() {
+        let dir = TempDir::new("search-symlink");
+        let (recorded, process) = symlink_pair(&dir);
+        write_session(dir.path(), "link-ws", &recorded, "find me here");
+        let index = open_index(dir.path()).unwrap().unwrap();
+        let hits = search(&index, &process, "find me", 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].session_id, "link-ws");
+    }
 
     #[test]
     fn the_summary_is_one_line_and_capped() {

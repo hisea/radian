@@ -52,11 +52,13 @@ its transcript to the client. `initialize` advertises `loadSession: true`.
 
 - The request's `cwd` must satisfy the same rule as `session/new`: an absolute directory that
   equals `--workspace`, or, when `--workspace` is absent, the workspace itself.
-- The session must belong to that workspace: the workspace recorded in its `SessionCreated`
-  event must equal the process workspace, the same rule `--export` and `--resume` use. A
-  workspace reached through a symlink matches the directory it names. A session created in
-  another workspace is refused with an error that names it, and nothing is written; the
-  process can still load another session or start one with `session/new`.
+- The session must belong to that workspace: the directory recorded in its `SessionCreated`
+  event must name the process workspace, the same rule `--export` and `--resume` use. Both
+  paths are compared as directories, so a workspace reached through a symlink matches the
+  directory it names, and a session recorded under another spelling of that directory still
+  loads. A session created in another workspace is refused with an error that names it, and
+  nothing is written; the process can still load another session or start one with
+  `session/new`.
 - The reply is an empty object. Before it, radian sends the journal's transcript as
   `session/update` notifications, in transcript order: `user_message_chunk` for each user
   message, `agent_thought_chunk` for reasoning, `agent_message_chunk` for answer text, and a
