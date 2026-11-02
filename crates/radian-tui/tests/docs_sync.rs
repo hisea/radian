@@ -180,6 +180,27 @@ fn every_hook_run_end_appears_in_the_manual() {
     }
 }
 
+/// Every `board_column` name `BoardColumn::as_str` writes appears in the manual: the `list
+/// --json`/`show --json` field list and the hub's route page. The source is
+/// [`radian_arc::board::BoardColumn::ALL`], the one list the serializer and the arc TUI read.
+#[test]
+fn every_board_column_appears_in_the_manual() {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let planning = std::fs::read_to_string(manifest.join("../../docs/user/arc/planning.md"))
+        .expect("planning.md exists");
+    let hub = std::fs::read_to_string(manifest.join("../../docs/user/arc/hub.md"))
+        .expect("hub.md exists");
+    for column in radian_arc::board::BoardColumn::ALL {
+        for (name, text) in [("planning.md", &planning), ("hub.md", &hub)] {
+            assert!(
+                text.contains(&format!("`{}`", column.as_str())),
+                "board column `{}` is missing from {name}",
+                column.as_str()
+            );
+        }
+    }
+}
+
 /// Every theme role the loader knows appears in `docs/user/themes.md`.
 ///
 /// The source is [`radian_tui::theme::Role::ALL`], the same table the loader parses

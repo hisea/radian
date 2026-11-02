@@ -9,6 +9,9 @@ not a separate program. This crate is its control plane, in these modules:
   `reject` and `run`.
 - `attempt` — one attempt's life: the claim, the wrapper child, the applied result, cancel, and
   the reconcile step.
+- `board` — the arc TUI board's rule: the column an open task is in (`todo`, `doing`,
+  `verifying`, `needs_you`) and whether a plan is paused through one of its tasks.
+  `list --json` and `show --json` write the column as a task's `board_column`.
 - `run` — `radian arc run`, the scheduling loop: reconcile, release retries, start the gate or
   a worker, apply what they left, and merge at auto level `merge`. A pass only schedules.
 - `gate` — a fixed sequence of stages against the verification candidate: each stage's separate

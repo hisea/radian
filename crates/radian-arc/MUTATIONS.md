@@ -2210,3 +2210,14 @@ was restored from a copy under `.radian/`, which `cmp` found identical.
 | TK0311-M3 | the task ignore file's tracked check is dropped as the parent implementation had it, so both tasks' tracked `.radian/arc-verdicts/<task>/.gitignore` files are overwritten | `two_task_verdict_copies_get_their_own_ignore_files` (both tracked files were reported dirty) | ✅ 1 failed |
 
 3/3 caught.
+## TK0313: the board column in the JSON (2026-11-02, branch `work/TK0313-board-column-in-json`)
+
+The arc TUI board's column rule moved into `radian-arc`, and `radian arc list --json`, `show --json`
+and the hub's item routes write it as each task's `board_column`. The mutation was applied by hand
+to `crates/radian-arc/src/board.rs`; the named test ran with `cargo nextest run -p radian-arc
+--locked --profile sandbox --test board_column -E 'test(<name>)'`. The file was restored from a
+copy under `.radian/mut/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0313-M1 | `column_of` ignores `auto_reverify_pending` for `review.rework_pending`, so every rework waits for the owner | `a_command_failure_with_reverifies_left_verifies_and_then_needs_you` (the failure with reverifies left read `needs_you`, not `verifying`) | ✅ 1 failed |

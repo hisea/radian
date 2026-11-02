@@ -124,6 +124,7 @@ They change on their own: a route can be added without touching a plan or task f
 The read routes and the event stream take `GET`; the owner actions take `POST` (see [Owner actions](#owner-actions)).
 Every body is `application/json` except [the event stream](#the-event-stream), which is `text/event-stream`; a `204` has no body.
 The list and show bodies are exactly the bytes `radian arc list --json` and `radian arc show --json` print in that repository, so a field the CLI gains appears on the route too.
+Every task object in `/v1/repos/<name>/items` and in the plan and task bodies of `/v1/repos/<name>/items/<id>` carries `board_column`: the arc TUI board's column for that task at the moment the response was written — `todo`, `doing`, `verifying` or `needs_you`, and `null` for a finished task (`done.*` or `failed.*`) or when its plan cannot be read (see [the `list --json` fields](planning.md#radian-arc-list-plan-id-all-json)).
 
 A request without a valid bearer token is `401` with `{}` before any route runs.
 The token is checked before the request body is read, so a request without one is answered without the hub buffering the body it sends.

@@ -1044,6 +1044,7 @@ fn task_json(
     config: &super::config::Config,
     with_body: bool,
     queue_reason: Option<String>,
+    board_column: Option<crate::board::BoardColumn>,
 ) -> serde_json::Value {
     let item = &task.item;
     let mut value = json!({
@@ -1083,6 +1084,9 @@ fn task_json(
         "verdict_set_digest": item.verdict_set_digest,
         "retry_at": item.retry_at,
         "changed_outside_arc": task.changed_outside_arc,
+        // The arc TUI board's column, computed from the same store state the board reads:
+        // `null` for a finished task (ADR 0048 decisions 1 and 9).
+        "board_column": board_column.map(crate::board::BoardColumn::as_str),
     });
     if with_body && let Some(object) = value.as_object_mut() {
         object.insert("body".to_owned(), json!(item.body));
@@ -1091,12 +1095,14 @@ fn task_json(
 }
 
 fn plan_json(
+    store: &Store,
     queue: Option<&QueueState>,
     view: &PlanView,
     config: &super::config::Config,
     with_body: bool,
 ) -> serde_json::Value {
     let plan = &view.plan.item;
+    let paused = crate::board::paused_plan(store, view);
     let mut value = json!({
         "id": plan.id,
         "title": plan.title,
@@ -1115,7 +1121,8 @@ fn plan_json(
             // tasks, it does not repeat every brief.
             .map(|task| {
                 let reason = queue.and_then(|queue| queue.reason(&view.plan, task));
-                task_json(task, config, false, reason)
+                let column = crate::board::column_of(store, plan, &task.item, paused);
+                task_json(task, config, false, reason, column)
             })
             .collect::<Vec<_>>(),
         "changed_outside_arc": view.plan.changed_outside_arc,
@@ -1457,7 +1464,7 @@ pub fn list_json(store: &Store, plan: Option<&str>, all: bool) -> Result<serde_j
     Ok(serde_json::Value::Array(
         views
             .iter()
-            .map(|view| plan_json(Some(&queue), view, &config, false))
+            .map(|view| plan_json(store, Some(&queue), view, &config, false))
             .collect(),
     ))
 }
@@ -1468,10 +1475,27 @@ pub fn show_json(store: &Store, id: &str) -> Result<serde_json::Value, Error> {
     Ok(match store.show(id)? {
         Item::Plan(view) => {
             let queue = QueueState::read(store).ok();
-            plan_json(queue.as_ref(), &view, &config, true)
+            plan_json(store, queue.as_ref(), &view, &config, true)
         }
         Item::Task(task) => {
-            let mut value = task_json(&task, &config, true, show_task_queue_reason(store, &task));
+            // The board's column reads the task's plan: its `auto` level and whether arc
+            // paused it through one of its tasks. A plan this store cannot read leaves the
+            // column unknown, as no board can draw the task either.
+            let board_column = store.plan_view(&task.item.plan).ok().and_then(|view| {
+                crate::board::column_of(
+                    store,
+                    &view.plan.item,
+                    &task.item,
+                    crate::board::paused_plan(store, &view),
+                )
+            });
+            let mut value = task_json(
+                &task,
+                &config,
+                true,
+                show_task_queue_reason(store, &task),
+                board_column,
+            );
             let chain = super::chain::chain(store, &task.item.id)?;
             let review = crate::review::latest_review_verdict(store, &task.item.id);
             let rework_reason = crate::review::rework_reason(store, &task.item);
