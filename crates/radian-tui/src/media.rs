@@ -87,9 +87,46 @@ impl EntryImage {
         };
         let width = u32::try_from(annotations.get("width")?.as_u64()?).ok()?;
         let height = u32::try_from(annotations.get("height")?.as_u64()?).ok()?;
+        Some(Self::from_facts(
+            Arc::from(data.as_str()),
+            mime_type.clone(),
+            width,
+            height,
+            placeholder,
+            cache,
+        ))
+    }
+
+    /// The decode of one image a **fold** carried: the host's folded entry holds the wire payload
+    /// and the display facts but never decodes (ADR 0023 U1), so the renderer decodes here, once,
+    /// through the same cache the live path uses. A broken payload keeps `decodable = false` and
+    /// reserves no rows (ADR 0028 R10).
+    pub(crate) fn from_part_facts(
+        part: &radian_host::transcript::ImagePart,
+        cache: &mut ImageCache,
+    ) -> Self {
+        Self::from_facts(
+            part.data.clone(),
+            part.mime_type.clone(),
+            part.width,
+            part.height,
+            part.placeholder.clone(),
+            cache,
+        )
+    }
+
+    /// One image from its facts, decoded through `cache`.
+    fn from_facts(
+        data: Arc<str>,
+        mime_type: String,
+        width: u32,
+        height: u32,
+        placeholder: String,
+        cache: &mut ImageCache,
+    ) -> Self {
         let mut image = Self {
-            data: Arc::from(data.as_str()),
-            mime_type: mime_type.clone(),
+            data,
+            mime_type,
             width,
             height,
             placeholder,
@@ -112,7 +149,7 @@ impl EntryImage {
                 decodable
             }
         };
-        Some(image)
+        image
     }
 
     /// A stable key for the decode cache: the payload plus its display dimensions. Two entries

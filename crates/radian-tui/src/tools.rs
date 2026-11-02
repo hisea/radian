@@ -36,74 +36,18 @@ use crate::blocks::ReasoningMode;
 mod cards;
 
 use cards::*;
-pub use cards::{body_line_count, call_text, meta_parts, result_display_text};
 
-/// One tool call's card data. `structured` and `duration_ms` may legitimately be absent
-/// (`None`): a tool that reports none, and the timing no source carries at all.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolCard {
-    /// The provider's call id: what pairs a tool message's result with its call, in the live
-    /// path and in a resume replay alike.
-    pub call_id: String,
-    /// The model-facing tool name.
-    pub name: String,
-    /// The call's argument JSON (always present: the provider always sends arguments).
-    pub arguments: Value,
-    /// The result's machine-readable form, when the tool produced one.
-    pub structured: Option<Value>,
-    /// How long the call took. **No producer yet** (see the module docs); renderers omit it
-    /// when it is `None`. A shell result's structured output carries its own `duration_ms`,
-    /// which the meta falls back to.
-    pub duration_ms: Option<u64>,
-    /// The paired result's body line count, once it has arrived (`None` while the call runs):
-    /// the collapsed fold's `· N lines` (ADR 0028). The head lives on the
-    /// **call** entry while the body lives on the result's, so the call entry can only know the
-    /// count through this field, which the pairing fills ([`crate::app::App::push_message`]).
-    pub result_lines: Option<usize>,
-    /// Whether the paired result is an error. A failed `patch` changed nothing, so its card
-    /// shows the tool's own error text instead of the call's edits, and no `+N −M`
-    /// (`crates/radian-tui/src/app/transcript.rs` sets it when the result arrives).
-    pub is_error: bool,
-    /// The ACP tool call's status, as the conversation tab draws it: `queued`, `running`,
-    /// `done` or `failed` (ADR 0048 §13). It rides on the head's meta instead of the status
-    /// glyph, so a `terminal` content block (which has no result to pair) still shows its
-    /// state. `None` for every radian-owned tool call, whose status is the glyph alone.
-    pub status: Option<String>,
-    /// The byte offset in the result entry's display text where a plain `content` text starts
-    /// after a `diff` body (ADR 0048 §13). `None` when the body is all one kind, which is every
-    /// card but an ACP one that carries a diff and text in the same `tool_call_update`: the
-    /// diff rows keep their roles and the text rows draw as ordinary body lines.
-    pub trailing_from: Option<usize>,
-    /// The memory file this call settled on (ADR 0035): present only after a successful
-    /// `read`, `write` or `patch` whose path is a record under the memory root. A `read` draws
-    /// one `memory used:` line; a `write`/`patch` draws the memory card in place of the ordinary
-    /// tool card.
-    pub memory: Option<crate::memory_card::MemoryRef>,
-}
-
-impl ToolCard {
-    pub fn new(call_id: impl Into<String>, name: impl Into<String>, arguments: Value) -> Self {
-        Self {
-            call_id: call_id.into(),
-            name: name.into(),
-            arguments,
-            structured: None,
-            duration_ms: None,
-            result_lines: None,
-            is_error: false,
-            status: None,
-            trailing_from: None,
-            memory: None,
-        }
-    }
-
-    /// The argument JSON's one-line summary, for the generic header (and the fallback for a
-    /// tool whose renderer wants a field that is not there).
-    pub fn arguments_summary(&self) -> String {
-        let text = compact_json(&self.arguments);
-        truncate_chars(&text, 120)
-    }
-}
+pub use cards::meta_parts;
+/// The card model is the folded entry's too (ADR 0023 U1), so a fold and a renderer hold the
+/// same data.
+pub use radian_host::transcript::ToolCard;
+/// The head functions and the display-text functions live in the host's folded transcript
+/// (ADR 0023 U1): the fold writes them into an entry and this renderer draws exactly that text.
+pub use radian_host::transcript::tool::{
+    ask_head, body_line_count, call_text, compact_json, generic_head, glob_head, grep_head,
+    head_for, head_text, patch_call_edits, patch_head, patch_hunks, read_head, result_display_text,
+    shell_head, string_field, text_lines, truncate_chars, write_head,
+};
 
 /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -278,14 +222,6 @@ pub struct Rendered {
     pub body: Vec<BodyLine>,
 }
 
-/// The header of a card, **without** width: the layout truncates it like a code line, so the
-/// same string is the entry's copyable text and the displayed line. `text` is the tool's
-/// result text when it is known (a call-time head has none and stays terse - the pairing
-/// refreshes it when the result arrives).
-pub fn head_text(card: &ToolCard, text: &str) -> String {
-    renderer_for(&card.name).head(card, text)
-}
-
 /// A tool body's plan: the rows to draw, and how many content rows the fold hides (the
 /// `· N lines` the head's meta gains under `collapsed`, ADR 0028).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -372,46 +308,47 @@ impl ToolRender {
 /// unknown tool. Everything not listed falls back to the generic renderer; the fallback is by
 /// construction, never a panic.
 pub fn renderer_for(name: &str) -> ToolRender {
+    let head = head_for(name);
     match name {
         "shell" => ToolRender {
-            head: shell_head,
+            head,
             body: shell_body,
             compact: false,
         },
         "read" => ToolRender {
-            head: read_head,
+            head,
             body: read_body,
             compact: true,
         },
         "patch" => ToolRender {
-            head: patch_head,
+            head,
             body: diff_body,
             compact: false,
         },
         "write" => ToolRender {
-            head: write_head,
+            head,
             body: write_body,
             compact: false,
         },
         // `grep` / `glob`: the search tools, whose successful call is one line naming what was
         // searched (ADR 0028's small tools).
         "grep" => ToolRender {
-            head: grep_head,
+            head,
             body: plain_body,
             compact: true,
         },
         "glob" => ToolRender {
-            head: glob_head,
+            head,
             body: plain_body,
             compact: true,
         },
         "ask_user" => ToolRender {
-            head: ask_head,
+            head,
             body: plain_body,
             compact: false,
         },
         _ => ToolRender {
-            head: generic_head,
+            head,
             body: generic_body,
             compact: false,
         },

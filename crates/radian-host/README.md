@@ -295,9 +295,52 @@ and is ignored, any other key is skipped and named, and `[sandbox]` keys (`allow
 of two tiers (`workspace` < `full`): a project can turn the sandbox on and can never
 turn it off. The file's presence also counts as a project resource for the trust gate.
 
+## The folded transcript (ADR 0023 U1)
+
+`radian-host::transcript` owns the transcript entry and the two folds that produce it. Three
+front ends read them — `radian attach`, the arc TUI's conversation page and the hub — so the
+folding rules, the tool-title text and the memory card resolution have one home and cannot
+drift. The crate is ratatui-free: a headless reader needs no renderer, and `radian-tui` draws
+the entries (its own `Entry` wraps this one and adds the render state).
+
+| Module | What it folds |
+|---|---|
+| `transcript::attach` | A session journal's committed facts (`JournalObserver`) into entries: user messages, assistant text, reasoning, tool cards paired by call id, compaction summaries, `!` command blocks, the open-call `queued`/`running` lines and the `working…` line. |
+| `transcript::acp` | An arc attempt's `result.jsonl` (`{"type":"acp",…}` protocol lines, permission answers and the `Result` line) into entries, bounded to 512 entries and 8 KiB per text. |
+| `transcript::entry` | The `Entry` itself, its `EntryKind`, the `Card` pairing and `CompactionInfo`, plus the `EntryList` change mark a mirroring consumer reads. |
+| `transcript::tool` | The tool card's data and the head/body **text** the fold writes into an entry (`call_text`, `result_display_text`, `body_line_count`). |
+| `transcript::memory` | The memory reference a settled `read`/`write`/`patch` resolves to (ADR 0035). |
+| `transcript::parts` | A message's display text, its images as facts, the `!` command block, and the row summary an ACP stream uses. |
+
+### The JSON shape
+
+`Entry` serializes to one stable object: snake_case, every field always present, and a `kind`
+tag first. The hub sends exactly this, so a client never parses a rendered frame.
+
+```json
+{"kind":"assistant","text":"Done.","is_error":false,"result":null,"error_code":null,
+ "card":"none","tool":null,"compaction":null,"interrupted":false,"images":[]}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | closed set: `user`, `assistant`, `reasoning`, `tool_call`, `tool_result`, `notice`, `banner`, `startup`, `trust_hint`, `warning`, `tip`, `compaction`, `context`, `outcome`, `bash` | The entry kind. `outcome` carries `ok` (bool), `bash` carries `exclude_from_context` (bool). |
+| `text` | string | The entry's text: what the screen draws, the selection copies and the search matches. |
+| `is_error` | bool | The entry is an error (a failed tool call, an interrupted reply). |
+| `result` | bool or null | A tool call's outcome once its result arrived; null while it runs. |
+| `error_code` | string or null | A tool result's error code (`interrupted` for a cancelled call). |
+| `card` | `none`, `head`, `tail`, `solo` | Where a tool entry sits in a call/result pair. |
+| `tool` | object or null | The call's card data: `call_id`, `name`, `arguments`, `structured`, `duration_ms`, `result_lines`, `is_error`, `status`, `trailing_from`. |
+| `compaction` | object or null | A compaction summary: `summary`, `user_messages`, `revision`, `tokens_before`, `tokens_after`, `deterministic`, `dropped` (the last four are live-only and null in a fold of a finished journal). |
+| `interrupted` | bool | The committed assistant message was an interrupted prefix (ADR 0003). |
+| `images` | array | Each image's `mime_type`, `width`, `height` and `placeholder`. **The base64 payload is never serialized**: the placeholder line is in `text`. |
+
+The shape is pinned by `the_json_shape_of_every_entry_kind_is_stable`.
+
 ## What it guarantees (each with the test that holds it)
 
-Tests live in the module they pin; there is no `tests/` directory in this crate.
+Tests live in the module they pin; the transcript folds also have an integration test in
+`tests/transcript.rs`.
 
 | Guarantee | Test | Where |
 |---|---|---|
@@ -314,8 +357,12 @@ Tests live in the module they pin; there is no `tests/` directory in this crate.
 | The default OpenAI arguments are accepted, and Anthropic accepts both flags | `the_default_openai_arguments_are_accepted`, `anthropic_accepts_both_flags` | `src/model.rs` |
 | A missing workspace names the path and **not** the sandbox or `full-access` | `a_missing_workspace_names_the_path_and_not_the_sandbox` | `src/workspace.rs` |
 | A file is not a workspace; a directory is canonicalized; the current directory is used when none is given | `a_file_is_not_a_workspace`, `a_directory_is_canonicalized`, `the_current_directory_is_used_when_no_workspace_is_given` | `src/workspace.rs` |
+| An arc attempt's `result.jsonl` folds to the conversation page's entries | `an_arc_result_jsonl_fixture_folds_to_the_conversation_entries`, `the_conversation_page_shows_the_folds_entries` | `tests/transcript.rs`, `radian-tui/src/arc/stdout/acp.rs` |
+| Every entry kind's JSON shape is stable, and an image payload is never sent | `the_json_shape_of_every_entry_kind_is_stable` | `tests/transcript.rs` |
+| A tool result that arrives later updates the entry its call already has, in both folds | `a_late_journal_result_updates_the_call_entry_it_folded_earlier`, `a_late_acp_result_updates_the_call_entry_it_folded_earlier` | `tests/transcript.rs` |
+| The resume mapping and the fold build the same entry from the same journal | `the_resume_mapping_and_the_shared_fold_agree_on_a_journal` | `radian-tui/tests/attach.rs` |
 
-End-to-end, through the binaries (this crate has no integration tests of its own):
+End-to-end, through the binaries (besides the transcript folds' integration test):
 
 | Guarantee | Test | Where |
 |---|---|---|
@@ -332,9 +379,11 @@ End-to-end, through the binaries (this crate has no integration tests of its own
 
 ## Known limits and what is not verified
 
-- **This crate has no integration tests.** Every guarantee above is a unit test in the module,
-  or a test in `radian-exec` / `radian-tui`. A change here that only the hosts exercise is caught
-  only when those suites run.
+- **The integration tests are the transcript folds'.** `tests/transcript.rs` is the crate's
+  only `tests/` file: the folds' fixtures (a journal and an ACP `result.jsonl` stream) are
+  end-to-end inputs, not unit values. Every other guarantee above is a unit test in the module,
+  or a test in `radian-exec` / `radian-tui`. A change here that only the hosts exercise is
+  caught only when those suites run.
 - **`describe` is wording, not enforcement.** It reports what was chosen; it cannot check that
   the sandbox was actually built. The unreachable `(WorkspaceWrite, None)` arm says so in its
   own text ("the sandbox is missing; this must not happen").

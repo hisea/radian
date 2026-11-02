@@ -16,9 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use radian_coding::PromptError;
-use radian_core::{
-    AgentEvent, BudgetReport, CompactionOutcome, ContentPart, Message, MessageId, UsageSource,
-};
+use radian_core::{AgentEvent, BudgetReport, CompactionOutcome, Message, MessageId, UsageSource};
 use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};

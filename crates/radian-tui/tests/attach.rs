@@ -986,3 +986,152 @@ fn a_ten_thousand_entry_first_frame_is_within_twice_a_resume_first_frame() {
          ({resume:?})"
     );
 }
+
+// ---------- the shared fold (ADR 0023 U1) ----------
+
+/// A journal with a user turn, an assistant message that calls `read`, and the result: the
+/// shapes a folded entry has to get right (text, a tool card, the pairing).
+fn journal_with_a_tool_call() -> Vec<String> {
+    let call = radian_core::ToolCall {
+        id: "c1".to_owned(),
+        name: "read".to_owned(),
+        arguments: serde_json::json!({"path": "a.rs"}),
+    };
+    let result = radian_core::ToolResult {
+        call_id: "c1".to_owned(),
+        content: vec![radian_core::ContentPart::text("7: fn a() {}")],
+        structured: None,
+        is_error: false,
+        error_code: None,
+    };
+    vec![
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "TurnStarted",
+            true,
+            serde_json::json!({"turn_id": "t-1"}),
+        ),
+        envelope(
+            2,
+            "MessageAppended",
+            true,
+            appended(0, radian_core::Message::user("read it")),
+        ),
+        envelope(
+            3,
+            "MessageAppended",
+            true,
+            appended(
+                1,
+                radian_core::Message::Assistant {
+                    content: vec![radian_core::ContentPart::text("Reading a.rs.")],
+                    tool_calls: vec![call],
+                    reasoning: Vec::new(),
+                    interrupted: false,
+                    meta: radian_core::MessageMeta::default(),
+                    provider_payload: None,
+                },
+            ),
+        ),
+        envelope(
+            4,
+            "MessageAppended",
+            true,
+            appended(
+                2,
+                radian_core::Message::Tool {
+                    result,
+                    meta: radian_core::MessageMeta::default(),
+                },
+            ),
+        ),
+        envelope(
+            5,
+            "TurnFinished",
+            true,
+            serde_json::json!({"turn_id": "t-1", "outcome": "completed"}),
+        ),
+    ]
+}
+
+/// **Edge case 1.** One journal, folded by the host's shared fold and by the TUI's attach path,
+/// gives the same entries — and those entries are the expected ones (ADR 0023 U1). The view
+/// mirrors the fold, so a frame can never show something the hub would not.
+///
+/// Mutation: drop one entry kind's mapping in the moved fold — the assistant text, or the tool
+/// call — and this FAILS: the expected kinds no longer match (and the view would draw the same
+/// wrong list).
+#[test]
+fn the_tui_attach_path_folds_the_journal_through_the_shared_fold() {
+    let lines = journal_with_a_tool_call();
+    let (scratch, mut view) = open_view("shared-fold", "shared", &lines);
+    let path = scratch.file("shared.jsonl");
+    let fold = radian_host::transcript::AttachFold::open(&path, None).expect("the fold opens");
+
+    let expected: Vec<(radian_host::transcript::EntryKind, &str)> = vec![
+        (radian_host::transcript::EntryKind::User, "read it"),
+        (
+            radian_host::transcript::EntryKind::Assistant,
+            "Reading a.rs.",
+        ),
+        (radian_host::transcript::EntryKind::ToolCall, "read a.rs"),
+        (
+            radian_host::transcript::EntryKind::ToolResult,
+            "7: fn a() {}",
+        ),
+    ];
+    let folded = fold.entries();
+    assert_eq!(
+        folded
+            .iter()
+            .map(|entry| (entry.kind, entry.text.as_str()))
+            .collect::<Vec<_>>(),
+        expected,
+        "the shared fold's entries"
+    );
+
+    let shown = view.entries();
+    assert_eq!(shown.len(), folded.len(), "the view mirrors every entry");
+    for (index, (shown, folded)) in shown.iter().zip(folded).enumerate() {
+        assert_eq!(&shown.data, folded, "entry {index} differs from the fold's");
+    }
+    // The frame is drawn from those entries. `read` is a small tool (ADR 0028): its successful
+    // call is one head line, so the result row is folded away here — the entry list above is
+    // what pins it.
+    let screen = screen(&mut view, 80, 24);
+    assert!(screen.contains("read a.rs"), "{screen}");
+}
+
+/// The resume path (`App::push_message`, the live/resume mapping) and the shared fold agree on
+/// a journal's committed messages: the fold is not a second interpretation of the messages, it
+/// is the same rules with the live-only state left out (ADR 0023 U1).
+///
+/// This is the drift guard for the one mapping that stays in `radian-tui`: the live path adds
+/// the live-only concerns (dropping live entries, the reasoning clock, the live compaction
+/// numbers, the decoded images) and must not change what an entry *is*.
+///
+/// Mutation: change a kind, a text or a card in either mapping (say, push an assistant message
+/// as a notice in one of them) and this FAILS.
+#[test]
+fn the_resume_mapping_and_the_shared_fold_agree_on_a_journal() {
+    let lines = journal_with_a_tool_call();
+    let (_scratch, view) = open_view("resume-mapping", "resume", &lines);
+    let mut app = radian_tui::App::new("m", "s");
+    for message in view.history() {
+        app.push_message(message);
+    }
+    let folded = radian_host::transcript::AttachFold::open(view.path(), None)
+        .expect("the fold opens")
+        .entries()
+        .to_vec();
+    assert_eq!(folded.len(), app.session.entries.len());
+    for (index, (resumed, folded)) in app.session.entries.iter().zip(&folded).enumerate() {
+        assert_eq!(&resumed.data, folded, "entry {index} differs");
+    }
+}
