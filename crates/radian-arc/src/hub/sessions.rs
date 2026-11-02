@@ -31,10 +31,11 @@ use std::fs;
 use std::io::{BufRead, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper::body::Bytes;
 use radian_host::transcript::{AcpFold, AttachFold};
@@ -50,11 +51,37 @@ pub const SCAN_INTERVAL_SECS: u64 = 2;
 /// The longest a `list_sessions` probe waits for a socket that accepts and does not answer.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The probe timeout while a just-started process's port is being awaited: short enough that
+/// the wait retries several times a second, long enough for a loaded process to answer one
+/// line. The scan's own [`PROBE_TIMEOUT`] stays longer so a busy session is not forgotten.
+const START_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// The longest the `models` route waits for a session's port.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a dropped subscription waits before it reconnects.
 const RECONNECT_PAUSE: Duration = Duration::from_millis(200);
+
+/// The longest a newly started hub-held process may take to answer its control port before
+/// the write route fails with `502` (ADR 0048 §16). Startup includes MCP servers and the
+/// session recovery, so this is generous; a process that exits early fails at once.
+pub const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the wait for a new process's control port retries.
+const START_POLL: Duration = Duration::from_millis(25);
+
+/// How long a held process gets after SIGTERM before the hub kills it while stopping (ADR
+/// 0048 §16). Its own SIGTERM path cancels the running turn, closes the inbox and joins the
+/// driver, which kills every background job's process group.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// How often the hub stops waiting for a signalled held process to leave its socket.
+const STOP_POLL: Duration = Duration::from_millis(25);
+
+/// The largest a session write route's body may be, before the route answers `413`. The
+/// control port's request line is 16 MiB (CONTROL.md); forwarding adds a short envelope, so
+/// the body keeps 1 KiB of headroom under it.
+pub const SESSION_BODY_LIMIT: usize = radian_host::control::MAX_REQUEST_BYTES - 1024;
 
 /// How often a subscription's read wakes to notice that its socket was forgotten.
 const READ_POLL: Duration = Duration::from_millis(250);
@@ -77,6 +104,9 @@ pub struct LiveSession {
     /// The model route in force.
     pub provider: String,
     pub model: String,
+    /// `hub` when a process the hub started in its hub-held mode hosts the session, `tui` for
+    /// any other hosting process (ADR 0048 §16).
+    pub holder: String,
 }
 
 impl LiveSession {
@@ -100,6 +130,14 @@ pub enum SessionError {
     Unknown(String),
     /// The session has no live process, so there is no port to ask: `409`.
     NotLive(String),
+    /// The answer arrived after the queue entry was completed or abandoned: `409`, and
+    /// nothing changed.
+    Late(String),
+    /// A required field is missing or has the wrong JSON type: `400`.
+    Bad(String),
+    /// The body is well formed but a value is refused (an attachment over a limit, a model
+    /// object that is not a route, a config change the port refuses): `422`.
+    Invalid(String),
     /// The session's port failed: `502`.
     Port(String),
     /// A read of the session data or the index failed: `500`.
@@ -113,18 +151,39 @@ impl SessionError {
         match self {
             SessionError::Unknown(message)
             | SessionError::NotLive(message)
+            | SessionError::Late(message)
+            | SessionError::Bad(message)
+            | SessionError::Invalid(message)
             | SessionError::Port(message)
             | SessionError::Failed(message) => message,
         }
     }
 }
 
-/// The hub's live-session state: what each socket's port last said, and one event fan-out per
-/// live session.
+/// The hub's live-session state: what each socket's port last said, one event fan-out per
+/// live session, and the hub-held processes it started (ADR 0048 §16).
 pub struct SessionHub {
     /// `$RADIAN_HOME`: the `run/` directory is scanned and `hub/token` is read from here.
     home: PathBuf,
+    /// `[hub] session_idle_secs`: what a hub-held process is told as its reclaim window.
+    idle_secs: u64,
     inner: Mutex<Inner>,
+    /// The hub-held processes, keyed by pid. A process is listed here from the moment it is
+    /// spawned (with its session id) so a second request never starts a second process for
+    /// the same journal; the reaper removes it when it exits.
+    held: Mutex<BTreeMap<u32, Held>>,
+    /// One start (or resume) at a time. A prompt that must start a process holds this across
+    /// the spawn and the wait for the port; a second prompt then finds the process the first
+    /// one started instead of starting its own.
+    start: Mutex<()>,
+}
+
+/// One hub-held process (ADR 0048 §16).
+pub struct Held {
+    child: Child,
+    /// The session this process opened; known before the spawn for both a new session
+    /// (`--session-id`) and a resume (`--resume`).
+    session_id: String,
 }
 
 #[derive(Default)]
@@ -136,13 +195,23 @@ struct Inner {
 }
 
 impl SessionHub {
-    /// A hub that has not scanned anything yet.
+    /// A hub that has not scanned anything yet. `idle_secs` is the window a hub-held process
+    /// gets before it reclaims itself (`[hub] session_idle_secs`).
     #[must_use]
-    pub fn new(home: PathBuf) -> Arc<Self> {
+    pub fn new(home: PathBuf, idle_secs: u64) -> Arc<Self> {
         Arc::new(Self {
             home,
+            idle_secs,
             inner: Mutex::new(Inner::default()),
+            held: Mutex::new(BTreeMap::new()),
+            start: Mutex::new(()),
         })
+    }
+
+    /// The reclaim window a hub-held process is told.
+    #[must_use]
+    pub fn idle_secs(&self) -> u64 {
+        self.idle_secs
     }
 
     /// Starts the scanner on a thread of its own. The thread ends when the process does; the
@@ -249,6 +318,287 @@ impl SessionHub {
         sockets.sort();
         sockets
     }
+
+    /// The socket of a process hosting `id`, starting a hub-held one with `--resume` when no
+    /// process hosts it (ADR 0048 §16). The start lock is held across the spawn and the wait
+    /// for the port, so two concurrent prompts for one ended session start one process: the
+    /// second finds the first one's process (or its port) and never spawns another.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Failed`] when the process cannot be started and [`SessionError::Port`]
+    /// when it exits or does not answer its control port.
+    fn start_for(&self, repo: &Path, id: &str) -> Result<PathBuf, SessionError> {
+        let _guard = self.start.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(socket) = self.hosting(id, |socket| {
+            probe(socket)
+                .map(|live| live.is_some_and(|live| live.id == id))
+                .unwrap_or(false)
+        }) {
+            return Ok(socket);
+        }
+        if let Some((pid, socket)) = self.held_socket(id) {
+            // A previous start held the lock until its port answered, so this one is up unless
+            // it has since reclaimed itself; a dead one is forgotten and replaced.
+            if self.wait_for_session(pid, id).is_ok() {
+                return Ok(socket);
+            }
+            self.forget_held(pid);
+        }
+        let pid = self.spawn_held(repo, id, true, None)?;
+        match self.wait_for_session(pid, id) {
+            Ok(_) => Ok(self.socket_for(pid)),
+            Err(error) => {
+                self.forget_held(pid);
+                Err(error)
+            }
+        }
+    }
+
+    /// The socket of a process that already hosts `id`, if one does. This is the
+    /// one-process-per-journal check: the scanner's cache answers first, but only through
+    /// `alive`, because a process can exit between two scans; on a miss every socket is probed
+    /// afresh, so a process the two-second scan has not seen yet is still found. A fresh row is
+    /// not recorded: the scanner owns the cache and the subscription that goes with it.
+    ///
+    /// A `None` from `alive` or a port that reports another id is no host, and the caller then
+    /// starts the process.
+    fn hosting(&self, id: &str, alive: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+        if let Some((socket, live)) = self.live(id) {
+            return (live.id == id && alive(&socket)).then_some(socket);
+        }
+        for socket in self.sockets() {
+            if let Ok(Some(live)) = probe(&socket)
+                && live.id == id
+            {
+                return Some(socket);
+            }
+        }
+        None
+    }
+
+    /// The live session with `id`, looked up in the scanner's cache first and, on a miss,
+    /// probed afresh in every socket of the run directory. A fresh row is returned but not
+    /// recorded: the scanner owns the cache and the subscription that goes with it, and a
+    /// route that recorded a session would leave it without an event stream until the next
+    /// scan. The fresh probe is what keeps a process the two-second scan has not seen yet from
+    /// being started a second time (ADR 0048 §16).
+    #[must_use]
+    pub fn locate(&self, id: &str) -> Option<(PathBuf, LiveSession)> {
+        if let Some(found) = self.live(id) {
+            return Some(found);
+        }
+        for socket in self.sockets() {
+            if let Ok(Some(live)) = probe(&socket)
+                && live.id == id
+            {
+                return Some((socket, live));
+            }
+        }
+        None
+    }
+
+    /// The socket of the hub-held process for `id`, once it was spawned.
+    fn held_socket(&self, id: &str) -> Option<(u32, PathBuf)> {
+        let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        held.iter()
+            .find(|(_, process)| process.session_id == id)
+            .map(|(pid, _)| (*pid, self.socket_for(*pid)))
+    }
+
+    /// `<run dir>/<pid>.sock`.
+    fn socket_for(&self, pid: u32) -> PathBuf {
+        self.run_dir().join(format!("{pid}.sock"))
+    }
+
+    /// Starts one hub-held process (ADR 0048 §16) and returns its pid. `resume` selects
+    /// `--resume <session_id>`; otherwise the process creates that id (`--session-id`). Its
+    /// workspace is `repo`, its configuration is this machine's, and `route` overrides the
+    /// configured model when the request named one. stdin is closed (the process must never
+    /// read a terminal) and its stderr joins the hub's, so a startup failure is visible.
+    fn spawn_held(
+        &self,
+        repo: &Path,
+        session_id: &str,
+        resume: bool,
+        route: Option<(&str, &str)>,
+    ) -> Result<u32, SessionError> {
+        let program = std::env::current_exe()
+            .map_err(|error| SessionError::Failed(format!("cannot find this program: {error}")))?;
+        let mut command = Command::new(program);
+        command
+            .arg("exec")
+            .arg("--hub-held")
+            .arg("--hub-idle-secs")
+            .arg(self.idle_secs.to_string())
+            .arg("--workspace")
+            .arg(repo)
+            .current_dir(repo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        if resume {
+            command.arg("--resume").arg(session_id);
+        } else {
+            command.arg("--session-id").arg(session_id);
+        }
+        if let Some((provider, model)) = route {
+            command.arg("--provider").arg(provider);
+            command.arg("--model").arg(model);
+        }
+        let child = command.spawn().map_err(|error| {
+            SessionError::Failed(format!(
+                "cannot start a session process in {}: {error}",
+                repo.display()
+            ))
+        })?;
+        let pid = child.id();
+        self.held
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                pid,
+                Held {
+                    child,
+                    session_id: session_id.to_owned(),
+                },
+            );
+        Ok(pid)
+    }
+
+    /// Waits until `pid`'s control port answers `list_sessions` with `id`, or fails. A process
+    /// that exits before its port answers is a start failure at once, not a timeout.
+    fn wait_for_session(&self, pid: u32, id: &str) -> Result<LiveSession, SessionError> {
+        let socket = self.socket_for(pid);
+        let deadline = Instant::now() + START_TIMEOUT;
+        let mut last: String;
+        loop {
+            if let Some(status) = self.exited(pid) {
+                return Err(SessionError::Port(format!(
+                    "the session process exited before its control port answered ({status})"
+                )));
+            }
+            match probe_within(&socket, START_PROBE_TIMEOUT) {
+                Ok(Some(live)) if live.id == id => return Ok(live),
+                Ok(Some(live)) => last = format!("the port reports session {:?}", live.id),
+                Ok(None) => last = "the port reported no main row".to_owned(),
+                Err(error) => last = error,
+            }
+            if Instant::now() >= deadline {
+                return Err(SessionError::Port(format!(
+                    "the session process did not answer its control port within {} seconds ({last})",
+                    START_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(START_POLL);
+        }
+    }
+
+    /// The exit status of a held process that has already exited (reaping it), or `None` while
+    /// it runs. The entry stays in the held map until the reaper removes it.
+    fn exited(&self, pid: u32) -> Option<std::process::ExitStatus> {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        let process = held.get_mut(&pid)?;
+        process.child.try_wait().ok().flatten()
+    }
+
+    /// Forgets a held process whose start failed: SIGTERM first (its own handler closes the
+    /// session), a moment to exit, then SIGKILL if it is still there.
+    fn forget_held(&self, pid: u32) {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(mut process) = held.remove(&pid) else {
+            return;
+        };
+        let _ = process::signal(pid, process::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if matches!(process.child.try_wait(), Ok(Some(_)) | Err(_)) {
+                return;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+        let _ = process.child.kill();
+        let _ = process.child.wait();
+    }
+
+    /// Removes held processes that have exited, so the map does not grow with every idle
+    /// reclaim. Called by the scanner on every pass.
+    fn reap(&self) {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        held.retain(|_, process| match process.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) | Err(_) => false,
+        });
+    }
+
+    /// Stops every hub-held process cleanly (ADR 0048 §16), before the hub releases
+    /// `hub.lock`: SIGTERM (which the process handles by cancelling its turn, closing the
+    /// session and flushing the journal), the [`STOP_GRACE`] window, then SIGKILL for what is
+    /// left. A hub-held process this hub did not spawn (one that outlived an `exec` of a
+    /// rebuilt binary) is found by its `holder` on the run directory's sockets and signalled
+    /// the same way.
+    pub fn shutdown(&self) {
+        let pids: Vec<u32> = {
+            let held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+            held.keys().copied().collect()
+        };
+        let mut signalled: Vec<(u32, Option<Child>)> = Vec::with_capacity(pids.len());
+        for pid in pids {
+            let _ = process::signal(pid, process::SIGTERM);
+            signalled.push((pid, None));
+        }
+        for socket in self.sockets() {
+            let Ok(Some(live)) = probe(&socket) else {
+                continue;
+            };
+            if live.holder != "hub" {
+                continue;
+            }
+            let Some(pid) = socket
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if signalled.iter().any(|(known, _)| *known == pid) {
+                continue;
+            }
+            let _ = process::signal(pid, process::SIGTERM);
+            signalled.push((pid, None));
+        }
+        // Take the children out so the waits happen without holding the map.
+        {
+            let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+            for (pid, slot) in signalled.iter_mut() {
+                if let Some(process) = held.remove(pid) {
+                    *slot = Some(process.child);
+                }
+            }
+        }
+        let deadline = Instant::now() + STOP_GRACE;
+        let mut waiting: Vec<(u32, Child)> = signalled
+            .into_iter()
+            .filter_map(|(pid, child)| child.map(|child| (pid, child)))
+            .collect();
+        while !waiting.is_empty() {
+            waiting.retain_mut(|(_, child)| match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) | Err(_) => false,
+            });
+            if waiting.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                for (_, child) in &mut waiting {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                break;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+    }
 }
 
 /// One subscription thread and the flag that stops it.
@@ -284,6 +634,7 @@ fn scan(hub: &Arc<SessionHub>) {
     let mut tracked: BTreeMap<PathBuf, Subscription> = BTreeMap::new();
     let mut failures: BTreeMap<PathBuf, u8> = BTreeMap::new();
     loop {
+        hub.reap();
         let sockets = hub.sockets();
         tracked.retain(|socket, subscription| {
             if sockets.contains(socket) {
@@ -328,12 +679,18 @@ fn scan(hub: &Arc<SessionHub>) {
 /// reports no `main` row. Every read is bounded by [`PROBE_TIMEOUT`] so a socket that accepts and
 /// never answers costs one timeout, not the scan.
 fn probe(socket: &Path) -> Result<Option<LiveSession>, String> {
+    probe_within(socket, PROBE_TIMEOUT)
+}
+
+/// [`probe`] with an explicit read timeout.
+fn probe_within(socket: &Path, timeout: Duration) -> Result<Option<LiveSession>, String> {
     let response = request(
         socket,
         &json!({ "id": 1, "verb": "list_sessions" }),
-        PROBE_TIMEOUT,
+        timeout,
         None,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let Some(rows) = response.get("sessions").and_then(Value::as_array) else {
         return Ok(None);
     };
@@ -367,6 +724,11 @@ fn probe(socket: &Path) -> Result<Option<LiveSession>, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned(),
+            holder: row
+                .get("holder")
+                .and_then(Value::as_str)
+                .unwrap_or("tui")
+                .to_owned(),
         }));
     }
     Ok(None)
@@ -380,9 +742,10 @@ fn request(
     request: &Value,
     timeout: Duration,
     token: Option<&str>,
-) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|error| format!("cannot connect to {}: {error}", socket.display()))?;
+) -> Result<Value, CallError> {
+    let mut stream = UnixStream::connect(socket).map_err(|error| {
+        CallError::Failed(format!("cannot connect to {}: {error}", socket.display()))
+    })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let mut request = request.clone();
@@ -391,26 +754,48 @@ fn request(
     {
         object.insert("token".to_owned(), json!(token));
     }
-    let mut line = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+    let mut line =
+        serde_json::to_vec(&request).map_err(|error| CallError::Failed(error.to_string()))?;
     line.push(b'\n');
-    stream
-        .write_all(&line)
-        .map_err(|error| format!("cannot write to {}: {error}", socket.display()))?;
+    stream.write_all(&line).map_err(|error| {
+        CallError::Failed(format!("cannot write to {}: {error}", socket.display()))
+    })?;
     let mut reader = std::io::BufReader::new(stream);
     let mut answer = String::new();
-    reader
-        .read_line(&mut answer)
-        .map_err(|error| format!("cannot read from {}: {error}", socket.display()))?;
-    let value: Value = serde_json::from_str(answer.trim())
-        .map_err(|error| format!("{} answered no JSON: {error}", socket.display()))?;
+    reader.read_line(&mut answer).map_err(|error| {
+        CallError::Failed(format!("cannot read from {}: {error}", socket.display()))
+    })?;
+    let value: Value = serde_json::from_str(answer.trim()).map_err(|error| {
+        CallError::Failed(format!("{} answered no JSON: {error}", socket.display()))
+    })?;
     if value.get("ok") == Some(&Value::Bool(true)) {
         return Ok(value);
     }
-    Err(value
-        .get("error")
-        .and_then(Value::as_str)
-        .unwrap_or("the control port refused the request")
-        .to_owned())
+    Err(CallError::Refused(
+        value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the control port refused the request")
+            .to_owned(),
+    ))
+}
+
+/// Why one call to a control port did not produce a successful answer line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallError {
+    /// The port answered, and the answer is an error line: the request was refused.
+    Refused(String),
+    /// The connection, the write or the read failed, or the answer was not JSON: the port
+    /// itself failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::Refused(message) | CallError::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// The `models` route's answer: the control port's own list (ADR 0026 D5).
@@ -435,8 +820,271 @@ pub fn models(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
         Ok(answer) => Ok(json!({
             "models": answer.get("models").cloned().unwrap_or(Value::Array(Vec::new())),
         })),
-        Err(error) => Err(SessionError::Port(error)),
+        Err(error) => Err(SessionError::Port(error.to_string())),
     }
+}
+
+// ---- the write routes ---------------------------------------------------------------------
+
+/// One model route a create request names.
+struct ModelRoute<'a> {
+    provider: &'a str,
+    model: &'a str,
+}
+
+/// One session write route's validated body (ADR 0048 §16). `raw` is the JSON object the
+/// route forwards, so the port parses exactly what the client sent (attachments included).
+struct SessionInput {
+    raw: Value,
+    steer: bool,
+}
+
+/// Parses and validates a session write route's body. A missing or wrong-typed field is
+/// [`SessionError::Bad`] (`400`); a well-formed value the composer refuses is
+/// [`SessionError::Invalid`] (`422`). Nothing is started or forwarded when this fails.
+fn parse_input(body: &[u8]) -> Result<SessionInput, SessionError> {
+    let raw = parse_object(body)?;
+    match raw.get("text") {
+        Some(Value::String(_)) => {}
+        None => return Err(SessionError::Bad("`text` is required".to_owned())),
+        Some(_) => return Err(SessionError::Bad("`text` must be a string".to_owned())),
+    }
+    let steer = match raw.get("steer") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(steer)) => *steer,
+        Some(_) => return Err(SessionError::Bad("`steer` must be a boolean".to_owned())),
+    };
+    radian_host::control::validate_attachments(&raw).map_err(SessionError::Invalid)?;
+    Ok(SessionInput { raw, steer })
+}
+
+/// Parses a write route's body as a JSON object; an empty body is `{}`.
+fn parse_object(body: &[u8]) -> Result<Value, SessionError> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(json!({}));
+    }
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|error| SessionError::Bad(format!("the body is not JSON: {error}")))?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(SessionError::Bad(
+            "the body must be a JSON object".to_owned(),
+        ))
+    }
+}
+
+/// The create route's optional `model`: exactly `{"provider": string, "model": string}`.
+fn parse_model(raw: &Value) -> Result<Option<ModelRoute<'_>>, SessionError> {
+    let Some(model) = raw.get("model") else {
+        return Ok(None);
+    };
+    if model.is_null() {
+        return Ok(None);
+    }
+    let Some(object) = model.as_object() else {
+        return Err(SessionError::Bad(
+            "`model` must be an object with `provider` and `model`".to_owned(),
+        ));
+    };
+    if object.keys().any(|key| key != "provider" && key != "model") {
+        return Err(SessionError::Bad(
+            "`model` accepts only `provider` and `model`".to_owned(),
+        ));
+    }
+    let provider = object
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SessionError::Bad("`model.provider` must be a non-empty string".to_owned())
+        })?;
+    let name = object
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SessionError::Bad("`model.model` must be a non-empty string".to_owned()))?;
+    Ok(Some(ModelRoute {
+        provider,
+        model: name,
+    }))
+}
+
+/// Forwards one already-built control request over `socket` with the hub token. A refusal
+/// keeps its meaning: the queue's two answer outcomes get their own route errors, and every
+/// other refusal is a value the route forwarded, so it is `422`.
+fn forward(socket: &Path, hub: &SessionHub, request: &Value) -> Result<Value, SessionError> {
+    let token = hub.token();
+    match self::request(socket, request, REQUEST_TIMEOUT, token.as_deref()) {
+        Ok(answer) => Ok(answer),
+        Err(CallError::Failed(message)) => Err(SessionError::Port(message)),
+        Err(CallError::Refused(message)) => Err(refusal(message)),
+    }
+}
+
+/// The route error a control port's error line becomes.
+fn refusal(message: String) -> SessionError {
+    if message.contains("the request is no longer pending") {
+        SessionError::Late(message)
+    } else if message.contains("no pending request has that id") {
+        SessionError::Unknown(message)
+    } else if message.contains("the session has closed") {
+        SessionError::NotLive(message)
+    } else {
+        SessionError::Invalid(message)
+    }
+}
+
+/// `POST /v1/repos/<name>/sessions`: start a hub-held process for a new session, send the
+/// body's first message, and return the session id. The id is generated here and handed to
+/// the process with `--session-id`, so the route knows it before the port answers.
+///
+/// # Errors
+///
+/// [`SessionError::Bad`]/[`SessionError::Invalid`] for a refused body (before anything
+/// starts), [`SessionError::Failed`] when the process cannot be started, and
+/// [`SessionError::Port`] when it exits or does not answer its port.
+pub fn start_session(hub: &SessionHub, repo: &Path, body: &[u8]) -> Result<String, SessionError> {
+    let input = parse_input(body)?;
+    let route = parse_model(&input.raw)?;
+    let id = radian_host::generate_session_id();
+    let pid = hub.spawn_held(
+        repo,
+        &id,
+        false,
+        route.as_ref().map(|route| (route.provider, route.model)),
+    )?;
+    if let Err(error) = hub.wait_for_session(pid, &id) {
+        hub.forget_held(pid);
+        return Err(error);
+    }
+    if let Err(error) = send_input(hub, &hub.socket_for(pid), &input) {
+        hub.forget_held(pid);
+        return Err(error);
+    }
+    Ok(id)
+}
+
+/// Sends one validated input over a session's port: `steer` when the body asked for it,
+/// `followup` otherwise, with the hub token so the port records it as the owner's.
+fn send_input(
+    hub: &SessionHub,
+    socket: &Path,
+    input: &SessionInput,
+) -> Result<Value, SessionError> {
+    let verb = if input.steer { "steer" } else { "followup" };
+    let mut request = input.raw.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.remove("steer");
+        object.remove("model");
+        object.insert("id".to_owned(), json!(1));
+        object.insert("verb".to_owned(), json!(verb));
+    }
+    forward(socket, hub, &request)
+}
+
+/// `POST …/sessions/<id>/prompt`: deliver the body to the session. A live session receives it
+/// through its socket; a session no process hosts is resumed by a hub-held process first. A
+/// second prompt for the same ended session finds the process the first one started (the
+/// hub's one-start lock), so only one process ever opens the journal.
+///
+/// # Errors
+///
+/// [`SessionError::Bad`]/[`SessionError::Invalid`] for a refused body, [`SessionError::Unknown`]
+/// for a session that is not this repository's, [`SessionError::Port`] when its port fails.
+pub fn prompt(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<Value, SessionError> {
+    let input = parse_input(body)?;
+    // The session must be this repository's before anything starts.
+    journal_for(repo, id)?;
+    if let Some((socket, _)) = hub.live(id) {
+        match send_input(hub, &socket, &input) {
+            // The cached socket died between the scan and this send: resume, the same way an
+            // ended session is.
+            Err(SessionError::Port(_)) => {}
+            other => return other,
+        }
+    }
+    let socket = hub.start_for(repo, id)?;
+    send_input(hub, &socket, &input)
+}
+
+/// `POST …/sessions/<id>/cancel`: forward the port's `cancel`.
+///
+/// # Errors
+///
+/// [`SessionError::Unknown`] for a session that is not this repository's,
+/// [`SessionError::NotLive`] when no process hosts it, [`SessionError::Port`] when its port
+/// fails.
+pub fn cancel(hub: &SessionHub, repo: &Path, id: &str) -> Result<(), SessionError> {
+    let (socket, _) = live_session(hub, repo, id)?;
+    forward(&socket, hub, &json!({ "id": 1, "verb": "cancel" }))?;
+    Ok(())
+}
+
+/// `POST …/sessions/<id>/answer`: forward the port's `answer`. A late answer is
+/// [`SessionError::Late`] (`409`) and changes nothing; an id the queue never issued is
+/// [`SessionError::Unknown`] (`404`).
+///
+/// # Errors
+///
+/// As [`cancel`], plus the body's field checks ([`SessionError::Bad`]) and the port's refusal
+/// ([`SessionError::Invalid`]).
+pub fn answer(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<(), SessionError> {
+    let raw = parse_object(body)?;
+    if !raw.get("request_id").is_some_and(Value::is_u64) {
+        return Err(SessionError::Bad(
+            "`request_id` is required and must be a non-negative integer".to_owned(),
+        ));
+    }
+    if raw.get("response").is_none_or(Value::is_null) {
+        return Err(SessionError::Bad("`response` is required".to_owned()));
+    }
+    let (socket, _) = live_session(hub, repo, id)?;
+    let mut request = raw;
+    if let Some(object) = request.as_object_mut() {
+        object.insert("id".to_owned(), json!(1));
+        object.insert("verb".to_owned(), json!("answer"));
+    }
+    forward(&socket, hub, &request)?;
+    Ok(())
+}
+
+/// `POST …/sessions/<id>/config`: forward the port's `config`; the port validates the keys
+/// and queues the change for the next turn boundary (ADR 0004).
+///
+/// # Errors
+///
+/// As [`cancel`], plus the body's field checks ([`SessionError::Bad`]) and the port's refusal
+/// ([`SessionError::Invalid`]).
+pub fn config(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<(), SessionError> {
+    let raw = parse_object(body)?;
+    if !raw.get("config").is_some_and(Value::is_object) {
+        return Err(SessionError::Bad(
+            "`config` is required and must be an object".to_owned(),
+        ));
+    }
+    let (socket, _) = live_session(hub, repo, id)?;
+    let mut request = raw;
+    if let Some(object) = request.as_object_mut() {
+        object.insert("id".to_owned(), json!(1));
+        object.insert("verb".to_owned(), json!("config"));
+    }
+    forward(&socket, hub, &request)?;
+    Ok(())
+}
+
+/// The live socket of a session this repository owns, or the route's error.
+fn live_session(
+    hub: &SessionHub,
+    repo: &Path,
+    id: &str,
+) -> Result<(PathBuf, LiveSession), SessionError> {
+    journal_for(repo, id)?;
+    // A fresh probe as well as the scanner's cache: a process started a moment ago is live
+    // before the next scan sees it, and its queue may already hold the request being answered.
+    hub.locate(id).ok_or_else(|| {
+        SessionError::NotLive(format!("session {id:?} is not live: no process hosts it"))
+    })
 }
 
 // ---- the route bodies ---------------------------------------------------------------------
@@ -478,7 +1126,7 @@ pub fn sessions_body(hub: &SessionHub, repo: &Path) -> Result<Value, SessionErro
                 "created": row.created_ts,
                 "last_activity": row.last_ts,
                 "title": (!row.summary.is_empty()).then_some(row.summary),
-                "live": if current.is_some() { "tui" } else { "none" },
+                "live": current.map_or("none", |live| live.holder.as_str()),
                 "state": current.map_or("idle", |live| live.state.as_str()),
                 "pending": current.map_or(0, |live| live.pending),
                 "model": current.map(LiveSession::route),
@@ -497,7 +1145,7 @@ pub fn sessions_body(hub: &SessionHub, repo: &Path) -> Result<Value, SessionErro
                 "created": Value::Null,
                 "last_activity": Value::Null,
                 "title": Value::Null,
-                "live": "tui",
+                "live": current.holder,
                 "state": current.state,
                 "pending": current.pending,
                 "model": current.route(),
@@ -900,6 +1548,7 @@ mod tests {
             pending,
             provider: "p".to_owned(),
             model: "m".to_owned(),
+            holder: "tui".to_owned(),
         }
     }
 
@@ -942,6 +1591,7 @@ mod tests {
             pending: 0,
             provider: "p".to_owned(),
             model: "m".to_owned(),
+            holder: "tui".to_owned(),
         };
         assert!(
             live.in_repo(&real),
@@ -961,15 +1611,40 @@ mod tests {
         fs::create_dir_all(&run).unwrap();
         fs::write(run.join("2147483647.sock"), b"").unwrap();
         fs::write(run.join("notes.txt"), b"").unwrap();
-        let hub = SessionHub::new(dir.clone());
+        let hub = SessionHub::new(
+            dir.clone(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
         assert!(hub.sockets().is_empty(), "{:?}", hub.sockets());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn a_session_another_process_hosts_is_not_started_again() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-hosted");
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        let socket = hub.run_dir().join("4242.sock");
+        let mut live = live_row("s", 0);
+        live.workspace = "/work/example".to_owned();
+        hub.record(&socket, live);
+
+        // The scanner saw the session and its port answers: it is hosted, so no process is
+        // started. A port that no longer answers, or another id, is not a host.
+        assert_eq!(hub.hosting("s", |_| true), Some(socket));
+        assert_eq!(hub.hosting("s", |_| false), None);
+        assert_eq!(hub.hosting("other", |_| true), None);
+    }
+
+    #[test]
     fn a_pending_event_becomes_one_pending_frame_and_a_blocked_state() {
         let dir = crate::test_support::TempDir::new("hub-sessions-pending");
-        let hub = SessionHub::new(dir.path().to_path_buf());
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
         let mut stream = Stream::new(
             Arc::clone(&hub),
             &live_row("s", 0),
@@ -1010,7 +1685,10 @@ mod tests {
             .open(&journal)
             .unwrap();
         fs2::FileExt::lock_exclusive(&writer).expect("the journal's writer lock is free");
-        let hub = SessionHub::new(dir.path().to_path_buf());
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
         let mut stream = Stream::new(Arc::clone(&hub), &live_row("s", 0), journal.clone());
         let mut file = fs::OpenOptions::new().append(true).open(&journal).unwrap();
         let appended = json!({
@@ -1081,7 +1759,10 @@ mod tests {
     #[test]
     fn the_subscription_reconnects_after_the_connection_drops() {
         let dir = crate::test_support::TempDir::new("hub-sessions-follow");
-        let hub = SessionHub::new(dir.path().to_path_buf());
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
         let live = live_row("s", 0);
         // The channel a session's subscribers read; the scanner records it for every live
         // session before it starts the subscription.
@@ -1144,7 +1825,10 @@ mod tests {
     #[test]
     fn a_config_change_becomes_one_config_frame() {
         let dir = crate::test_support::TempDir::new("hub-sessions-config");
-        let hub = SessionHub::new(dir.path().to_path_buf());
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
         let mut stream = Stream::new(
             Arc::clone(&hub),
             &live_row("s", 0),

@@ -66,12 +66,14 @@ test-group = "pty"
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
 #
-# 6. The hub's session surface (9 names). Each test binds a fake control socket at
-#    `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`: `/tmp`
-#    is the only writable base that short, and the sandbox denies it (group 1),
-#    while `$TMPDIR` inside the workspace is too long (group 5). The routes these
-#    tests exercise without a socket (the transcript, the conversation, the router,
-#    the version) run in the sandbox.
+# 6. The hub's session surface (20 names). Each test binds or connects to a control
+#    socket at `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`
+#    and the connect must be allowed: `/tmp` is the only short base that is writable
+#    outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside the
+#    workspace is too long (group 5), and the `workspace` tier denies every Unix-socket
+#    connect (`(deny network-outbound (remote unix-socket))`). The routes these tests
+#    exercise without a socket (the transcript, the conversation, the router, the
+#    version, and a session write route's body validation) run in the sandbox.
 
 [profile.sandbox]
 # See the group list above; the blank lines below separate the groups.
@@ -383,5 +385,17 @@ not (
   | test(=a_socket_whose_process_died_is_dropped_on_the_next_scan)
   | test(=a_workspace_spelled_through_a_symlink_matches_its_repository)
   | test(=each_repository_lists_only_its_own_live_session)
+
+  | test(=a_created_session_sends_its_first_message_as_the_owner_with_the_hub_origin)
+  | test(=a_prompt_to_an_ended_session_resumes_the_same_journal)
+  | test(=a_prompt_to_a_live_process_outside_the_hub_uses_its_socket)
+  | test(=two_concurrent_prompts_to_an_ended_session_start_one_process)
+  | test(=an_approval_waits_in_the_queue_and_proceeds_after_the_hub_answers)
+  | test(=a_late_answer_is_conflict_and_nothing_changes)
+  | test(=an_idle_process_exits_and_the_next_prompt_resumes_it)
+  | test(=a_process_with_a_running_background_job_is_not_reclaimed)
+  | test(=a_bad_body_is_bad_request_and_starts_no_process)
+  | test(=the_live_only_routes_refuse_an_ended_session)
+  | test(=a_config_route_queues_the_next_turns_route)
 )
 """

@@ -7,3 +7,5 @@ port = 7341
 concurrency = 4
 # Seconds between two scheduling passes.
 interval_secs = 30
+# Seconds a hub-held session may sit idle before its process exits.
+session_idle_secs = 3600

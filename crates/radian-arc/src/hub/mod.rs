@@ -27,8 +27,14 @@
 //! [`http`] is the loopback HTTP API: every request carries the bearer token, and the read
 //! routes return the same bytes `radian arc list --json` and `radian arc show --json` print.
 //! [`sessions`] is the hub's view of this machine's radian sessions: the run directory's
-//! sockets, the control port each one hosts, and the transcript, event stream, model list and
-//! worker conversation the session routes answer from.
+//! sockets, the control port each one hosts, the transcript, event stream, model list and
+//! worker conversation the session routes answer from, and the write routes that start and
+//! drive a **hub-held** session (a `radian exec --hub-held` process, ADR 0048 §16). The hub
+//! starts one of those for a new session or to resume an ended one, forwards the phone's
+//! prompt, cancel, answer and config to its control port with the hub token, and never starts
+//! a second process for a journal another process already hosts. A hub-held process reclaims
+//! itself after `[hub] session_idle_secs` without work; the hub stops whatever it still holds
+//! when it shuts down.
 
 pub mod http;
 pub mod lock;

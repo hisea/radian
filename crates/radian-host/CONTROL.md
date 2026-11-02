@@ -16,7 +16,10 @@ its socket. (`radian serve` and `radian mcp` remain reserved subcommands.)
   both drop a guard that removes it. At startup every `*.sock` in `run/` whose pid is no longer
   alive (`kill(pid, 0)`, `EPERM` counts as alive) is removed, so a `kill -9` does not leave one.
 - On by default. `[control] enabled = false` in the config file turns the port off for this
-  process; the startup line then does not print a `[control]` path.
+  process; the startup line then does not print a `[control]` path. A hub-held process (ADR
+  0048 §16) is the exception: its port is its only input and the hub's only channel to it, so
+  the mode binds the port whatever `[control] enabled` says, and a bind failure is a startup
+  error for that process.
 - The startup writes one line naming the path: `[control] /home/me/.radian/run/12345.sock`.
 
 ## The protocol
@@ -280,7 +283,7 @@ One `main` row (one process serves one session):
 
 ```json
 {"id": 1, "ok": true, "sessions": [{
-  "id": "…", "kind": "main",
+  "id": "…", "kind": "main", "holder": "tui",
   "workspace": "/home/me/project",
   "model": {"provider": "anthropic", "model": "claude-sonnet-4"},
   "state": "blocked",
@@ -290,6 +293,7 @@ One `main` row (one process serves one session):
 | field | meaning |
 |---|---|
 | `workspace` | the canonical workspace this session was opened in |
+| `holder` | `hub` for a process a hub started in its hub-held mode (ADR 0048 §16), `tui` for every other hosting process. The hub turns `hub` into `live: hub` and `tui` into `live: tui`. |
 | `model` | the model route in force (ADR 0026 D8) |
 | `state` | `idle`, `working` or `blocked` by ADR 0034 H2: a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, and everything else is `idle` |
 | `pending` | the pending approval/question count |

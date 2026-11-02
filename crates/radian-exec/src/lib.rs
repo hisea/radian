@@ -223,6 +223,22 @@ pub struct CommonArgs {
     /// killed the child, so machine load cannot make the two branches look alike.
     #[arg(long = "tool-cancel-grace-ms", value_name = "MILLIS", hide = true)]
     tool_cancel_grace_ms: Option<u64>,
+
+    /// Hidden: the hub-held mode (ADR 0048 §16). Internal: `radian hub` is the only caller.
+    /// The process opens its session (new, or `--resume`) and runs no turn of its own; every
+    /// input arrives on its control port, and approvals and questions go to the session's
+    /// pending queue, never a terminal. It is not a user input and the manual does not
+    /// document it. `run` refuses it beside a prompt or a management command: the flag lives
+    /// in the shared `CommonArgs`, which `radian acp` flattens too, so a clap conflict naming
+    /// an exec-only argument would break the ACP parser's own debug check.
+    #[arg(long = "hub-held", hide = true)]
+    hub_held: bool,
+
+    /// Hidden: how long the hub-held process may sit idle before it exits cleanly (ADR 0048
+    /// §16). Internal: `radian hub` passes `[hub] session_idle_secs`. `3600` when absent, so a
+    /// hand-started `--hub-held` process has the documented default. Not a user input.
+    #[arg(long = "hub-idle-secs", value_name = "SECS", hide = true)]
+    hub_idle_secs: Option<u64>,
 }
 
 #[derive(Parser, Default)]
@@ -456,6 +472,25 @@ pub fn run_acp_blocking(cli: AcpCli) -> i32 {
 }
 
 pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i32 {
+    // The hidden hub-held mode takes no prompt and none of the session-management modes: its
+    // input is its control port (ADR 0048 §16). The check is here rather than in clap because
+    // the flag lives in the shared argument set `radian acp` flattens too.
+    if cli.hub_held
+        && (cli.prompt.is_some()
+            || cli.list
+            || cli.export.is_some()
+            || cli.search.is_some()
+            || cli.fork.is_some()
+            || cli.output.is_some()
+            || cli.command.is_some())
+    {
+        eprintln!("radian: --hub-held cannot be combined with a prompt or a management command");
+        return USAGE_ERROR;
+    }
+    if cli.hub_idle_secs.is_some() && !cli.hub_held {
+        eprintln!("radian: --hub-idle-secs needs --hub-held");
+        return USAGE_ERROR;
+    }
     // `radian memory` and `radian config` are modes of their own: no model, no key, no session
     // file, no network. They are handled before `setup`, like the session-management commands.
     if cli.command.is_some() {
@@ -594,6 +629,8 @@ mod tests {
             "--parent",
             "--parent-seq",
             "--tool-cancel-grace-ms",
+            "--hub-held",
+            "--hub-idle-secs",
         ] {
             assert!(acp.contains(flag), "radian acp misses the shared {flag}");
         }

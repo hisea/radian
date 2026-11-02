@@ -212,6 +212,13 @@ pub const MAX_HUB_PORT: u16 = 65535;
 pub const MIN_HUB_INTERVAL_SECS: u64 = 5;
 /// The high end of the closed `[hub] interval_secs` range.
 pub const MAX_HUB_INTERVAL_SECS: u64 = 3600;
+/// The `[hub] session_idle_secs` default: how long a hub-held session may sit idle before its
+/// process exits (ADR 0048 §16).
+pub const DEFAULT_HUB_SESSION_IDLE_SECS: u64 = 3600;
+/// The low end of the closed `[hub] session_idle_secs` range.
+pub const MIN_HUB_SESSION_IDLE_SECS: u64 = 60;
+/// The high end of the closed `[hub] session_idle_secs` range.
+pub const MAX_HUB_SESSION_IDLE_SECS: u64 = 86400;
 
 /// `[hub]` (ADR 0048): the hub process. A value outside a range is refused; an unknown key is
 /// skipped and named.
@@ -220,6 +227,8 @@ pub struct HubConfig {
     pub port: u16,
     pub concurrency: u64,
     pub interval_secs: u64,
+    /// `[hub] session_idle_secs`: the reclaim window of a hub-held session (ADR 0048 §16).
+    pub session_idle_secs: u64,
 }
 
 impl Default for HubConfig {
@@ -228,6 +237,7 @@ impl Default for HubConfig {
             port: DEFAULT_HUB_PORT,
             concurrency: DEFAULT_HUB_CONCURRENCY,
             interval_secs: DEFAULT_HUB_INTERVAL_SECS,
+            session_idle_secs: DEFAULT_HUB_SESSION_IDLE_SECS,
         }
     }
 }
@@ -605,6 +615,22 @@ fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             }
             ("interval_secs", _) => {
                 return Err(wrong_type(path, "hub.interval_secs", "an integer"));
+            }
+            ("session_idle_secs", Value::Integer(secs))
+                if (MIN_HUB_SESSION_IDLE_SECS as i64..=MAX_HUB_SESSION_IDLE_SECS as i64)
+                    .contains(secs) =>
+            {
+                config.hub.session_idle_secs = *secs as u64;
+            }
+            ("session_idle_secs", Value::Integer(_)) => {
+                return Err(ConfigError::ValueOutOfRange {
+                    path: path.to_path_buf(),
+                    key: "hub.session_idle_secs".into(),
+                    range: "60 to 86400",
+                });
+            }
+            ("session_idle_secs", _) => {
+                return Err(wrong_type(path, "hub.session_idle_secs", "an integer"));
             }
             (other, _) => config.skipped.push(format!("hub.{other}")),
         }
@@ -2142,6 +2168,7 @@ future_option = "alpha"
             "hub.port",
             "hub.concurrency",
             "hub.interval_secs",
+            "hub.session_idle_secs",
             "context.subtree_files",
             "compaction.auto",
             "compaction.thinking",
@@ -2290,6 +2317,7 @@ future_option = "alpha"
                 "port = 7341\n",
                 "concurrency = 4\n",
                 "interval_secs = 30\n",
+                "session_idle_secs = 3600\n",
                 "[compaction]\n",
                 "auto = false\n",
                 "thinking = \"low\"\n",
@@ -2695,6 +2723,10 @@ future_option = "alpha"
                 HubConfig::default().interval_secs.to_string(),
             ),
             (
+                "hub.session_idle_secs",
+                HubConfig::default().session_idle_secs.to_string(),
+            ),
+            (
                 "control.enabled",
                 ControlConfig::default().enabled.to_string(),
             ),
@@ -2737,5 +2769,28 @@ future_option = "alpha"
         let config =
             parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 7\n").unwrap();
         assert_eq!(config.memory.injection().sessions_index_max_lines, 7);
+    }
+
+    /// `[hub] session_idle_secs` is the closed range `60` to `86400`: a value outside it is a
+    /// configuration error naming the key and the range, and the endpoints are accepted.
+    /// Mutation: widen the range, or drop the error's key or range → this fails.
+    #[test]
+    fn hub_session_idle_secs_outside_its_range_names_the_key_and_the_range() {
+        for value in [0, 59, 86_401] {
+            let text = format!("schema_version = 1\n[hub]\nsession_idle_secs = {value}\n");
+            let error = parse_str(&text).unwrap_err().to_string();
+            assert!(
+                error.contains("hub.session_idle_secs") && error.contains("60 to 86400"),
+                "{value}: {error}"
+            );
+        }
+        for (value, expected) in [(60, 60), (86_400, 86_400)] {
+            let text = format!("schema_version = 1\n[hub]\nsession_idle_secs = {value}\n");
+            let config = parse_str(&text).expect("the range's endpoints are accepted");
+            assert_eq!(config.hub.session_idle_secs, expected);
+        }
+        // Absent, the default is 3600.
+        let config = parse_str("schema_version = 1\n[hub]\nport = 7341\n").unwrap();
+        assert_eq!(config.hub.session_idle_secs, 3600);
     }
 }

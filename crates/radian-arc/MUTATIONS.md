@@ -2241,3 +2241,24 @@ drives end to end.
 | TK0307-M2 | the subscription follows one connection only (`follow`'s `while` becomes `if`) | `hub::sessions::tests::the_subscription_reconnects_after_the_connection_drops` (the second connection's event never becomes a frame) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0308: the hub's session write routes and hub-held processes (2026-11-02, branch `work/TK0308-hub-session-write-and-hold`)
+
+The hub gained the session write routes (`start_session`, `prompt`, `cancel`, `answer`, `config`)
+and `radian exec --hub-held`, the process those routes start and hold (ADR 0048 §16). Each mutation
+was applied by hand to `crates/radian-arc/src/hub/sessions.rs` and `crates/radian-exec/src/turn.rs`,
+run with `cargo nextest run -p <crate> --lib --locked --profile sandbox -E 'test(<name>)'`, and
+restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+The suite's end-to-end cases live in `crates/radian-arc/tests/hub_session_write.rs`. The
+`workspace` sandbox denies every Unix-socket connect (`(deny network-outbound (remote
+unix-socket))`) and `$TMPDIR` is too long for `sun_path`, so those tests are excluded from the
+`sandbox` profile and the gate's default profile runs them; the two unit tests below name the
+decisions they cover, so each mutation is still caught inside the sandbox.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0308-M1 | the one-process check skipped: `hosting` answers `None` for a session another process already hosts | `hub::sessions::tests::a_session_another_process_hosts_is_not_started_again` (the cached, answering host is no longer found) | ✅ 1 failed |
+| TK0308-M2 | reclaim ignores background jobs: `hub_held_working` drops the `running_jobs` term | `turn::tests::a_hub_held_session_stays_alive_for_every_kind_of_work` (the running-job row reads idle) | ✅ 1 failed |
+
+2/2 caught.

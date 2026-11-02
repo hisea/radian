@@ -254,6 +254,7 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
             port: config::DEFAULT_HUB_PORT,
             concurrency: config::DEFAULT_HUB_CONCURRENCY,
             interval_secs: config::DEFAULT_HUB_INTERVAL_SECS,
+            session_idle_secs: config::DEFAULT_HUB_SESSION_IDLE_SECS,
         }
     );
 
