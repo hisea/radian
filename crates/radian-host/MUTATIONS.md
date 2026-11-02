@@ -2094,6 +2094,18 @@ the file was restored from `.radian/bak/sessions.rs`, which `cmp` found identica
 |---|---|---|---|
 | TK0302-M1 | `same_directory` compares the two values as raw strings again (no canonicalization) | ✅ 4 failed (rc=100) | `sessions::tests::a_symlinked_workspace_spelling_is_not_a_mismatch`, `sessions::tests::in_workspace_follows_the_symlinked_spelling`, `sessions::tests::list_finds_a_session_recorded_under_a_symlinked_spelling`, `sessions::tests::search_finds_a_session_recorded_under_a_symlinked_spelling` |
 
+## TK0306: the folded transcript shared by the TUI and the hub (2026-11-02)
+
+Branch `work/TK0306-shared-transcript-fold`. The folds moved from `radian-tui` into
+`radian-host::transcript` (ADR 0023 U1); each mutation was applied in place, the transcript
+tests were run, and the file was restored from a copy under `.radian/` that `cmp` found
+identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0306-M1 | the journal fold drops one entry kind's mapping: an assistant message's text entry is not pushed (`transcript::attach`) | ✅ 1 failed (rc=100) | `radian-tui::attach the_tui_attach_path_folds_the_journal_through_the_shared_fold` (the fold produced `[User, ToolCall, ToolResult]` where `[User, Assistant, ToolCall, ToolResult]` is expected) |
+| TK0306-M2 | the ACP fold drops one entry kind's mapping: `tool_call` and `tool_call_update` are swallowed (`transcript::acp`) | ✅ 1 failed (rc=100) | `transcript::an_arc_result_jsonl_fixture_folds_to_the_conversation_entries` (the fold produced `[Reasoning, Notice, Assistant, Outcome]` where `[Reasoning, ToolCall, ToolResult, Notice, Assistant, Outcome]` is expected) |
+| TK0306-M3 | the conversation page stops truncating its mirrored tail in `sync`, so a rewritten entry keeps its old state (`radian-tui`, `arc/stdout/acp.rs`) | ✅ 1 failed (rc=100) | `arc::stdout::acp::tests::the_conversation_page_shows_the_folds_entries` (9 drawn entries against the fold's 6) |
 ## TK0304: the owner token on the control port (2026-11-02)
 
 Branch `work/TK0304-control-token-user-source`. The control tests bind `/tmp` sockets, which the

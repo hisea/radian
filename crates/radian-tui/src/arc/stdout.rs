@@ -43,7 +43,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
@@ -52,8 +52,10 @@ mod acp;
 
 use acp::AcpFold;
 
-/// The keys a row's summary is taken from, in this order (ADR 0048 §13).
-pub const SUMMARY_KEYS: [&str; 5] = ["text", "message", "command", "content", "summary"];
+/// The keys a row's summary is taken from, in this order (ADR 0048 §13). The fold and the row
+/// view share the rule, so a mixed file reads the same folded or as rows.
+pub use radian_host::transcript::parts::SUMMARY_KEYS;
+pub use radian_host::transcript::parts::{first_summary, line_breaks_to_spaces};
 
 /// The most bytes one poll reads. A worker that writes faster than this falls behind by the
 /// difference and the next refresh catches up; the view never reads or keeps the whole file.
@@ -367,40 +369,6 @@ fn row_line(raw: &str, width: usize, theme: &Theme) -> Line<'static> {
     parts.push((" ".to_owned(), theme.text));
     parts.push((body, theme.text));
     Line::from(spans_row(parts, width))
-}
-
-/// The first non-empty summary string: the keys of [`SUMMARY_KEYS`] at the top level first,
-/// then the same keys one level down inside every object-valued field.
-fn first_summary(object: &Map<String, Value>) -> Option<&str> {
-    for key in SUMMARY_KEYS {
-        if let Some(text) = object
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-        {
-            return Some(text);
-        }
-    }
-    for value in object.values() {
-        let Some(inner) = value.as_object() else {
-            continue;
-        };
-        for key in SUMMARY_KEYS {
-            if let Some(text) = inner
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-            {
-                return Some(text);
-            }
-        }
-    }
-    None
-}
-
-/// A summary is one row: its line breaks become spaces.
-fn line_breaks_to_spaces(text: &str) -> String {
-    text.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }
 
 /// Whether one complete line is an ACP envelope (`{"type":"acp",...}`). A row view that meets

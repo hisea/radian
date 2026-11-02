@@ -316,18 +316,8 @@ fn fence_closes(trimmed: &str, marker: char) -> bool {
 /// longer draws a box, so the block is just the call's head row followed by the result's `│ `
 /// rows). The data stays two entries (the journal and the projection are untouched); this only
 /// records the pairing, which the `ask_user` record reads to decide whether to draw its block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Card {
-    /// Not a tool entry.
-    #[default]
-    None,
-    /// The call that heads a block its result closes.
-    Head,
-    /// The result that closes the block its call opened.
-    Tail,
-    /// A tool entry with no pair: a call still running, or a torn transcript.
-    Solo,
-}
+/// The type is the host's folded entry's (ADR 0023 U1), so a fold and a renderer agree on it.
+pub use radian_host::transcript::Card;
 
 /// The tool block's line shape (ADR 0028). A block is one head line and
 /// `│ `-prefixed body rows; the markers live in the marker column and are **drawn**, never part

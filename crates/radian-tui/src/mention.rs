@@ -28,7 +28,6 @@
 use std::borrow::Cow;
 
 use radian_coding::image::{self, ImageError, LoadedImage};
-use radian_core::ContentPart;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
@@ -76,31 +75,9 @@ impl Expansion {
     }
 }
 
-/// The message one send carries (ADR 0018): the shared composer, re-exported above.
-/// [`user_message`] is the TUI's and the control port's one path from text, files and images
-/// to a message's parts.
-///
-/// The display text of a user message's parts: an attachment part becomes
-/// `[file: P, N lines]`, an image part `[image: <name>, W×H, N KB]` (ADR 0028 R5); neither
-/// ever shows its content.
-pub fn display_parts(parts: &[ContentPart]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for part in parts {
-        match part {
-            ContentPart::Text { text, .. } => match part.attachment_path() {
-                Some(path) => lines.push(format!("[file: {path}, {} lines]", text.lines().count())),
-                None => lines.push(text.clone()),
-            },
-            ContentPart::Image { .. } => {
-                if let Some(line) = image::part_placeholder(part) {
-                    lines.push(line);
-                }
-            }
-            _ => {}
-        }
-    }
-    lines.join("\n\n")
-}
+/// The display text of a user message's parts. The host's fold writes the same text into an
+/// entry (ADR 0023 U1), so the TUI and the hub show the same line.
+pub use radian_host::transcript::parts::display_parts;
 
 /// One referenced file that exists but cannot be attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,7 +707,7 @@ fn common_prefix(candidates: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use radian_core::Message;
+    use radian_core::{ContentPart, Message};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A temp directory with a unique name (no dev-dependency on a tempdir crate).

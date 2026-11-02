@@ -64,7 +64,7 @@ radian decisions as a first-class herdr agent live in **ADR 0034**: state, sessi
 
 ### 7. `radian attach <session> [--follow]`
 
-`crates/radian-tui/src/attach.rs`: reuses `radian_host::JournalObserver` to read journals, `App::push_message` into the same transcript render. **Read-only**, never takes session write locks. `--follow` tails newly appended rows, half rows wait for next time. Keys scroll and quit only, all else swallowed, producing no input events. Ids build paths only after `validate_session_id` checks. Streaming deltas stay invisible (ADR 0010). **No "waiting approval" rows**: they need durable `PermissionRequested`, which never exists now. Uses: read-only views of other radian sessions (herdr "screen read" counterparts in radian). ADR 0034 plugin `attach` panes use it.
+`crates/radian-tui/src/attach.rs`: reads a journal through the host's read-only fold, `radian_host::transcript::AttachFold` (ADR 0023 U1: the same fold the hub uses), and draws the entries it produces through the same transcript renderer. **Read-only**, never takes session write locks. `--follow` tails newly appended rows, half rows wait for next time. Keys scroll and quit only, all else swallowed, producing no input events. Ids build paths only after `validate_session_id` checks. Streaming deltas stay invisible (ADR 0010). **No "waiting approval" rows**: they need durable `PermissionRequested`, which never exists now. Uses: read-only views of other radian sessions (herdr "screen read" counterparts in radian). ADR 0034 plugin `attach` panes use it.
 
 ## Constraints and Costs
 

@@ -4,11 +4,6 @@
 
 use super::*;
 
-/// `MCP and other tools`: the name and the arguments' JSON summary.
-pub(super) fn generic_head(card: &ToolCard, _text: &str) -> String {
-    card.arguments_summary()
-}
-
 /// The generic body: the structured output pretty-printed when the tool reported one, the
 /// plain text otherwise. The pretty print is synthesized (the text is a different rendering),
 /// so its lines carry no source range — the title and a text-backed body stay selectable,
@@ -130,74 +125,12 @@ pub(super) fn call_path(card: &ToolCard) -> Option<String> {
     })
 }
 
-/// `shell`'s title: the command verbatim as `$ <command>` (its own newlines kept — a
-/// multi-line command wraps, continuation rows from the body column).
-pub(super) fn shell_head(card: &ToolCard, _text: &str) -> String {
-    let command = shell_command(card);
-    if command.is_empty() {
-        return card.arguments_summary();
-    }
-    format!("$ {command}")
-}
-
-/// The command a shell card runs, verbatim (its own newlines kept).
-pub(crate) fn shell_command(card: &ToolCard) -> String {
-    card.structured
-        .as_ref()
-        .and_then(|value| value.get("command"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| {
-            card.arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_default()
-}
-
-/// The head text of a tool **call** entry (ADR 0028): the tool name and
-/// the renderer's title, `shell $ make test` — the text the head row draws and copies. The
-/// `• ` marker, the meta and the status glyph are the block layer's and are never copied.
-pub fn call_text(card: &ToolCard, text: &str) -> String {
-    // ADR 0035: a memory read's one line is the memory, not the read tool's own head; the
-    // write/patch card's text is its body row, so search and copy still see the title, the type
-    // and the path.
-    if let Some(memory) = &card.memory {
-        return if memory.read {
-            format!("memory used: {}", memory.title)
-        } else {
-            memory.line()
-        };
-    }
-    let title = head_text(card, text);
-    if title.is_empty() {
-        return card.name.clone();
-    }
-    format!("{} {}", card.name, title)
-}
-
 /// The exit code from the structured result (`shell`'s own JSON), when it has one.
 pub(crate) fn exit_code_of(card: &ToolCard) -> Option<i64> {
     card.structured
         .as_ref()
         .and_then(|value| value.get("exit_code"))
         .and_then(Value::as_i64)
-}
-
-/// The rows a renderer's body lays out to, from the display text alone: the collapsed head's
-/// `· N lines` (ADR 0028) and the pairing's [`ToolCard::result_lines`].
-///
-/// Every built-in renderer emits exactly one row per line of the display text (`patch`'s
-/// synthesized diff included), which `the_line_count_mirrors_every_renderer`
-/// pins; the push path therefore counts without building the rows, which a resume would
-/// otherwise do for every tool result.
-pub fn body_line_count(text: &str) -> usize {
-    if text.is_empty() {
-        1
-    } else {
-        text.lines().count()
-    }
 }
 
 /// A millisecond duration as the head meta writes it: two decimals below a second (`0.01s`),
@@ -319,49 +252,10 @@ pub(super) fn shell_body(_card: &ToolCard, text: &str) -> Vec<BodyLine> {
     })
 }
 
-/// `read`: the path and the line range the call asked for.
-pub(super) fn read_head(card: &ToolCard, _text: &str) -> String {
-    let path = card
-        .arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            card.structured
-                .as_ref()
-                .and_then(|value| value.get("path"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("<path>");
-    let offset = card.arguments.get("offset").and_then(Value::as_u64);
-    let limit = card.arguments.get("limit").and_then(Value::as_u64);
-    match (offset, limit) {
-        (Some(offset), Some(limit)) => format!("{path} {}-{}", offset + 1, offset + limit),
-        (Some(offset), None) => format!("{path} {}-", offset + 1),
-        (None, Some(limit)) => format!("{path} 1-{limit}"),
-        (None, None) => path.to_owned(),
-    }
-}
-
 /// `read`'s body: the text, shown only when the fold mode expands it (`read` is a small tool:
 /// a successful call is one line, ADR 0028).
 pub(super) fn read_body(_card: &ToolCard, text: &str) -> Vec<BodyLine> {
     text_body_lines(text, |_| LineRole::Normal)
-}
-
-/// `patch`: the path the replacement is in. The `+N −M` counts are the meta's
-/// ([`meta_parts`]), not the title's (ADR 0028).
-pub(super) fn patch_head(card: &ToolCard, _text: &str) -> String {
-    string_field(&card.arguments, "path").unwrap_or_else(|| "<path>".into())
-}
-
-/// A `string` field of an argument object.
-pub(super) fn string_field(object: &Value, key: &str) -> Option<String> {
-    object.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-/// `write`: the path the content was written to. The `+N −M` counts are the meta's.
-pub(super) fn write_head(card: &ToolCard, _text: &str) -> String {
-    string_field(&card.arguments, "path").unwrap_or_else(|| "<path>".into())
 }
 
 /// `write`'s body (ADR 0028): the content it wrote, one `Added` diff row
@@ -398,43 +292,6 @@ pub(super) fn write_body(card: &ToolCard, text: &str) -> Vec<BodyLine> {
         }));
     }
     out
-}
-
-/// `grep`: the regex and the path it searched (`.` when the call named none).
-pub(super) fn grep_head(card: &ToolCard, _text: &str) -> String {
-    let pattern = string_field(&card.arguments, "pattern").unwrap_or_default();
-    match string_field(&card.arguments, "path") {
-        Some(path) => format!("{pattern} {path}"),
-        None => pattern,
-    }
-}
-
-/// `glob`: the pattern it matched.
-pub(super) fn glob_head(card: &ToolCard, _text: &str) -> String {
-    string_field(&card.arguments, "pattern").unwrap_or_default()
-}
-
-/// `ask_user`: how many questions the call asked (ADR 0024 Q3).
-pub(super) fn ask_head(card: &ToolCard, _text: &str) -> String {
-    // The call's own `questions` array is the request and is there at call time; the result's
-    // `answers` is the reply.
-    let questions = card
-        .arguments
-        .get("questions")
-        .and_then(Value::as_array)
-        .map(|questions| questions.len())
-        .or_else(|| {
-            card.structured
-                .as_ref()
-                .and_then(|value| value.get("answers"))
-                .and_then(Value::as_array)
-                .map(|answers| answers.len())
-        });
-    match questions {
-        Some(1) => "1 question".to_string(),
-        Some(n) => format!("{n} questions"),
-        None => String::new(),
-    }
 }
 
 /// The unified-diff body (ADR 0028): one row per line of the entry's
@@ -555,162 +412,4 @@ fn diff_lines(card: &ToolCard, text: &str) -> Vec<BodyLine> {
 /// A plain body: the entry text, every line on the card's own role.
 pub(super) fn plain_body(_card: &ToolCard, text: &str) -> Vec<BodyLine> {
     text_body_lines(text, |_| LineRole::Normal)
-}
-
-/// The text a tool **result** entry displays: the tool's own text, except for `patch` (whose
-/// card shows the replacement as a diff - the result text is only "replaced 1 occurrence")
-/// and `write` (whose card shows the content it wrote). Synthesizing the display text here
-/// keeps the one invariant the selection mapping and the search need: **the body's text is
-/// the entry's text**, so what is shown is what is copied and searched.
-pub fn result_display_text(card: &ToolCard, tool_text: &str) -> String {
-    match card.name.as_str() {
-        "patch" => patch_diff_text(card).unwrap_or_else(|| tool_text.to_owned()),
-        "write" => string_field(&card.arguments, "content").unwrap_or_else(|| tool_text.to_owned()),
-        _ => tool_text.to_owned(),
-    }
-}
-
-/// A patch's body: one block per replaced range — the hunk header naming the range's start
-/// lines in both files, then the removed lines and the added ones, each prefixed by the sign
-/// the diff roles paint. There are no context lines: the call carries no surrounding text, and
-/// the renderer must not pretend it does (ADR 0028 R4).
-///
-/// The hunks come from the result's structured `hunks` (`radian-coding`'s `patch`), and each
-/// hunk's `-`/`+` text is that hunk's `edit`. A result that carries no `hunks` (an older journal
-/// entry), or a hunk whose `edit` is missing or out of range, falls back to the call's edits in
-/// call order with no `@@` line; the diff body then draws it without a gutter. A **failed**
-/// patch changed nothing, so it has no diff at all: the card shows the tool's own error text.
-pub(super) fn patch_diff_text(card: &ToolCard) -> Option<String> {
-    if card.is_error {
-        return None;
-    }
-    let edits = patch_call_edits(card);
-    if edits.is_empty() {
-        return None;
-    }
-    let hunks = patch_hunks(card);
-    let addressed = !hunks.is_empty()
-        && hunks.iter().all(|hunk| {
-            hunk.edit
-                .is_some_and(|edit| (1..=edits.len()).contains(&edit))
-        });
-    let mut out = String::new();
-    if addressed {
-        for hunk in &hunks {
-            // `addressed` guarantees every hunk names one of the call's edits.
-            if let Some(edit) = hunk.edit {
-                out.push_str(&format!(
-                    "@@ -{},{} +{},{} @@\n",
-                    hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-                ));
-                let (old, new) = &edits[edit - 1];
-                push_diff_lines(&mut out, old, new);
-            }
-        }
-    } else {
-        for (old, new) in &edits {
-            push_diff_lines(&mut out, old, new);
-        }
-    }
-    Some(out)
-}
-
-/// One edit's `-old` / `+new` rows, in that order.
-fn push_diff_lines(out: &mut String, old: &str, new: &str) {
-    for line in old.lines() {
-        out.push('-');
-        out.push_str(line);
-        out.push('\n');
-    }
-    for line in new.lines() {
-        out.push('+');
-        out.push_str(line);
-        out.push('\n');
-    }
-}
-
-/// A text's line count for the `+N −M` meta: `str::lines`, so a trailing newline ends the last
-/// line instead of adding an empty one, and an empty text counts zero.
-fn text_lines(text: &str) -> usize {
-    if text.is_empty() {
-        0
-    } else {
-        text.lines().count()
-    }
-}
-
-/// The call's edits in **call order**, each as its `(old, new)` text: the single `old`/`new`
-/// pair, or one entry per item of the `edits` array. Empty when the call carries neither.
-pub(super) fn patch_call_edits(card: &ToolCard) -> Vec<(String, String)> {
-    if let Some(edits) = card.arguments.get("edits").and_then(Value::as_array) {
-        return edits
-            .iter()
-            .map(|edit| {
-                (
-                    string_field(edit, "old").unwrap_or_default(),
-                    string_field(edit, "new").unwrap_or_default(),
-                )
-            })
-            .collect();
-    }
-    match (
-        string_field(&card.arguments, "old"),
-        string_field(&card.arguments, "new"),
-    ) {
-        (Some(old), Some(new)) => vec![(old, new)],
-        _ => Vec::new(),
-    }
-}
-
-/// One replaced range from the result's `hunks` (ADR 0028): its start line and line count in
-/// each file, and the 1-based edit of the call that produced it (`None` for a result written
-/// before the `edit` field existed).
-pub(super) struct PatchHunk {
-    old_start: u64,
-    old_lines: u64,
-    new_start: u64,
-    new_lines: u64,
-    edit: Option<usize>,
-}
-
-/// The result's `hunks` in file order. Empty when the result carries none.
-pub(super) fn patch_hunks(card: &ToolCard) -> Vec<PatchHunk> {
-    card.structured
-        .as_ref()
-        .and_then(|value| value.get("hunks"))
-        .and_then(Value::as_array)
-        .map(|hunks| {
-            hunks
-                .iter()
-                .filter_map(|hunk| {
-                    let field = |name: &str| hunk.get(name).and_then(Value::as_u64);
-                    Some(PatchHunk {
-                        old_start: field("old_start")?,
-                        old_lines: field("old_lines")?,
-                        new_start: field("new_start")?,
-                        new_lines: field("new_lines")?,
-                        edit: field("edit").map(|edit| edit as usize),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// A compact one-line JSON rendering, for headers.
-pub(super) fn compact_json(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// Truncates on a char boundary, appending `…` when something was cut.
-pub(super) fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }

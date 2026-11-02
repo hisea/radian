@@ -597,6 +597,13 @@ impl App {
 
     /// Appends a committed message as transcript entries. Used for live commits and for the
     /// history of a resumed session.
+    ///
+    /// The committed-message rules (a user message's placeholder text, a compaction summary, a
+    /// `!` block, the reasoning channel, one card per call, the pairing by call id) are the
+    /// host's shared fold's (`radian_host::transcript`, ADR 0023 U1); this path adds what only a
+    /// running screen has — the live entries it replaces, the reasoning clock, the live-only
+    /// compaction numbers, the decoded images — to the same entry. Its parity with the fold is
+    /// pinned by `the_resume_mapping_and_the_shared_fold_agree_on_a_journal`.
     pub fn push_message(&mut self, message: &Message) {
         // The committed message is the truth; discard the partial live view of it. The scan
         // runs **only when a live entry exists**: a resume pushes every message before any
@@ -619,6 +626,7 @@ impl App {
                 return;
             }
             if let Some(entry) = bash_entry_from_context(&text) {
+                let entry = Entry::from_fold(&entry, &mut self.images);
                 self.session.entries.push(entry);
                 return;
             }
@@ -740,6 +748,10 @@ impl App {
                             .is_some_and(|card| card.call_id == result.call_id)
                     {
                         entry.result = Some(result.is_error);
+                        // The head's text is set after the card borrow ends: `entry.text` and
+                        // `entry.tool` are two fields of the same borrowed entry, and the
+                        // deref to the folded entry makes one `deref_mut` for both.
+                        let mut head_text = None;
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
                             card.is_error = result.is_error;
@@ -768,16 +780,19 @@ impl App {
                             // ADR 0024: the call entry draws the whole ask block
                             // (its result entry is blank), so it keeps the result's own text
                             // for the declined/cancelled status line inside the box.
-                            entry.text = if card.name == "ask_user" {
+                            head_text = Some(if card.name == "ask_user" {
                                 tool_text.clone()
                             } else {
                                 crate::tools::call_text(card, &tool_text)
-                            };
+                            });
                             paired = Some((
                                 card.name.clone(),
                                 card.arguments.clone(),
                                 card.memory.clone(),
                             ));
+                        }
+                        if let Some(text) = head_text {
+                            entry.data.text = text;
                         }
                         call_index = Some(len - 1 - rev);
                         break;
