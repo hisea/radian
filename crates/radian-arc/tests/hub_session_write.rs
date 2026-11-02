@@ -720,7 +720,9 @@ fn two_concurrent_prompts_to_an_ended_session_start_one_process() {
     fixture.wait_journal(&id, "the creating turn finishes", |event| {
         event.get("event").and_then(Value::as_str) == Some("TurnFinished")
     });
-    fixture.wait_no_socket();
+    // End the session now rather than waiting out its 60-second idle window: the prompts below
+    // must find it ended, and the process they start must stay alive past them.
+    fixture.stop_sessions();
 
     let barrier = Arc::new(Barrier::new(2));
     let mut handles = Vec::new();
