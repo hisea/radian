@@ -178,6 +178,7 @@ impl App {
         if let RuntimeEvent::TurnStarted { .. } = event {
             self.session.last_turn_failed = false;
             self.session.goal_mode.blocked = false;
+            self.sync_idle_block();
         }
         if let RuntimeEvent::ConfigChanged { change, .. } = event {
             // The driver applied the queued change: the status bar's `next:` promise is done.
@@ -273,6 +274,18 @@ impl App {
         self.session.entries.push(entry);
     }
 
+    /// Mirrors the five idle-block flags into the session projection (ADR 0034 H2), so the
+    /// control port's `list_sessions` reports the same `blocked` state herdr and the footer do.
+    /// The TUI keeps the flags; the projection is the one copy a hub-read port can see.
+    pub(crate) fn sync_idle_block(&self) {
+        let blocked = self.session.wake_waiting
+            || self.session.goal_mode.blocked
+            || self.session.notice_lost_waiting
+            || self.session.intent_stop_waiting
+            || self.session.hook_stop_waiting;
+        self.session.projection.set_idle_blocked(blocked);
+    }
+
     /// A job completion notice was lost (every enqueue attempt failed): the burst's
     /// visible stop, on the same notice slot as [`App::wake_budget_notice`]. The first
     /// notice of a burst pushes the line; a later one rewrites it, so two stops still
@@ -285,6 +298,7 @@ impl App {
         self.session.wake_waiting = false;
         self.session.intent_stop_waiting = false;
         self.session.hook_stop_waiting = false;
+        self.sync_idle_block();
         result
     }
 
@@ -299,6 +313,7 @@ impl App {
         self.session.wake_waiting = false;
         self.session.notice_lost_waiting = false;
         self.session.hook_stop_waiting = false;
+        self.sync_idle_block();
         result
     }
 
@@ -313,6 +328,7 @@ impl App {
         self.session.wake_waiting = false;
         self.session.notice_lost_waiting = false;
         self.session.intent_stop_waiting = false;
+        self.sync_idle_block();
         result
     }
 
@@ -330,6 +346,7 @@ impl App {
         self.session.notice_lost_waiting = false;
         self.session.intent_stop_waiting = false;
         self.session.hook_stop_waiting = false;
+        self.sync_idle_block();
     }
 
     /// A wake-gate degrade fired: one visible notice line per burst. The first degrade of
@@ -343,6 +360,7 @@ impl App {
         self.session.notice_lost_waiting = false;
         self.session.intent_stop_waiting = false;
         self.session.hook_stop_waiting = false;
+        self.sync_idle_block();
         result
     }
 
@@ -394,6 +412,7 @@ impl App {
                 self.session.intent_stop_waiting = false;
                 // The idle hook-continuation cap clears the same way (ADR 0045 §3).
                 self.session.hook_stop_waiting = false;
+                self.sync_idle_block();
             }
             // ADR 0027: the local turn timer starts with the model request and
             // stops with its response. The token count is the model's reported output.
@@ -683,7 +702,10 @@ impl App {
                 // `{"via":"hub"}` in its `origin`; the renderer shows that marker.
                 entry.via = radian_host::transcript::origin_via(message);
                 // ADR 0028 R10: the images draw under their placeholder lines. The decode
-                // happens here, once; the drawn protocol is built from it.
+                // happens here, once; the drawn protocol is built from it. The folded facts
+                // (`data.images`) travel too, so the live entry's data is exactly the host
+                // fold's and the resume mapping and the shared fold agree entry for entry.
+                entry.data.images = radian_host::transcript::image_parts(content);
                 entry.images = crate::media::images_of(&mut self.images, content);
                 self.session.entries.push(entry);
             }
@@ -829,7 +851,10 @@ impl App {
                 entry.tool = Some(Box::new(card));
                 // ADR 0028 R10: a `read` image (or any tool's image part) draws under a
                 // placeholder row inside the block's body. The decode happens here, once,
-                // even while the block is folded; the drawn protocol is built from it.
+                // even while the block is folded; the drawn protocol is built from it. The
+                // folded facts travel in `data.images` for the same parity the user entry
+                // keeps with the host fold.
+                entry.data.images = radian_host::transcript::image_parts(&result.content);
                 entry.images = crate::media::images_of(&mut self.images, &result.content);
                 entry.card = crate::blocks::Card::Solo;
                 // Rule 4: the result sits right after **its own** call, so a batch reads
@@ -1110,6 +1135,10 @@ mod tests {
         );
         assert_eq!(app.session.entries[0].kind, EntryKind::Notice);
         assert!(app.session.wake_waiting);
+        assert!(
+            app.session.projection.read().idle_blocked(),
+            "the port can see the idle block the footer and herdr report"
+        );
         assert_eq!(
             app.herdr_blocked(),
             Some(radian_host::herdr::Blocked::WakeBudget)
@@ -1120,6 +1149,10 @@ mod tests {
         // burst pushes a fresh line.
         app.apply_event(&AgentEvent::TurnStarted);
         assert!(!app.session.wake_waiting);
+        assert!(
+            !app.session.projection.read().idle_blocked(),
+            "a turn start clears the projection's idle block too"
+        );
         assert_eq!(app.session.wake_notice, None);
         assert_eq!(
             app.herdr_blocked(),

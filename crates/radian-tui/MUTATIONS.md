@@ -3598,3 +3598,28 @@ applied by hand to `crates/radian-tui/src/render/transcript.rs`, the named `rend
 | TK0310-M1 | `tail_spans` appends the suffix to every user message (`entry.kind == EntryKind::User`, ignoring `via`) | `render::a_hub_message_carries_the_weak_marker_and_a_typed_one_does_not` (the typed message drew `typed-here · hub`) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0306: the conversation page mirrors the folded tail (2026-11-02, branch `work/TK0306-shared-transcript-fold`)
+
+The mutation changes this crate's conversation page, so its row is recorded here rather than in
+`radian-host`'s file (where the shared folds themselves live). It was applied in place to
+`crates/radian-tui/src/arc/stdout/acp.rs`, the named test ran with `cargo nextest run -p
+radian-tui --locked --profile sandbox --lib -E 'test(the_conversation_page_shows_the_folds_entries)'`,
+and the file was restored from a copy under `.radian/` that `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0306-M3 | the conversation page stops truncating its mirrored tail in `sync`, so a rewritten entry keeps its old state (`arc/stdout/acp.rs`) | `arc::stdout::acp::tests::the_conversation_page_shows_the_folds_entries` (9 drawn entries against the fold's 6) | ✅ 1 failed |
+
+1/1 caught.
+
+## TK0314: the hub-session review follow-ups (2026-11-02, branch `work/TK0314-hub-sessions-followups`)
+
+The TUI's image-facts change was mutated in place and restored from `.radian/bak/transcript.rs`,
+which `cmp` found identical; the parity test ran inside the workspace sandbox.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0314-M3 | the live/resume mapping stops keeping the folded image facts (`entry.data.images` assignments removed), so the wrapper's decoded images are the only copy | `attach::the_resume_mapping_keeps_the_folded_image_facts` (entry 0 had `images: []` where the fold had the `ImagePart`) | ✅ 1 failed |
+
+1/1 caught.

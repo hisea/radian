@@ -1135,3 +1135,71 @@ fn the_resume_mapping_and_the_shared_fold_agree_on_a_journal() {
         assert_eq!(&resumed.data, folded, "entry {index} differs");
     }
 }
+
+/// The one-message image journal: a user message with one annotated image part.
+fn journal_with_an_image() -> Vec<String> {
+    let image = radian_core::ContentPart::Image {
+        mime_type: "image/png".to_owned(),
+        // A real 1x1 PNG: the renderer's decode succeeds, and the fold keeps the same part.
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".to_owned(),
+        annotations: Some(serde_json::json!({
+            "kind": "image",
+            "name": "photo.png",
+            "width": 1,
+            "height": 1,
+            "bytes": 68
+        })),
+        meta: None,
+    };
+    let user = radian_core::Message::User {
+        content: vec![radian_core::ContentPart::text("look at this"), image],
+        meta: radian_core::MessageMeta::default(),
+    };
+    vec![
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(
+            1,
+            "TurnStarted",
+            true,
+            serde_json::json!({"turn_id": "t-1"}),
+        ),
+        envelope(2, "MessageAppended", true, appended(0, user)),
+        envelope(
+            3,
+            "TurnFinished",
+            true,
+            serde_json::json!({"turn_id": "t-1", "outcome": "completed"}),
+        ),
+    ]
+}
+
+/// ADR 0023 U1: the resume mapping's entry data is exactly the shared fold's entry, image
+/// facts included. The wrapper's decoded images are extra render state; the folded
+/// `data.images` must still be there, or a journal with an annotated image folds differently
+/// in a resumed TUI and in the hub.
+#[test]
+fn the_resume_mapping_keeps_the_folded_image_facts() {
+    let lines = journal_with_an_image();
+    let (_scratch, view) = open_view("resume-image", "resume-image", &lines);
+    let mut app = radian_tui::App::new("m", "s");
+    for message in view.history() {
+        app.push_message(message);
+    }
+    let folded = radian_host::transcript::AttachFold::open(view.path(), None)
+        .expect("the fold opens")
+        .entries()
+        .to_vec();
+    assert_eq!(folded.len(), app.session.entries.len());
+    assert!(
+        !folded[0].images.is_empty(),
+        "the fold kept the image part's facts"
+    );
+    for (index, (resumed, folded)) in app.session.entries.iter().zip(&folded).enumerate() {
+        assert_eq!(&resumed.data, folded, "entry {index} differs");
+    }
+}
