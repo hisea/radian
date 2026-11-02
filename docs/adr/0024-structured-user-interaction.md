@@ -112,6 +112,19 @@ Unattended runs **do not register** `ask_user`. The test is "a human sits at the
 - The queue's abort outcomes are unchanged: a closing session denies an approval and gives a
   question `PromptError::Gone`.
 
+### Q9 The control port is a second front end
+
+- A session's own process control port answers the same pending queue (ADR 0023 U7) when the
+  request carries the owner token (ADR 0043). An approval answers `allow_once`, `allow_always`
+  or `reject_once` with an optional reason; a question answers a full `QuestionAnswer`, so free
+  text, multi-select and `Other` are all answerable — more than the ACP surface (Q8) can
+  represent.
+- First answer wins. Once the TUI, the ACP bridge or the control port has completed an entry,
+  another answer for that id returns an error and changes nothing (`Answered::Late`); an id
+  that was never issued is `Answered::Unknown`.
+- The queue's abort outcomes (Q4) and the tool-result landing (Q3) are unchanged: an answer is
+  a tool result, never user input and never a permission grant.
+
 ## No Changes to `radian-core`
 
 `ToolContext.cancellation`, `ToolOutput.structured`, `ToolConcurrency::Exclusive`, `ToolExecutionStarted` and `Settled`, and per-await `before_tool_call` all already exist. `ask_user` is a normal `ToolSession` member. Core never knows it waits on a human.
@@ -125,4 +138,4 @@ Unattended runs **do not register** `ask_user`. The test is "a human sits at the
 
 ## Verification
 
-`radian-coding/tests/ask.rs`, `specs.rs`, and `journal.rs` cover schema, limits, `header`, `recommended`, `note`, and landing shape. `radian-host` `pending` tests cover multi-session order, session-close abort, and late-answer ignore. `radian-tui/tests/question.rs`, `render.rs`, and `pty.rs` cover form keys, panel and transcript records. `radian-permissions` covers fixed `allow` for `ask_user`. Fixture `ask-user.jsonl` passes the reference checker.
+`radian-coding/tests/ask.rs`, `specs.rs`, and `journal.rs` cover schema, limits, `header`, `recommended`, `note`, and landing shape. `radian-host` `pending` tests cover multi-session order, session-close abort, and late-answer ignore. `radian-host/tests/control.rs` covers the token-gated `pending`/`answer`/`config`/`models` verbs: the first answer wins, a late answer returns an error and changes nothing, and a free-text answer through the port lands the same tool result a keyboard answer does. `radian-tui/tests/question.rs`, `render.rs`, and `pty.rs` cover form keys, panel and transcript records. `radian-permissions` covers fixed `allow` for `ask_user`. Fixture `ask-user.jsonl` passes the reference checker.

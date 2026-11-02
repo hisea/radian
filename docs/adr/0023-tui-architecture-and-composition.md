@@ -78,6 +78,8 @@ When observing another process session: only `Observe` capability exists. No wri
 
 Approval and structured questions share one arrival-order queue. Elements carry `origin: SessionId`. Completion still uses oneshot (the permission-layer race, the UI-exit "abandoned", and silent late-answer drops stay unchanged). The queue gives stable order and source, and completes all its requests with abort results when its session closes. The UI shows only the head. The status bar shows the pending count. Approval fail-closed semantics (ADR 0012) stay unchanged by one word.
 
+A second front end may answer the same queue through the process control port's owner-token `answer` verb (ADR 0043). The queue is the one arbiter, so the first answer wins: once the TUI (or the ACP bridge, or the control port) has completed an entry, a later answer for the same id returns `Answered::Late` and changes nothing. The TUI's own path and the queue's completion rules are unchanged.
+
 ### U8 Panels and layout tree; only built-in compile-time panels
 
 - `Panel` trait: `id`, `title`, `min_size`, `update(&projections, event)`, `handle(Action) -> Handled|Pass`, `draw(frame, area, theme)`. The registry is `Vec<Box<dyn PanelFactory>>`, registered by the host at compile time. **No** third-party dynamic UI plugins exist. No JS, Wasm, or dynamic libraries exist.
