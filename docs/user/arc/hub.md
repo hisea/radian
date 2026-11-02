@@ -151,7 +151,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/sessions/<id>/events` | `GET` | A server-sent-event stream of the session's changes; see [the session event stream](#the-session-event-stream). | `200`, `401`, `404`, `409`, `500` |
 | `/v1/repos/<name>/sessions/<id>/models` | `GET` | `models` (array): the control port's `models` answer, grouped by provider with the current route marked. | `200`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/sessions` | `POST` | Starts a hub-held session and sends its first message: `session` (string), the new id. See [starting and driving a session](#starting-and-driving-a-session). | `200`, `400`, `401`, `404`, `413`, `422`, `500`, `502` |
-| `/v1/repos/<name>/sessions/<id>/prompt` | `POST` | One message: `session` (string) and `message_id` (string). See [starting and driving a session](#starting-and-driving-a-session). | `200`, `400`, `401`, `404`, `409`, `413`, `422`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/prompt` | `POST` | One message: `session` (string) and `message_id` (string). See [starting and driving a session](#starting-and-driving-a-session). | `200`, `400`, `401`, `404`, `413`, `422`, `500`, `502` |
 | `/v1/repos/<name>/sessions/<id>/cancel` | `POST` | The control port's `cancel`: `ok` (boolean, `true`). | `200`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/sessions/<id>/answer` | `POST` | The control port's `answer`, with the hub token: `ok` (boolean). A late answer is `409`. | `200`, `400`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/sessions/<id>/config` | `POST` | The control port's `config`, applied at the next turn boundary: `ok` (boolean). | `200`, `400`, `401`, `404`, `409`, `422`, `500`, `502` |
@@ -319,7 +319,7 @@ An unknown session, or one whose workspace is another repository's, is `404`; `c
 
 A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
 Only hub-started processes are reclaimed; a TUI decides its own session's life.
-A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period) before it releases `hub.lock`.
+A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period).
 
 ### `GET /v1/repos/<name>/items/<task>/conversation`
 
