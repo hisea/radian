@@ -316,6 +316,7 @@ A session write route reads at most 16 MiB (16,777,216 bytes) minus 1 KiB of bod
 A session a process already hosts — a TUI's or the hub's own — is never started twice: the prompt goes through that process's socket.
 An ended session is resumed by a new hub-held process on the same journal.
 An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer` and `config` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`.
+A socket that has gone while the hub's last scan still listed the session is the ended-session case, not a port failure: a live-only route answers `409` (the same body as for an ended session) and a `prompt` resumes the journal, and the stale entry is dropped.
 
 A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
 Only hub-started processes are reclaimed; a TUI decides its own session's life.

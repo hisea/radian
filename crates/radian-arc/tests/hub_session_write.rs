@@ -1083,6 +1083,132 @@ fn the_live_only_routes_refuse_an_ended_session() {
     );
 }
 
+// ---- the stale socket ------------------------------------------------------------------
+
+/// A control socket's pid, from its `<pid>.sock` file name.
+fn socket_pid(socket: &Path) -> u32 {
+    socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("a control socket is named <pid>.sock: {}", socket.display()))
+}
+
+fn kill(pid: u32, signal: i32) {
+    let _ = unsafe { libc::kill(pid as libc::pid_t, signal) };
+}
+
+/// Kills a session process by pid when it goes out of scope, so a panicking assertion cannot
+/// leave a process behind whose socket the test removed.
+struct KilledOnDrop(u32);
+
+impl Drop for KilledOnDrop {
+    fn drop(&mut self) {
+        kill(self.0, libc::SIGKILL);
+    }
+}
+
+/// A live-only route whose socket has vanished while the scanner still lists the session
+/// answers exactly as it does for an ended session (`409`), not as a control port failure
+/// (`502`), and the stale entry is gone afterwards (ADR 0048 §16).
+#[test]
+fn a_vanished_socket_is_the_ended_session_not_a_bad_gateway() {
+    let fixture = Fixture::new("stale-live", vec![text_reply("done")], "", Some(60));
+    let id = fixture.create(json!({"text": "hello"}));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    // The scanner records the session as live ...
+    wait_until("the sessions route reports the session live", || {
+        fixture.hub.sessions(fixture.name).iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(id.as_str())
+                && row.get("live").and_then(Value::as_str) == Some("hub")
+        })
+    });
+    // ... and then its socket goes, before the next scan can forget the row: a connect now
+    // finds no socket while the hub still holds the session as live, which is the gate's race
+    // made certain. The process is still running; it is killed at the end of the test.
+    let socket = sockets(&fixture.home.run())
+        .pop()
+        .expect("the session has a control socket");
+    let pid = socket_pid(&socket);
+    let _held = KilledOnDrop(pid);
+    fs::remove_file(&socket).expect("the socket file is removable");
+
+    let stale = fixture.hub.post(
+        &format!("/v1/repos/{}/sessions/{id}/cancel", fixture.name),
+        &json!({}),
+    );
+    assert_eq!(stale.status, 409, "{:?}", stale.body);
+
+    // Once the session is definitely ended, the same route answers the same body: the stale
+    // entry got the ended-session answer, not the port's `502`.
+    let ended = fixture.hub.post(
+        &format!("/v1/repos/{}/sessions/{id}/cancel", fixture.name),
+        &json!({}),
+    );
+    assert_eq!(ended.status, 409, "{:?}", ended.body);
+    assert_eq!(stale.error(), ended.error());
+    assert_eq!(
+        stale.error(),
+        format!("session {id:?} is not live: no process hosts it")
+    );
+}
+
+/// A prompt whose send finds the session's socket gone resumes the journal with a hub-held
+/// process, exactly as for an ended session, instead of answering `502` (ADR 0048 §16).
+#[test]
+fn a_prompt_to_a_vanished_socket_resumes_the_journal() {
+    let fixture = Fixture::new(
+        "stale-prompt",
+        vec![text_reply("one"), text_reply("two")],
+        "",
+        Some(60),
+    );
+    let id = fixture.create(json!({"text": "first"}));
+    fixture.wait_journal(&id, "the first turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    wait_until("the sessions route reports the session live", || {
+        fixture.hub.sessions(fixture.name).iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(id.as_str())
+                && row.get("live").and_then(Value::as_str) == Some("hub")
+        })
+    });
+    // The process ends (SIGKILL leaves its socket file behind) and the socket goes while the
+    // scanner still lists the session: the prompt's send reaches a stale entry.
+    let socket = sockets(&fixture.home.run())
+        .pop()
+        .expect("the session has a control socket");
+    let pid = socket_pid(&socket);
+    kill(pid, libc::SIGKILL);
+    fs::remove_file(&socket).expect("the socket file is removable");
+
+    let response = fixture.prompt(&id, json!({"text": "second"}));
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    assert_eq!(
+        response.json().get("session").and_then(Value::as_str),
+        Some(id.as_str()),
+        "the prompt answers the same session id"
+    );
+    fixture.wait_journal(&id, "the resumed turn takes the message", |event| {
+        event.pointer("/data/message/user/content/0/text/text") == Some(&json!("second"))
+    });
+    assert_eq!(
+        journal_events(&fixture.journal(&id))
+            .iter()
+            .filter(|event| event.get("event").and_then(Value::as_str) == Some("SessionCreated"))
+            .count(),
+        1,
+        "the resume reuses the journal"
+    );
+    assert_eq!(
+        sockets(&fixture.home.run()).len(),
+        1,
+        "one process hosts the journal"
+    );
+}
+
 // ---- the configuration route -----------------------------------------------------------
 
 /// `config` on a live session queues the turn-boundary change; the next prompt's turn journals

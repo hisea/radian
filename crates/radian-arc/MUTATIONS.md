@@ -2253,12 +2253,13 @@ restored from a copy under `.radian/mut/`, which `cmp` found identical.
 The suite's end-to-end cases live in `crates/radian-arc/tests/hub_session_write.rs`. The
 `workspace` sandbox denies every Unix-socket connect (`(deny network-outbound (remote
 unix-socket))`) and `$TMPDIR` is too long for `sun_path`, so those tests are excluded from the
-`sandbox` profile and the gate's default profile runs them; the two unit tests below name the
+`sandbox` profile and the gate's default profile runs them; the three unit tests below name the
 decisions they cover, so each mutation is still caught inside the sandbox.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0308-M1 | the one-process check skipped: `hosting` answers `None` for a session another process already hosts | `hub::sessions::tests::a_session_another_process_hosts_is_not_started_again` (the cached, answering host is no longer found) | ✅ 1 failed |
 | TK0308-M2 | reclaim ignores background jobs: `hub_held_working` drops the `running_jobs` term | `turn::tests::a_hub_held_session_stays_alive_for_every_kind_of_work` (the running-job row reads idle) | ✅ 1 failed |
+| TK0308-M3 | the gone-socket branch removed: `connect_error` reports every connect failure as a failed port, so a session whose socket is gone answers `502` instead of the ended session's `409` | `hub::sessions::tests::a_gone_socket_is_an_ended_session_not_a_port_failure` (a `NotFound` connect no longer maps to `Gone`); the route cases `hub_session_write::a_vanished_socket_is_the_ended_session_not_a_bad_gateway` and `a_prompt_to_a_vanished_socket_resumes_the_journal` cover the same branch end to end but need sockets the sandbox denies | ✅ 1 failed |
 
-2/2 caught.
+3/3 caught.

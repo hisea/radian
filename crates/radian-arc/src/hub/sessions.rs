@@ -295,6 +295,23 @@ impl SessionHub {
         }
     }
 
+    /// Forgets the live entry for session `id` when its socket is gone but the last scan has not
+    /// noticed yet. The scanner owns the cache; dropping the stale row here is what makes the
+    /// next request see the session as ended (ADR 0048 §16).
+    fn forget_session(&self, id: &str) {
+        let socket = {
+            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            inner
+                .live
+                .iter()
+                .find(|(_, live)| live.id == id)
+                .map(|(socket, _)| socket.clone())
+        };
+        if let Some(socket) = socket {
+            self.forget(&socket);
+        }
+    }
+
     /// The sockets in the run directory whose file name is a live pid's, in name order. A file
     /// that is not `<pid>.sock`, or whose pid is gone, is not a session (ADR 0043: the socket is
     /// removed on exit, and a `kill -9` leaves one behind).
@@ -743,9 +760,7 @@ fn request(
     timeout: Duration,
     token: Option<&str>,
 ) -> Result<Value, CallError> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| {
-        CallError::Failed(format!("cannot connect to {}: {error}", socket.display()))
-    })?;
+    let mut stream = UnixStream::connect(socket).map_err(|error| connect_error(socket, &error))?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
     let mut request = request.clone();
@@ -780,6 +795,24 @@ fn request(
     ))
 }
 
+/// The [`CallError`] one failed connect is. A socket file that is gone, or one that is still
+/// there and nothing listens on, means the process that hosted the session has ended: the
+/// scanner may not have noticed yet (it reads the run directory every two seconds), so the
+/// caller must answer as it does for an ended session rather than report a port failure
+/// (ADR 0048 §16). Every other connect failure (a permission error, a resource limit) is the
+/// port failing.
+fn connect_error(socket: &Path, error: &std::io::Error) -> CallError {
+    let message = format!("cannot connect to {}: {error}", socket.display());
+    if matches!(
+        error.kind(),
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+    ) {
+        CallError::Gone(message)
+    } else {
+        CallError::Failed(message)
+    }
+}
+
 /// Why one call to a control port did not produce a successful answer line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CallError {
@@ -788,12 +821,17 @@ enum CallError {
     /// The connection, the write or the read failed, or the answer was not JSON: the port
     /// itself failed.
     Failed(String),
+    /// The connect failed because the socket is gone: the hosting process has ended, and the
+    /// session is an ended one whatever the last scan recorded.
+    Gone(String),
 }
 
 impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CallError::Refused(message) | CallError::Failed(message) => f.write_str(message),
+            CallError::Refused(message) | CallError::Failed(message) | CallError::Gone(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -806,22 +844,12 @@ impl std::fmt::Display for CallError {
 /// port fails.
 pub fn models(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
     let Some((socket, _)) = hub.live(id) else {
-        return Err(SessionError::NotLive(format!(
-            "session {id:?} is not live: no process hosts it"
-        )));
+        return Err(ended(id));
     };
-    let token = hub.token();
-    match request(
-        &socket,
-        &json!({ "id": 1, "verb": "models" }),
-        REQUEST_TIMEOUT,
-        token.as_deref(),
-    ) {
-        Ok(answer) => Ok(json!({
-            "models": answer.get("models").cloned().unwrap_or(Value::Array(Vec::new())),
-        })),
-        Err(error) => Err(SessionError::Port(error.to_string())),
-    }
+    let answer = call_live(hub, id, &socket, &json!({ "id": 1, "verb": "models" }))?;
+    Ok(json!({
+        "models": answer.get("models").cloned().unwrap_or(Value::Array(Vec::new())),
+    }))
 }
 
 // ---- the write routes ---------------------------------------------------------------------
@@ -910,16 +938,42 @@ fn parse_model(raw: &Value) -> Result<Option<ModelRoute<'_>>, SessionError> {
     }))
 }
 
-/// Forwards one already-built control request over `socket` with the hub token. A refusal
-/// keeps its meaning: the queue's two answer outcomes get their own route errors, and every
-/// other refusal is a value the route forwarded, so it is `422`.
-fn forward(socket: &Path, hub: &SessionHub, request: &Value) -> Result<Value, SessionError> {
+/// Forwards one already-built control request to the live session `id` over `socket`, with the
+/// hub token. A refusal keeps its meaning: the queue's two answer outcomes get their own route
+/// errors, and every other refusal is a value the route forwarded, so it is `422`. A connect
+/// that finds the socket gone is the session ending between the last scan and this call, so it
+/// is the ended-session answer (`409`), and the stale live entry is dropped.
+fn forward(
+    socket: &Path,
+    hub: &SessionHub,
+    id: &str,
+    request: &Value,
+) -> Result<Value, SessionError> {
+    call_live(hub, id, socket, request)
+}
+
+/// One port call for the live session `id`; see [`forward`] for the error mapping.
+fn call_live(
+    hub: &SessionHub,
+    id: &str,
+    socket: &Path,
+    request: &Value,
+) -> Result<Value, SessionError> {
     let token = hub.token();
     match self::request(socket, request, REQUEST_TIMEOUT, token.as_deref()) {
         Ok(answer) => Ok(answer),
+        Err(CallError::Gone(_)) => {
+            hub.forget_session(id);
+            Err(ended(id))
+        }
         Err(CallError::Failed(message)) => Err(SessionError::Port(message)),
         Err(CallError::Refused(message)) => Err(refusal(message)),
     }
+}
+
+/// The route error a session no process hosts answers: `409`, and nothing changed.
+fn ended(id: &str) -> SessionError {
+    SessionError::NotLive(format!("session {id:?} is not live: no process hosts it"))
 }
 
 /// The route error a control port's error line becomes.
@@ -958,17 +1012,18 @@ pub fn start_session(hub: &SessionHub, repo: &Path, body: &[u8]) -> Result<Strin
         hub.forget_held(pid);
         return Err(error);
     }
-    if let Err(error) = send_input(hub, &hub.socket_for(pid), &input) {
+    if let Err(error) = send_input(hub, &id, &hub.socket_for(pid), &input) {
         hub.forget_held(pid);
         return Err(error);
     }
     Ok(id)
 }
 
-/// Sends one validated input over a session's port: `steer` when the body asked for it,
-/// `followup` otherwise, with the hub token so the port records it as the owner's.
+/// Sends one validated input to the session `id` over its port: `steer` when the body asked for
+/// it, `followup` otherwise, with the hub token so the port records it as the owner's.
 fn send_input(
     hub: &SessionHub,
+    id: &str,
     socket: &Path,
     input: &SessionInput,
 ) -> Result<Value, SessionError> {
@@ -980,7 +1035,7 @@ fn send_input(
         object.insert("id".to_owned(), json!(1));
         object.insert("verb".to_owned(), json!(verb));
     }
-    forward(socket, hub, &request)
+    forward(socket, hub, id, &request)
 }
 
 /// `POST …/sessions/<id>/prompt`: deliver the body to the session. A live session receives it
@@ -997,15 +1052,15 @@ pub fn prompt(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<Va
     // The session must be this repository's before anything starts.
     journal_for(repo, id)?;
     if let Some((socket, _)) = hub.live(id) {
-        match send_input(hub, &socket, &input) {
+        match send_input(hub, id, &socket, &input) {
             // The cached socket died between the scan and this send: resume, the same way an
-            // ended session is.
-            Err(SessionError::Port(_)) => {}
+            // ended session is. A `Gone` connect already dropped the stale entry.
+            Err(SessionError::NotLive(_)) => {}
             other => return other,
         }
     }
     let socket = hub.start_for(repo, id)?;
-    send_input(hub, &socket, &input)
+    send_input(hub, id, &socket, &input)
 }
 
 /// `POST …/sessions/<id>/cancel`: forward the port's `cancel`.
@@ -1017,7 +1072,7 @@ pub fn prompt(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<Va
 /// fails.
 pub fn cancel(hub: &SessionHub, repo: &Path, id: &str) -> Result<(), SessionError> {
     let (socket, _) = live_session(hub, repo, id)?;
-    forward(&socket, hub, &json!({ "id": 1, "verb": "cancel" }))?;
+    forward(&socket, hub, id, &json!({ "id": 1, "verb": "cancel" }))?;
     Ok(())
 }
 
@@ -1045,7 +1100,7 @@ pub fn answer(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<()
         object.insert("id".to_owned(), json!(1));
         object.insert("verb".to_owned(), json!("answer"));
     }
-    forward(&socket, hub, &request)?;
+    forward(&socket, hub, id, &request)?;
     Ok(())
 }
 
@@ -1069,7 +1124,7 @@ pub fn config(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<()
         object.insert("id".to_owned(), json!(1));
         object.insert("verb".to_owned(), json!("config"));
     }
-    forward(&socket, hub, &request)?;
+    forward(&socket, hub, id, &request)?;
     Ok(())
 }
 
@@ -1082,9 +1137,7 @@ fn live_session(
     journal_for(repo, id)?;
     // A fresh probe as well as the scanner's cache: a process started a moment ago is live
     // before the next scan sees it, and its queue may already hold the request being answered.
-    hub.locate(id).ok_or_else(|| {
-        SessionError::NotLive(format!("session {id:?} is not live: no process hosts it"))
-    })
+    hub.locate(id).ok_or_else(|| ended(id))
 }
 
 // ---- the route bodies ---------------------------------------------------------------------
@@ -1574,6 +1627,25 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn a_gone_socket_is_an_ended_session_not_a_port_failure() {
+        let socket = Path::new("/nonexistent/1.sock");
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+            let error = std::io::Error::new(kind, "gone");
+            assert!(
+                matches!(connect_error(socket, &error), CallError::Gone(_)),
+                "{kind:?} means the hosting process ended"
+            );
+        }
+        for kind in [ErrorKind::TimedOut, ErrorKind::PermissionDenied] {
+            let error = std::io::Error::new(kind, "failed");
+            assert!(
+                matches!(connect_error(socket, &error), CallError::Failed(_)),
+                "{kind:?} is the port failing, not the session ending"
+            );
+        }
     }
 
     #[test]
