@@ -430,7 +430,7 @@ A change takes effect at the hub's next start.
 | `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. The API binds `127.0.0.1` only. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
-| `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's queue gets a new head; see [the after_pending hook](#the-after_pending-hook). |
+| `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's queue gets a new head; see [the after_pending hook](#the-after-pending-hook). |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
