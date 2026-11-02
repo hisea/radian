@@ -49,7 +49,7 @@ Status: accepted
 
 - Selection list: all **logged-in** provider descriptor model lists, grouped by provider. A hand-typed model name is also allowed. The current-route provider still lists even with no usable credentials, so the `✓` row never misses (switch still refuses per D6). `/model <provider>/<model>` completes both levels. The current model marks `✓`. The description column shows the provider. Typing matches both model and provider names.
 - On switch one user line states: "next round uses <model>; the first round after switch misses cache".
-- After select it pushes into `ConfigQueue` only a route reference `{"model":{"provider":"…","model":"…"}}`, **with no key and no header values**. Per ADR 0004 it takes effect **before the next turn**. The in-progress turn stays unaffected. The status bar shows "next: <model>".
+- After select it pushes into `ConfigQueue` only a route reference `{"model":{"provider":"…","model":"…"}}`, **with no key and no header values**. Per ADR 0004 it takes effect **before the next turn**. The in-progress turn stays unaffected. The status bar shows "next: <model>". The control port's owner verbs are this same list and this same switch (ADR 0043): `models` answers the list above and `config` pushes the same route reference into `ConfigQueue`.
 - The host holds one switchable model and takes out (or builds and caches) the matching `HostModel` per request by current route. The driver only swaps the slot between turns.
 
 ### D6 Cross-provider switch

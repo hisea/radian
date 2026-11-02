@@ -81,7 +81,8 @@ request), the request is the owner's:
 
 - `followup`, `steer` and `inject` enqueue with source `User`; the `source` field is ignored.
 - The message records `{"via": "hub"}` in its `origin` metadata, so the transcript can tell a
-  phone-sent message from a typed one.
+  phone-sent message from a typed one: the TUI appends a weak ` · hub` to that message's last
+  row (a keyboard message has none).
 - The four owner verbs below are available.
 
 A missing, unreadable or empty token file means no token matches. A request without `token`,
@@ -191,6 +192,10 @@ entry. An error line changes nothing when:
 - the response is for the other kind (an approval response for a question, or the reverse);
 - the response does not parse: an unknown approval word, a non-string `reason`, or an `answers`
   list that violates the answer shape.
+
+A TUI that was showing the completed popup closes it when the queue's head moves, draws one weak
+`answered from the hub` line in the transcript, and applies no second answer. The tool result (the
+tool card, or the `ask_user` record) is the same one a keyboard answer produces.
 
 ## `config`
 

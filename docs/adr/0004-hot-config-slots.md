@@ -25,7 +25,7 @@ pub struct ConfigQueue { pending: Mutex<Vec<Value>> }
 
 ### D3: Apply at the boundary, and record the application
 
-The driver calls `apply_pending_config()` before each `start_turn`. It drains the queue item by item and assigns monotonically increasing `revision` numbers (from 1). It **first** writes `RuntimeEvent::ConfigChanged { revision, change }` and the write must succeed, **then** it applies the change to the slot. After a successful application it passes the event to the runtime event listener. Application is the effect; enqueue is only the intent. The recorded `revision` therefore always names a configuration truly in effect. Each session applies at its own boundary.
+The driver calls `apply_pending_config()` before each `start_turn`. It drains the queue item by item and assigns monotonically increasing `revision` numbers (from 1). It **first** writes `RuntimeEvent::ConfigChanged { revision, change }` and the write must succeed, **then** it applies the change to the slot. After a successful application it passes the event to the runtime event listener. Application is the effect; enqueue is only the intent. The recorded `revision` therefore always names a configuration truly in effect. Each session applies at its own boundary. The control port's owner `config` verb (`model` and `thinking`, ADR 0043) is one more enqueue path: it enters this same queue, drains at the same boundary and journals the same `ConfigChanged`, never applying mid-turn.
 
 A model change (`{"model": {"provider", "model"}}`) also makes the host recompute the next turn context budget and compaction settings (ADR 0026 D7). `ConfigChanged` holds only host labels (route/thinking/approval and similar). It holds **no secret or header value**.
 

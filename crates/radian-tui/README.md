@@ -144,6 +144,11 @@ transcript: ❯ user  ·  assistant prose  ·  ◼/◻ thinking  ·  <fold> tool
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
+A user message the owner sent through the control port (the hub) keeps the `❯ ` marker and
+its text, and appends ` · hub` in the dim role at the end of its last row (ADR 0035); a typed
+message has no suffix. A pending popup the port answers closes with one dim
+`answered from the hub` line in the transcript, and the TUI applies no second answer.
+
 The default input area is `tui.input_style = "lines"` (ADR 0035): a rule
 above and below with a `❯ ` prompt, continuation lines indented two cells. The running status
 sits on the top rule (`── <spinner>  Working · 12s · esc to interrupt ──`; the clock is the
@@ -1129,6 +1134,19 @@ throwaway terminal, not your working one.
     multiplexer may or may not forward OSC 52); the status bar says `copied N chars (via …)`;
     `pbcopy` works on macOS; `off` writes nothing and says so. *Fail*: record herdr's version
     and whether OSC 52 forwarding is enabled — this is the known-open question.
+14. **The phone on the tailnet, taking over a TUI session** (ADR 0048 §16, ADR 0035).
+    *Steps*: on the Mac open a `radian` session in a repository the hub has registered, with
+    `radian hub` running and the hub exposed to the tailnet (`tailscale serve`). From the phone
+    in the tailnet: send one message, answer one approval, switch the model, and send a photo.
+    *Expect*: the message appears in the TUI with the dim ` · hub` suffix; the approval popup
+    the TUI shows closes when the phone answers (the tool runs, and the TUI shows one dim
+    `answered from the hub` line); the footer's model changes at the next turn; the photo
+    draws as an image under its placeholder. A late answer from the other front end changes
+    nothing. Then, from the phone, start a new session and close the app for an hour; on
+    reopening, the session is still listed and its transcript is intact (a hub-held process
+    that was idle for longer than `hub.session_idle_secs` has exited, and the next prompt
+    resumes the same journal). *Fail*: record which front end missed the update, the hub's
+    version, and the session id.
 
 ### Hand test: passed
 
@@ -1453,7 +1471,8 @@ if it stayed under `a/`. While the box is up, other keys do not type into the in
 
 Approvals and `ask_user` questions share **one** arrival-ordered queue in `radian-host`
 (`PendingQueue`), and the UI shows its head: a second request waits behind the first instead of
-superseding it. The queue is a wake-up source (its `watch` receiver is a `UiEvent::Pending`), so
+superseding it. The queue is a wake-up source (its `watch` receiver is a `UiEvent::Pending`
+carrying the ids the control port answered since the last wake), so
 a waiter that gives up — a cancelled turn — removes the modal immediately, without waiting for
 anything else. The status bar counts the queue (`N pending`) while it is not empty. Answering
 goes through the session facade (`answer`), which re-validates the `AnswerRequest` capability,

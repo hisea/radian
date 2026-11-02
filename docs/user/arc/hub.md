@@ -285,6 +285,7 @@ Every entry is one object. The fields are always present, in this order; `kind` 
 | `compaction` | object or `null` | A compaction summary's data; `null` for every other entry. |
 | `interrupted` | boolean | A committed assistant message was an interrupted prefix. |
 | `images` | array | The images the entry's message carried, each with its display data but **never** the base64 payload; the placeholder line is in `text`. |
+| `via` | string or `null` | `hub` on a user message the owner token sent through the control port; `null` on every other entry. |
 
 ### `GET /v1/repos/<name>/sessions/<id>/models`
 

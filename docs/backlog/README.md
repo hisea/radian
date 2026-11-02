@@ -54,8 +54,7 @@
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `arc.md` | in-progress（切片 1–7 已落地） | 0032、0043、0044、0038、0020、0024、0013、0037、0022 | 替代 herdr 的派发与闸门：文件 backlog 单写者、一次性 worker、固定 sha 的 gate；产品形态为三界面 app 加 plan 层与全自动 |
 | `arc-gate-batch.md` | decided（合并方式已落地） | 0048 | gate 合批：单个 task 只做快速检查，可合并的 task 叠在 main 上只跑一次完整 Verify，失败再拆开定位 |
-| `hub-sessions.md` | decided | 0043、0011、0012、0023、0024、0005、0004、0026、0010、0048、0020、0013、0034 | hub 的会话面：手机看、开、接管 radian 会话。控制口凭 hub token 开放 `User` 来源与 `answer`/`pending`/`config`/`models`，hub 扫 `run/*.sock` 列会话、折好 transcript、SSE、起不带 `-p` 的 `radian exec` 持有手机开的会话并空闲回收，`[hub.hooks] after_pending` 通知；ACP 不参与 |
-| `arc-ios.md` | decided | 0048、0034 | 原生 SwiftUI 客户端，单独仓库 `radian-ios`，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；TestFlight，最低 iOS 17；会话见 `hub-sessions.md` |
+| `arc-ios.md` | decided | 0048、0034 | 原生 SwiftUI 客户端，单独仓库 `radian-ios`，只连 hub；扫码配对、Keychain 存 token；v1 列表、详情、diff 与八个 owner 动作，不看实时会话；锁屏通知走 Bark/ntfy 钩子跳 app 的 URL scheme；TestFlight，最低 iOS 17；会话面见 ADR 0048 §16 |
 | `session-arc-page.md` | idea | 0048、0023、0027、0035 | 会话 TUI 里 `/arc` 切到 arc 的 plans/task/merge 页面，不退出会话；读当前项目的 `.radian/arc/`，审批弹窗仍在最上层，owner 动作与 `radian arc` 相同，模型一侧调不到 |
 | `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表；第一阶段的用户是 arc（arc 即 ACP 客户端已落地） |
 | `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |

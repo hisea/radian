@@ -833,3 +833,11 @@ gate stages `mutation` and `ci` are refused until they are built.
   registered repositories, do one owner action, and receive one lock-screen notification from
   an `after_awaiting_human` hook. The hub binds `127.0.0.1` only; the tailnet exposure is the
   proxy's.
+- **The phone driving a TUI session** (ADR 0048 §16). With a `radian` session open on the Mac
+  and the hub running, from the phone send one message, answer one approval, switch the model
+  and send a photo. The TUI must show the message with the dim ` · hub` suffix, close the
+  approval popup (one dim `answered from the hub` line, the tool runs), show the new model in
+  the footer at the next turn, and draw the photo. A late answer from either front end changes
+  nothing. Then open a new session from the phone, close the app for an hour, and reopen it:
+  the session is still listed and its transcript is intact, because an idle hub-held process
+  exits and the next prompt resumes the same journal.

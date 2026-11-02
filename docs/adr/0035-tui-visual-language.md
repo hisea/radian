@@ -45,13 +45,14 @@ The visual hand-test list lives in `crates/radian-tui/README.md`. It holds one s
 
 | Entry | Columns 1-2 | Role | Notes |
 |---|---|---|---|
-| User message | `❯ ` | `user` (foreground role, accent) | Text also uses `user`. No background, no half-cell pad, no `▌` |
+| User message | `❯ ` | `user` (foreground role, accent) | Text also uses `user`. No background, no half-cell pad, no `▌`. A message whose `origin.via` is `hub` (the owner token sent it through the control port, ADR 0043) appends ` · hub` at the end of its last row in the `truncation` (dim) role; the marker and the text stay the same, and a keyboard message has no suffix |
 | Assistant reply | First row `● `, rest `  ` | `frame` | `●` sits on the entry first row only, unselectable, uncopied |
 | Thinking | `◼ ` folded / `◻ ` expanded (with body) | `reasoning` | Body rows use `│ `. Head row and shapes: see ADR 0028 |
 | Tool calls | `• ` (one row) / `◼`/`◻` (expandable body) | `frame` | Body rows use `│ `. Shapes: see ADR 0028 |
 | Q&A record | `╭─ ask ───` / `│ ` / `╰──` | `frame` | Content: see ADR 0028 |
 | Memory card | `╭─ memory ───` / `│ ` / `╰──` | `frame`; title text, type and path weak | Content: see below |
 | notice / warning / `!` commands | `* ` / `! ` / `$ ` | unchanged | |
+| Hub answer record | `* ` | `truncation` (marker and body) | One line `answered from the hub` after a popup the control port answered (ADR 0048 §16). The weak level, not a notice's secondary level; no background, text starts at column 3 |
 | Compaction summary | `── context compacted (…) ──` starts at column 1 | `frame` | |
 
 - Marker column stays 2 cells, text stays column 3. `->`/`<-` retire.
@@ -80,4 +81,4 @@ The visual hand-test list lives in `crates/radian-tui/README.md`. It holds one s
 
 ## Verification
 
-`tests/thin.rs` full-screen snapshots cover all thin elements. `tests/context_grid.rs` full-screen snapshots cover grid, legend, and detail positions and color roles (120/80 columns and ascii level). `tests/render.rs`, `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, and `tests/footer.rs` cover blocks and lists. `blocks::tests::md_line_count_matches_the_layout`, `markdown::line_count_matches_the_layout`, and `tests/virtual.rs` cover row-count books and windows. `crates/radian-tui/scripts/check-glyph-coverage.py` checks against the README glyph table. The hand-test list in `crates/radian-tui/README.md` applies.
+`tests/thin.rs` full-screen snapshots cover all thin elements. `tests/context_grid.rs` full-screen snapshots cover grid, legend, and detail positions and color roles (120/80 columns and ascii level). `tests/render.rs`, `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, and `tests/footer.rs` cover blocks and lists; `tests/render.rs::a_hub_message_carries_the_weak_marker_and_a_typed_one_does_not` covers the ` · hub` suffix and its absence. `blocks::tests::md_line_count_matches_the_layout`, `markdown::line_count_matches_the_layout`, and `tests/virtual.rs` cover row-count books and windows. `crates/radian-tui/scripts/check-glyph-coverage.py` checks against the README glyph table. The hand-test list in `crates/radian-tui/README.md` applies.

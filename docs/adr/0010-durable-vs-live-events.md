@@ -38,6 +38,8 @@ Core `JournalRecord` is `#[non_exhaustive]`. Current variants: `Message`, `Trans
 | `CompactionUsage { revision, model, usage }` | Delivery notice for a durable fact | Maps to the `CompactionUsage` record | Once per summary call, after the record. |
 | `RunFinished { status }` | **Mandatory end state** | No record; the runtime writes the turn end state as `TurnFinished` | The only event-layer variant that must **never drop** (K3). |
 
+The control port's `subscribe` stream follows the same split (ADR 0043): it carries the committed `AgentEvent` and `RuntimeEvent` facts, plus one **live** `pending` event when the approval/question queue's head or length changes. The `pending` event is R2 — the queue is re-derivable from the next event and the durable outcome is the decision the session journals (`PermissionResolved`, or the `ask_user` result) — and it never carries model deltas.
+
 ### K3: `EventSink` contract
 
 `EventSink::emit` carries the existing comment as normative text: **"Receives events synchronously from the turn loop. Must be short and non-blocking; forward to a queue if the host needs to do more. A bounded queue may drop progress events but must keep `RunFinished`"**. It expands into three rules:

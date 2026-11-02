@@ -319,7 +319,7 @@ tag first. The hub sends exactly this, so a client never parses a rendered frame
 
 ```json
 {"kind":"assistant","text":"Done.","is_error":false,"result":null,"error_code":null,
- "card":"none","tool":null,"compaction":null,"interrupted":false,"images":[]}
+ "card":"none","tool":null,"compaction":null,"interrupted":false,"images":[],"via":null}
 ```
 
 | Field | Type | Meaning |
@@ -334,6 +334,7 @@ tag first. The hub sends exactly this, so a client never parses a rendered frame
 | `compaction` | object or null | A compaction summary: `summary`, `user_messages`, `revision`, `tokens_before`, `tokens_after`, `deterministic`, `dropped` (the last four are live-only and null in a fold of a finished journal). |
 | `interrupted` | bool | The committed assistant message was an interrupted prefix (ADR 0003). |
 | `images` | array | Each image's `mime_type`, `width`, `height` and `placeholder`. **The base64 payload is never serialized**: the placeholder line is in `text`. |
+| `via` | string or null | `hub` on a user message the owner token sent through the control port; null otherwise. ADR 0035 draws its marker from this |
 
 The shape is pinned by `the_json_shape_of_every_entry_kind_is_stable`.
 
