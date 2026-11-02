@@ -2201,11 +2201,12 @@ leaves it as it is and writes the rule into each attempt's copy directory instea
 was applied by hand to the named working file; the wrapper tests run the `radian` binary, so it
 was rebuilt with `cargo build -p radian-tui --bin radian`, and the named test ran with `cargo
 nextest run -p radian-arc --locked --profile sandbox --test work -E 'test(<name>)'`. Each file
-was restored from a copy under `.radian/mut/`, which `cmp` found identical.
+was restored from a copy under `.radian/`, which `cmp` found identical.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0311-M1 | the task ignore file's tracked check is skipped (`if false && ...`), so a tracked `.radian/arc-verdicts/<task>/.gitignore` is overwritten | `a_tracked_task_verdict_ignore_file_is_left_alone` (the attempt exited 1) | ✅ 1 failed |
 | TK0311-M2 | the attempt ignore file is never written (its tracked check is forced true), so a copy below a tracked task file is left unignored | `a_tracked_task_verdict_ignore_file_is_left_alone` (the attempt exited 1; the copy was untracked) | ✅ 1 failed |
+| TK0311-M3 | the task ignore file's tracked check is dropped as the parent implementation had it, so both tasks' tracked `.radian/arc-verdicts/<task>/.gitignore` files are overwritten | `two_task_verdict_copies_get_their_own_ignore_files` (both tracked files were reported dirty) | ✅ 1 failed |
 
-2/2 caught.
+3/3 caught.
