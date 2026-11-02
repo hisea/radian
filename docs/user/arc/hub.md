@@ -309,8 +309,8 @@ It is an ordinary session: its workspace is the repository's path, its configura
 | `POST /v1/repos/<name>/sessions/<id>/config` | `config` (object, required), the control port's own change: `model` (`{provider, model}`) and/or `thinking`. |
 
 `model` is exactly `{"provider": string, "model": string}`; any other key, a missing or empty value, or a value that is not an object is `400`.
-`images` and `files` are the control port's own attachment shapes and limits ([attachments](../control.md#attachments)): a bad image, an over-limit file or an unknown MIME is `422` naming the item.
-A missing or wrong-typed `text`, `steer`, `request_id`, `response` or `config` is `400`.
+`images` and `files` are the control port's own attachment shapes and limits ([attachments](../control.md#attachments)): a bad image, an over-limit file or an unknown MIME is `422` naming the item. A present `null` is a wrong-typed field, not an absent one.
+A missing or wrong-typed `text`, `steer`, `images`, `files`, `request_id`, `response` or `config` is `400`.
 A body is validated before any process starts, so a refused body starts nothing and changes nothing.
 A session write route reads at most 16 MiB (16,777,216 bytes) minus 1 KiB of body and answers `413` beyond it: the control port's own request line is 16 MiB, and forwarding adds a small envelope.
 

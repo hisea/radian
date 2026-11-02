@@ -221,7 +221,7 @@ pub async fn open_session(
         // open, and its single-writer lock would refuse with a generic lock error. Ask the
         // control ports first, so the refusal names the holder and its pid — the same kind of
         // message the other-workspace refusal gives. The scan reads only.
-        if let Some(holder) = crate::control::hub_holder(session_id.as_str()) {
+        if let Some(holder) = crate::control::hub_holder(session_id.as_str(), &journal_path) {
             return Err(SessionError::Message(format!(
                 "session {:?} is held by the hub (pid {}); only one process opens a journal, so \
                  it is only opened there",
@@ -443,9 +443,11 @@ pub async fn open_session(
         intent_stop_warning,
         hook_stop_warning,
     ));
-    // ADR 0011 L2: a turn runs with the source of the input that opened it. The control port
-    // may queue an owner input while another turn runs (it must not raise that turn's source),
-    // so the reset happens at the claim, not at the enqueue.
+    // ADR 0011 L2: a turn runs with the least-privileged source of the input that opened it
+    // and every input the turn admits — a waking `steer` already queued when it opens, and a
+    // `steer`/`inject` a later safe point admits. The control port may queue an owner input
+    // while another turn runs (it must not raise that turn's source), so the source is fixed
+    // at the claim and lowered by the drain callback, never at the enqueue.
     command_hooks.set_turn_source_hooks(Arc::downgrade(&hooks));
     // ADR 0045 §4: the permission layer asks the same command hooks to answer an `ask`
     // before any approver (and before the non-human denial). The permission crate holds

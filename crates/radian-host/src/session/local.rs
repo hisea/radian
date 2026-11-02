@@ -376,19 +376,15 @@ impl LocalSession {
         Arc::clone(&self.turn_running)
     }
 
-    /// Applies a facade input's source to the permission layer (ADR 0011 L2). The turn the
-    /// input opens restates it at the claim; here only a turn already in flight matters: a
-    /// `steer`/`inject` joins it and can only lower its source, while a `followup` belongs to a
-    /// later turn and leaves it alone. This is the same rule the control port applies.
+    /// Applies a facade input's source to the permission layer (ADR 0011 L2). Only a turn
+    /// already in flight matters: a `steer`/`inject` joins it and can only lower its source,
+    /// while a `followup` belongs to a later turn and leaves it alone. An idle input sets
+    /// nothing: its own turn does not exist yet, and the claim applies its source. This is the
+    /// same rule the control port applies.
     fn note_input_source(&self, followup: bool) {
-        if self.turn_running() || self.inbox.inflight_turns() > 0 {
-            if !followup {
-                self.hooks
-                    .observe_input_source(radian_core::InputSource::User);
-            }
-        } else {
+        if (self.turn_running() || self.inbox.inflight_turns() > 0) && !followup {
             self.hooks
-                .set_turn_source(Some(radian_core::InputSource::User));
+                .observe_input_source(radian_core::InputSource::User);
         }
     }
 

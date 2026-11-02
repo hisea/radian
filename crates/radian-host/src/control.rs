@@ -74,6 +74,10 @@ pub struct ControlTarget {
     /// The canonical workspace this session was opened in (`list_sessions` reports it so a
     /// hub can group sessions by repository).
     pub workspace: PathBuf,
+    /// The journal this process has open: `list_sessions` reports it so a session opener can
+    /// tell two sessions with the same user-chosen id under different session directories
+    /// apart (ADR 0048 §16's one-process-per-journal rule).
+    journal: PathBuf,
     /// The route this session started on: the fallback when the model handle has closed.
     initial_route: ModelRoute,
     inbox: Weak<radian_runtime::Inbox>,
@@ -107,6 +111,7 @@ impl ControlTarget {
         Self {
             session_id: session.id().as_str().to_owned(),
             workspace: session.workspace().to_path_buf(),
+            journal: session.journal_path().to_path_buf(),
             initial_route,
             inbox: Arc::downgrade(session.inbox()),
             hooks: Arc::downgrade(session.hooks()),
@@ -341,21 +346,25 @@ impl ControlServer {
         };
         // The `pending` subscription runs alongside the accept loop: whenever the queue's
         // version changes, every subscriber gets the current head (or `null`), redacted for a
-        // subscriber without the owner token. The task holds the queue and this server weakly,
-        // so a closed session or a dropped server ends it.
+        // subscriber without the owner token. The task holds the queue and this server weakly
+        // and drops both before it waits, so a dropped server is not kept alive; a closed
+        // session ends it when the queue's watch channel closes.
         if let Some((queue, mut changes)) = target.pending_watch() {
             let weak_server = Arc::downgrade(self);
             runtime.spawn(async move {
                 loop {
-                    let Some(server) = weak_server.upgrade() else {
-                        break;
-                    };
-                    let Some(queue) = queue.upgrade() else {
-                        break;
-                    };
-                    let (full, redacted) = pending_event(&queue);
-                    server.push_pending(full, redacted);
-                    drop(queue);
+                    // Both handles are dropped before the wait: a dropped server must not be
+                    // kept alive by this task, so it parks on the queue's channel alone.
+                    {
+                        let Some(server) = weak_server.upgrade() else {
+                            break;
+                        };
+                        let Some(queue) = queue.upgrade() else {
+                            break;
+                        };
+                        let (full, redacted) = pending_event(&queue);
+                        server.push_pending(full, redacted);
+                    }
                     if changes.changed().await.is_err() {
                         break;
                     }
@@ -604,18 +613,14 @@ impl ControlServer {
             return failure(id.clone(), "the session has closed");
         };
         // The source the port fixed is what the durable record and the inbox enqueue see
-        // (ADR 0011 L2), and the turn-claimed observer resets the permission source to it
-        // when this input's own turn starts. Here only a turn that is already in flight
-        // matters: a `steer`/`inject` is admitted into it, so it can lower its source but
-        // never raise it; a `followup` belongs to a later turn, so it must not touch this
-        // one at all. With nothing in flight the input may start the next turn, and the set
-        // keeps the state right until the claim restates it.
-        if turn_running || inbox.inflight_turns() > 0 {
-            if verb != "followup" {
-                hooks.observe_input_source(source);
-            }
-        } else {
-            hooks.set_turn_source(Some(source));
+        // (ADR 0011 L2), and the turn-claimed observer applies it when this input's own
+        // turn starts (and lowers by every input that turn already has queued). Here only a
+        // turn that is already in flight matters: a `steer`/`inject` is admitted into it, so
+        // it can lower its source but never raise it; a `followup` belongs to a later turn, so
+        // it must not touch this one at all. An idle request sets nothing: its own turn does
+        // not exist yet, so there is no source to fix until the claim opens it.
+        if (turn_running || inbox.inflight_turns() > 0) && verb != "followup" {
+            hooks.observe_input_source(source);
         }
         let mut message = user_message(text, &files, &images);
         if via_hub {
@@ -639,8 +644,9 @@ impl ControlServer {
         let Some(queue) = target.queue() else {
             return failure(id, "the session has closed");
         };
-        let head = queue.head();
-        let length = queue.len();
+        // One lock, so the head and the length are one instant: a concurrent answer cannot
+        // pair the old head with a length of zero.
+        let (head, length) = queue.head_and_len();
         let head = head.as_ref().map(pending_head).unwrap_or(Value::Null);
         success(id, Some(json!({ "head": head, "length": length })))
     }
@@ -839,15 +845,22 @@ impl ControlServer {
         let pending = target.queue().map_or(0, |queue| queue.len());
         let turn = target.turn_state();
         // ADR 0034 H2's pure state function: a non-empty queue is `blocked`, a running turn
-        // (or background jobs) is `working`, everything else `idle`.
+        // (or background jobs) is `working`, and an idle block (the wake budget, a `/goal`
+        // budget, a lost job notice, the intent-stop or hook-continuation cap) blocks while no
+        // turn runs. The TUI folds the five into a projection bit, so a process that folds
+        // committed events reports the same state herdr does.
+        let idle_block = target
+            .projection()
+            .is_some_and(|projection| projection.read().idle_blocked());
         let state =
-            crate::herdr::state(turn, pending, false, false, target.running_jobs()).as_str();
+            crate::herdr::state(turn, pending, false, idle_block, target.running_jobs()).as_str();
         let route = target.current_route();
         vec![json!({
             "id": target.session_id,
             "kind": "main",
             "holder": if target.hub_held { "hub" } else { "tui" },
             "workspace": target.workspace.to_string_lossy(),
+            "journal": target.journal.to_string_lossy(),
             "model": { "provider": route.provider, "model": route.model },
             "state": state,
             "pending": pending,
@@ -863,8 +876,7 @@ const OWNER_REQUIRED: &str =
 /// every other subscriber (request id, kind and tool name only — no arguments, no question
 /// text). The event source is `control`.
 fn pending_event(queue: &SessionQueue) -> (Value, Value) {
-    let head = queue.head();
-    let length = queue.len();
+    let (head, length) = queue.head_and_len();
     let full = head.as_ref().map(pending_head).unwrap_or(Value::Null);
     let redacted = head.as_ref().map(redacted_head).unwrap_or(Value::Null);
     (
@@ -1169,7 +1181,7 @@ fn parse_images(request: &Value) -> Result<Vec<LoadedImage>, String> {
     use base64::Engine as _;
 
     let items = match request.get("images") {
-        None | Some(Value::Null) => return Ok(Vec::new()),
+        None => return Ok(Vec::new()),
         Some(Value::Array(items)) => items,
         Some(_) => return Err("`images` must be an array".into()),
     };
@@ -1202,7 +1214,7 @@ fn parse_images(request: &Value) -> Result<Vec<LoadedImage>, String> {
 
 fn parse_files(request: &Value) -> Result<Vec<Attachment>, String> {
     let items = match request.get("files") {
-        None | Some(Value::Null) => return Ok(Vec::new()),
+        None => return Ok(Vec::new()),
         Some(Value::Array(items)) => items,
         Some(_) => return Err("`files` must be an array".into()),
     };
@@ -1637,14 +1649,16 @@ pub struct HubHolder {
 /// same bound the hub's scanner uses. A socket that never answers costs one timeout.
 const HOLDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Finds the hub-held process hosting `session_id`, or `None` when no socket reports it.
+/// Finds the hub-held process hosting the journal at `journal`, or `None` when no socket
+/// reports it.
 ///
 /// ADR 0048 §16's one-process-per-journal rule: a session opener asks this before it takes the
 /// journal's single-writer lock, so a `--resume` of a session a hub-held process holds is
-/// refused by name instead of failing on the lock. The scan is read-only: each socket gets one
-/// `list_sessions` request and the reply is never written back.
+/// refused by name instead of failing on the lock. `session_id` is the user-chosen id, which
+/// two session directories may share, so the row's journal path must match too. The scan is
+/// read-only: each socket gets one `list_sessions` request and the reply is never written back.
 #[cfg(unix)]
-pub fn hub_holder(session_id: &str) -> Option<HubHolder> {
+pub fn hub_holder(session_id: &str, journal: &Path) -> Option<HubHolder> {
     let home = crate::home::radian_home()?;
     let dir = crate::home::run_dir_for(&home);
     let entries = std::fs::read_dir(dir).ok()?;
@@ -1667,6 +1681,10 @@ pub fn hub_holder(session_id: &str) -> Option<HubHolder> {
             row.get("kind").and_then(Value::as_str) == Some("main")
                 && row.get("id").and_then(Value::as_str) == Some(session_id)
                 && row.get("holder").and_then(Value::as_str) == Some("hub")
+                && row
+                    .get("journal")
+                    .and_then(Value::as_str)
+                    .is_some_and(|held| same_journal(Path::new(held), journal))
         }) {
             return Some(HubHolder { pid });
         }
@@ -1675,8 +1693,22 @@ pub fn hub_holder(session_id: &str) -> Option<HubHolder> {
 }
 
 #[cfg(not(unix))]
-pub fn hub_holder(_session_id: &str) -> Option<HubHolder> {
+pub fn hub_holder(_session_id: &str, _journal: &Path) -> Option<HubHolder> {
     None
+}
+
+/// Whether two reported journal paths name the same file: the file name exactly, the parent
+/// directory by [`crate::sessions::same_directory`], so a relative `--session-dir` and the same
+/// directory's absolute spelling match.
+fn same_journal(held: &Path, wanted: &Path) -> bool {
+    let same_name = held.file_name() == wanted.file_name();
+    same_name
+        && match (held.parent(), wanted.parent()) {
+            (Some(held), Some(wanted)) => {
+                crate::sessions::same_directory(&held.to_string_lossy(), &wanted.to_string_lossy())
+            }
+            _ => false,
+        }
 }
 
 /// One `list_sessions` request on a fresh connection, bounded by [`HOLDER_PROBE_TIMEOUT`]. A
@@ -1807,5 +1839,32 @@ impl SocketGuard {
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_journal;
+
+    /// The one-holder lookup compares the journal file, not only the user-chosen session id: two
+    /// session directories may hold the same id, and only the one a hub holds is refused.
+    #[test]
+    fn the_same_journal_needs_the_same_file_not_only_the_id() {
+        let root = std::env::temp_dir().join(format!("radian-journal-{}", std::process::id()));
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let shared_a = a.join("shared.jsonl");
+        let shared_b = b.join("shared.jsonl");
+        std::fs::write(&shared_a, b"").unwrap();
+        std::fs::write(&shared_b, b"").unwrap();
+        assert!(same_journal(&shared_a, &shared_a));
+        assert!(
+            !same_journal(&shared_a, &shared_b),
+            "the same id in another session directory is another journal"
+        );
+        assert!(!same_journal(&shared_a, &a.join("other.jsonl")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

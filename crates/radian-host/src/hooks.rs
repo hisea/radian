@@ -542,8 +542,10 @@ fn install_turn_claimed_callback(
     inbox.set_turn_claimed_callback(Some(Arc::new(
         move |entry: &InboxEntry, queued: &[InputSource]| {
             // The source reset comes first, before any turn work can read the source. The
-            // opener sets the turn's starting point; every queued waking entry the turn
-            // will admit can only lower it.
+            // opener sets the turn's starting point; every queued waking entry the turn will
+            // admit can only lower it. A plain `inject` is not waking, so it is not in
+            // `queued`: the turn lowers for it when the safe point admits it (the drain
+            // callback below), before the next model request.
             let hooks = source_hooks
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
