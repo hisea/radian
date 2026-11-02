@@ -241,6 +241,16 @@ impl FakePort {
         }
     }
 
+    /// Drops every subscription's sender, so the fake closes the connection and the hub must
+    /// reconnect. The next `wait_for_subscription` waits for that new connection.
+    fn disconnect(&self) {
+        self.inner
+            .lines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     fn subscriptions(&self) -> usize {
         self.inner.subscriptions.load(Ordering::SeqCst)
     }
@@ -1583,4 +1593,303 @@ fn bind_silent_socket(run_dir: &Path, pid: u32) -> SilentSocket {
         }
     });
     SilentSocket { path, accepted }
+}
+
+// ---- `[hub.hooks] after_pending` (ADR 0048 §16; backlog decision 5) ------------------------
+
+/// Writes `[hub.hooks] after_pending` into the hub's user configuration under `home`
+/// (`$RADIAN_HOME/config/config.toml`).
+fn write_hub_hooks(home: &Path, commands: &[String]) {
+    let dir = home.join("config");
+    fs::create_dir_all(&dir).expect("the config directory is creatable");
+    let mut text = String::from("schema_version = 1\n[hub.hooks]\nafter_pending = [");
+    for (index, command) in commands.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        // Rust's debug form of a string is a TOML basic string for the characters these
+        // tests use (quotes and backslashes escaped; no raw newline).
+        text.push_str(&format!("{command:?}"));
+    }
+    text.push_str("]\n");
+    fs::write(dir.join("config.toml"), text).expect("the hub configuration writes");
+}
+
+/// One live session on its own fake control port, in this hub's run directory.
+fn live_session(home: &Path, repo: &Repo, id: &str) -> (LivePid, FakePort) {
+    let pid = LivePid::new();
+    let fake = FakePort::bind(
+        &home.join("run"),
+        pid.pid(),
+        FakeInner {
+            id: id.to_owned(),
+            workspace: repo.canonical_clone().to_string_lossy().into_owned(),
+            state: "working".to_owned(),
+            pending: 0,
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            lines: Mutex::new(Vec::new()),
+            subscriptions: AtomicUsize::new(0),
+            drop_next: AtomicBool::new(false),
+        },
+    );
+    (pid, fake)
+}
+
+/// One `pending` event as the control port pushes it to an owner subscriber.
+fn pending(head: Value, length: u64) -> Value {
+    json!({ "source": "control", "name": "pending", "data": { "head": head, "length": length } })
+}
+
+/// The hub's hook log.
+fn hub_log(home: &Path) -> String {
+    fs::read_to_string(home.join("hub/hub.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_new_approval_head_runs_the_hook_once_with_only_the_four_variables() {
+    let repo = Repo::new("hub-hooks-approval");
+    arc_store(&repo);
+    let short = ShortHome::new("hook-approval");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let runs = repo.clone.join("hook-runs.txt");
+    let env_file = repo.clone.join("hook-env.txt");
+    write_hub_hooks(
+        &home,
+        &[format!(
+            "printf 'run\\n' >> '{}'; env > '{}'",
+            runs.display(),
+            env_file.display()
+        )],
+    );
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_pid, fake) = live_session(&home, &repo, "session-approval");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    fake.push(pending(
+        json!({
+            "request_id": 1,
+            "kind": "approval",
+            "tool": "shell",
+            "arguments": { "command": "printf secret-argument" },
+            "resource": "/secret-path/file",
+            "resolved_resource": "/secret-path/file",
+            "reason": "secret-reason",
+        }),
+        1,
+    ));
+    eventually(Duration::from_secs(30), || {
+        fs::read_to_string(&runs)
+            .ok()
+            .filter(|text| !text.is_empty())
+    });
+    // The same head is not sent again, but give a wrong double fire time to show up.
+    std::thread::sleep(Duration::from_millis(500));
+    let count = fs::read_to_string(&runs)
+        .expect("the hook wrote its run record")
+        .lines()
+        .count();
+    assert_eq!(count, 1, "the hook ran once for one new head");
+
+    let text = fs::read_to_string(&env_file).expect("the hook wrote its environment");
+    for line in [
+        "RADIAN_HUB_REPO=repo",
+        "RADIAN_HUB_SESSION=session-approval",
+        "RADIAN_HUB_PENDING_KIND=approval",
+        "RADIAN_HUB_TOOL=shell",
+    ] {
+        assert!(
+            text.lines().any(|candidate| candidate == line),
+            "the environment lacks {line}: {text}"
+        );
+    }
+    assert_eq!(
+        text.lines()
+            .filter(|line| line.starts_with("RADIAN_HUB_"))
+            .count(),
+        radian_arc::hub::hooks::HOOK_ENV.len(),
+        "the child sees exactly the four hook variables: {text}"
+    );
+    for secret in ["secret-argument", "secret-path", "secret-reason"] {
+        assert!(
+            !text.contains(secret),
+            "the environment carries {secret} from the request: {text}"
+        );
+    }
+}
+
+/// Edge 2: the same head seen again after a subscription reconnect does not run twice.
+#[test]
+fn a_repeated_head_after_a_reconnect_runs_the_hook_once() {
+    let repo = Repo::new("hub-hooks-reconnect");
+    arc_store(&repo);
+    let short = ShortHome::new("hook-reconnect");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let runs = repo.clone.join("hook-runs.txt");
+    write_hub_hooks(&home, &[format!("printf 'run\\n' >> '{}'", runs.display())]);
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_pid, fake) = live_session(&home, &repo, "session-reconnect");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let head = pending(
+        json!({ "request_id": 2, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.push(head.clone());
+    eventually(Duration::from_secs(30), || {
+        fs::read_to_string(&runs)
+            .ok()
+            .filter(|text| !text.is_empty())
+    });
+
+    // The connection drops and the hub subscribes again; the port repeats the same head.
+    let before = fake.subscriptions();
+    fake.disconnect();
+    eventually(Duration::from_secs(30), || {
+        (fake.subscriptions() > before).then_some(())
+    });
+    // The acknowledgement is written before the handler registers its sender.
+    std::thread::sleep(Duration::from_millis(100));
+    fake.push(head);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let count = fs::read_to_string(&runs)
+        .expect("the hook wrote its run record")
+        .lines()
+        .count();
+    assert_eq!(count, 1, "the same request id is not a new head");
+}
+
+/// Edge 3: a question's head sets kind `question` and an empty tool.
+#[test]
+fn a_question_head_runs_the_hook_with_kind_question_and_an_empty_tool() {
+    let repo = Repo::new("hub-hooks-question");
+    arc_store(&repo);
+    let short = ShortHome::new("hook-question");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let env_file = repo.clone.join("hook-env.txt");
+    write_hub_hooks(&home, &[format!("env > '{}'", env_file.display())]);
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_pid, fake) = live_session(&home, &repo, "session-question");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    fake.push(pending(
+        json!({
+            "request_id": 7,
+            "kind": "question",
+            "question": { "questions": [{ "question": "secret-question-text" }] },
+        }),
+        1,
+    ));
+    let text = eventually(Duration::from_secs(30), || {
+        fs::read_to_string(&env_file)
+            .ok()
+            .filter(|text| text.contains("RADIAN_HUB_PENDING_KIND"))
+    });
+    assert!(
+        text.lines()
+            .any(|line| line == "RADIAN_HUB_PENDING_KIND=question"),
+        "{text}"
+    );
+    assert!(
+        text.lines().any(|line| line == "RADIAN_HUB_TOOL="),
+        "a question carries an empty tool: {text}"
+    );
+    assert!(
+        !text.contains("secret-question-text"),
+        "the environment carries the question text: {text}"
+    );
+}
+
+/// Edge 4: a hook past its timeout is killed and logged; another session's hook still runs.
+#[test]
+fn a_slow_hook_is_killed_at_the_timeout_and_another_sessions_hook_still_runs() {
+    let repo = Repo::new("hub-hooks-timeout");
+    // The timeout is the repository's arc `[gate] command_timeout_secs`, the rule arc's hooks
+    // follow. Five seconds leaves the other session room to finish first.
+    arc_store_with_timeout(&repo, 5);
+    let short = ShortHome::new("hook-timeout");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let slept = repo.clone.join("slept.txt");
+    let woke = repo.clone.join("woke.txt");
+    write_hub_hooks(
+        &home,
+        &[format!(
+            "if [ \"$RADIAN_HUB_SESSION\" = \"session-sleepy\" ]; then sleep 30; printf slept > '{}'; else printf woke > '{}'; fi",
+            slept.display(),
+            woke.display()
+        )],
+    );
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_sleepy_pid, sleepy) = live_session(&home, &repo, "session-sleepy");
+    let (_brisk_pid, brisk) = live_session(&home, &repo, "session-brisk");
+    sleepy.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    brisk.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let head = || {
+        pending(
+            json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+            1,
+        )
+    };
+    sleepy.push(head());
+    brisk.push(head());
+
+    // The slow session's command is on its own thread: the other one completes while it runs.
+    eventually(Duration::from_secs(3), || woke.exists().then_some(()));
+    eventually(Duration::from_secs(15), || {
+        hub_log(&home).contains("timed out after 5 s").then_some(())
+    });
+    assert!(
+        !slept.exists(),
+        "the timed-out command was killed before its second step"
+    );
+    let log = hub_log(&home);
+    assert!(
+        log.contains("session-sleepy"),
+        "the timeout is logged with the session: {log}"
+    );
+}
+
+/// Edge 5: an emptied queue runs nothing.
+#[test]
+fn an_emptied_queue_runs_no_hook() {
+    let repo = Repo::new("hub-hooks-empty");
+    arc_store(&repo);
+    let short = ShortHome::new("hook-empty");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let runs = repo.clone.join("hook-runs.txt");
+    write_hub_hooks(&home, &[format!("printf 'run\\n' >> '{}'", runs.display())]);
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_pid, fake) = live_session(&home, &repo, "session-empty");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    fake.push(pending(
+        json!({ "request_id": 3, "kind": "approval", "tool": "shell" }),
+        1,
+    ));
+    eventually(Duration::from_secs(30), || {
+        fs::read_to_string(&runs)
+            .ok()
+            .filter(|text| !text.is_empty())
+    });
+    fake.push(pending(Value::Null, 0));
+    std::thread::sleep(Duration::from_millis(500));
+    let count = fs::read_to_string(&runs)
+        .expect("the hook wrote its run record")
+        .lines()
+        .count();
+    assert_eq!(count, 1, "an emptied queue is not a new head");
+}
+
+/// An initialized arc store with a chosen `[gate] command_timeout_secs`.
+fn arc_store_with_timeout(repo: &Repo, secs: u64) -> Store {
+    let root = repo.arc();
+    fs::create_dir_all(&root).expect("the arc directory is creatable");
+    let text = config::default_text("main").replace(
+        "command_timeout_secs = 3600",
+        &format!("command_timeout_secs = {secs}"),
+    );
+    fs::write(root.join("config.toml"), text).expect("the config writes");
+    Store::at(repo.clone.clone())
 }

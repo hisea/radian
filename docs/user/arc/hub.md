@@ -320,8 +320,8 @@ Each event has one of these names, with this `data` object:
 
 ## Notifications
 
-A lock-screen notification is a [`[hooks]`](hooks.md#hooks) command, not something the hub sends.
-The hook runs in the scheduling loop, so the notification is sent whether or not a client is connected.
+A lock-screen notification for a task is a [`[hooks]`](hooks.md#hooks) command, not something the hub sends.
+These arc points run in the scheduling loop, so the notification is sent whether or not a client is connected.
 These two `after_awaiting_human` lines send only the repository name (the directory name), the task id and the phase: no title, no brief and no diff.
 
 ntfy:
@@ -344,6 +344,39 @@ after_awaiting_human = [
 
 `after_proposed`, `after_rework` and `after_fail` are the other points a notification usually watches.
 The client opens the task over the hub for the title, the brief and the diff.
+
+### The after_pending hook
+
+`[hub.hooks] after_pending` in the user configuration (`~/.radian/config/config.toml`) is an array of shell command lines, default `[]`, in the same shape as arc's [`[hooks]`](hooks.md#hooks) points: each entry is one `sh -c` line.
+The hub runs the list once each time a live session's approval and question queue gets a **new head**, that is, a head whose `request_id` the hub has not seen for that session. It does not run on a repeat of the same head (a subscription reconnect re-sends it), and it does not run when the queue empties. There is no hub process, there is no notification.
+
+The commands run in the hub's process, from the same long-lived `subscribe` connection that feeds [the session event stream](#the-session-event-stream). Each fire runs on a thread of its own, so a slow or failing command never delays the subscription, another session's hook or an HTTP request. A command that fails or times out does not stop the next one.
+The hook list is read when the hub starts; a change takes effect at the hub's next start.
+
+| Variable | Value |
+|---|---|
+| `RADIAN_HUB_REPO` | The repository's registry name. |
+| `RADIAN_HUB_SESSION` | The session id. |
+| `RADIAN_HUB_PENDING_KIND` | `approval` or `question`. |
+| `RADIAN_HUB_TOOL` | The approval's tool name; empty for a question. |
+
+Those four values are the whole of what the request contributes, the privacy rule that governs notification reports: no command text, path, tool arguments or question text reaches the command. The client opens the session over the hub for the rest.
+A live session in a workspace that is not registered runs nothing, because it has no repository name.
+
+Each command runs in the repository root with that repository's arc [`gate.command_timeout_secs`](config.md#configtoml) as its limit (default `3600` seconds; `0` means no limit), the same rule arc's own hooks follow. A command past its limit is killed with its process group.
+A repository whose `.radian/arc/config.toml` cannot be read runs none of the commands; one line naming the reason goes to `hub.log`.
+Its stdout, stderr, and one line per failure or timeout are appended to `$RADIAN_HOME/hub/hub.log` (default `~/.radian/hub/hub.log`), the directory the sandbox cannot read.
+
+One ntfy push, using only those variables:
+
+```toml
+[hub.hooks]
+after_pending = [
+  "curl -s -d \"$RADIAN_HUB_REPO $RADIAN_HUB_SESSION $RADIAN_HUB_PENDING_KIND $RADIAN_HUB_TOOL\" https://ntfy.sh/<your-topic>",
+]
+```
+
+This is a different point from arc's [`after_awaiting_human`](hooks.md#hooks): that one runs in the scheduling loop for a task, and this one runs in the hub for a radian session. Neither depends on the other.
 
 ## The loop
 
@@ -397,6 +430,7 @@ A change takes effect at the hub's next start.
 | `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. The API binds `127.0.0.1` only. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
+| `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's queue gets a new head; see [the after_pending hook](#the-after_pending-hook). |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.

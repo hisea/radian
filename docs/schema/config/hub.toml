@@ -7,3 +7,7 @@ port = 7341
 concurrency = 4
 # Seconds between two scheduling passes.
 interval_secs = 30
+
+[hub.hooks]
+# Commands run once when a live session's pending queue gets a new head.
+after_pending = ["true"]

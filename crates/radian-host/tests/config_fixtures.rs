@@ -240,6 +240,7 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
     assert_eq!(config.hub.port, 7341);
     assert_eq!(config.hub.concurrency, 4);
     assert_eq!(config.hub.interval_secs, 30);
+    assert_eq!(config.hub.hooks.after_pending, vec!["true".to_owned()]);
     assert!(
         !config.skipped.iter().any(|key| key.starts_with("hub")),
         "{:?}",
@@ -254,6 +255,7 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
             port: config::DEFAULT_HUB_PORT,
             concurrency: config::DEFAULT_HUB_CONCURRENCY,
             interval_secs: config::DEFAULT_HUB_INTERVAL_SECS,
+            hooks: config::HubHooks::default(),
         }
     );
 
@@ -291,6 +293,36 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
         .expect("an unknown hub key is skipped, never refused");
     assert!(
         parsed.skipped.contains(&"hub.other".to_string()),
+        "{:?}",
+        parsed.skipped
+    );
+
+    // `[hub.hooks] after_pending` is an array of command lines; a wrong shape names the key,
+    // and an unknown key under the table is skipped like the rest of `[hub]`.
+    let parsed = config::parse(
+        &path,
+        "schema_version = 1\n[hub.hooks]\nafter_pending = [\"curl -s https://ntfy.sh/x\"]\n",
+    )
+    .expect("the hook list parses");
+    assert_eq!(
+        parsed.hub.hooks.after_pending,
+        vec!["curl -s https://ntfy.sh/x".to_owned()]
+    );
+    let error = config::parse(
+        &path,
+        "schema_version = 1\n[hub.hooks]\nafter_pending = \"curl\"\n",
+    )
+    .expect_err("a bare string is not a command list");
+    let message = error.to_string();
+    assert!(message.contains("hub.hooks.after_pending"), "{message}");
+    assert!(message.contains("array of strings"), "{message}");
+    let parsed = config::parse(
+        &path,
+        "schema_version = 1\n[hub.hooks]\nafter_pending = [\"true\"]\nother = 1\n",
+    )
+    .expect("an unknown hook key is skipped");
+    assert!(
+        parsed.skipped.contains(&"hub.hooks.other".to_string()),
         "{:?}",
         parsed.skipped
     );

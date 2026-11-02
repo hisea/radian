@@ -275,7 +275,10 @@ directory as its `workspace` (`radian_host::sessions::same_directory`, the one r
 `--export` and `--resume` use). Each live session gets one long-lived `subscribe` connection,
 carrying the hub token, on a thread of its own; it folds the journal with
 `radian_host::transcript::AttachFold` and fans the frames — `entry`, `pending`, `config`,
-`state` — out to the session's event streams. A socket that goes away, that does not answer, or
+`state` — out to the session's event streams. The same connection is the `[hub.hooks]
+after_pending` point: a `pending` event with a `request_id` the connection has not seen starts
+the configured commands through `hub::hooks` on a thread of their own, so the hook never delays
+the stream. A socket that goes away, that does not answer, or
 whose pid is gone is forgotten on the next scan. Ended sessions come from
 `radian_host::sessions::{open_index, list}`, the lookup `radian exec --list` makes, and a
 task's conversation is its attempt's `result.jsonl` folded with

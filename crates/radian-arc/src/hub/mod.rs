@@ -30,6 +30,7 @@
 //! sockets, the control port each one hosts, and the transcript, event stream, model list and
 //! worker conversation the session routes answer from.
 
+pub mod hooks;
 pub mod http;
 pub mod lock;
 pub mod r#loop;

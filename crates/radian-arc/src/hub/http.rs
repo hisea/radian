@@ -85,7 +85,7 @@ pub fn bind_address(port: u16) -> SocketAddr {
 /// (registry re-reads, status lines and joins) while the HTTP API serves on a thread of its own
 /// and every repository's pass runs on its own thread (ADR 0048 decision 16). `config` is the
 /// top-level `--config` file the loop reads its `[hub] interval_secs` and `[hub] concurrency`
-/// from.
+/// from, and the session scanner its `[hub.hooks]` commands.
 ///
 /// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
 /// a test or a person stops the hub as soon as it announces itself, and the default action
@@ -120,12 +120,16 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
     let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
     let http_registry = registry.clone();
+    // `[hub.hooks]` is read once at start; the hook list a running hub uses does not change
+    // until it is restarted (the same rule as the other `[hub]` keys).
+    let hooks = hub_hooks(config)?;
     // The live-session scanner: its own thread, its own blocking socket work, so no request and
     // no scheduling pass waits on a session's control port.
-    let http_sessions = SessionHub::new(
+    let http_sessions = SessionHub::with_hooks(
         dir.parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| dir.clone()),
+        hooks,
     );
     http_sessions.start();
     // The accept loop has a thread and a runtime of its own; no request waits on a pass.
@@ -136,6 +140,16 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
         let _ = radian_host::write_stdout(text);
     });
     super::r#loop::run(&registry, emit, lock, config)
+}
+
+/// The `[hub.hooks]` commands the hub runs. The same configuration file the scheduling loop
+/// reads; the hooks are taken from it here because the session scanner is started before the
+/// loop. A configuration error keeps the hub from starting, the rule every `[hub]` key follows.
+fn hub_hooks(explicit: Option<&Path>) -> Result<radian_host::config::HubHooks, Error> {
+    let path = radian_host::config::resolved_path(explicit);
+    radian_host::config::load_path(path.as_deref())
+        .map(|config| config.hub.hooks)
+        .map_err(|error| Error::Failed(format!("cannot read the configuration: {error}")))
 }
 
 /// Binds `address` with `SO_REUSEADDR`, so a rebuilt binary that `exec`s the hub binds the

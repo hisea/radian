@@ -263,6 +263,7 @@ attachments, and the line limit. This key only turns the port on or off.
 | `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
+| `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's pending queue gets a new head. See [the hub page](arc/hub.md#the-after_pending-hook) for the variables, the timeout and the log. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
@@ -276,6 +277,9 @@ See `arc/hub` for the registry, the routes, the loop and the subcommands.
 port = 7341
 concurrency = 4
 interval_secs = 30
+
+[hub.hooks]
+after_pending = []
 ```
 
 ## `[context]`

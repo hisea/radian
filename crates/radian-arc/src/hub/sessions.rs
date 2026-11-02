@@ -37,10 +37,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use hyper::body::Bytes;
+use radian_host::config::HubHooks;
 use radian_host::transcript::{AcpFold, AttachFold};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+use crate::hub::hooks::{self, PendingHead};
 use crate::process;
 use crate::store::Store;
 
@@ -124,6 +126,8 @@ impl SessionError {
 pub struct SessionHub {
     /// `$RADIAN_HOME`: the `run/` directory is scanned and `hub/token` is read from here.
     home: PathBuf,
+    /// `[hub.hooks]` (ADR 0048 §16), read once when the hub starts.
+    hooks: HubHooks,
     inner: Mutex<Inner>,
 }
 
@@ -136,11 +140,18 @@ struct Inner {
 }
 
 impl SessionHub {
-    /// A hub that has not scanned anything yet.
+    /// A hub that has not scanned anything yet, with no `[hub.hooks]` commands.
     #[must_use]
     pub fn new(home: PathBuf) -> Arc<Self> {
+        Self::with_hooks(home, HubHooks::default())
+    }
+
+    /// A hub that runs `hooks` for every new pending head of a live session.
+    #[must_use]
+    pub fn with_hooks(home: PathBuf, hooks: HubHooks) -> Arc<Self> {
         Arc::new(Self {
             home,
+            hooks,
             inner: Mutex::new(Inner::default()),
         })
     }
@@ -188,6 +199,28 @@ impl SessionHub {
             .iter()
             .find(|(_, live)| live.id == id)
             .map(|(socket, live)| (socket.clone(), live.clone()))
+    }
+
+    /// The registered repository whose path is the session's workspace, with its registry name.
+    /// A workspace that is not registered has none, and no hook runs for it.
+    fn repo_for(&self, workspace: &str) -> Option<(String, PathBuf)> {
+        let registry = crate::hub::Registry::at(radian_host::hub_dir_for(&self.home));
+        let repos = registry.repos().ok()?;
+        repos
+            .into_iter()
+            .find(|entry| {
+                radian_host::sessions::same_directory(workspace, &entry.path.to_string_lossy())
+            })
+            .map(|entry| (entry.name, entry.path))
+    }
+
+    /// Runs the `[hub.hooks] after_pending` commands for a new head, off this thread. A session
+    /// whose workspace is not registered has no repository name and runs nothing.
+    fn fire(&self, workspace: &str, session: &str, head: &PendingHead) {
+        let Some((repo, root)) = self.repo_for(workspace) else {
+            return;
+        };
+        hooks::fire(&self.home, &self.hooks, &root, &repo, session, head);
     }
 
     /// The event fan-out of the live session `id`, or `None` when no process hosts it.
@@ -640,6 +673,8 @@ fn subscribe(hub: Arc<SessionHub>, socket: PathBuf, live: LiveSession) -> Subscr
 struct Stream {
     hub: Arc<SessionHub>,
     id: String,
+    /// The workspace the port reported, matched against the registry when a head fires.
+    workspace: String,
     journal: PathBuf,
     /// The memory root a settled call's card resolves against; `None` in a process with none.
     memory_root: Option<PathBuf>,
@@ -647,6 +682,9 @@ struct Stream {
     /// The fold's state at the last frame sent, so a no-op read sends nothing.
     sent_state: Option<&'static str>,
     pending: u64,
+    /// The head's `request_id` the `after_pending` hook last ran for. A reconnect re-sends the
+    /// same head, and the hook must not run twice for it.
+    last_pending_head: Option<u64>,
 }
 
 impl Stream {
@@ -654,11 +692,13 @@ impl Stream {
         let mut stream = Self {
             hub,
             id: live.id.clone(),
+            workspace: live.workspace.clone(),
             journal,
             memory_root: radian_host::memory_dir(),
             fold: None,
             sent_state: None,
             pending: live.pending,
+            last_pending_head: None,
         };
         // The fold opens with the subscription, so the baseline it drops is the transcript as
         // the session stood when the hub began following it.
@@ -697,6 +737,9 @@ impl Stream {
                     .get("length")
                     .and_then(Value::as_u64)
                     .unwrap_or(self.pending);
+                if let Some(head) = self.new_pending_head(&data) {
+                    self.hub.fire(&self.workspace, &self.id, &head);
+                }
                 frames.push(frame("pending", &data));
             }
             // The port fans a `RuntimeEvent` out under `event.name()`, the v1 disk name
@@ -707,6 +750,33 @@ impl Stream {
         frames.extend(self.poll_fold());
         frames.extend(self.state_frame());
         frames
+    }
+
+    /// The head this pending event carries, when it is one the `after_pending` hook has not run
+    /// for. A `null` head (an emptied queue) is never one, and the same `request_id` seen again —
+    /// after a reconnect, or because the queue behind the head changed — is not a new head.
+    fn new_pending_head(&mut self, data: &Value) -> Option<PendingHead> {
+        let head = data.get("head")?;
+        if head.is_null() {
+            return None;
+        }
+        let request_id = head.get("request_id").and_then(Value::as_u64)?;
+        if self.last_pending_head == Some(request_id) {
+            return None;
+        }
+        self.last_pending_head = Some(request_id);
+        Some(PendingHead {
+            kind: head
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            tool: head
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
     }
 
     /// The journal's entries that are new or changed since the last read, one frame each. The
@@ -964,6 +1034,148 @@ mod tests {
         let hub = SessionHub::new(dir.clone());
         assert!(hub.sockets().is_empty(), "{:?}", hub.sockets());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mutation: fire on every pending event instead of a new head (drop the `request_id`
+    /// comparison). The second call with the same head then returns a head again.
+    #[test]
+    fn a_repeated_pending_head_is_not_new() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-head");
+        let hub = SessionHub::new(dir.path().to_path_buf());
+        let mut stream = Stream::new(
+            Arc::clone(&hub),
+            &live_row("s", 0),
+            dir.path().join("s.jsonl"),
+        );
+        let approval = json!({
+            "head": {"request_id": 5, "kind": "approval", "tool": "shell"},
+            "length": 1,
+        });
+        let head = stream
+            .new_pending_head(&approval)
+            .expect("a first head is new");
+        assert_eq!(head.kind, "approval");
+        assert_eq!(head.tool, "shell");
+        assert!(
+            stream.new_pending_head(&approval).is_none(),
+            "the same request id is not a new head"
+        );
+        assert!(
+            stream
+                .new_pending_head(&json!({"head": null, "length": 0}))
+                .is_none(),
+            "an emptied queue is no head"
+        );
+        let question = json!({
+            "head": {"request_id": 6, "kind": "question", "question": {"questions": []}},
+            "length": 1,
+        });
+        let head = stream
+            .new_pending_head(&question)
+            .expect("a later request id is new");
+        assert_eq!(head.kind, "question");
+        assert_eq!(head.tool, "", "a question carries no tool");
+    }
+
+    /// Edge 1/2/3/5 through the subscription: a new head runs the hook with the four values,
+    /// the same head seen again does not, a question sets an empty tool, and an emptied queue
+    /// runs nothing. The socket tests of `tests/hub_sessions.rs` need a `/tmp` path; this one
+    /// uses the workspace temp tree and runs inside the sandbox.
+    #[test]
+    fn a_new_pending_head_runs_the_configured_hook_once() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-hook");
+        let home = dir.path().to_path_buf();
+        let repo = home.join("repo");
+        std::fs::create_dir_all(repo.join(".radian/arc")).unwrap();
+        let config = crate::store::config::default_text("main")
+            .replace("command_timeout_secs = 3600", "command_timeout_secs = 5");
+        std::fs::write(repo.join(".radian/arc/config.toml"), config).unwrap();
+        let registry = crate::hub::Registry::at(radian_host::hub_dir_for(&home));
+        registry
+            .add(&repo, Some("repo"))
+            .expect("the repository registers");
+        let runs = repo.join("runs.txt");
+        let command = format!(
+            "printf '%s|%s|%s|%s\\n' \"$RADIAN_HUB_REPO\" \"$RADIAN_HUB_SESSION\" \
+             \"$RADIAN_HUB_PENDING_KIND\" \"$RADIAN_HUB_TOOL\" >> '{}'",
+            runs.display()
+        );
+        let hub = SessionHub::with_hooks(
+            home.clone(),
+            HubHooks {
+                after_pending: vec![command],
+            },
+        );
+        let live = LiveSession {
+            id: "s".to_owned(),
+            workspace: std::fs::canonicalize(&repo)
+                .expect("the repository canonicalizes")
+                .to_string_lossy()
+                .into_owned(),
+            state: "working".to_owned(),
+            pending: 0,
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+        };
+        let mut stream = Stream::new(Arc::clone(&hub), &live, home.join("s.jsonl"));
+        let line = |head: Value, length: u64| {
+            json!({
+                "event": { "source": "control", "name": "pending",
+                           "data": { "head": head, "length": length } },
+            })
+            .to_string()
+        };
+        let wait = |count: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let lines: Vec<String> = std::fs::read_to_string(&runs)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect();
+                if lines.len() >= count {
+                    return lines;
+                }
+                assert!(std::time::Instant::now() < deadline, "the hook never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        // Edge 1: a new approval head, once.
+        stream.on_line(&line(
+            json!({ "request_id": 1, "kind": "approval", "tool": "shell",
+                    "arguments": { "command": "secret" } }),
+            1,
+        ));
+        let lines = wait(1);
+        assert_eq!(lines[0], "repo|s|approval|shell");
+        // Edge 2: the same head again is not a new one.
+        stream.on_line(&line(
+            json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+            1,
+        ));
+        // Edge 5: the queue empties; nothing runs.
+        stream.on_line(&line(Value::Null, 0));
+        // Edge 3: a question is a new head with an empty tool.
+        stream.on_line(&line(
+            json!({ "request_id": 2, "kind": "question",
+                    "question": { "questions": [{ "question": "secret" }] } }),
+            1,
+        ));
+        wait(2);
+        std::thread::sleep(Duration::from_millis(300));
+        let lines: Vec<String> = std::fs::read_to_string(&runs)
+            .expect("the hook wrote its runs")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "repo|s|approval|shell".to_owned(),
+                "repo|s|question|".to_owned()
+            ]
+        );
     }
 
     #[test]

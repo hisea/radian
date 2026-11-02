@@ -2241,3 +2241,20 @@ drives end to end.
 | TK0307-M2 | the subscription follows one connection only (`follow`'s `while` becomes `if`) | `hub::sessions::tests::the_subscription_reconnects_after_the_connection_drops` (the second connection's event never becomes a frame) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0309: the hub's after_pending hook (2026-11-02, branch `work/TK0309-hub-after-pending-hook`)
+
+The hub gained `[hub.hooks] after_pending`: a new head of a live session's pending queue starts the
+configured commands on a thread of its own. The mutation was applied by hand to
+`crates/radian-arc/src/hub/sessions.rs`; the sandbox-safe unit test ran with `cargo nextest run -p
+radian-arc --locked --profile sandbox --lib -E 'test(=hub::sessions::tests::
+a_repeated_pending_head_is_not_new)'`, and the file was restored from a copy under `.radian/mut/`,
+which `cmp` found identical. The edge-2 integration test (`a_repeated_head_after_a_reconnect_runs_
+the_hook_once`) needs a `/tmp` control socket, so the `sandbox` profile skips it and the gate runs
+it; it drives the same comparison through a real reconnect.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0309-M1 | `new_pending_head` drops the `last_pending_head` comparison, so every pending event with a non-null head fires the hook | `hub::sessions::tests::a_repeated_pending_head_is_not_new` (the second call with the same request id returned a head); `a_repeated_head_after_a_reconnect_runs_the_hook_once` fails the same way under the gate's default profile | ✅ 1 failed |
+
+1/1 caught.
