@@ -501,7 +501,7 @@ An unknown repository or id is `404` with the CLI's own message as `{"error": "<
 | `/v1/repos/<name>/sessions/<id>/transcript` | `GET` | `{"session": "<id>", "entries": [...]}`, the journal folded into the shared transcript entry (ADR 0023 U1), the same entries `radian attach` shows. |
 | `/v1/repos/<name>/sessions/<id>/events` | `GET` | The session's event stream: `text/event-stream`, no replay; see below. |
 | `/v1/repos/<name>/sessions/<id>/models` | `GET` | `{"models": [...]}`, the control port's `models` answer (ADR 0026 D5). |
-| `/v1/repos/<name>/items/<task>/conversation` | `GET` | `{"task": "<id>", "attempt": <n> or null, "entries": [...]}`, the attempt's `result.jsonl` folded with the ACP fold; `?attempt=<n>` picks one attempt. |
+| `/v1/repos/<name>/items/<task>/conversation` | `GET` | `{"task": "<id>", "attempt": <n> or null, "entries": [...]}`, the attempt's `result.jsonl` folded with the ACP fold; `?attempt=<n>` picks one attempt, and a value that is not a number is `400`. |
 
 `live` is `tui` for a session a `radian` or `radian exec` process is hosting, `hub` for one a hub-started process hosts, and `none` for an ended session. `state` is ADR 0034 H2's classification (`idle`, `working` or `blocked`); `pending` is the approval and question queue's length; `model` is the route in force as `{"provider", "model"}`, and `null` for an ended session, whose route no process reports. An ended session reads `idle`, `0` and `null` for those three fields. A session no process hosts answers `409` on its `events` and `models` routes, and a port that fails mid-request answers `502`; an unknown repository, session or task is `404`.
 
