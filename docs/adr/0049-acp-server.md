@@ -195,13 +195,15 @@ advertises no client capability dependence.
 the same recovery, the same model route and access the journal records. Its `cwd` obeys the
 `session/new` rule (an absolute directory equal to `--workspace`, or the workspace when the
 flag is absent), and its `mcpServers` are merged exactly as `session/new`'s are (decision 9).
-The named session must belong to that workspace: its `SessionCreated.workspace` must equal the
-process workspace, the rule `--export` and `--resume` apply (ADR 0006 §4). Both values are
-canonical paths (the host resolves both with `resolve_workspace`), so a workspace reached
-through a symlink matches the directory it names. A session created in another workspace is
-refused with an invalid-parameters error that names it, before the session is opened, so the
-refusal writes nothing and the process can still load a session of its own workspace or start
-one with `session/new`. `session/load` and `--resume` therefore agree: a `radian` or
+The named session must belong to that workspace: its `SessionCreated.workspace` must name the
+same directory as the process workspace, the rule `--export` and `--resume` apply (ADR 0006 §4).
+The two values are compared as directories, canonicalizing each side when it exists (the host
+canonicalizes the process workspace with `resolve_workspace`), so a workspace reached through a
+symlink matches the directory it names and a session recorded under an older spelling still
+loads. A recorded value whose directory no longer exists is compared as written. A session
+created in another workspace is refused with an invalid-parameters error that names it, before
+the session is opened, so the refusal writes nothing and the process can still load a session of
+its own workspace or start one with `session/new`. `session/load` and `--resume` therefore agree: a `radian` or
 `radian exec --resume` of that session is refused too, and `session/new` with `--resume` fails
 the same way. An unknown id is an error from the opener that names the id, and a file whose
 `SessionCreated` cannot be read is that opener's error too, never this refusal.
