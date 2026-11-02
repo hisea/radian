@@ -1076,6 +1076,15 @@ impl SwitchableModel {
         ModelRoute::from_value(&self.slot.value()).unwrap_or_else(|| self.initial_route.clone())
     }
 
+    /// The config's `[providers.<name>]` declarations this session resolved with (ADR 0026
+    /// D10). The control port's `models` and `config` read the same set the TUI's `/model`
+    /// does, including a `--config` path the process environment does not carry.
+    pub fn config_providers(
+        &self,
+    ) -> &std::collections::BTreeMap<String, crate::provider::ProviderDecl> {
+        &self.ctx.providers
+    }
+
     /// The thinking level in force: the slot's `thinking` change (D11), else the startup one.
     pub fn current_thinking(&self) -> String {
         self.slot

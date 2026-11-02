@@ -173,6 +173,14 @@ impl ControlTarget {
             })
     }
 
+    /// The config's `[providers.<name>]` declarations this session resolved with. Empty once
+    /// the session has closed.
+    fn config_providers(&self) -> std::collections::BTreeMap<String, crate::ProviderDecl> {
+        self.model()
+            .map(|model| model.config_providers().clone())
+            .unwrap_or_default()
+    }
+
     /// A queue-version receiver and the queue itself for the `pending` subscription. `None`
     /// once the session has closed.
     fn pending_watch(&self) -> Option<(Weak<SessionQueue>, tokio::sync::watch::Receiver<u64>)> {
@@ -742,9 +750,7 @@ impl ControlServer {
     /// `/model` reads.
     fn models(&self, id: Value, target: &ControlTarget) -> Value {
         let current = target.current_route();
-        let config_providers = crate::config::load(None)
-            .map(|config| config.providers)
-            .unwrap_or_default();
+        let config_providers = target.config_providers();
         let choices = crate::model_choices(Some(&current.provider), &config_providers);
         let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
         for choice in choices {
@@ -771,9 +777,7 @@ impl ControlServer {
         if provider == current.provider && model == current.model {
             return true;
         }
-        let config_providers = crate::config::load(None)
-            .map(|config| config.providers)
-            .unwrap_or_default();
+        let config_providers = target.config_providers();
         crate::model_choices(Some(&current.provider), &config_providers)
             .into_iter()
             .any(|choice| choice.provider == provider && choice.model == model)
