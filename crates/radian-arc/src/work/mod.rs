@@ -1934,13 +1934,14 @@ const VERDICT_COPY_IGNORE_FILE: &str = ".gitignore";
 /// a follow-up task can name another task's verdict. When at least one copy is written, the
 /// copies' directory gets its own `.gitignore` holding `*`, so git ignores it in every
 /// repository; a repository that tracks that file gets the rule in each task's copy directory
-/// instead (see [`write_verdict_ignores`]). A brief that names no copy writes nothing at all.
+/// instead, and one that tracks that file too gets it beside each attempt's copy (see
+/// [`write_verdict_ignores`]). A brief that names no copy writes nothing at all.
 fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<String>) {
     let runs = arc.join("runs");
     let prefix = format!("{}/", runs.display());
     let mut text = String::with_capacity(brief.len());
     let mut notes = Vec::new();
-    let mut copied_tasks: Vec<String> = Vec::new();
+    let mut copied: Vec<(String, String)> = Vec::new();
     let mut rest = brief;
     while let Some(start) = rest.find(&prefix) {
         text.push_str(&rest[..start]);
@@ -1952,9 +1953,11 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
             .unwrap_or(tail.len());
         let named = &tail[..end];
         match copy_verdict(named, &runs, worktree) {
-            Ok((relative, task)) => {
-                if !copied_tasks.contains(&task) {
-                    copied_tasks.push(task);
+            Ok((relative, task, attempt)) => {
+                if !copied.iter().any(|(copied_task, copied_attempt)| {
+                    *copied_task == task && *copied_attempt == attempt
+                }) {
+                    copied.push((task, attempt));
                 }
                 text.push_str(&relative.display().to_string());
             }
@@ -1966,8 +1969,8 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
         rest = &tail[end..];
     }
     text.push_str(rest);
-    if !copied_tasks.is_empty()
-        && let Err(reason) = write_verdict_ignores(worktree, &copied_tasks)
+    if !copied.is_empty()
+        && let Err(reason) = write_verdict_ignores(worktree, &copied)
     {
         notes.push(format!("verdict copy ignore file skipped: {reason}"));
     }
@@ -1988,34 +1991,82 @@ fn verdict_task_ignore_path(task: &str) -> PathBuf {
         .join(VERDICT_COPY_IGNORE_FILE)
 }
 
+/// The ignore file inside one attempt's copy directory: neither the copies' own `.gitignore`
+/// nor the task's can be used when the repository tracks them (ADR 0048 decision 7).
+fn verdict_attempt_ignore_path(task: &str, attempt: &str) -> PathBuf {
+    Path::new(VERDICT_COPY_DIR)
+        .join(task)
+        .join(attempt)
+        .join(VERDICT_COPY_IGNORE_FILE)
+}
+
 /// Makes git ignore the copies, written the same no-symlink way as the copies themselves. The
 /// copies' own `.gitignore` holds `*`; when the repository tracks that file, the wrapper
 /// leaves it as it is and writes the rule into each task's copy directory instead: git never
 /// ignores a tracked file, so rewriting it would leave the worktree dirty and fail the
-/// delivery check (ADR 0048 decision 7).
-fn write_verdict_ignores(worktree: &Path, tasks: &[String]) -> Result<(), String> {
-    if !verdict_ignore_is_tracked(worktree) {
-        return write_verdict_copy(worktree, &verdict_ignore_path(), VERDICT_COPY_IGNORE);
+/// delivery check. A repository that tracks a task's ignore file too is treated the same way:
+/// that file is left as it is and the rule goes into each attempt's copy directory (ADR 0048
+/// decision 7).
+fn write_verdict_ignores(worktree: &Path, copies: &[(String, String)]) -> Result<(), String> {
+    let own = verdict_ignore_path();
+    if !verdict_ignore_is_tracked(worktree, &own) {
+        return write_verdict_copy(worktree, &own, VERDICT_COPY_IGNORE);
     }
+    let mut tasks: Vec<&str> = Vec::new();
+    for (task, _) in copies {
+        if !tasks.contains(&task.as_str()) {
+            tasks.push(task);
+        }
+    }
+    let mut written: Vec<&str> = Vec::new();
+    let mut first_error = None;
     for task in tasks {
-        write_verdict_copy(
-            worktree,
-            &verdict_task_ignore_path(task),
-            VERDICT_COPY_IGNORE,
-        )?;
+        let path = verdict_task_ignore_path(task);
+        if verdict_ignore_is_tracked(worktree, &path) {
+            continue;
+        }
+        match write_verdict_copy(worktree, &path, VERDICT_COPY_IGNORE) {
+            Ok(()) => written.push(task),
+            Err(reason) => {
+                first_error.get_or_insert(reason);
+            }
+        }
     }
-    Ok(())
+    for (task, attempt) in copies {
+        if written.contains(&task.as_str()) {
+            continue;
+        }
+        let path = verdict_attempt_ignore_path(task, attempt);
+        if verdict_ignore_is_tracked(worktree, &path) {
+            first_error.get_or_insert_with(|| {
+                format!("the repository tracks the ignore file beside the copy of {task}/{attempt}")
+            });
+            continue;
+        }
+        if let Err(reason) = write_verdict_copy(worktree, &path, VERDICT_COPY_IGNORE) {
+            first_error.get_or_insert(reason);
+        }
+    }
+    match first_error {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
 }
 
-/// Whether the worktree's repository tracks the copies' own `.gitignore`. git never ignores a
-/// tracked file, so writing it would leave the worktree dirty. A worktree whose git cannot be
-/// asked counts as tracking it: the nested ignore file hides the copies either way, and
-/// guessing the other way could dirty a tracked file (ADR 0048 decision 7).
-fn verdict_ignore_is_tracked(worktree: &Path) -> bool {
-    let path = format!("{VERDICT_COPY_DIR}/{VERDICT_COPY_IGNORE_FILE}");
+/// Whether the worktree's repository tracks the ignore file at `path`, which is worktree
+/// relative. git never ignores a tracked file, so writing it would leave the worktree dirty. A
+/// worktree whose git cannot be asked counts as tracking it: a deeper ignore file hides the
+/// copies either way, and guessing the other way could dirty a tracked file (ADR 0048
+/// decision 7).
+fn verdict_ignore_is_tracked(worktree: &Path, path: &Path) -> bool {
+    let shown = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
     match crate::git::run(
         worktree,
-        &["ls-files", "--error-unmatch", "--", path.as_str()],
+        &["ls-files", "--error-unmatch", "--", shown.as_str()],
     ) {
         Ok(out) => out.status.success(),
         Err(_) => true,
@@ -2035,7 +2086,11 @@ fn ends_path(c: char) -> bool {
 /// Copies one named attempt file into the worktree and returns the path the worker reads and
 /// the task whose directory holds it. The reason a copy is refused is the second half of the
 /// note line.
-fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<(PathBuf, String), String> {
+fn copy_verdict(
+    named: &str,
+    runs: &Path,
+    worktree: &Path,
+) -> Result<(PathBuf, String, String), String> {
     let path = Path::new(named);
     let Some((task, attempt)) = verdict_ids(path, runs) else {
         return Err("not a file of an attempt".to_owned());
@@ -2074,7 +2129,7 @@ fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<(PathBuf, S
         ));
     }
     write_verdict_copy(worktree, &relative, &bytes)?;
-    Ok((relative, task))
+    Ok((relative, task, attempt))
 }
 
 /// Opens a named attempt file without following a symbolic link. A worker can plant a link in

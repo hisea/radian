@@ -3058,6 +3058,230 @@ fn a_tracked_verdict_ignore_file_is_left_alone() {
     );
 }
 
+/// A repository that tracks both the copies' own `.gitignore` and one task's copy-directory
+/// `.gitignore` keeps both files: git never ignores a tracked file, so rewriting either would
+/// leave the worktree dirty and fail the delivery check. The rule goes into the attempt's copy
+/// directory instead (ADR 0048 decision 7).
+#[test]
+fn a_tracked_task_verdict_ignore_file_is_left_alone() {
+    let repo = Repo::new("verdict-ignore-task-tracked");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let (task, body) = rework_task(&store, "work");
+    // The repository tracks both ignore files the wrapper would otherwise write, each with
+    // content that does not ignore the copies.
+    let top = repo.clone.join(".radian/arc-verdicts/.gitignore");
+    let task_ignore = repo
+        .clone
+        .join(format!(".radian/arc-verdicts/{task}/.gitignore"));
+    for (path, content) in [(&top, "top\n"), (&task_ignore, "task\n")] {
+        std::fs::create_dir_all(path.parent().expect("the ignore directory"))
+            .expect("the ignore directory");
+        write(path, content);
+    }
+    repo.git(&["add", ".radian/arc-verdicts"]);
+    repo.git(&["commit", "-m", "track the verdict ignore files"]);
+    repo.git(&["push", repo.remote.as_str(), repo.main_branch.as_str()]);
+    let _ = run(
+        &repo,
+        &task,
+        1,
+        "tok-i8a",
+        &["--worker-command", "true"],
+        &[],
+        "the brief\n",
+    );
+
+    let mock = Mock::start(vec![
+        shell_reply(
+            "c1",
+            "echo change > change.txt && git add change.txt && git commit -m change",
+        ),
+        text_reply("done"),
+    ]);
+    let run = run(
+        &repo,
+        &task,
+        2,
+        "tok-i8b",
+        &[],
+        &model_args(mock.base_url()),
+        &body,
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let finished = run.finished();
+    assert_eq!(finished["outcome"], json!("completed"), "{finished}");
+    assert_eq!(finished["failure"], json!(null), "{finished}");
+    assert_eq!(finished["pushed"], json!(true), "{finished}");
+    assert_eq!(finished["dirty"], json!([]), "nothing is dirty");
+
+    let worktree = repo.worktree(&task);
+    assert_eq!(
+        std::fs::read(worktree.join(".radian/arc-verdicts/.gitignore"))
+            .expect("the tracked top-level ignore file"),
+        b"top\n",
+        "the repository's tracked top-level ignore file is not rewritten"
+    );
+    assert_eq!(
+        std::fs::read(worktree.join(format!(".radian/arc-verdicts/{task}/.gitignore")))
+            .expect("the tracked task ignore file"),
+        b"task\n",
+        "the repository's tracked task ignore file is not rewritten"
+    );
+    assert_eq!(
+        std::fs::read(worktree.join(format!(".radian/arc-verdicts/{task}/{task}-1/.gitignore")))
+            .expect("the attempt's ignore file"),
+        b"*\n",
+        "the attempt's copy directory carries the rule"
+    );
+    assert!(
+        worktree
+            .join(format!(".radian/arc-verdicts/{task}/{task}-1/review.json"))
+            .is_file(),
+        "the copy is in the worktree"
+    );
+    assert_eq!(
+        repo.git_at(
+            &worktree,
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        "",
+        "the copy directory is ignored"
+    );
+}
+
+/// One verdict from each of two task directories in one brief get their own ignore file when
+/// the repository tracks the copies' own `.gitignore` and each task's, and the worktree's
+/// status stays clean (ADR 0048 decisions 7 and 8). The repository tracks both task files
+/// with content that does not ignore the copies: the per-task check must leave each of them
+/// as it is and fall back to that task's attempt directory. Rewriting them, as the wrapper
+/// did before that check, leaves tracked modifications and fails the delivery check.
+#[test]
+fn two_task_verdict_copies_get_their_own_ignore_files() {
+    let repo = Repo::new("verdict-ignore-two-tracked");
+    init(&repo);
+    let store = Store::open(&repo.clone).expect("the store opens");
+    let plan = store.add_plan("p", "P", "request").expect("a plan");
+    let first_task = store
+        .add_task(
+            &plan,
+            "first-other",
+            "First other",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the first brief\n",
+        )
+        .expect("the first other task");
+    let second_task = store
+        .add_task(
+            &plan,
+            "second-other",
+            "Second other",
+            Vec::new(),
+            false,
+            Vec::new(),
+            "the second brief\n",
+        )
+        .expect("the second other task");
+    // The repository tracks the copies' own ignore file and each task's, each with content
+    // that does not ignore the copies.
+    let top = repo.clone.join(".radian/arc-verdicts/.gitignore");
+    std::fs::create_dir_all(top.parent().expect("the ignore directory"))
+        .expect("the ignore directory");
+    write(&top, "old\n");
+    for (task, content) in [(&first_task, "first\n"), (&second_task, "second\n")] {
+        let path = repo
+            .clone
+            .join(format!(".radian/arc-verdicts/{task}/.gitignore"));
+        std::fs::create_dir_all(path.parent().expect("the ignore directory"))
+            .expect("the ignore directory");
+        write(&path, content);
+    }
+    repo.git(&["add", ".radian/arc-verdicts"]);
+    repo.git(&["commit", "-m", "track the verdict ignore files"]);
+    repo.git(&["push", repo.remote.as_str(), repo.main_branch.as_str()]);
+    let first_bytes = b"{\"summary\":\"first\"}\n";
+    let second_bytes = b"{\"summary\":\"second\"}\n";
+    let first = write_verdict(&store, &first_task, 1, "review", first_bytes);
+    let second = write_verdict(&store, &second_task, 1, "review", second_bytes);
+    let followup = store
+        .add_task(
+            &plan,
+            "work",
+            "Follow-ups",
+            vec![first_task.clone(), second_task.clone()],
+            false,
+            Vec::new(),
+            "placeholder\n",
+        )
+        .expect("the follow-up task");
+    let body = format!(
+        "Read the verdicts for detail: `{}`, `{}`",
+        first.display(),
+        second.display()
+    );
+    store
+        .change_task(&followup, |task| {
+            task.body = body;
+            Ok(())
+        })
+        .expect("the follow-up brief");
+    let body = store.load_task(&followup).expect("the task").item.body;
+
+    let run = run(
+        &repo,
+        &followup,
+        1,
+        "tok-i9",
+        &["--worker-command", "true"],
+        &[],
+        &body,
+    );
+    assert_eq!(run.finished()["dirty"], json!([]), "{}", run.stdout);
+    let worktree = repo.worktree(&followup);
+    for (task, bytes, tracked) in [
+        (&first_task, first_bytes as &[u8], "first\n"),
+        (&second_task, second_bytes as &[u8], "second\n"),
+    ] {
+        let relative = format!(".radian/arc-verdicts/{task}/{task}-1/review.json");
+        assert_eq!(
+            std::fs::read(worktree.join(&relative)).expect("the copy exists"),
+            bytes
+        );
+        assert_eq!(
+            std::fs::read(worktree.join(format!(".radian/arc-verdicts/{task}/.gitignore")))
+                .expect("the task's tracked ignore file"),
+            tracked.as_bytes(),
+            "each task's tracked ignore file is not rewritten"
+        );
+        assert_eq!(
+            std::fs::read(
+                worktree.join(format!(".radian/arc-verdicts/{task}/{task}-1/.gitignore"))
+            )
+            .expect("the attempt's ignore file"),
+            b"*\n",
+            "each task's attempt copy directory carries the rule"
+        );
+    }
+    assert_eq!(
+        std::fs::read(worktree.join(".radian/arc-verdicts/.gitignore"))
+            .expect("the tracked ignore file"),
+        b"old\n",
+        "the repository's tracked ignore file is not rewritten"
+    );
+    assert_eq!(
+        repo.git_at(
+            &worktree,
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
+        "",
+        "both copies are ignored: {}",
+        run.stderr
+    );
+    assert_eq!(run.finished()["dirty"], json!([]), "neither copy is dirty");
+}
+
 /// A symbolic link planted at `.gitignore` is refused, not followed: the target outside the
 /// worktree keeps its bytes, the copy is still written, the attempt runs, and the record
 /// carries one note line (ADR 0048 decision 7). Mutation: follow the link and the target is
