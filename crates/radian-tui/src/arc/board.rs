@@ -22,8 +22,7 @@
 //! four. The selection is the pair (column, card in that column), so a width change keeps the
 //! same card selected.
 
-use std::collections::BTreeSet;
-
+use radian_arc::board::{BoardColumn, column_of, paused_plans};
 use radian_arc::read;
 use radian_arc::store::attempt_ops;
 use radian_arc::store::model::{PlanFile, TaskFile, TaskState};
@@ -185,7 +184,7 @@ impl BoardPage {
             for task in &view.tasks {
                 let item = &task.item;
                 if let Some(column) = column_of(store, plan, item, paused) {
-                    columns[column].push(card(store, item, column));
+                    columns[column.index()].push(card(store, item, column));
                 }
                 if is_finished(item) {
                     done.push(finished_row(store, plan, item));
@@ -349,44 +348,8 @@ pub fn is_finished(task: &TaskFile) -> bool {
     matches!(task.state, TaskState::Done | TaskState::Failed)
 }
 
-/// The column a task belongs to, or `None` for a finished task.
-///
-/// `paused` marks a plan `arc` paused through one of its tasks: every task of it waits for the
-/// owner. A `review.rework_pending` task a scheduling pass would still reverify by itself (a
-/// command failure with automatic reverifies left) stays in `verifying`, because a gate runs
-/// for it once main moves; the rule is `radian_arc::review::auto_reverify_pending`, the pass's
-/// own.
-#[must_use]
-pub fn column_of(store: &Store, plan: &PlanFile, task: &TaskFile, paused: bool) -> Option<usize> {
-    if is_finished(task) {
-        return None;
-    }
-    if paused {
-        return Some(NEEDS_YOU);
-    }
-    match (task.state, task.phase.as_str()) {
-        (TaskState::Todo, "proposed" | "paused_budget") => Some(NEEDS_YOU),
-        (TaskState::Todo, _) => Some(TODO),
-        (TaskState::Doing, _) => Some(DOING),
-        (TaskState::Review, "awaiting_human") => Some(if plan.auto == "merge" {
-            VERIFYING
-        } else {
-            NEEDS_YOU
-        }),
-        (TaskState::Review, "rework_pending") => Some(
-            if radian_arc::review::auto_reverify_pending(store, &task.id) {
-                VERIFYING
-            } else {
-                NEEDS_YOU
-            },
-        ),
-        (TaskState::Review, _) => Some(VERIFYING),
-        (TaskState::Done | TaskState::Failed, _) => None,
-    }
-}
-
 /// One card's data.
-fn card(store: &Store, task: &TaskFile, column: usize) -> BoardCard {
+fn card(store: &Store, task: &TaskFile, column: BoardColumn) -> BoardCard {
     let beat = (task.state == TaskState::Doing)
         .then(|| {
             attempt_ops::read_heartbeat(store, &task.id, task.attempt)
@@ -403,7 +366,7 @@ fn card(store: &Store, task: &TaskFile, column: usize) -> BoardCard {
         attempt: task.attempt,
         cost: Cost::of(task),
         mark: task_mark(task.state, &task.phase),
-        needs_you: column == NEEDS_YOU,
+        needs_you: column == BoardColumn::NeedsYou,
         doing: task.state == TaskState::Doing,
         beat,
     }
@@ -420,34 +383,6 @@ fn finished_row(store: &Store, plan: &PlanFile, task: &TaskFile) -> FinishedRow 
         age: attempt_ops::utc_age_secs(&at),
         at,
     }
-}
-
-/// Every plan `arc` paused through one of `plans`' tasks: its automatic rework limit wrote
-/// `paused.json` next to the attempt, or a plan budget set the plan's `auto` to `off` and left
-/// the task it stopped in `todo.paused_budget`.
-///
-/// A task budget also leaves its task in `todo.paused_budget`, but it leaves the plan's `auto`
-/// alone, so only the task itself waits for the owner. `radian arc pause` writes no marker
-/// either: the plan's `auto` is `off`, which is also the level a plan is confirmed at, so the
-/// board cannot tell the two apart.
-fn paused_plans(plans: &[PlanView], store: &Store) -> BTreeSet<String> {
-    let mut paused = BTreeSet::new();
-    for view in plans {
-        let mut plan_paused = false;
-        for task in &view.tasks {
-            if attempt_ops::paused_plan(store, &task.item.id, task.item.attempt).is_some() {
-                plan_paused = true;
-            }
-        }
-        let budget_paused = view.plan.item.auto == "off"
-            && view.tasks.iter().any(|task| {
-                task.item.state == TaskState::Todo && task.item.phase == "paused_budget"
-            });
-        if plan_paused || budget_paused {
-            paused.insert(view.plan.item.id.clone());
-        }
-    }
-    paused
 }
 
 /// `12m ago`, `3h ago`, `2d ago`; `now` under a minute, `—` without a record.

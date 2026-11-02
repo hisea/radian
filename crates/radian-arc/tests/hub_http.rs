@@ -513,12 +513,23 @@ fn the_list_and_show_routes_are_the_cli_json_bytes() {
         cli.stdout.as_bytes(),
         "the route returns exactly what the CLI prints"
     );
+    // The route carries the board's computed column with the CLI's own bytes.
+    let body = String::from_utf8(listed.body.clone()).expect("the list body is UTF-8");
+    assert!(
+        body.contains("\"board_column\": \"todo\""),
+        "the new field is in the route body: {body}"
+    );
 
     let shown = hub.authorized("GET", &format!("/v1/repos/a/items/{task}"));
     assert_eq!(shown.status, 200);
     let cli = a.radian(&["arc", "show", &task, "--json"]);
     assert_eq!(cli.code, 0, "{}", cli.stderr);
     assert_eq!(shown.body, cli.stdout.as_bytes());
+    let body = String::from_utf8(shown.body.clone()).expect("the show body is UTF-8");
+    assert!(
+        body.contains("\"board_column\": \"todo\""),
+        "the show route carries the column too: {body}"
+    );
 
     // The scheduling loop takes each repository's `runner.lock`; wait for both, then the
     // route reports them as scheduled by this hub.

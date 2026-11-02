@@ -9,11 +9,23 @@ Status: accepted
 | Layer | Owns | Never owns |
 |---|---|---|
 | TUI Foundation (`radian-tui`) | Event loop, Action and Effect, layer stack, panels and layout, themes and keys | Agent lifecycle, session-fact authority |
-| Host Interface (`radian-host`, observers in `radian-session`) | Session Facade, read-only projections, command senders, pending-request queue | UI layout |
+| Host Interface (`radian-host`, observers in `radian-session`) | Session Facade, read-only projections, command senders, pending-request queue, the folded transcript (`transcript`: one entry type and the two folds that produce it) | UI layout |
 | Runtime (`radian-runtime`) | Inbox, driver, journal, tool sessions, approval routing | TUI components |
 | Workspace Extension (optional) | Panel and workspace-view composition | Core and runtime implementation |
 
 TUI **never owns** agent session lifecycles. The driver belongs to runtime. TUI only holds a Facade.
+
+The **folded transcript is host-owned.** `radian-host::transcript` turns a session's committed
+facts (the journal and the events a `JournalObserver` folds) and an ACP attempt's
+`result.jsonl` into one `Entry` sequence, and it owns that entry type: the entry a user message,
+an assistant reply, a reasoning block, a tool call with its result, a compaction summary or a
+notice becomes, plus the tool-card data and the memory reference the card carries. Three
+front ends fold through it — `radian attach`, the arc TUI's conversation page and the hub — so
+none of them forks the folding rules. The TUI's own `Entry` is that host entry plus render
+state (the live flag, decoded images, the layout caches), and `radian-tui` keeps everything
+about drawing it: layout, themes, scrolling and ratatui. The split is one-way: the fold crate
+knows nothing about ratatui and nothing about `radian-tui`, and `radian-arc` (the hub) reads
+the same fold without a renderer.
 
 ### U2 Event-driven loop
 
@@ -72,7 +84,7 @@ trait SessionFacade {
 
 ### U6 Read-only observer
 
-When observing another process session: only `Observe` capability exists. No writer lock, no inbox, no send, steer, or cancel exists. **It renders only committed facts**: ADR 0019 pending segments read as "uncommitted" and hide. It never derives live sandbox or approval state from another process JSONL. It reuses the `radian-session` validating reader and reads **incrementally** by byte offset (`JournalTail`): it saves `TranscriptFold` state, last `seq`, and byte offset, then continues from the offset next time. Pending-segment state lives inside too. A file-identity change (inode or length regress) triggers re-read. An incomplete trailing line reads as torn tail. One reader exists per observer; reads merge then send a dirty notice.
+When observing another process session: only `Observe` capability exists. No writer lock, no inbox, no send, steer, or cancel exists. **It renders only committed facts**: ADR 0019 pending segments read as "uncommitted" and hide. It never derives live sandbox or approval state from another process JSONL. It reuses the `radian-session` validating reader and reads **incrementally** by byte offset (`JournalTail`): it saves `TranscriptFold` state, last `seq`, and byte offset, then continues from the offset next time. Pending-segment state lives inside too. A file-identity change (inode or length regress) triggers re-read. An incomplete trailing line reads as torn tail. One reader exists per observer; reads merge then send a dirty notice. The observer's committed history is folded into the shared entry sequence by the host's `transcript` fold (U1), so the observer itself stays a source of facts and the TUI only draws the entries.
 
 ### U7 Pending-request queue lives at the host
 
@@ -135,4 +147,4 @@ Each item already depends on Core facts: `EventSink::emit` is synchronous and no
 
 ## Verification
 
-`tests/update.rs` (each effect and result input), `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`, `tests/btw.rs` (`/btw` effect, reject, Esc, reopen, streaming and completion inputs), `tests/purity.rs` (`app.rs` holds no `std::fs`, `MemoryService`, `tokio`, or `mention::expand`). `projection.rs` order unit tests. `tests/virtual.rs` window tests. Pty tests cover idle zero-redraw, signals, flood draw fairness, terminal loss and orphans, `--block-input` and `--freeze-draw`, `/btw` overlay end to end (request-body prefix sameness, session file with no side questions). `/new` coverage: `command.rs` parse and HELP tests, `tests/update.rs` accept and reject tests, pty one-round, `/new`, one-round tests (two session files, second `SessionCreated` carrying route and levels, `ConfigChanged` backfill, `Session::history` replay, `/sessions` listing both) plus reject and lock-release tests. `tests/perf_render.rs` and `benchmarks/perf-baseline.md` record P95 and long-list metrics.
+`tests/update.rs` (each effect and result input), `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`, `tests/btw.rs` (`/btw` effect, reject, Esc, reopen, streaming and completion inputs), `tests/purity.rs` (`app.rs` holds no `std::fs`, `MemoryService`, `tokio`, or `mention::expand`). `projection.rs` order unit tests. `tests/virtual.rs` window tests. Pty tests cover idle zero-redraw, signals, flood draw fairness, terminal loss and orphans, `--block-input` and `--freeze-draw`, `/btw` overlay end to end (request-body prefix sameness, session file with no side questions). `/new` coverage: `command.rs` parse and HELP tests, `tests/update.rs` accept and reject tests, pty one-round, `/new`, one-round tests (two session files, second `SessionCreated` carrying route and levels, `ConfigChanged` backfill, `Session::history` replay, `/sessions` listing both) plus reject and lock-release tests. `tests/perf_render.rs` and `benchmarks/perf-baseline.md` record P95 and long-list metrics. The folds are pinned in `radian-host`: the journal fold against the TUI's attach path, an ACP `result.jsonl` fixture against the arc conversation page, the serialized shape of every entry kind, and a late tool result updating its own entry in both folds.
