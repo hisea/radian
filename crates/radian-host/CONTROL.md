@@ -50,8 +50,11 @@ client's word alone; that source is what the inbox records, and the turn the inp
 with it. A turn that is already running keeps its own effective source, which only ever lowers:
 a `steer` or `inject` that joins it can lower it, never raise it, not even the owner's. A
 `followup` that arrives mid-turn belongs to a later turn: it leaves the running turn's source
-alone and opens its own turn with its own source. Without a matching owner token (below), the
-client picks the input's source with an optional `source` field:
+alone and opens its own turn with its own source. The same rule holds at that turn's start: its
+source is the least-privileged of the input that opens it and every `steer`/`inject` the turn
+admits, so a queued scheduled input can lower the turn an owner's `followup` starts. Without a
+matching owner token (below), the client picks the input's source with an optional `source`
+field:
 
 | `source` | result |
 |---|---|

@@ -17,5 +17,6 @@ pub use config::{ConfigQueue, ConfigSlot, ModelRoute};
 pub use driver::{BudgetFor, CompactionSettingsFor};
 pub use driver::{Driver, DriverError, RuntimeEvents, TurnAdditions};
 pub use inbox::{
-    CancelCause, Inbox, InboxEntry, InboxError, Lane, PendingWakeCallback, TurnClaimedCallback,
+    CancelCause, Inbox, InboxEntry, InboxError, InputDrainedCallback, Lane, PendingWakeCallback,
+    TurnClaimedCallback,
 };

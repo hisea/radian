@@ -245,10 +245,12 @@ drift apart. The rest of `.git` stays writable, and `full` has no such rules by 
 ### The current turn source (a Core gap, worked around)
 
 `HookContext` has **no** source field. The host sets it per turn with
-`PermissionHooks::set_turn_source(Some(InputSource::User))` before `start_turn`. This is a
-host obligation and it is **not** concurrency-safe for a shared instance serving several
-turns: one instance is one session. If Core later adds the turn source to `HookContext`, the
-setter becomes unnecessary. Until then, forgetting to set it fails closed (non-human).
+`PermissionHooks::set_turn_source(Some(InputSource::User))` before `start_turn`, then reports
+each input the turn admits with `observe_input_source` (the same method only ever lowers, so
+the turn's source is the least-privileged of them, ADR 0011 L2). This is a host obligation and
+it is **not** concurrency-safe for a shared instance serving several turns: one instance is one
+session. If Core later adds the turn source to `HookContext`, the setter becomes unnecessary.
+Until then, forgetting to set it fails closed (non-human).
 
 ## Audit
 

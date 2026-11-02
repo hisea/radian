@@ -34,7 +34,7 @@ The interface exposes only these semantic operations. It exposes **no** generic 
 - A control-port input (`followup`/`steer`/`inject`) is `Scheduler` by default, and `User` when the request carries the owner token (ADR 0043). The port decides the source; the client cannot declare `User`.
 - At the runtime **`followup`/`steer`/`inject` boundary, `source` is required**. `None` is not accepted, so the permission layer always receives a source. The value written into `InboxEnqueued.source` is the caller-declared value.
 - The permission layer treats `source == Some(User)` as the only marker of human input. `None` and any non-`User` value never carry `User` semantics. An externally queued or externally injected message without a `User` source never gains user-level permissions.
-- The effective source of one turn takes the least-privileged of all inputs admitted into it. It only lowers, never raises. It resets at turn end. Its scope covers only inbox-admitted inputs, never tool results (ADR 0011 L2).
+- The effective source of one turn takes the least-privileged of all inputs admitted into it — the input that claims the turn and every `steer`/`inject` a safe point admits. A claim never raises it above an input the turn admits. It only lowers, never raises. It resets at turn end. Its scope covers only inbox-admitted inputs, never tool results (ADR 0011 L2).
 
 ### L3: Crash recovery
 

@@ -454,10 +454,11 @@ pub struct CommandHooks {
     /// non-completed turn clears it; a user message does not touch a turn that already
     /// started.
     turn_continuation: Arc<AtomicU8>,
-    /// The permission layer, for the turn-source reset the turn-claimed observer does. The
-    /// host installs it with [`CommandHooks::set_turn_source_hooks`]; absent (tests that build
-    /// the hooks alone), the observer skips the reset and a turn-starting input keeps the
-    /// source the enqueuer set.
+    /// The permission layer, for the turn-source reset and lowering the turn-claimed and
+    /// drained observers do. The host installs it with
+    /// [`CommandHooks::set_turn_source_hooks`]; absent (tests that build the hooks alone),
+    /// the observers skip their work and a turn-starting input keeps the source the
+    /// enqueuer set.
     turn_source_hooks: Arc<std::sync::Mutex<Option<Weak<PermissionHooks>>>>,
     /// Consecutive hook-opened continuations whose turns ended `Completed` with no tool
     /// call (`model_calls == 1`). A continued turn that called a tool, a non-`Completed`
@@ -525,39 +526,61 @@ fn continuation_message_id() -> MessageId {
 /// Installs the inbox's turn-claimed observer: the id of each message that opens a turn
 /// is looked up in the pending continuation map, and the verdict that drove it becomes
 /// the running turn's provenance. A claim of any other input clears it (a new turn). It is
-/// also the turn-start seam for the permission source: the turn runs with the source of the
-/// input that opened it (ADR 0011 L2, ADR 0043), so a `User` input the control port queued
-/// mid-turn resets the source here, when its own turn starts, and never while another turn
-/// runs.
+/// also the turn-start seam for the permission source (ADR 0011 L2, ADR 0043): the turn
+/// runs with the least-privileged source of the input that opened it and of every waking
+/// `steer` already queued for it, so a `User` input the control port queued mid-turn
+/// cannot raise the rights of a turn that also absorbs a `Scheduler`/`Mcp`/`Subagent`
+/// input, and never resets while another turn runs. A plain `inject` waits for a natural
+/// step boundary; the drain callback below lowers the turn when that safe point admits it.
 fn install_turn_claimed_callback(
     inbox: &Arc<Inbox>,
     pending: Arc<std::sync::Mutex<HashMap<MessageId, bool>>>,
     turn_continuation: Arc<AtomicU8>,
     turn_source_hooks: Arc<std::sync::Mutex<Option<Weak<PermissionHooks>>>>,
 ) {
-    inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
-        // The source reset comes first, before any turn work can read the source. A weaker
-        // source can only lower the turn; the input's own source is the turn's starting point.
-        let hooks = turn_source_hooks
+    let source_hooks = Arc::clone(&turn_source_hooks);
+    inbox.set_turn_claimed_callback(Some(Arc::new(
+        move |entry: &InboxEntry, queued: &[InputSource]| {
+            // The source reset comes first, before any turn work can read the source. The
+            // opener sets the turn's starting point; every queued waking entry the turn
+            // will admit can only lower it.
+            let hooks = source_hooks
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_ref()
+                .and_then(Weak::upgrade);
+            if let Some(hooks) = hooks {
+                hooks.set_turn_source(Some(entry.source));
+                for source in queued {
+                    hooks.observe_input_source(*source);
+                }
+            }
+            let continuation = entry.message.meta().id.as_ref().and_then(|id| {
+                pending
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(id)
+            });
+            let kind = match continuation {
+                Some(true) => Continuation::Hook,
+                Some(false) => Continuation::Validator,
+                None => Continuation::None,
+            };
+            turn_continuation.store(kind.as_u8(), Ordering::SeqCst);
+        },
+    )));
+    // A `steer`/`inject` admitted at a safe point joins the turn: its source applies then,
+    // so an owner turn that absorbs a non-human input loses the human rights before the
+    // next model call (ADR 0011 L2).
+    inbox.set_input_drained_callback(Some(Arc::new(move |source: InputSource| {
+        if let Some(hooks) = turn_source_hooks
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .and_then(Weak::upgrade);
-        if let Some(hooks) = hooks {
-            hooks.set_turn_source(Some(entry.source));
+            .and_then(Weak::upgrade)
+        {
+            hooks.observe_input_source(source);
         }
-        let continuation = entry.message.meta().id.as_ref().and_then(|id| {
-            pending
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .remove(id)
-        });
-        let kind = match continuation {
-            Some(true) => Continuation::Hook,
-            Some(false) => Continuation::Validator,
-            None => Continuation::None,
-        };
-        turn_continuation.store(kind.as_u8(), Ordering::SeqCst);
     })));
 }
 

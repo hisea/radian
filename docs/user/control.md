@@ -69,6 +69,10 @@ A turn that is already running keeps its own effective source, which only ever l
 `steer` or `inject` that joins it can lower it, never raise it. A `followup` that arrives
 mid-turn belongs to a later turn and leaves the running turn alone.
 
+The same rule applies at a turn's start: its source is the least-privileged of the input
+that opens it and every `steer`/`inject` that turn admits. A queued scheduled input can
+lower the turn an owner's `followup` starts, and it does so before the first model call.
+
 ## The owner token
 
 A request may carry an optional string field `token`. When it equals the trimmed content of

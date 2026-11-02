@@ -169,11 +169,20 @@ impl State {
 /// next turn (ADR 0011). The host installs its wake-gate counter here.
 pub type PendingWakeCallback = Arc<dyn Fn(MessageId) + Send + Sync>;
 
-/// Fired with every entry [`Inbox::claim_next_turn`] takes to open a turn. The host
-/// attributes the turn to the input that opened it here (a `Stop` continuation's
-/// `stop_hook_active`, ADR 0045 §2): the provenance travels with the queued message,
+/// Fired with every entry [`Inbox::claim_next_turn`] takes to open a turn, together with
+/// the sources of the waking `next_step` entries still queued at that claim (the `steer`s
+/// the turn will absorb at its next safe point, in queue order). The host attributes the
+/// turn to the input that opened it here (a `Stop` continuation's `stop_hook_active`,
+/// ADR 0045 §2) and applies the least-privileged source of the opener and those waking
+/// entries (ADR 0011 L2): the provenance and the source travel with the queued messages,
 /// not with a session-global flag. Runs without the queue lock held.
-pub type TurnClaimedCallback = Arc<dyn Fn(&InboxEntry) + Send + Sync>;
+pub type TurnClaimedCallback = Arc<dyn Fn(&InboxEntry, &[InputSource]) + Send + Sync>;
+
+/// Fired with the source of every `next_step` entry the driver hands to Core at a safe
+/// point (ADR 0011 L2): the input is admitted into the running turn, so its source lowers
+/// the turn's effective source. A declined steer (the turn already wound down) does not
+/// fire it; the entry goes back to the inbox. Runs without the queue lock held.
+pub type InputDrainedCallback = Arc<dyn Fn(InputSource) + Send + Sync>;
 
 /// The bounded, two-lane input queue. Share it with `Arc`: the host enqueues, the driver
 /// claims.
@@ -228,6 +237,10 @@ pub struct Inbox {
     /// [`Inbox::claim_next_turn`] takes. The host reads the claimed message's own
     /// provenance here (ADR 0045 §2).
     turn_claimed_callback: std::sync::Mutex<Option<TurnClaimedCallback>>,
+    /// Fired with the source of every `next_step` entry a safe point admits (ADR 0011 L2).
+    /// The host lowers the running turn's effective source here, so a non-human `steer` or
+    /// `inject` that reaches the transcript can never keep the turn's human rights.
+    input_drained_callback: std::sync::Mutex<Option<InputDrainedCallback>>,
     /// Control requests the driver runs between turns (ADR 0018: `/compact`). Not a lane.
     control: Mutex<VecDeque<ControlRequest>>,
 }
@@ -285,6 +298,7 @@ impl Inbox {
             runtime_events: std::sync::Mutex::new(None),
             pending_wake_callback: std::sync::Mutex::new(None),
             turn_claimed_callback: std::sync::Mutex::new(None),
+            input_drained_callback: std::sync::Mutex::new(None),
             control: Mutex::new(VecDeque::new()),
         })
     }
@@ -316,6 +330,16 @@ impl Inbox {
     pub fn set_turn_claimed_callback(&self, callback: Option<TurnClaimedCallback>) {
         *self
             .turn_claimed_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = callback;
+    }
+
+    /// Fires `callback` with the source of every `next_step` entry a safe point admits, so
+    /// the host can lower the running turn's effective source (ADR 0011 L2). `None` keeps
+    /// the behavior a host that never installed one had before.
+    pub fn set_input_drained_callback(&self, callback: Option<InputDrainedCallback>) {
+        *self
+            .input_drained_callback
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = callback;
     }
@@ -609,9 +633,9 @@ impl Inbox {
     /// returns an entry, [`Inbox::inflight_turns`] already counts it. A host checking
     /// "may I exit" between the pop and the turn's start still sees the claimed turn.
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
-        let entry = {
+        let (entry, queued) = {
             let mut state = self.state.lock().await;
-            if let Some(entry) = state.next_turn.pop_front() {
+            let entry = if let Some(entry) = state.next_turn.pop_front() {
                 self.version.fetch_add(1, Ordering::SeqCst);
                 self.inflight.fetch_add(1, Ordering::SeqCst);
                 entry
@@ -628,7 +652,18 @@ impl Inbox {
                 self.inflight.fetch_add(1, Ordering::SeqCst);
                 // `position` just found it, so the remove cannot miss.
                 state.next_step.remove(index).expect("claimed entry")
-            }
+            };
+            // The waking entries still waiting at this claim are the `steer`s the turn
+            // will absorb at its first safe point: the host applies their sources when
+            // the turn opens (ADR 0011 L2). A plain `inject` waits for a natural step
+            // boundary, so its source applies when that safe point admits it.
+            let queued = state
+                .next_step
+                .iter()
+                .filter(|entry| entry.wake)
+                .map(|entry| entry.source)
+                .collect::<Vec<_>>();
+            (entry, queued)
         };
         if let Some(callback) = self
             .turn_claimed_callback
@@ -636,7 +671,7 @@ impl Inbox {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
         {
-            callback(&entry);
+            callback(&entry, &queued);
         }
         if entry.pending_wake
             && let Some(callback) = self
@@ -662,6 +697,20 @@ impl Inbox {
     /// with exactly one of these (a requeued entry is re-popped, which counts again).
     pub fn turn_ended(&self) {
         self.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Reports that a safe point admitted one `next_step` entry. Used by the driver right
+    /// after Core accepts the steer; the host lowers the running turn's effective source
+    /// here (ADR 0011 L2).
+    pub(crate) fn input_drained(&self, source: InputSource) {
+        if let Some(callback) = self
+            .input_drained_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            callback(source);
+        }
     }
 
     /// Removes the oldest `next_step` entry, if any. Used by the driver at a safe point.
