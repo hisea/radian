@@ -24,7 +24,7 @@ Each line names one page and what it covers.
 - `arc/running`: the task-running commands.
 - `arc/owner`: the owner's commands.
 - `arc/hooks`: the `[hooks]` points, rules and environment.
-- `arc/hub`: the hub's HTTP API on loopback, pairing and the bearer token, every route, the repository registry, its scheduling loop and the `[hub]` keys.
+- `arc/hub`: the hub's HTTP API on loopback, pairing and the bearer token, every route, the repository registry, its scheduling loop, the `[hub]` keys and the session routes.
 - `arc/gate`: the gate run, a gate for this repository, and reconcile.
 - `arc/gate-review`: the review stage.
 - `arc/gate-failures`: the failure classes, retries and the budget.

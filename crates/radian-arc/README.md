@@ -266,6 +266,22 @@ registered repository's store before each claim, not cached, so it bounds steady
 than acting as a lock; a repository whose store cannot be read is left out of that count, so its
 broken task file cannot fail another repository's pass.
 
+`hub::sessions` is the hub's view of this machine's radian sessions, which the session routes
+serve. `SessionHub` starts one scanner thread for the hub's life: it reads `$RADIAN_HOME/run/`
+every `SCAN_INTERVAL_SECS` (2), keeps only `<pid>.sock` files whose pid is alive
+(`crate::process::alive`, never `ps`), calls `list_sessions` on each socket with a one-second
+read timeout, and assigns the session to the registered repository whose path is the same
+directory as its `workspace` (`radian_host::sessions::same_directory`, the one rule `--list`,
+`--export` and `--resume` use). Each live session gets one long-lived `subscribe` connection,
+carrying the hub token, on a thread of its own; it folds the journal with
+`radian_host::transcript::AttachFold` and fans the frames — `entry`, `pending`, `config`,
+`state` — out to the session's event streams. A socket that goes away, that does not answer, or
+whose pid is gone is forgotten on the next scan. Ended sessions come from
+`radian_host::sessions::{open_index, list}`, the lookup `radian exec --list` makes, and a
+task's conversation is its attempt's `result.jsonl` folded with
+`radian_host::transcript::AcpFold`. Nothing here runs on the HTTP runtime's threads: the routes
+run on `spawn_blocking` and the scanner on its own thread, so a slow socket delays no request.
+
 ## Gate checkout
 
 `GateCheckout::new(repository, stage, remote)` owns

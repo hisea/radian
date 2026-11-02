@@ -47,12 +47,13 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::gate::Stage;
 use crate::gate::Verdict;
 use crate::hub::lock::HubLock;
 use crate::hub::registry::Registry;
+use crate::hub::sessions::{self, SessionError, SessionHub};
 use crate::hub::token;
 use crate::read;
 use crate::store::attempt_ops;
@@ -65,7 +66,9 @@ pub const KEEP_ALIVE_SECS: u64 = 15;
 
 /// The API version `GET /v1/version` reports. It names the route set and its behavior; the
 /// plan and task file shape is `schema_version` (ADR 0048 decision 5) and changes on its own.
-pub const API_VERSION: u32 = 1;
+/// Version `2` adds the session surface; version `1`'s routes and their behavior are
+/// unchanged.
+pub const API_VERSION: u32 = 2;
 
 /// The most diff text `GET …/diff/<path>` returns, in bytes.
 pub const DIFF_TEXT_LIMIT: usize = 256 * 1024;
@@ -117,9 +120,17 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
     let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
     let http_registry = registry.clone();
+    // The live-session scanner: its own thread, its own blocking socket work, so no request and
+    // no scheduling pass waits on a session's control port.
+    let http_sessions = SessionHub::new(
+        dir.parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| dir.clone()),
+    );
+    http_sessions.start();
     // The accept loop has a thread and a runtime of its own; no request waits on a pass.
     std::thread::spawn(move || {
-        runtime.block_on(serve_http(listener, http_registry, tokens));
+        runtime.block_on(serve_http(listener, http_registry, tokens, http_sessions));
     });
     let emit = Arc::new(|text: &str| {
         let _ = radian_host::write_stdout(text);
@@ -154,6 +165,7 @@ async fn serve_http(
     listener: std::net::TcpListener,
     registry: Registry,
     tokens: Arc<Mutex<TokenState>>,
+    sessions: Arc<SessionHub>,
 ) {
     let listener = match TcpListener::from_std(listener) {
         Ok(listener) => listener,
@@ -176,13 +188,16 @@ async fn serve_http(
         };
         let registry = registry.clone();
         let tokens = Arc::clone(&tokens);
+        let sessions = Arc::clone(&sessions);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let registry = registry.clone();
                 let tokens = Arc::clone(&tokens);
+                let sessions = Arc::clone(&sessions);
                 async move {
                     let method = request.method().clone();
                     let path = request.uri().path().to_owned();
+                    let query = request.uri().query().map(str::to_owned);
                     let header = request
                         .headers()
                         .get(AUTHORIZATION)
@@ -225,7 +240,7 @@ async fn serve_http(
                         Bytes::new()
                     };
                     let response = tokio::task::spawn_blocking(move || {
-                        handle(method, &path, &body, &registry)
+                        handle(method, &path, query.as_deref(), &body, &registry, &sessions)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -347,6 +362,11 @@ enum Route {
     Verdicts(String, String),
     Diff(String, String),
     DiffFile(String, String, String),
+    Conversation(String, String),
+    Sessions(String),
+    Transcript(String, String),
+    SessionEvents(String, String),
+    SessionModels(String, String),
     Events,
     Action(String, String, OwnerAction),
     Unknown,
@@ -396,6 +416,11 @@ fn route(path: &str) -> Route {
         ["v1", "repos", name, "items", id, "report"] => Route::Report(decode(name), decode(id)),
         ["v1", "repos", name, "items", id, "verdicts"] => Route::Verdicts(decode(name), decode(id)),
         ["v1", "repos", name, "items", id, "diff"] => Route::Diff(decode(name), decode(id)),
+        // A task's worker conversation, before the generic `/items/<id>/<action>` arm: an
+        // action named `conversation` is not a write route.
+        ["v1", "repos", name, "items", task, "conversation"] => {
+            Route::Conversation(decode(name), decode(task))
+        }
         ["v1", "repos", name, "items", id, "diff", rest @ ..] if !rest.is_empty() => {
             Route::DiffFile(decode(name), decode(id), decode(&rest.join("/")))
         }
@@ -403,6 +428,16 @@ fn route(path: &str) -> Route {
             Some(action) => Route::Action(decode(name), decode(id), action),
             None => Route::Unknown,
         },
+        ["v1", "repos", name, "sessions"] => Route::Sessions(decode(name)),
+        ["v1", "repos", name, "sessions", id, "transcript"] => {
+            Route::Transcript(decode(name), decode(id))
+        }
+        ["v1", "repos", name, "sessions", id, "events"] => {
+            Route::SessionEvents(decode(name), decode(id))
+        }
+        ["v1", "repos", name, "sessions", id, "models"] => {
+            Route::SessionModels(decode(name), decode(id))
+        }
         _ => Route::Unknown,
     }
 }
@@ -428,7 +463,14 @@ fn decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn handle(method: Method, path: &str, body: &[u8], registry: &Registry) -> Response<ResponseBody> {
+fn handle(
+    method: Method,
+    path: &str,
+    query: Option<&str>,
+    body: &[u8],
+    registry: &Registry,
+    sessions: &Arc<SessionHub>,
+) -> Response<ResponseBody> {
     let route = route(path);
     if matches!(route, Route::Unknown) {
         return error_response(StatusCode::NOT_FOUND, "no such route");
@@ -457,6 +499,11 @@ fn handle(method: Method, path: &str, body: &[u8], registry: &Registry) -> Respo
         Route::Verdicts(name, task) => verdicts(registry, &name, &task),
         Route::Diff(name, task) => diff(registry, &name, &task),
         Route::DiffFile(name, task, path) => diff_file(registry, &name, &task, &path),
+        Route::Conversation(name, task) => conversation(registry, &name, &task, query),
+        Route::Sessions(name) => session_list(registry, sessions, &name),
+        Route::Transcript(name, id) => session_transcript(registry, &name, &id),
+        Route::SessionEvents(name, id) => session_events(registry, sessions, &name, &id),
+        Route::SessionModels(name, id) => session_models(registry, sessions, &name, &id),
         Route::Events => events(registry),
         Route::Action(..) | Route::Unknown => {
             unreachable!("an action or unknown route returned above")
@@ -977,6 +1024,191 @@ fn cap(text: &str, limit: usize) -> (&str, bool) {
     (&text[..end], true)
 }
 
+// ---- the session routes ------------------------------------------------------------------
+
+/// The repository `name` names, the way `Registry::store_for` resolves it (so the refusal a
+/// session route answers with is the CLI's own message).
+fn repo_path(registry: &Registry, name: &str) -> Result<PathBuf, Error> {
+    registry
+        .repos()?
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.path)
+        .ok_or_else(|| Error::Failed(format!("no repository named `{name}` is registered")))
+}
+
+/// The status and body one [`SessionError`] answers with.
+fn session_failure(error: SessionError) -> Response<ResponseBody> {
+    let status = match error {
+        SessionError::Unknown(_) => StatusCode::NOT_FOUND,
+        SessionError::NotLive(_) => StatusCode::CONFLICT,
+        SessionError::Port(_) => StatusCode::BAD_GATEWAY,
+        SessionError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error_response(status, error.message())
+}
+
+/// `GET /v1/repos/<name>/sessions`: every session of the repository's workspace, live and
+/// ended (ADR 0048 decision 16).
+fn session_list(registry: &Registry, sessions: &SessionHub, name: &str) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::sessions_body(sessions, &path) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `GET /v1/repos/<name>/sessions/<id>/transcript`: the journal folded into the shared entry,
+/// the same entries `radian attach` shows.
+fn session_transcript(registry: &Registry, name: &str, id: &str) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::transcript_body(&path, id) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `GET /v1/repos/<name>/sessions/<id>/models`: the control port's own `models` answer, so the
+/// phone offers the list `/model` offers in that session.
+fn session_models(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    // The session must be this repository's before its port is asked: another workspace's
+    // session is not reachable through this repository's name.
+    if let Err(error) = sessions::journal_for(&path, id) {
+        return session_failure(error);
+    }
+    match sessions::models(sessions, id) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `GET /v1/repos/<name>/sessions/<id>/events`: the session's event stream, fed by the hub's
+/// own long-lived subscription. Like `/v1/events` it never replays: a client that reconnects
+/// first re-reads the transcript.
+fn session_events(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    if let Err(error) = sessions::journal_for(&path, id) {
+        return session_failure(error);
+    }
+    let Some(source) = sessions.channel(id) else {
+        return session_failure(SessionError::NotLive(format!(
+            "session {id:?} is not live: no process hosts it"
+        )));
+    };
+    let mut events = source.subscribe();
+    let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
+    // The stream's producer is an async task: it moves frames from the subscription's fan-out
+    // to the connection and writes a keep-alive while nothing happens. It does no blocking IO,
+    // so the runtime's threads are free for other requests.
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(event_keep_alive_interval());
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval` fires once at once; a keep-alive at the start is not what the stream
+        // means, so the first tick is dropped.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(frame) => {
+                        if sender.send(Ok(Frame::data(frame))).await.is_err() {
+                            return;
+                        }
+                    }
+                    // The client fell behind: it re-reads the transcript, which is the rule.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // The session was forgotten: the stream ends.
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                _ = ticker.tick() => {
+                    if sender
+                        .send(Ok(Frame::data(Bytes::from_static(b": keep-alive\n\n"))))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header(CACHE_CONTROL, "no-cache")
+        .body(ResponseBody::Stream(receiver))
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "no body"))
+}
+
+/// `GET /v1/repos/<name>/items/<task>/conversation`: one attempt's `result.jsonl` folded with
+/// the ACP fold, the entries the arc TUI's conversation page shows. `?attempt=<n>` picks an
+/// attempt by number; without it the newest is read.
+fn conversation(
+    registry: &Registry,
+    name: &str,
+    task: &str,
+    query: Option<&str>,
+) -> Response<ResponseBody> {
+    let store = match registry.store_for(name) {
+        Ok(store) => store,
+        Err(error) => return not_found(error),
+    };
+    if let Err(error) = store.load_task(task) {
+        return not_found(error);
+    }
+    let attempt = match attempt_parameter(query) {
+        Ok(attempt) => attempt,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    match sessions::conversation_body(&store, task, attempt) {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// The `attempt` query parameter: `None` when the query does not carry one, the number it names
+/// otherwise. A value that is not a number is refused, never guessed.
+fn attempt_parameter(query: Option<&str>) -> Result<Option<u32>, String> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key != "attempt" {
+            continue;
+        }
+        return value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| format!("`attempt` must be a number, not {value:?}"));
+    }
+    Ok(None)
+}
+
 // ---- the event stream --------------------------------------------------------------------
 
 /// `GET /v1/events`: one `event: transition` per state change since the previous read, and a
@@ -1215,6 +1447,33 @@ fn no_content() -> Response<ResponseBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The session event stream's producer is spawned from a route, and a route runs on a
+    /// blocking thread. `tokio::spawn` must be usable there, or the stream would never produce a
+    /// frame.
+    #[test]
+    fn a_route_can_spawn_on_the_runtime_from_a_blocking_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&spawned);
+        runtime.block_on(async move {
+            tokio::task::spawn_blocking(move || {
+                tokio::spawn(async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+            })
+            .await
+            .expect("the blocking route finished");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        assert!(
+            spawned.load(std::sync::atomic::Ordering::SeqCst),
+            "the spawned stream task ran"
+        );
+    }
 
     #[test]
     fn the_bind_address_is_loopback() {

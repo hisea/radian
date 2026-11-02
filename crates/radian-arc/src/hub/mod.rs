@@ -26,11 +26,15 @@
 //!
 //! [`http`] is the loopback HTTP API: every request carries the bearer token, and the read
 //! routes return the same bytes `radian arc list --json` and `radian arc show --json` print.
+//! [`sessions`] is the hub's view of this machine's radian sessions: the run directory's
+//! sockets, the control port each one hosts, and the transcript, event stream, model list and
+//! worker conversation the session routes answer from.
 
 pub mod http;
 pub mod lock;
 pub mod r#loop;
 pub mod registry;
+pub mod sessions;
 pub mod status;
 pub mod token;
 
@@ -39,4 +43,5 @@ pub use r#loop::run;
 pub use registry::{
     HUB_LOCK, NAME_MAX_CHARS, REGISTRY_FILE, Registry, RepoEntry, TOKEN_FILE, valid_name,
 };
+pub use sessions::{LiveSession, SessionError, SessionHub};
 pub use status::{HubStatus, RepoState, RepoStatus};
