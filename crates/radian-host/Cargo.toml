@@ -71,6 +71,10 @@ futures-util.workspace = true
 # `time`: the footer command runner bounds each run (`tokio::time::timeout`) and spaces out
 # its `ETXTBSY` spawn retries (`tokio::time::sleep`).
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
+# Standard base64 (RFC 4648 §4): the control port's image `data` is base64, decoded back to
+# bytes here before the shared `radian-coding` image checks. Already in the workspace through
+# `radian-tui`'s image parts.
+base64 = "0.22"
 # The configuration file (ADR 0008) is TOML. `toml` reads it; `toml_edit` is the one place
 # that writes it back, format-preserving (`/theme`, ADR 0008).
 toml = "0.8"

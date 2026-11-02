@@ -2093,3 +2093,52 @@ the file was restored from `.radian/bak/sessions.rs`, which `cmp` found identica
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0302-M1 | `same_directory` compares the two values as raw strings again (no canonicalization) | ✅ 4 failed (rc=100) | `sessions::tests::a_symlinked_workspace_spelling_is_not_a_mismatch`, `sessions::tests::in_workspace_follows_the_symlinked_spelling`, `sessions::tests::list_finds_a_session_recorded_under_a_symlinked_spelling`, `sessions::tests::search_finds_a_session_recorded_under_a_symlinked_spelling` |
+
+## TK0304: the owner token on the control port (2026-11-02)
+
+Branch `work/TK0304-control-token-user-source`. The control tests bind `/tmp` sockets, which the
+workspace sandbox denies, so each mutation was applied in place to
+`crates/radian-host/src/control.rs` and the named test ran outside it with `cargo nextest run -p
+radian-host --test control --locked --no-fail-fast -E 'test(<name>)'`. The source was restored
+from `.radian/control.rs.bak`, which `cmp` found identical after every mutation.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M1 | `input` ignores the token (`let via_hub = false`) | ✅ 1 failed (rc=100) | `a_followup_with_the_owner_token_is_user_with_the_hub_origin` (the enqueue's source stayed `scheduler` and carried no `origin.via`) |
+| TK0304-M2 | `token_matches` accepts a non-empty prefix (`expected.starts_with(provided)`) | ✅ 1 failed (rc=100) | `a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin` (the prefix token `owner` enqueued with `source: "user"` and `via: "hub"`) |
+| TK0304-M3 | `is_owner` grants on the field's presence (any string `token`) | ✅ 2 failed (rc=100) | `without_a_token_file_any_token_stays_scheduler` (no token file, yet `source: "user"`) and `a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin` (a wrong token became the owner) |
+| TK0304-M4 | `parse_attachments` drops `images`/`files` | ✅ 2 failed (rc=100) | `attachments_become_the_same_parts_as_the_tui_composer` (the journal held only the text part) and `a_bad_attachment_names_the_item_and_enqueues_nothing` (the invalid image was accepted) |
+| TK0304-M5 | `read_request_line` never enforces `MAX_REQUEST_BYTES` (both checks short-circuited) | ✅ 1 failed (rc=100) | `an_over_limit_line_gets_an_error_and_the_connection_stays_usable` (the over-limit line was dispatched and answered `ok: true`) |
+
+M1 and M2 are the two the brief names. M3–M5 are the other three behaviours the edge tests pin:
+the missing token file, the attachment path, and the line limit. Edge 8
+(`a_steer_with_the_token_during_a_running_turn_is_a_user_steer`) is caught by M1 as well: with
+the token ignored, the steer's source stayed `scheduler` and it had no `origin.via`.
+
+## TK0304 rework: a mid-turn owner input must not raise the turn's source (2026-11-02)
+
+Same branch and same outside-the-sandbox command as above. Each mutation was applied in place to
+`crates/radian-host/src/control.rs` and restored from a copy under `.radian/`
+(`control.rs.fix.bak` for M6, `control.rs.fix2.bak` for M7); `cmp` found both identical
+afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M6 | `input` unconditionally calls `set_turn_source(Some(source))`, even while a turn runs (the review's defect) | ✅ 1 failed (rc=100) | `an_owner_input_does_not_raise_a_running_non_human_turn` (a token-bearing steer during a running `Scheduler` turn left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |
+| TK0304-M7 | the idle branch only observes (`observe_input_source`) and never resets the source | ✅ 1 failed (rc=100) | `a_followup_with_the_owner_token_is_user_with_the_hub_origin` (the idle owner followup left `turn_source()` at `None` instead of `Some(User)`) |
+
+## TK0304 rework 2: the source is applied when the input's own turn starts (2026-11-02)
+
+Same branch and same outside-the-sandbox command as above. M8 and M10 were applied in place to
+`crates/radian-host/src/hooks.rs`, M9 to `crates/radian-host/src/control.rs`, and M11 to
+`crates/radian-host/src/session/local.rs`; each source was restored from the copy taken before
+its first mutation (`.radian/mut/hooks.rs.m8`, `.radian/mut/control.rs.m8`,
+`.radian/mut/local.rs.m11`) and `cmp` found all identical afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M8 | the turn-claimed observer does not reset the source at the claim | ✅ 3 failed (rc=100) | `a_mid_turn_owner_followup_gives_its_own_turn_the_user_source` (its turn stayed `Some(Scheduler)` instead of `Some(User)`), `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (its turn stayed `Some(User)` instead of `Some(Scheduler)`), and `a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user` (a direct-inbox `Scheduler` input left the source `None`) |
+| TK0304-M9 | `input` observes a mid-turn `followup` like a `steer` (it lowers the running turn) | ✅ 1 failed (rc=100) | `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (the queued `Scheduler` followup lowered the running `User` turn to `Some(Scheduler)`) |
+| TK0304-M10 | the claim reset applies only to a `User` opener | ✅ 1 failed (rc=100) | `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (the scheduled followup's own turn stayed `Some(User)` instead of `Some(Scheduler)`) |
+| TK0304-M11 | the facade's `SendFollowup` keeps the old unconditional `set_turn_source(Some(User))` | ✅ 1 failed (rc=100) | `a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user` (the mid-turn send raised the running `Scheduler` turn to `Some(User)`) |
+

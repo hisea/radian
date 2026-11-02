@@ -22,6 +22,8 @@ MessageMeta {
 
 All three fields are optional. Only the host generates and interprets `MessageId(String)`. Core only carries it. `origin` keeps the `OpaqueJson` bytes unchanged. Core does not parse or normalize it. Exceptions: Core writes and reads the compaction summary message `origin` (`kind = "compaction_summary"`, including the verbatim `user_messages`) and the memory-addition message with `kind = "memory_addition"`. A host-written `origin` still passes through unparsed.
 
+A control-port input that carries the owner token records `{"via": "hub"}` in `origin` (ADR 0043): the transcript can tell a message the hub sent from one typed at the keyboard.
+
 ### G2: The source has no default value
 
 `InputSource` is `#[non_exhaustive]` and serializes in snake_case: `User`, `SlashCommand`, `PermissionDecision`, `Scheduler`, `Mcp`, `Subagent`, `System`. It has no default implementation. `None` means the host provides no source. `None` never equals `User`. A non-human producer therefore never gains human-input semantics or permissions through a Core default. Core also makes no permission decision from it.

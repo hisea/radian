@@ -252,6 +252,42 @@ sessions_index_max_lines = 1000
 |---|---|---|---|
 | `control.enabled` | boolean | `true` | Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`. `false` turns the port off for the process. A non-boolean is refused. |
 
+Every hosting process on that socket serves one JSON object per line in each direction. The
+input verbs `followup`, `steer` and `inject` carry `text`, and may carry `token`, `images` and
+`files`.
+
+`token` is a string. When it equals the trimmed content of `$RADIAN_HOME/hub/token`, the request
+is the owner's: its source is `User`, and the message's host metadata records `{"via":"hub"}`.
+The token file is read when the request arrives, so a rotated token works on the next request. A
+missing, unreadable or empty token file means no token matches, and a request without `token` or
+with a wrong one behaves as if this field did not exist. Without a matching token the source is
+`Scheduler` when `source` is absent or `scheduler`, `Subagent` for `subagent`, and `Mcp` for
+`mcp`; `user` and `permission_decision` are refused, and no `via` metadata is recorded. With a
+matching token the `source` field is ignored. A request that arrives while a turn is already
+running never raises that turn's permission source. A `steer` or `inject` joins the running
+turn, so it can lower that turn's source. A `followup` belongs to a later turn: it leaves the
+running turn's source alone, and the turn it opens runs with the input's source.
+
+`images` is an array of objects with `mime` and `data`; `data` is standard base64 and `mime` is
+one of `image/png`, `image/jpeg`, `image/gif` or `image/webp` (the bytes' magic number decides
+the kind). The image limits are the composer's: at most 5 MiB and 8000 pixels per side. `files`
+is an array of objects with `name` and `text`; at most 100 KiB per file and 400 KiB in total.
+The attachments become the message's parts exactly as a dropped image and an `@` file do: the
+text, then the images, then the files. An image's display name is `image <n>` (1-based). `text`
+is required, and may be empty when the request carries only attachments.
+
+One request is one line of at most 16 MiB (16 777 216 bytes), excluding the newline. A longer
+line is discarded through its newline and answered with one error line; the connection stays
+usable, so the client can retry with a smaller request. A bad attachment — an unknown MIME,
+invalid base64, an over-limit image or an over-limit file — rejects the whole request with an
+error line naming the item, and nothing is enqueued.
+
+```json
+{"id": 1, "verb": "followup", "text": "look at this", "token": "…",
+ "images": [{"mime": "image/png", "data": "iVBORw0KGgo…"}],
+ "files": [{"name": "notes.txt", "text": "hello"}]}
+```
+
 ## `[hub]`
 
 | Key | Type | Default | Allowed | What it does |

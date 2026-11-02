@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
-use radian_core::{NoopSink, TurnOptions};
+use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
+use radian_host::compose::{Attachment, user_message};
+use radian_host::control::MAX_REQUEST_BYTES;
 use radian_host::{
-    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionId, SessionProjection,
-    SessionSetup, TurnState, build_model, open_session,
+    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionCommand, SessionFacade,
+    SessionId, SessionProjection, SessionSetup, TurnState, build_model, open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
@@ -209,6 +211,13 @@ impl Fixture {
         self.server.path()
     }
 
+    /// Writes the hub owner token under this fixture's own `RADIAN_HOME`.
+    fn write_token(&self, token: &str) {
+        let dir = radian_host::hub_dir_for(&self.home);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("token"), token).unwrap();
+    }
+
     /// The journal's lines, as JSON values.
     fn journal(&self) -> Vec<Value> {
         std::fs::read_to_string(self.session.journal_path())
@@ -289,9 +298,9 @@ impl Client {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Sources (ADR 0043, decided item 4): `User` and `PermissionDecision` are refused, and a
-/// refusal changes nothing (no `InboxEnqueued`); `Scheduler` is accepted and recorded with that
-/// source. `cancel` always goes; an approval/answer verb does not exist.
+/// Sources (ADR 0043, decided item 4): `User` and `PermissionDecision` are refused without
+/// the owner token, and a refusal changes nothing (no `InboxEnqueued`); `Scheduler` is accepted
+/// and recorded with that source. `cancel` always goes; an approval/answer verb does not exist.
 #[tokio::test]
 async fn sources_are_fixed_by_the_port_and_an_approval_verb_does_not_exist() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
@@ -376,6 +385,24 @@ fn inbox_sources(fixture: &Fixture) -> Vec<String> {
         .filter(|line| line["event"] == "InboxEnqueued")
         .filter_map(|line| line["data"]["source"].as_str().map(str::to_owned))
         .collect()
+}
+
+/// The one `InboxEnqueued` whose message carries this text.
+fn enqueued(journal: &[Value], text: &str) -> Value {
+    journal
+        .iter()
+        .find(|line| {
+            line["event"] == "InboxEnqueued"
+                && line["data"]["message"]["user"]["content"]
+                    .as_array()
+                    .is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .any(|part| part["text"]["text"].as_str() == Some(text))
+                    })
+        })
+        .unwrap_or_else(|| panic!("no InboxEnqueued for {text:?}"))
+        .clone()
 }
 
 /// Waits until the mock has seen at least `want` requests.
@@ -502,4 +529,551 @@ async fn the_socket_is_private_cleans_stale_files_and_is_removed_on_drop() {
         "the socket is removed when the server drops"
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+// ---------------------------------------------------------------------------
+// The owner token (ADR 0043): the port decides `User`, and the hub origin
+// ---------------------------------------------------------------------------
+
+/// A minimal PNG header with these dimensions (33 bytes: the 8-byte signature, the IHDR
+/// chunk's length and type, width, height, the bit-depth/colour/compression/filter/interlace
+/// bytes, and a CRC). `imagesize` reads only the header, so the rest may be anything.
+fn png_photo(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&13u32.to_be_bytes());
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.push(8); // bit depth
+    bytes.push(6); // colour type (RGBA)
+    bytes.extend_from_slice(&[0, 0, 0]); // compression, filter, interlace
+    bytes.extend_from_slice(&[0; 4]); // a CRC the header parser does not check
+    bytes
+}
+
+/// Edge 1: a `followup` with the right token is the owner's input: source `User`, and the
+/// message's `origin` records `{"via":"hub"}` (ADR 0005 G1).
+#[tokio::test]
+async fn a_followup_with_the_owner_token_is_user_with_the_hub_origin() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let fixture = Fixture::new("owner", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let response = client
+        .request(
+            json!({"id": 1, "verb": "followup", "text": "from the phone", "token": "owner-token"}),
+        )
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+
+    let enqueued = enqueued(&fixture.journal(), "from the phone");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
+        "{enqueued}"
+    );
+    // The complement of a mid-turn input: with no turn running, this request sets the source
+    // of the turn it starts.
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "an owner followup that starts a turn sets the turn's source"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 2: a wrong token, a prefix of the right one, and no token at all behave exactly as
+/// before: source `Scheduler`, no hub origin.
+#[tokio::test]
+async fn a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin() {
+    let server = MockServer::start(vec![text_reply("a"), text_reply("b"), text_reply("c")]).await;
+    let fixture = Fixture::new("wrong-token", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    for (id, text, token) in [
+        (1, "wrong token", Some("wrong")),
+        (2, "prefix token", Some("owner")),
+        (3, "no token", None),
+    ] {
+        let mut request = json!({"id": id, "verb": "followup", "text": text});
+        if let Some(token) = token {
+            request["token"] = json!(token);
+        }
+        let response = client.request(request).await;
+        assert_eq!(response["ok"], true, "{response}");
+
+        let enqueued = enqueued(&fixture.journal(), text);
+        assert_eq!(enqueued["data"]["source"], "scheduler", "{enqueued}");
+        assert!(
+            enqueued["data"]["message"]["user"]["meta"]
+                .get("origin")
+                .is_none(),
+            "a non-owner input records no hub origin: {enqueued}"
+        );
+    }
+    fixture.stop().await;
+}
+
+/// Edge 3: with no token file, any `token` is just a wrong token.
+#[tokio::test]
+async fn without_a_token_file_any_token_stays_scheduler() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let fixture = Fixture::new("no-token-file", &server.base_url).await;
+    assert!(
+        !radian_host::hub_dir_for(&fixture.home)
+            .join("token")
+            .exists()
+    );
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let response = client
+        .request(json!({"id": 1, "verb": "followup", "text": "any token", "token": "anything"}))
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+
+    let enqueued = enqueued(&fixture.journal(), "any token");
+    assert_eq!(enqueued["data"]["source"], "scheduler", "{enqueued}");
+    assert!(
+        enqueued["data"]["message"]["user"]["meta"]
+            .get("origin")
+            .is_none(),
+        "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 4: the token file is read trimmed, so its trailing newline does not matter.
+#[tokio::test]
+async fn a_token_file_with_a_trailing_newline_matches_the_token_without_it() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let fixture = Fixture::new("token-newline", &server.base_url).await;
+    fixture.write_token("owner-token\n");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let response = client
+        .request(json!({"id": 1, "verb": "followup", "text": "trimmed", "token": "owner-token"}))
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+
+    let enqueued = enqueued(&fixture.journal(), "trimmed");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
+        "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 5: one PNG and one file become the same parts, in the same order, as the TUI path
+/// builds through the shared composer (a dropped image loaded by `load_path`, an `@` file).
+#[tokio::test]
+async fn attachments_become_the_same_parts_as_the_tui_composer() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let fixture = Fixture::new("attachments", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // The TUI's dropped-image path: a file the composer loads, whose file name becomes the
+    // image's display name.
+    let image_path = fixture.scratch.join("ws").join("image 1");
+    std::fs::write(&image_path, png_photo(1200, 800)).unwrap();
+    let radian_coding::image::PathImage::Loaded(image) =
+        radian_coding::image::load_path(&image_path)
+    else {
+        panic!("the dropped image loads");
+    };
+    let base64 = radian_coding::image::base64_encode(&png_photo(1200, 800));
+    let file = Attachment {
+        path: "notes.txt".into(),
+        content: "hello from the phone".into(),
+    };
+    let expected = user_message("look", std::slice::from_ref(&file), &[image]);
+    let expected = serde_json::to_value(&expected).unwrap();
+    let expected_parts = expected["user"]["content"].clone();
+
+    let response = client
+        .request(json!({
+            "id": 1,
+            "verb": "followup",
+            "text": "look",
+            "images": [{"mime": "image/png", "data": base64}],
+            "files": [{"name": "notes.txt", "text": "hello from the phone"}],
+        }))
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+
+    let journal = fixture.journal();
+    let message_id = response["message_id"].as_str().expect("message_id");
+    let enqueued = journal
+        .iter()
+        .find(|line| line["event"] == "InboxEnqueued" && line["data"]["message_id"] == message_id)
+        .unwrap_or_else(|| panic!("no InboxEnqueued for {message_id}"));
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["content"], expected_parts,
+        "the control port's parts match the TUI composer's"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 6: one bad attachment rejects the whole request with an error naming it, and enqueues
+/// nothing.
+#[tokio::test]
+async fn a_bad_attachment_names_the_item_and_enqueues_nothing() {
+    let server = MockServer::start(vec![]).await;
+    let fixture = Fixture::new("bad-attachment", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let bad_base64 = client
+        .request(json!({
+            "id": 1,
+            "verb": "followup",
+            "text": "bad base64",
+            "images": [{"mime": "image/png", "data": "not base64!"}],
+        }))
+        .await;
+    assert_eq!(bad_base64["ok"], false, "{bad_base64}");
+    assert!(
+        bad_base64["error"].as_str().unwrap().contains("image 1"),
+        "{bad_base64}"
+    );
+
+    let valid_base64 = radian_coding::image::base64_encode(&png_photo(4, 5));
+    let bad_mime = client
+        .request(json!({
+            "id": 2,
+            "verb": "followup",
+            "text": "bad mime",
+            "images": [{"mime": "image/tiff", "data": valid_base64}],
+        }))
+        .await;
+    assert_eq!(bad_mime["ok"], false, "{bad_mime}");
+    assert!(
+        bad_mime["error"].as_str().unwrap().contains("image 1")
+            && bad_mime["error"].as_str().unwrap().contains("image/tiff"),
+        "{bad_mime}"
+    );
+
+    assert!(
+        !fixture
+            .journal()
+            .iter()
+            .any(|line| line["event"] == "InboxEnqueued"),
+        "a refused attachment must not reach the inbox"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 7: an over-limit line gets one error line, and the connection stays usable.
+#[tokio::test]
+async fn an_over_limit_line_gets_an_error_and_the_connection_stays_usable() {
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let fixture = Fixture::new("line-limit", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let oversized = "a".repeat(MAX_REQUEST_BYTES + 1024);
+    client
+        .send(json!({"id": 1, "verb": "followup", "text": oversized}))
+        .await;
+    let response = client.read().await;
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"].as_str().unwrap().contains("16 MiB"),
+        "{response}"
+    );
+
+    // The rest of the over-limit line was discarded through its newline, and the connection
+    // still serves requests.
+    let response = client
+        .request(json!({"id": 2, "verb": "followup", "text": "small"}))
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+    assert!(
+        !fixture
+            .journal()
+            .iter()
+            .any(|line| line["event"] == "InboxEnqueued"
+                && line["data"]["message"]["user"]["content"][0]["text"]["text"].as_str()
+                    == Some(oversized.as_str())),
+        "an over-limit line must not be dispatched"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 8: a token-bearing `steer` during a running turn lands as a `next_step` steer with
+/// source `User` (and the hub origin).
+#[tokio::test]
+async fn a_steer_with_the_token_during_a_running_turn_is_a_user_steer() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+        text_reply("third"),
+    ])
+    .await;
+    let fixture = Fixture::new("steer-token", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    // The first model request waits at the barrier, so the turn is provably running: it has
+    // started and has not finished.
+    wait_requests(&server, 1).await;
+    let journal = fixture.journal();
+    assert!(
+        journal.iter().any(|line| line["event"] == "TurnStarted"),
+        "the turn started"
+    );
+    assert!(
+        !journal.iter().any(|line| line["event"] == "TurnFinished"),
+        "the turn is still running while the model request waits"
+    );
+
+    let steered = client
+        .request(json!({"id": 2, "verb": "steer", "text": "turn left", "token": "owner-token"}))
+        .await;
+    assert_eq!(steered["ok"], true, "{steered}");
+
+    let enqueued = enqueued(&fixture.journal(), "turn left");
+    assert_eq!(enqueued["data"]["lane"], "next_step", "{enqueued}");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
+        "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// ADR 0011 L2: a `followup` belongs to the next turn, so a token-bearing one that arrives
+/// while a turn runs must not touch that running turn's source — but the turn it opens is the
+/// owner's, and runs with `User`. Nothing resets the source at the enqueue, because the turn it
+/// belongs to has not started yet.
+#[tokio::test]
+async fn a_mid_turn_owner_followup_gives_its_own_turn_the_user_source() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("owner-followup-mid-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler` input opens the first turn, paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The owner's followup is queued for the next turn, not admitted into this one: the
+    // running turn keeps its own source.
+    let queued = client
+        .request(json!({
+            "id": 2, "verb": "followup", "text": "owner task", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn owner followup must not raise the running turn's source"
+    );
+
+    // The next turn is the one the owner's followup opens: it runs with `User`.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the turn the owner's followup opens is the owner's (ADR 0011 L2)"
+    );
+    let enqueued = enqueued(&fixture.journal(), "owner task");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
+        "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// The mirror of the owner case: a `followup` queued mid-turn belongs to the next turn, so a
+/// `Scheduler` one must not lower the running human turn either — and the turn it opens is
+/// non-human.
+#[tokio::test]
+async fn a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("scheduler-followup-mid-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // The owner's token opens the first turn, paused in its first model request.
+    let started = client
+        .request(json!({
+            "id": 1, "verb": "followup", "text": "start", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the owner's input started a human turn"
+    );
+
+    // A scheduled followup is queued for the next turn, not admitted into this one.
+    let queued = client
+        .request(json!({"id": 2, "verb": "followup", "text": "scheduled task"}))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "a mid-turn followup of any source must not change the running turn's source"
+    );
+
+    // The scheduled followup's own turn is non-human.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "the turn the scheduled followup opens is non-human (ADR 0011 L2)"
+    );
+    assert_eq!(
+        enqueued(&fixture.journal(), "scheduled task")["data"]["source"],
+        "scheduler"
+    );
+    fixture.stop().await;
+}
+
+/// The TUI's facade is the other caller that fixes a turn's source. Its `SendFollowup` while a
+/// turn runs belongs to the next turn too: it must not raise the running turn's source, and the
+/// turn it opens runs with `User` (ADR 0011 L2).
+#[tokio::test]
+async fn a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("facade-followup-mid-turn", &server.base_url).await;
+
+    // A `Scheduler` input opens the first turn, paused in its first model request.
+    fixture
+        .session
+        .inbox()
+        .followup(Message::user("start"), InputSource::Scheduler)
+        .await
+        .expect("enqueue the Scheduler input");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The TUI's send is queued for the next turn. `command` blocks on the inbox, so it runs on
+    // a blocking thread, as a real host's synchronous UI thread does.
+    let command = Arc::clone(&fixture.session);
+    tokio::task::spawn_blocking(move || {
+        command.command(SessionCommand::SendFollowup("typed".into()))
+    })
+    .await
+    .expect("the blocking task joins")
+    .expect("the send is accepted");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn facade followup must not raise the running turn's source"
+    );
+
+    // The next turn is the one the facade followup opens: it is the user's.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the turn the facade followup opens is the user's (ADR 0011 L2)"
+    );
+    fixture.stop().await;
+}
+
+/// ADR 0011 L2: a turn's effective source only ever lowers. A token-bearing input that
+/// arrives while a non-human turn runs is admitted with source `User`, but it must not raise
+/// the running turn's permission source before its safe-point admission: the turn keeps
+/// `Scheduler`, and tool permission checks stay non-human.
+#[tokio::test]
+async fn an_owner_input_does_not_raise_a_running_non_human_turn() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("no-raise", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler`-sourced turn is running and paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The owner's steer is enqueued with source `User`, but the running turn's effective
+    // source must stay where it was: a later human input cannot raise it.
+    let steered = client
+        .request(json!({"id": 2, "verb": "steer", "text": "turn left", "token": "owner-token"}))
+        .await;
+    assert_eq!(steered["ok"], true, "{steered}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn owner input must not raise the running turn's source (ADR 0011 L2)"
+    );
+    let enqueued = enqueued(&fixture.journal(), "turn left");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    fixture.stop().await;
 }
