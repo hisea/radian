@@ -1,11 +1,12 @@
 ---
-description: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
+description: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 ---
 
 # hub
 
 A hub is one process that manages every repository registered on this machine.
 [`radian hub`](#radian-hub) serves the HTTP API on loopback and runs the scheduling loop for every registered repository; `radian hub add`, `remove` and `list` manage the registry; [`radian hub pair`](#radian-hub-pair) and [`radian hub token rotate`](#radian-hub-token-rotate) handle the bearer token every request carries.
+The API also reads the radian sessions on this machine: [the session routes](#sessions) list a repository's sessions, read a session's transcript, follow its event stream, list its models and read a worker's conversation.
 
 ## The registry file
 
@@ -113,10 +114,11 @@ A running hub stat()s the file once per request and re-reads it when its modific
 
 The API has two version numbers.
 
-- `api_version` names the route set and its behavior. This build's is `1`, and every route starts with `/v1/`.
+- `api_version` names the route set and its behavior. This build's is `2`, and every route starts with `/v1/`.
 - `schema_version` names the plan and task file shape (see [the file fields](files.md)). This build's is `1`.
 
-They change on their own: a route can be added without touching a plan or task file, and a field can be added to a file while `api_version` stays `1`.
+They change on their own: a route can be added without touching a plan or task file, and a field can be added to a file while `api_version` stays `2`.
+Version `2` adds [the session routes](#sessions); every version `1` route and its behavior is unchanged, so a client written for `1` keeps working.
 `GET /v1/version` returns both.
 
 ## Routes
@@ -144,6 +146,11 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/items/<task>/diff` | `GET` | One array of `path` (string), `added` (integer) and `removed` (integer), from `git diff --numstat` for the task's own change; a binary file reports `0` and `0`. | `200`, `401`, `404` |
 | `/v1/repos/<name>/items/<task>/diff/<path>` | `GET` | `path` (string), `truncated` (boolean), `text` (string): that file's unified diff, cut at 256 KiB (262,144 bytes) with `truncated` `true`. A path not in the list is `404`, and so is a git that cannot produce the diff: a failed read is never a `200` with an empty text. | `200`, `401`, `404` |
 | `/v1/events` | `GET` | A server-sent-event stream of every state change; see [the event stream](#the-event-stream). | `200`, `401` |
+| `/v1/repos/<name>/sessions` | `GET` | `sessions` (array), the repository's sessions, live and ended, newest activity first; see [Sessions](#sessions). | `200`, `401`, `404` |
+| `/v1/repos/<name>/sessions/<id>/transcript` | `GET` | `session` (string) and `entries` (array): the journal folded into [transcript entries](#transcript-entries). | `200`, `401`, `404` |
+| `/v1/repos/<name>/sessions/<id>/events` | `GET` | A server-sent-event stream of the session's changes; see [the session event stream](#the-session-event-stream). | `200`, `401`, `404`, `409` |
+| `/v1/repos/<name>/sessions/<id>/models` | `GET` | `models` (array): the control port's `models` answer, grouped by provider with the current route marked. | `200`, `401`, `404`, `409`, `502` |
+| `/v1/repos/<name>/items/<task>/conversation` | `GET` | `task` (string), `attempt` (integer or `null`) and `entries` (array): one attempt's `result.jsonl` folded with the ACP fold. `?attempt=<n>` picks an attempt by number. | `200`, `400`, `401`, `404` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
 `<path>` in the last read route is percent-encoded, so a file whose name contains `/` stays one path.
@@ -217,6 +224,99 @@ The changes are the closed list [the MCP channel](mcp.md#the-claude-experimental
 While nothing happens the stream carries one `: keep-alive` comment line every 15 seconds.
 An event has no id, and the stream does not replay: a client that reconnects first reads the routes above again, then follows the stream.
 The stream ends when the client disconnects or the hub stops.
+
+## Sessions
+
+The hub is also the remote door to the radian sessions on this machine: the sessions a `radian` or `radian exec` process hosts, and the ones that have ended.
+
+**Discovery.** The hub reads `$RADIAN_HOME/run/*.sock` every 2 seconds and calls the control port's `list_sessions` on each socket whose file name is a live pid's.
+It assigns each live session to a registered repository whose `path` is the same directory as the session's `workspace`, compared after canonicalizing both sides, so macOS's `/var` → `/private/var`, a symlinked project directory and an older spelling of the same directory are one workspace.
+A live session in a workspace that is not registered is not shown anywhere.
+A socket that does not answer within one second, or whose pid is gone, is not a session, and a session whose socket goes away leaves the list at the next scan (or the one after that, when its process is alive but its port stopped answering).
+
+The ended sessions come from the same lookup `radian exec --list` uses: the session index under `$RADIAN_SESSION_DIR` (default `$RADIAN_HOME/sessions`), filtered by the repository's workspace.
+
+The hub keeps one long-lived `subscribe` connection per live session, carrying the hub token, so the port treats it as the owner's. The connection reconnects when it drops; that is what feeds [the session event stream](#the-session-event-stream).
+All of this runs on threads of the hub's own, never on the HTTP server's threads: a session's socket that accepts and never answers delays no request.
+
+### `GET /v1/repos/<name>/sessions`
+
+The repository's sessions, live and ended, newest activity first.
+The body is one object with a `sessions` array; each entry has these fields:
+
+| Field | Type | What it is |
+|---|---|---|
+| `id` | string | The session id. |
+| `created` | string or `null` | The session's creation time, RFC 3339 UTC (the `SessionCreated` line's `ts`), or `null` when the index has no row for it. |
+| `last_activity` | string or `null` | The time of the newest journal line, the same value `radian exec --list` prints, or `null`. |
+| `title` | string or `null` | The first user message as one line, cut at 80 characters with `…`; `null` when the session has no user message or the index has no row for it. |
+| `live` | string | `tui` when a `radian` or `radian exec` process hosts the session, `hub` for a session a hub-started process hosts, `none` when it has ended. This build reports `tui` for every live session: it starts no process of its own yet, so `hub` never appears. |
+| `state` | string | The turn state: `idle`, `working` or `blocked` (the same classification the herdr report uses, with `blocked` winning over `working`). A live session's value is the one its port reports; an ended session reads `idle`. |
+| `pending` | integer | The length of the approval and question queue. An ended session reads `0`. |
+| `model` | object or `null` | The model route in force, `{"provider": string, "model": string}`, as the live session's port reports it; `null` for an ended session, whose route no process reports. |
+
+A live session whose journal the index has not caught up with is still listed, with `created`, `last_activity` and `title` `null`.
+An unknown repository is `404`; a session directory that cannot be read is `500`.
+
+### `GET /v1/repos/<name>/sessions/<id>/transcript`
+
+The session's journal folded into transcript entries: the same entries `radian attach` draws, from the same fold.
+The body is `{"session": "<id>", "entries": [ … ]}`.
+The session must belong to that repository's workspace; another workspace's session, an unknown id, and an id that cannot be one are `404` with the same message `--export` and `--resume` give.
+
+#### Transcript entries
+
+Every entry is one object. The fields are always present, in this order; `kind` is the tag:
+
+| Field | Type | What it is |
+|---|---|---|
+| `kind` | string | `user`, `assistant`, `reasoning`, `tool_call`, `tool_result`, `notice`, `compaction`, `outcome`, `bash`, `warning`, `tip`, `banner`, `startup`, `trust_hint` or `context`. The hub's folds produce `user`, `assistant`, `reasoning`, `tool_call`, `tool_result`, `notice`, `compaction`, `outcome` and `bash`; `bash` carries one extra field, `exclude_from_context` (boolean), and `outcome` carries `ok` (boolean). |
+| `text` | string | The entry's display text: a message's text, a tool card's title and body line, a notice's line, a compaction's summary. An attachment is its placeholder line (`[file: P, N lines]`), never the file's body. |
+| `is_error` | boolean | The entry is an error: a failed tool call, an interrupted reply. |
+| `result` | boolean or `null` | A tool call's outcome once its result arrived; `null` while it runs. |
+| `error_code` | string or `null` | A tool result's error code. |
+| `card` | string | Where a tool entry sits in a merged card: `none`, `head`, `tail` or `solo`. |
+| `tool` | object or `null` | A tool card's data; `null` for every other entry. |
+| `compaction` | object or `null` | A compaction summary's data; `null` for every other entry. |
+| `interrupted` | boolean | A committed assistant message was an interrupted prefix. |
+| `images` | array | The images the entry's message carried, each with its display data but **never** the base64 payload; the placeholder line is in `text`. |
+
+### `GET /v1/repos/<name>/sessions/<id>/models`
+
+`{"models": [ … ]}`: exactly the list `/model` shows in that session, grouped by provider, with the current route's entry marked `current: true`.
+The hub asks the session's control port, so the list is the process's own (only logged-in providers, and the current route's provider).
+A session no process hosts is `409`; a port that fails mid-request is `502`; an unknown session or repository is `404`.
+
+### `GET /v1/repos/<name>/items/<task>/conversation`
+
+An arc worker attempt's conversation: its `result.jsonl` folded with the ACP fold, the entries the arc TUI's conversation page shows.
+The body is `{"task": "<task id>", "attempt": <integer> or null, "entries": [ … ]}`, in the [transcript entry](#transcript-entries) shape.
+
+| Parameter | Where | Type | What it does |
+|---|---|---|---|
+| `attempt` | query string | integer | Reads that attempt (`<task>-<n>`) instead of the newest one. |
+
+Without `attempt` the newest attempt is read.
+A task with no attempt answers `200` with `"attempt": null` and no entries.
+An unknown task, or an attempt number the task does not have, is `404`; an `attempt` value that is not a number is `400`. The task must be a task, not a plan.
+
+### The session event stream
+
+`GET /v1/repos/<name>/sessions/<id>/events` is a server-sent-event stream of one session's changes, fed by the hub's own subscription.
+It needs the bearer token and answers `Content-Type: text/event-stream`.
+A session no process hosts is `409`; an unknown session or repository is `404`.
+
+The stream follows the [event stream](#the-event-stream)'s rules: no event ids, no replay, a `: keep-alive` comment every 15 seconds while nothing happens, and an end when the client disconnects, the session's process goes away or the hub stops.
+**A client that reconnects first re-reads the transcript.**
+
+Each event has one of these names, with this `data` object:
+
+| Event | `data` | When |
+|---|---|---|
+| `entry` | `index` (integer), `reset` (boolean), `entry` (one [transcript entry](#transcript-entries)) | An entry was added or changed at `index`. `reset` is `true` on the first frame after the fold was rebuilt, and the client then drops every entry before `index`. |
+| `pending` | `head` (object or `null`) and `length` (integer) | The approval and question queue's head changed. The head carries the request id, the kind (`approval` or `question`) and, for an approval, the tool, the resolved resource and the raw arguments. |
+| `config` | `revision` (integer) and `change` (object) | A `ConfigChanged` record was committed: a `/model`, `/thinking`, or hub `config` change applied at a turn boundary. |
+| `state` | `state` (string) | The turn state changed: `idle`, `working` or `blocked`, from the queue's length and the journal's open turn. The process's own facts (a trust modal, background jobs) are on the `sessions` route, which asks the port. |
 
 ## Notifications
 

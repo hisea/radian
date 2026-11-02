@@ -2221,3 +2221,23 @@ copy under `.radian/mut/`, which `cmp` found identical.
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0313-M1 | `column_of` ignores `auto_reverify_pending` for `review.rework_pending`, so every rework waits for the owner | `a_command_failure_with_reverifies_left_verifies_and_then_needs_you` (the failure with reverifies left read `needs_you`, not `verifying`) | ✅ 1 failed |
+
+## TK0307: the hub's session read surface (2026-11-02, branch `work/TK0307-hub-session-read-routes`)
+
+The hub gained `hub::sessions`: it discovers the sessions the run directory's
+control ports report, keeps one subscription per live session, and serves the session list,
+transcript, event stream, models and conversation routes. Each mutation was applied by hand to
+`crates/radian-arc/src/hub/sessions.rs`, run with `cargo nextest run -p radian-arc --locked
+--profile sandbox --no-fail-fast -E 'test(hub::sessions)'`, and restored from a copy under
+`.radian/mut/`, which `cmp` found identical. The two tests below run inside the workspace
+sandbox; the eight socket tests of `tests/hub_sessions.rs` cannot (they need a `/tmp` socket
+path, so the `sandbox` profile skips them) and the gate runs them. M1's rule is the one edge 3
+of the brief names — the symlinked-workspace match — and M2's is the loop the reconnect test
+drives end to end.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0307-M1 | a live session's workspace is compared with the registered path as written (`in_repo` drops `same_directory`) | `hub::sessions::tests::a_live_session_matches_a_repository_through_another_path_spelling` (the symlinked spelling no longer matches) | ✅ 1 failed |
+| TK0307-M2 | the subscription follows one connection only (`follow`'s `while` becomes `if`) | `hub::sessions::tests::the_subscription_reconnects_after_the_connection_drops` (the second connection's event never becomes a frame) | ✅ 1 failed |
+
+2/2 caught.
