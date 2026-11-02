@@ -77,6 +77,7 @@ not (
   | test(=a_token_file_with_a_trailing_newline_matches_the_token_without_it)
   | test(=a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin)
   | test(=an_over_limit_line_gets_an_error_and_the_connection_stays_usable)
+  | test(=an_owner_input_does_not_raise_a_running_non_human_turn)
   | test(=attachments_become_the_same_parts_as_the_tui_composer)
   | test(=without_a_token_file_any_token_stays_scheduler)
   | test(=a_base_url_with_credentials_is_redacted_in_errors)

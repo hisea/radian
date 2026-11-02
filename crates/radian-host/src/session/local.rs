@@ -362,6 +362,13 @@ impl LocalSession {
         self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// The driver's turn flag as a shared handle, for a caller that must decide on it without
+    /// holding the session (the control port checks it before it touches the turn source).
+    /// The clone keeps only the atomic alive, never the session.
+    pub(crate) fn turn_running_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.turn_running)
+    }
+
     /// Resolves whenever the driver stops running a turn or control request. Pair with
     /// [`LocalSession::turn_running`]: subscribe first, then check, so a clear between
     /// the check and the wait still resolves the wait.

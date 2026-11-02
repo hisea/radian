@@ -13,9 +13,12 @@
 //! may declare `Subagent` or `Mcp`, and `User`/`PermissionDecision` are refused with an error
 //! line. The one exception is the owner's token: a request whose `token` equals the trimmed
 //! content of `$RADIAN_HOME/hub/token` is the owner's input and is `User` (with
-//! `{"via":"hub"}` recorded in the message's `origin`, ADR 0005 G1). Approvals cannot be
-//! answered over the port — there is deliberately no such verb, and an unknown verb
-//! (including an `approve`) changes nothing.
+//! `{"via":"hub"}` recorded in the message's `origin`, ADR 0005 G1). The input's source is
+//! what the inbox records and what the turn it starts runs with; a turn that is already
+//! running keeps its own effective source, which only ever lowers (ADR 0011 L2), so an owner
+//! input arriving mid-turn never raises it. Approvals cannot be answered over the port —
+//! there is deliberately no such verb, and an unknown verb (including an `approve`) changes
+//! nothing.
 //!
 //! **Inputs carry attachments.** `followup`/`steer`/`inject` may carry `images` (base64 plus a
 //! MIME) and `files` (a name plus text). They become the message's parts through
@@ -34,7 +37,7 @@
 //! longer alive is removed, so a `kill -9` does not leave it behind.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use radian_coding::image::LoadedImage;
@@ -48,15 +51,18 @@ use tokio::sync::mpsc;
 use crate::compose::{Attachment, MAX_FILE_BYTES, MAX_TOTAL_BYTES, user_message};
 use crate::session::LocalSession;
 
-/// What the port needs from the hosting session: its id, its inbox and its permission hooks.
-/// Every handle is **weak**, so serving the socket never keeps a closed session (or its audit
-/// sink) alive — a host's teardown still observes the session dropping. A request upgrades what
-/// it needs; if the session has closed it is refused.
+/// What the port needs from the hosting session: its id, its inbox, its permission hooks and
+/// whether a turn is running. Every session handle is **weak**, so serving the socket never
+/// keeps a closed session (or its audit sink) alive — a host's teardown still observes the
+/// session dropping. A request upgrades what it needs; if the session has closed it is refused.
 #[derive(Clone)]
 pub struct ControlTarget {
     pub session_id: String,
     inbox: Weak<radian_runtime::Inbox>,
     hooks: Weak<radian_permissions::PermissionHooks>,
+    /// The driver's turn flag (a standalone atomic, cloned weakly): a mid-turn input must not
+    /// raise the turn's source (ADR 0011 L2).
+    turn_running: Weak<AtomicBool>,
 }
 
 impl ControlTarget {
@@ -66,6 +72,7 @@ impl ControlTarget {
             session_id: session.id().as_str().to_owned(),
             inbox: Arc::downgrade(session.inbox()),
             hooks: Arc::downgrade(session.hooks()),
+            turn_running: Arc::downgrade(&session.turn_running_handle()),
         }
     }
 
@@ -77,6 +84,13 @@ impl ControlTarget {
     /// The session's permission hooks, or `None` once the session has closed.
     fn hooks(&self) -> Option<Arc<radian_permissions::PermissionHooks>> {
         self.hooks.upgrade()
+    }
+
+    /// Whether a turn is running right now, or `None` once the session has closed.
+    fn turn_running(&self) -> Option<bool> {
+        self.turn_running
+            .upgrade()
+            .map(|flag| flag.load(Ordering::SeqCst))
     }
 }
 
@@ -398,13 +412,22 @@ impl ControlServer {
                 Err(reason) => return failure(id.clone(), reason),
             }
         };
-        let (Some(hooks), Some(inbox)) = (target.hooks(), target.inbox()) else {
+        let (Some(hooks), Some(inbox), Some(turn_running)) =
+            (target.hooks(), target.inbox(), target.turn_running())
+        else {
             return failure(id.clone(), "the session has closed");
         };
-        // The source the port fixed is what both the permission layer and the durable record
-        // see (ADR 0011 L2). A signed-out source can never be raised back.
-        hooks.set_turn_source(Some(source));
-        hooks.observe_input_source(source);
+        // The source the port fixed is what the durable record and the inbox enqueue see
+        // (ADR 0011 L2). A turn's **effective** source only ever lowers: when a turn is
+        // already running, an owner input is admitted with `User` but must not raise the
+        // turn's permission source before that safe-point admission, so only an input that
+        // arrives while no turn runs may reset it for the turn it will start.
+        if turn_running {
+            hooks.observe_input_source(source);
+        } else {
+            hooks.set_turn_source(Some(source));
+            hooks.observe_input_source(source);
+        }
         let mut message = user_message(text, &files, &images);
         if via_hub {
             set_origin(&mut message, HUB_ORIGIN);

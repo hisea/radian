@@ -263,7 +263,9 @@ missing, unreadable or empty token file means no token matches, and a request wi
 with a wrong one behaves as if this field did not exist. Without a matching token the source is
 `Scheduler` when `source` is absent or `scheduler`, `Subagent` for `subagent`, and `Mcp` for
 `mcp`; `user` and `permission_decision` are refused, and no `via` metadata is recorded. With a
-matching token the `source` field is ignored.
+matching token the `source` field is ignored. A request that arrives while a turn is already
+running does not raise that turn's permission source: the source above belongs to the queued
+input, and a running turn's effective source only ever lowers.
 
 `images` is an array of objects with `mime` and `data`; `data` is standard base64 and `mime` is
 one of `image/png`, `image/jpeg`, `image/gif` or `image/webp` (the bytes' magic number decides

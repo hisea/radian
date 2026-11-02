@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
-use radian_core::{NoopSink, TurnOptions};
+use radian_core::{InputSource, NoopSink, TurnOptions};
 use radian_host::compose::{Attachment, user_message};
 use radian_host::control::MAX_REQUEST_BYTES;
 use radian_host::{
@@ -839,5 +839,54 @@ async fn a_steer_with_the_token_during_a_running_turn_is_a_user_steer() {
         enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
         "{enqueued}"
     );
+    fixture.stop().await;
+}
+
+/// ADR 0011 L2: a turn's effective source only ever lowers. A token-bearing input that
+/// arrives while a non-human turn runs is admitted with source `User`, but it must not raise
+/// the running turn's permission source before its safe-point admission: the turn keeps
+/// `Scheduler`, and tool permission checks stay non-human.
+#[tokio::test]
+async fn an_owner_input_does_not_raise_a_running_non_human_turn() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("no-raise", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler`-sourced turn is running and paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The owner's steer is enqueued with source `User`, but the running turn's effective
+    // source must stay where it was: a later human input cannot raise it.
+    let steered = client
+        .request(json!({"id": 2, "verb": "steer", "text": "turn left", "token": "owner-token"}))
+        .await;
+    assert_eq!(steered["ok"], true, "{steered}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn owner input must not raise the running turn's source (ADR 0011 L2)"
+    );
+    let enqueued = enqueued(&fixture.journal(), "turn left");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
     fixture.stop().await;
 }

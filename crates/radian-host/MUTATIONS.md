@@ -2114,3 +2114,13 @@ M1 and M2 are the two the brief names. M3–M5 are the other three behaviours th
 the missing token file, the attachment path, and the line limit. Edge 8
 (`a_steer_with_the_token_during_a_running_turn_is_a_user_steer`) is caught by M1 as well: with
 the token ignored, the steer's source stayed `scheduler` and it had no `origin.via`.
+
+## TK0304 rework: a mid-turn owner input must not raise the turn's source (2026-11-02)
+
+Same branch and same outside-the-sandbox command as above. The mutation was applied in place to
+`crates/radian-host/src/control.rs` and restored from `.radian/control.rs.fix.bak`, which `cmp`
+found identical afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M6 | `input` unconditionally calls `set_turn_source(Some(source))`, even while a turn runs (the review's defect) | ✅ 1 failed (rc=100) | `an_owner_input_does_not_raise_a_running_non_human_turn` (a token-bearing steer during a running `Scheduler` turn left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |

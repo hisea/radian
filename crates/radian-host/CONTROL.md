@@ -45,9 +45,11 @@ parseable `id` gets `"id": null`.
 
 ### Sources
 
-`followup`, `steer` and `inject` set the turn's source; the port decides it, never the client's
-word alone. Without a matching owner token (below), the client picks it with an optional
-`source` field:
+`followup`, `steer` and `inject` carry an input whose source the port decides, never the
+client's word alone; that source is what the inbox records. A turn that is already running keeps
+its own effective source, which only ever lowers: a request that arrives mid-turn never raises
+it, not even the owner's. Without a matching owner token (below), the client picks the input's
+source with an optional `source` field:
 
 | `source` | result |
 |---|---|
