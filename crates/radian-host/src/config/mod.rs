@@ -229,6 +229,9 @@ pub struct HubConfig {
     pub interval_secs: u64,
     /// `[hub] session_idle_secs`: the reclaim window of a hub-held session (ADR 0048 §16).
     pub session_idle_secs: u64,
+    /// `[hub.hooks]` (ADR 0048 §16): the commands the hub runs from a session's long-lived
+    /// subscription.
+    pub hooks: HubHooks,
 }
 
 impl Default for HubConfig {
@@ -238,8 +241,18 @@ impl Default for HubConfig {
             concurrency: DEFAULT_HUB_CONCURRENCY,
             interval_secs: DEFAULT_HUB_INTERVAL_SECS,
             session_idle_secs: DEFAULT_HUB_SESSION_IDLE_SECS,
+            hooks: HubHooks::default(),
         }
     }
+}
+
+/// `[hub.hooks]` (ADR 0048 §16): one array of shell command lines, run when a live session's
+/// pending queue gets a new head. The array defaults to empty, so a repository that configures
+/// no notification runs none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HubHooks {
+    /// `[hub.hooks] after_pending`: the commands run in the hub's process.
+    pub after_pending: Vec<String>,
 }
 
 /// `[context]` (ADR 0036): when the host appends subtree context files on first use.
@@ -632,7 +645,44 @@ fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
             ("session_idle_secs", _) => {
                 return Err(wrong_type(path, "hub.session_idle_secs", "an integer"));
             }
+            ("hooks", value) => parse_hub_hooks(value, path, config)?,
             (other, _) => config.skipped.push(format!("hub.{other}")),
+        }
+    }
+    Ok(())
+}
+
+/// Parses `[hub.hooks]` (ADR 0048 §16). `after_pending` is an array of shell command lines, the
+/// same shape arc's `[hooks]` points use; a wrong shape names the key. An unknown key under the
+/// table is skipped and named, the rule the rest of `[hub]` follows.
+fn parse_hub_hooks(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
+    let Some(table) = value.as_table() else {
+        return Err(wrong_type(path, "hub.hooks", "a table"));
+    };
+    for (key, value) in table {
+        match (key.as_str(), value) {
+            ("after_pending", Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate() {
+                    match item {
+                        Value::String(line) => config.hub.hooks.after_pending.push(line.clone()),
+                        _ => {
+                            return Err(wrong_type(
+                                path,
+                                &format!("hub.hooks.after_pending[{index}]"),
+                                "a string",
+                            ));
+                        }
+                    }
+                }
+            }
+            ("after_pending", _) => {
+                return Err(wrong_type(
+                    path,
+                    "hub.hooks.after_pending",
+                    "an array of strings",
+                ));
+            }
+            (other, _) => config.skipped.push(format!("hub.hooks.{other}")),
         }
     }
     Ok(())
@@ -2169,6 +2219,7 @@ future_option = "alpha"
             "hub.concurrency",
             "hub.interval_secs",
             "hub.session_idle_secs",
+            "hub.hooks.after_pending",
             "context.subtree_files",
             "compaction.auto",
             "compaction.thinking",
@@ -2318,6 +2369,8 @@ future_option = "alpha"
                 "concurrency = 4\n",
                 "interval_secs = 30\n",
                 "session_idle_secs = 3600\n",
+                "[hub.hooks]\n",
+                "after_pending = [\"true\"]\n",
                 "[compaction]\n",
                 "auto = false\n",
                 "thinking = \"low\"\n",

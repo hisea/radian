@@ -66,14 +66,21 @@ test-group = "pty"
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
 #
-# 6. The hub's session surface (20 names). Each test binds or connects to a control
-#    socket at `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`
-#    and the connect must be allowed: `/tmp` is the only short base that is writable
-#    outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside the
-#    workspace is too long (group 5), and the `workspace` tier denies every Unix-socket
-#    connect (`(deny network-outbound (remote unix-socket))`). The routes these tests
-#    exercise without a socket (the transcript, the conversation, the router, the
-#    version, and a session write route's body validation) run in the sandbox.
+# 6. The hub's session surface (15 names). Each test binds a fake control socket at
+#    `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`: `/tmp`
+#    is the only writable base that short, and the sandbox denies it (group 1),
+#    while `$TMPDIR` inside the workspace is too long (group 5). The routes these
+#    tests exercise without a socket (the transcript, the conversation, the router,
+#    the version) run in the sandbox.
+#
+# 7. The hub's session write routes (13 names). Each test binds or connects to a
+#    control socket at `<home>/run/<pid>.sock`, so its home must be short enough for
+#    `sun_path` and the connect must be allowed: `/tmp` is the only short base that is
+#    writable outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside
+#    the workspace is too long (group 5), and the `workspace` tier denies every
+#    Unix-socket connect (`(deny network-outbound (remote unix-socket))`). The route
+#    these tests exercise without a socket (a session write route's body validation)
+#    runs in the sandbox.
 
 [profile.sandbox]
 # See the group list above; the blank lines below separate the groups.
@@ -381,9 +388,15 @@ not (
   | test(=a_live_session_in_an_unregistered_workspace_is_not_listed_anywhere)
   | test(=a_message_committed_in_the_session_arrives_as_one_entry_event)
   | test(=a_message_committed_while_disconnected_is_in_the_reread_transcript)
+  | test(=a_new_approval_head_runs_the_hook_once_with_only_the_four_variables)
+  | test(=a_question_head_runs_the_hook_with_kind_question_and_an_empty_tool)
+  | test(=a_recovered_socket_does_not_run_the_hook_for_the_same_head_again)
+  | test(=a_repeated_head_after_a_reconnect_runs_the_hook_once)
+  | test(=a_slow_hook_is_killed_at_the_timeout_and_another_sessions_hook_still_runs)
   | test(=a_slow_socket_delays_no_version_and_no_other_repositorys_listing)
   | test(=a_socket_whose_process_died_is_dropped_on_the_next_scan)
   | test(=a_workspace_spelled_through_a_symlink_matches_its_repository)
+  | test(=an_emptied_queue_runs_no_hook)
   | test(=each_repository_lists_only_its_own_live_session)
 
   | test(=a_created_session_sends_its_first_message_as_the_owner_with_the_hub_origin)

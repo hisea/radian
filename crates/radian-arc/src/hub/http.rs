@@ -85,7 +85,7 @@ pub fn bind_address(port: u16) -> SocketAddr {
 /// (registry re-reads, status lines and joins) while the HTTP API serves on a thread of its own
 /// and every repository's pass runs on its own thread (ADR 0048 decision 16). `config` is the
 /// top-level `--config` file the loop reads its `[hub] interval_secs` and `[hub] concurrency`
-/// from.
+/// from, and the session scanner its `[hub.hooks]` commands.
 ///
 /// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
 /// a test or a person stops the hub as soon as it announces itself, and the default action
@@ -120,17 +120,21 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
     let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
     let http_registry = registry.clone();
+    let config_value = load_config(config)?;
     // The reclaim window a hub-held process is told (ADR 0048 §16). `[hub] session_idle_secs`
-    // comes from the same file the scheduling loop reads; a broken file is the same startup
-    // error either way.
-    let idle_secs = session_idle_secs(&load_config(config)?);
+    // comes from the same file the scheduling loop reads.
+    let idle_secs = session_idle_secs(&config_value);
+    // `[hub.hooks]` is read once at start; the hook list a running hub uses does not change
+    // until it is restarted (the same rule as the other `[hub]` keys).
+    let hooks = config_value.hub.hooks;
     // The live-session scanner: its own thread, its own blocking socket work, so no request and
     // no scheduling pass waits on a session's control port.
-    let http_sessions = SessionHub::new(
+    let http_sessions = SessionHub::with_hooks(
         dir.parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| dir.clone()),
         idle_secs,
+        hooks,
     );
     http_sessions.start();
     // The accept loop has a thread and a runtime of its own; no request waits on a pass.

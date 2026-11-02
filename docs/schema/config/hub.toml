@@ -9,3 +9,7 @@ concurrency = 4
 interval_secs = 30
 # Seconds a hub-held session may sit idle before its process exits.
 session_idle_secs = 3600
+
+[hub.hooks]
+# Commands run once when a live session's pending queue gets a new head.
+after_pending = ["true"]

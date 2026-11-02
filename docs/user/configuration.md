@@ -264,6 +264,7 @@ attachments, and the line limit. This key only turns the port on or off.
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 | `hub.session_idle_secs` | integer | `3600` | `60` to `86400` | How long a hub-held session may have no running turn, nothing pending and no running background job before its process exits cleanly; the journal stays and the next prompt resumes it. |
+| `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's pending queue gets a new head. See [the hub page](arc/hub.md#the-after-pending-hook) for the variables, the timeout and the log. |
 
 A value outside its range is a configuration error naming the key and the range.
 An unknown key under `[hub]` is skipped and named at startup.
@@ -279,6 +280,9 @@ port = 7341
 concurrency = 4
 interval_secs = 30
 session_idle_secs = 3600
+
+[hub.hooks]
+after_pending = []
 ```
 
 ## `[context]`

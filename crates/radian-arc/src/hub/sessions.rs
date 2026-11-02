@@ -18,7 +18,10 @@
 //! it as the owner's and the `pending` event carries the full head; it reconnects when it drops,
 //! and the scanner forgets it when the socket goes away. The connection's events are folded
 //! into frames by polling the journal with the same [`AttachFold`] `radian attach` uses, so the
-//! stream and the transcript route can never disagree.
+//! stream and the transcript route can never disagree. The same connection is the
+//! `[hub.hooks] after_pending` point: the hub remembers, per socket, the head it ran the hook
+//! for, so a head the port re-sends starts nothing — also when the scanner forgot the socket
+//! and found it again — and a new process starts over with its own `request_id` sequence.
 //!
 //! **Threads.** The scan, every probe and every subscription is blocking socket and file work on
 //! an OS thread of its own, never on the HTTP runtime's async threads (the rule the scheduling
@@ -38,10 +41,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hyper::body::Bytes;
+use radian_host::config::HubHooks;
 use radian_host::transcript::{AcpFold, AttachFold};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+use crate::hub::hooks::{self, PendingHead};
 use crate::process;
 use crate::store::Store;
 
@@ -167,6 +172,8 @@ pub struct SessionHub {
     home: PathBuf,
     /// `[hub] session_idle_secs`: what a hub-held process is told as its reclaim window.
     idle_secs: u64,
+    /// `[hub.hooks]` (ADR 0048 §16), read once when the hub starts.
+    hooks: HubHooks,
     inner: Mutex<Inner>,
     /// The hub-held processes, keyed by pid. A process is listed here from the moment it is
     /// spawned (with its session id) so a second request never starts a second process for
@@ -192,16 +199,39 @@ struct Inner {
     live: BTreeMap<PathBuf, LiveSession>,
     /// The event fan-out of each live session id.
     events: BTreeMap<String, broadcast::Sender<Bytes>>,
+    /// The head the `after_pending` hook already ran for on each socket. It belongs to the hub
+    /// and not to the subscription's [`Stream`] because the scanner forgets a socket that misses
+    /// two probes and builds a fresh stream when the port answers again, and the port then
+    /// re-sends the head it already pushed (ADR 0048 §16: one run per new head).
+    heads: BTreeMap<PathBuf, SeenHead>,
+}
+
+/// The last pending head the `after_pending` hook ran for on one socket.
+struct SeenHead {
+    /// The session the socket reported. A socket that now hosts another session is another
+    /// process's queue, whose `request_id`s start over.
+    session: String,
+    /// The head's `request_id`.
+    request: u64,
 }
 
 impl SessionHub {
-    /// A hub that has not scanned anything yet. `idle_secs` is the window a hub-held process
-    /// gets before it reclaims itself (`[hub] session_idle_secs`).
+    /// A hub that has not scanned anything yet, with no `[hub.hooks]` commands. `idle_secs` is
+    /// the window a hub-held process gets before it reclaims itself (`[hub]
+    /// session_idle_secs`).
     #[must_use]
     pub fn new(home: PathBuf, idle_secs: u64) -> Arc<Self> {
+        Self::with_hooks(home, idle_secs, HubHooks::default())
+    }
+
+    /// A hub that runs `hooks` for every new pending head of a live session, and tells each
+    /// hub-held process that `idle_secs` is its reclaim window.
+    #[must_use]
+    pub fn with_hooks(home: PathBuf, idle_secs: u64, hooks: HubHooks) -> Arc<Self> {
         Arc::new(Self {
             home,
             idle_secs,
+            hooks,
             inner: Mutex::new(Inner::default()),
             held: Mutex::new(BTreeMap::new()),
             start: Mutex::new(()),
@@ -257,6 +287,60 @@ impl SessionHub {
             .iter()
             .find(|(_, live)| live.id == id)
             .map(|(socket, live)| (socket.clone(), live.clone()))
+    }
+
+    /// The registered repository whose path is the session's workspace, with its registry name.
+    /// A workspace that is not registered has none, and no hook runs for it.
+    fn repo_for(&self, workspace: &str) -> Option<(String, PathBuf)> {
+        let registry = crate::hub::Registry::at(radian_host::hub_dir_for(&self.home));
+        let repos = registry.repos().ok()?;
+        repos
+            .into_iter()
+            .find(|entry| {
+                radian_host::sessions::same_directory(workspace, &entry.path.to_string_lossy())
+            })
+            .map(|entry| (entry.name, entry.path))
+    }
+
+    /// Runs the `[hub.hooks] after_pending` commands for a new head, off this thread. A session
+    /// whose workspace is not registered has no repository name and runs nothing.
+    fn fire(&self, workspace: &str, session: &str, head: &PendingHead) {
+        let Some((repo, root)) = self.repo_for(workspace) else {
+            return;
+        };
+        hooks::fire(&self.home, &self.hooks, &root, &repo, session, head);
+    }
+
+    /// Whether `request_id` is a head the `after_pending` hook has not run for on `socket` yet,
+    /// which makes it a new one; records it when it is. The memory outlives a forgotten socket,
+    /// so the port's re-sent head after a recovery is not new, and it starts over for another
+    /// socket (another process, whose `request_id`s begin at 1 again) or another session id.
+    fn claim_head(&self, socket: &Path, session: &str, request_id: u64) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let new = inner
+            .heads
+            .get(socket)
+            .is_none_or(|seen| seen.session != session || seen.request != request_id);
+        if new {
+            inner.heads.insert(
+                socket.to_path_buf(),
+                SeenHead {
+                    session: session.to_owned(),
+                    request: request_id,
+                },
+            );
+        }
+        new
+    }
+
+    /// Forgets the head memory of sockets whose pid is gone, so it does not grow with every
+    /// process that ever reported here. A socket whose process is still alive keeps its memory
+    /// while the scanner has forgotten the session: that is what a recovery needs.
+    fn forget_dead_heads(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner
+            .heads
+            .retain(|socket, _| socket_pid(socket).is_some_and(process::alive));
     }
 
     /// The event fan-out of the live session `id`, or `None` when no process hosts it.
@@ -323,14 +407,7 @@ impl SessionHub {
         let mut sockets: Vec<PathBuf> = entries
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension().and_then(|ext| ext.to_str()) == Some("sock")
-                    && path
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .and_then(|stem| stem.parse::<u32>().ok())
-                        .is_some_and(process::alive)
-            })
+            .filter(|path| socket_pid(path).is_some_and(process::alive))
             .collect();
         sockets.sort();
         sockets
@@ -618,6 +695,16 @@ impl SessionHub {
     }
 }
 
+/// The pid a socket's file name names, when the file is `<pid>.sock`.
+fn socket_pid(path: &Path) -> Option<u32> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("sock") {
+        return None;
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse::<u32>().ok())
+}
+
 /// One subscription thread and the flag that stops it.
 struct Subscription {
     stop: Arc<AtomicBool>,
@@ -652,6 +739,8 @@ fn scan(hub: &Arc<SessionHub>) {
     let mut failures: BTreeMap<PathBuf, u8> = BTreeMap::new();
     loop {
         hub.reap();
+        // A pid that is gone cannot report again; its memory would only grow the map.
+        hub.forget_dead_heads();
         let sockets = hub.sockets();
         tracked.retain(|socket, subscription| {
             if sockets.contains(socket) {
@@ -1330,7 +1419,7 @@ fn subscribe(hub: Arc<SessionHub>, socket: PathBuf, live: LiveSession) -> Subscr
             let journal = radian_host::session_dir(None)
                 .map(|dir| dir.join(format!("{}.jsonl", live.id)))
                 .unwrap_or_default();
-            let mut stream = Stream::new(Arc::clone(&hub), &live, journal);
+            let mut stream = Stream::new(Arc::clone(&hub), socket.clone(), &live, journal);
             follow(&mut stream, &flag, || connect(&socket, &hub, &flag));
         })
         .ok();
@@ -1340,7 +1429,12 @@ fn subscribe(hub: Arc<SessionHub>, socket: PathBuf, live: LiveSession) -> Subscr
 /// The subscription's frames: one state machine per connection.
 struct Stream {
     hub: Arc<SessionHub>,
+    /// The control socket the session's port listens on: the identity of the process whose
+    /// heads the hook has already seen.
+    socket: PathBuf,
     id: String,
+    /// The workspace the port reported, matched against the registry when a head fires.
+    workspace: String,
     journal: PathBuf,
     /// The memory root a settled call's card resolves against; `None` in a process with none.
     memory_root: Option<PathBuf>,
@@ -1351,10 +1445,12 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(hub: Arc<SessionHub>, live: &LiveSession, journal: PathBuf) -> Self {
+    fn new(hub: Arc<SessionHub>, socket: PathBuf, live: &LiveSession, journal: PathBuf) -> Self {
         let mut stream = Self {
             hub,
+            socket,
             id: live.id.clone(),
+            workspace: live.workspace.clone(),
             journal,
             memory_root: radian_host::memory_dir(),
             fold: None,
@@ -1398,6 +1494,9 @@ impl Stream {
                     .get("length")
                     .and_then(Value::as_u64)
                     .unwrap_or(self.pending);
+                if let Some(head) = self.new_pending_head(&data) {
+                    self.hub.fire(&self.workspace, &self.id, &head);
+                }
                 frames.push(frame("pending", &data));
             }
             // The port fans a `RuntimeEvent` out under `event.name()`, the v1 disk name
@@ -1408,6 +1507,33 @@ impl Stream {
         frames.extend(self.poll_fold());
         frames.extend(self.state_frame());
         frames
+    }
+
+    /// The head this pending event carries, when it is one the `after_pending` hook has not run
+    /// for. A `null` head (an emptied queue) is never one, and the same `request_id` seen again —
+    /// after a reconnect, or because the queue behind the head changed, or because the scanner
+    /// forgot the socket and found it again — is not a new head.
+    fn new_pending_head(&mut self, data: &Value) -> Option<PendingHead> {
+        let head = data.get("head")?;
+        if head.is_null() {
+            return None;
+        }
+        let request_id = head.get("request_id").and_then(Value::as_u64)?;
+        if !self.hub.claim_head(&self.socket, &self.id, request_id) {
+            return None;
+        }
+        Some(PendingHead {
+            kind: head
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            tool: head
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
     }
 
     /// The journal's entries that are new or changed since the last read, one frame each. The
@@ -1691,6 +1817,206 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Mutation: fire on every pending event instead of a new head (drop the `request_id`
+    /// comparison). The second call with the same head then returns a head again.
+    #[test]
+    fn a_repeated_pending_head_is_not_new() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-head");
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        let mut stream = Stream::new(
+            Arc::clone(&hub),
+            dir.path().join("run/1.sock"),
+            &live_row("s", 0),
+            dir.path().join("s.jsonl"),
+        );
+        let approval = json!({
+            "head": {"request_id": 5, "kind": "approval", "tool": "shell"},
+            "length": 1,
+        });
+        let head = stream
+            .new_pending_head(&approval)
+            .expect("a first head is new");
+        assert_eq!(head.kind, "approval");
+        assert_eq!(head.tool, "shell");
+        assert!(
+            stream.new_pending_head(&approval).is_none(),
+            "the same request id is not a new head"
+        );
+        assert!(
+            stream
+                .new_pending_head(&json!({"head": null, "length": 0}))
+                .is_none(),
+            "an emptied queue is no head"
+        );
+        let question = json!({
+            "head": {"request_id": 6, "kind": "question", "question": {"questions": []}},
+            "length": 1,
+        });
+        let head = stream
+            .new_pending_head(&question)
+            .expect("a later request id is new");
+        assert_eq!(head.kind, "question");
+        assert_eq!(head.tool, "", "a question carries no tool");
+    }
+
+    /// Review: a socket the scanner forgot and found again keeps the head memory, so the port's
+    /// re-sent head does not run the hook twice (ADR 0048 §16: one run per new head).
+    #[test]
+    fn a_forgotten_socket_does_not_fire_the_same_head_again() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-forgotten-head");
+        let socket = dir.path().join("run/1.sock");
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        let live = live_row("s", 0);
+        assert!(hub.record(&socket, live.clone()));
+        let head = json!({
+            "head": { "request_id": 1, "kind": "approval", "tool": "shell" },
+            "length": 1,
+        });
+        let journal = dir.path().join("s.jsonl");
+        let mut first = Stream::new(Arc::clone(&hub), socket.clone(), &live, journal.clone());
+        assert!(
+            first.new_pending_head(&head).is_some(),
+            "a first sight is a new head"
+        );
+
+        // The port missed two `list_sessions` probes, so the scanner stopped the subscription
+        // and forgot the session; it answers again, `record` reports it as new, and `subscribe`
+        // builds a fresh `Stream`. The port then re-sends the head it already pushed.
+        hub.forget(&socket);
+        assert!(
+            hub.record(&socket, live.clone()),
+            "the recovered socket is new again"
+        );
+        let mut recovered = Stream::new(Arc::clone(&hub), socket, &live, journal);
+        assert!(
+            recovered.new_pending_head(&head).is_none(),
+            "the head the hook already ran for is not new on the recovered socket"
+        );
+
+        // Another process (another socket path) starts its `request_id`s over: the same id is a
+        // new head there.
+        let other = dir.path().join("run/2.sock");
+        let mut elsewhere = Stream::new(Arc::clone(&hub), other, &live, dir.path().join("s.jsonl"));
+        assert!(
+            elsewhere.new_pending_head(&head).is_some(),
+            "a new socket's request ids start over"
+        );
+    }
+
+    /// Edge 1/2/3/5 through the subscription: a new head runs the hook with the four values,
+    /// the same head seen again does not, a question sets an empty tool, and an emptied queue
+    /// runs nothing. The socket tests of `tests/hub_sessions.rs` need a `/tmp` path; this one
+    /// uses the workspace temp tree and runs inside the sandbox.
+    #[test]
+    fn a_new_pending_head_runs_the_configured_hook_once() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-hook");
+        let home = dir.path().to_path_buf();
+        let repo = home.join("repo");
+        std::fs::create_dir_all(repo.join(".radian/arc")).unwrap();
+        let config = crate::store::config::default_text("main")
+            .replace("command_timeout_secs = 3600", "command_timeout_secs = 5");
+        std::fs::write(repo.join(".radian/arc/config.toml"), config).unwrap();
+        let registry = crate::hub::Registry::at(radian_host::hub_dir_for(&home));
+        registry
+            .add(&repo, Some("repo"))
+            .expect("the repository registers");
+        let runs = repo.join("runs.txt");
+        let command = format!(
+            "printf '%s|%s|%s|%s\\n' \"$RADIAN_HUB_REPO\" \"$RADIAN_HUB_SESSION\" \
+             \"$RADIAN_HUB_PENDING_KIND\" \"$RADIAN_HUB_TOOL\" >> '{}'",
+            runs.display()
+        );
+        let hub = SessionHub::with_hooks(
+            home.clone(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+            HubHooks {
+                after_pending: vec![command],
+            },
+        );
+        let live = LiveSession {
+            id: "s".to_owned(),
+            workspace: std::fs::canonicalize(&repo)
+                .expect("the repository canonicalizes")
+                .to_string_lossy()
+                .into_owned(),
+            state: "working".to_owned(),
+            pending: 0,
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            holder: "tui".to_owned(),
+        };
+        let mut stream = Stream::new(
+            Arc::clone(&hub),
+            home.join("run/1.sock"),
+            &live,
+            home.join("s.jsonl"),
+        );
+        let line = |head: Value, length: u64| {
+            json!({
+                "event": { "source": "control", "name": "pending",
+                           "data": { "head": head, "length": length } },
+            })
+            .to_string()
+        };
+        let wait = |count: usize| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let lines: Vec<String> = std::fs::read_to_string(&runs)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect();
+                if lines.len() >= count {
+                    return lines;
+                }
+                assert!(std::time::Instant::now() < deadline, "the hook never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        // Edge 1: a new approval head, once.
+        stream.on_line(&line(
+            json!({ "request_id": 1, "kind": "approval", "tool": "shell",
+                    "arguments": { "command": "secret" } }),
+            1,
+        ));
+        let lines = wait(1);
+        assert_eq!(lines[0], "repo|s|approval|shell");
+        // Edge 2: the same head again is not a new one.
+        stream.on_line(&line(
+            json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+            1,
+        ));
+        // Edge 5: the queue empties; nothing runs.
+        stream.on_line(&line(Value::Null, 0));
+        // Edge 3: a question is a new head with an empty tool.
+        stream.on_line(&line(
+            json!({ "request_id": 2, "kind": "question",
+                    "question": { "questions": [{ "question": "secret" }] } }),
+            1,
+        ));
+        wait(2);
+        std::thread::sleep(Duration::from_millis(300));
+        let lines: Vec<String> = std::fs::read_to_string(&runs)
+            .expect("the hook wrote its runs")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "repo|s|approval|shell".to_owned(),
+                "repo|s|question|".to_owned()
+            ]
+        );
+    }
+
     #[test]
     fn a_session_another_process_hosts_is_not_started_again() {
         let dir = crate::test_support::TempDir::new("hub-sessions-hosted");
@@ -1719,6 +2045,7 @@ mod tests {
         );
         let mut stream = Stream::new(
             Arc::clone(&hub),
+            dir.path().join("run/1.sock"),
             &live_row("s", 0),
             dir.path().join("s.jsonl"),
         );
@@ -1761,7 +2088,12 @@ mod tests {
             dir.path().to_path_buf(),
             radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
         );
-        let mut stream = Stream::new(Arc::clone(&hub), &live_row("s", 0), journal.clone());
+        let mut stream = Stream::new(
+            Arc::clone(&hub),
+            dir.path().join("run/1.sock"),
+            &live_row("s", 0),
+            journal.clone(),
+        );
         let mut file = fs::OpenOptions::new().append(true).open(&journal).unwrap();
         let appended = json!({
             "schema_version": 1,
@@ -1838,12 +2170,13 @@ mod tests {
         let live = live_row("s", 0);
         // The channel a session's subscribers read; the scanner records it for every live
         // session before it starts the subscription.
-        assert!(hub.record(&PathBuf::from("/run/s.sock"), live.clone()));
+        let socket = PathBuf::from("/run/s.sock");
+        assert!(hub.record(&socket, live.clone()));
         let mut receiver = hub
             .channel("s")
             .expect("a live session has a fan-out")
             .subscribe();
-        let mut stream = Stream::new(Arc::clone(&hub), &live, dir.path().join("s.jsonl"));
+        let mut stream = Stream::new(Arc::clone(&hub), socket, &live, dir.path().join("s.jsonl"));
         // Two connections: the first is closed by the test, the second carries the event. The
         // read timeout is what `connect` sets on a real socket, so the loop wakes to see `stop`.
         let (first, mut peer_one) = UnixStream::pair().expect("a socket pair");
@@ -1903,6 +2236,7 @@ mod tests {
         );
         let mut stream = Stream::new(
             Arc::clone(&hub),
+            dir.path().join("run/1.sock"),
             &live_row("s", 0),
             dir.path().join("s.jsonl"),
         );

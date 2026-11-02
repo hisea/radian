@@ -30,6 +30,7 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
     repos.toml             the registered repositories (ADR 0048)
     token                  the hub's bearer token (ADR 0048)
     hub.lock               the flock a running hub holds (ADR 0048)
+    hub.log                the output of the `[hub.hooks] after_pending` commands (ADR 0048 §16)
 ```
 
 `RADIAN_HOME` override moves all subdirectories with it. `--session-dir` moves only the session directory.

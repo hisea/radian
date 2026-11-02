@@ -36,6 +36,7 @@
 //! itself after `[hub] session_idle_secs` without work; the hub stops whatever it still holds
 //! when it shuts down.
 
+pub mod hooks;
 pub mod http;
 pub mod lock;
 pub mod r#loop;
