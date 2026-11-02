@@ -844,3 +844,20 @@ restored from `.radian/metrics-r4.rs.bak`, which `cmp` found identical.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0299-M6 | the anchor match drops its `TurnFinished` arm, so a between-turns `/compact` anchors on the previous turn's last usage record | ✅ 1 failed (rc=100) | `metrics::tests::a_compaction_after_a_turn_anchors_on_the_turns_end` (`left: 64000`, `right: 60000`) |
+
+## TK0301: the request latency anchor's full record set (2026-11-01)
+
+Branch `work/TK0301-task-metrics-followups-3`, the followups to TK0299's reviews. The first two
+mutations keep `InputAdmitted` and `MemoryInjected` out of the anchor, the state before this
+branch; both are written between a response and the next request, so each is the last record
+before it. The third removes the in-flight exclusion arm, so the records the host may write while
+a request streams move the anchor again. Each was applied to `src/metrics.rs`, the named tests
+were run with `cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'`, and the source was restored from `.radian/metrics-mut.rs.bak`, which `cmp` found
+identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0301-M1 | `InputAdmitted` joins the in-flight exclusion arm, so it no longer moves the anchor | ✅ 1 failed (rc=100) | `metrics::tests::an_input_admitted_between_requests_moves_the_anchor` (`left: 4500`, `right: 4000`) |
+| TK0301-M2 | `MemoryInjected` joins the in-flight exclusion arm, so it no longer moves the anchor | ✅ 1 failed (rc=100) | `metrics::tests::a_memory_injected_before_a_request_moves_the_anchor` (`left: 4400`, `right: 4200`) |
+| TK0301-M3 | the in-flight exclusion arm is removed, so `InboxEnqueued`, `BackgroundJobSettled`, `ConfigChanged`, `ApprovalPolicyChanged` and `UserBash` move the anchor again | ✅ 2 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) and `metrics::tests::in_flight_config_and_user_bash_records_do_not_move_the_anchor` (`left: 100`, `right: 3000`) |
