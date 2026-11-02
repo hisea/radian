@@ -1924,19 +1924,23 @@ const VERDICT_COPY_DIR: &str = ".radian/arc-verdicts";
 /// git ignores the copies whatever the repository's own ignore rules say (ADR 0048 decision 7).
 const VERDICT_COPY_IGNORE: &[u8] = b"*\n";
 
+/// The name of the ignore file each copy directory carries (ADR 0048 decision 7).
+const VERDICT_COPY_IGNORE_FILE: &str = ".gitignore";
+
 /// Copies every attempt file a brief names under `arc/runs/` into the worker's worktree and
 /// rewrites its path to the copy (ADR 0048 decision 7). A path that cannot be copied stays in
 /// the text as it is and gets one note line for the attempt record; nothing here fails the
 /// attempt. The copy is keyed by the path's own `runs/<task>/attempts/<attempt>/` segments, so
 /// a follow-up task can name another task's verdict. When at least one copy is written, the
 /// copies' directory gets its own `.gitignore` holding `*`, so git ignores it in every
-/// repository; a brief that names no copy writes nothing at all.
+/// repository; a repository that tracks that file gets the rule in each task's copy directory
+/// instead (see [`write_verdict_ignores`]). A brief that names no copy writes nothing at all.
 fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<String>) {
     let runs = arc.join("runs");
     let prefix = format!("{}/", runs.display());
     let mut text = String::with_capacity(brief.len());
     let mut notes = Vec::new();
-    let mut copied = false;
+    let mut copied_tasks: Vec<String> = Vec::new();
     let mut rest = brief;
     while let Some(start) = rest.find(&prefix) {
         text.push_str(&rest[..start]);
@@ -1948,8 +1952,10 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
             .unwrap_or(tail.len());
         let named = &tail[..end];
         match copy_verdict(named, &runs, worktree) {
-            Ok(relative) => {
-                copied = true;
+            Ok((relative, task)) => {
+                if !copied_tasks.contains(&task) {
+                    copied_tasks.push(task);
+                }
                 text.push_str(&relative.display().to_string());
             }
             Err(reason) => {
@@ -1960,9 +1966,8 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
         rest = &tail[end..];
     }
     text.push_str(rest);
-    if copied
-        && let Err(reason) =
-            write_verdict_copy(worktree, &verdict_ignore_path(), VERDICT_COPY_IGNORE)
+    if !copied_tasks.is_empty()
+        && let Err(reason) = write_verdict_ignores(worktree, &copied_tasks)
     {
         notes.push(format!("verdict copy ignore file skipped: {reason}"));
     }
@@ -1972,7 +1977,49 @@ fn copy_verdicts(brief: &str, arc: &Path, worktree: &Path) -> (String, Vec<Strin
 /// The ignore file the copies' directory carries, written the same no-symlink way as the
 /// copies themselves (ADR 0048 decision 7).
 fn verdict_ignore_path() -> PathBuf {
-    Path::new(VERDICT_COPY_DIR).join(".gitignore")
+    Path::new(VERDICT_COPY_DIR).join(VERDICT_COPY_IGNORE_FILE)
+}
+
+/// The ignore file inside one task's copy directory: the copies' own `.gitignore` cannot be
+/// used when the repository tracks it (ADR 0048 decision 7).
+fn verdict_task_ignore_path(task: &str) -> PathBuf {
+    Path::new(VERDICT_COPY_DIR)
+        .join(task)
+        .join(VERDICT_COPY_IGNORE_FILE)
+}
+
+/// Makes git ignore the copies, written the same no-symlink way as the copies themselves. The
+/// copies' own `.gitignore` holds `*`; when the repository tracks that file, the wrapper
+/// leaves it as it is and writes the rule into each task's copy directory instead: git never
+/// ignores a tracked file, so rewriting it would leave the worktree dirty and fail the
+/// delivery check (ADR 0048 decision 7).
+fn write_verdict_ignores(worktree: &Path, tasks: &[String]) -> Result<(), String> {
+    if !verdict_ignore_is_tracked(worktree) {
+        return write_verdict_copy(worktree, &verdict_ignore_path(), VERDICT_COPY_IGNORE);
+    }
+    for task in tasks {
+        write_verdict_copy(
+            worktree,
+            &verdict_task_ignore_path(task),
+            VERDICT_COPY_IGNORE,
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether the worktree's repository tracks the copies' own `.gitignore`. git never ignores a
+/// tracked file, so writing it would leave the worktree dirty. A worktree whose git cannot be
+/// asked counts as tracking it: the nested ignore file hides the copies either way, and
+/// guessing the other way could dirty a tracked file (ADR 0048 decision 7).
+fn verdict_ignore_is_tracked(worktree: &Path) -> bool {
+    let path = format!("{VERDICT_COPY_DIR}/{VERDICT_COPY_IGNORE_FILE}");
+    match crate::git::run(
+        worktree,
+        &["ls-files", "--error-unmatch", "--", path.as_str()],
+    ) {
+        Ok(out) => out.status.success(),
+        Err(_) => true,
+    }
 }
 
 /// Whether `c` ends a path in a brief. The briefs wrap a path in backticks; prose around one
@@ -1985,9 +2032,10 @@ fn ends_path(c: char) -> bool {
         )
 }
 
-/// Copies one named attempt file into the worktree and returns the path the worker reads. The
-/// reason a copy is refused is the second half of the note line.
-fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<PathBuf, String> {
+/// Copies one named attempt file into the worktree and returns the path the worker reads and
+/// the task whose directory holds it. The reason a copy is refused is the second half of the
+/// note line.
+fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<(PathBuf, String), String> {
     let path = Path::new(named);
     let Some((task, attempt)) = verdict_ids(path, runs) else {
         return Err("not a file of an attempt".to_owned());
@@ -2026,7 +2074,7 @@ fn copy_verdict(named: &str, runs: &Path, worktree: &Path) -> Result<PathBuf, St
         ));
     }
     write_verdict_copy(worktree, &relative, &bytes)?;
-    Ok(relative)
+    Ok((relative, task))
 }
 
 /// Opens a named attempt file without following a symbolic link. A worker can plant a link in

@@ -2179,7 +2179,8 @@ identical.
 ## TK0303: the verdict copy directory ignores itself (2026-11-02, branch `work/TK0303-verdict-copy-dir-ignores-itself`)
 
 The wrapper writes `.radian/arc-verdicts/.gitignore` with `*` whenever it writes a verdict copy,
-with the same no-symlink handling as the copies. Each mutation was applied by hand to the named
+with the same no-symlink handling as the copies; a repository that tracks that file gets the
+rule in each task's copy directory instead. Each mutation was applied by hand to the named
 working file; the wrapper tests run the `radian` binary, so it was rebuilt with `cargo build -p
 radian-tui --bin radian`, and each named test ran with `cargo nextest run -p radian-arc --locked
 --profile sandbox --test work -E 'test(<name>)'`. Each file was restored from a copy under
@@ -2187,7 +2188,8 @@ radian-tui --bin radian`, and each named test ran with `cargo nextest run -p rad
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0303-M1 | the `.gitignore` write is skipped (`copied && false`), so a copy is left untracked | `a_verdict_copy_is_ignored_without_the_repositorys_own_rule` (the attempt's `dirty` list held `.radian/arc-verdicts/`); also `an_existing_verdict_ignore_file_is_replaced_with_a_star`, `a_verdict_ignore_file_link_is_noted_and_the_attempt_runs`, `two_verdict_copies_share_one_ignore_file` | ✅ 4 failed |
-| TK0303-M2 | the `.gitignore` is written with plain `fs::write`, which follows a planted link | `a_verdict_ignore_file_link_is_noted_and_the_attempt_runs` (the link's target outside the worktree held `*\n`, not `keep\n`) | ✅ 1 failed |
+| TK0303-M1 | the ignore-file write is skipped (`if false` before `write_verdict_ignores`), so a copy is left untracked | `a_verdict_copy_is_ignored_without_the_repositorys_own_rule` (the attempt's `dirty` list held `.radian/arc-verdicts/`); also `an_existing_verdict_ignore_file_is_replaced_with_a_star`, `a_verdict_ignore_file_link_is_noted_and_the_attempt_runs`, `two_verdict_copies_share_one_ignore_file` and `a_tracked_verdict_ignore_file_is_left_alone` | ✅ 5 failed |
+| TK0303-M2 | both ignore files are written with plain `fs::write`, which follows a planted link | `a_verdict_ignore_file_link_is_noted_and_the_attempt_runs` (the link's target outside the worktree held `*\n`, not `keep\n`) | ✅ 1 failed |
+| TK0303-M3 | the tracked-file check is skipped (`verdict_ignore_is_tracked` returns `false`), so a tracked `.gitignore` is overwritten | `a_tracked_verdict_ignore_file_is_left_alone` (the attempt exited 1 and `git status` held `.radian/arc-verdicts/.gitignore` as modified) | ✅ 1 failed |
 
-2/2 caught.
+3/3 caught.
