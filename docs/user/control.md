@@ -243,7 +243,7 @@ A `config` `model` must name one of these entries or the current route.
 
 ```json
 {"id": 1, "ok": true, "sessions": [{
-  "id": "...", "kind": "main",
+  "id": "...", "kind": "main", "holder": "tui",
   "workspace": "/home/me/project",
   "model": {"provider": "anthropic", "model": "claude-sonnet-4"},
   "state": "blocked",
@@ -256,6 +256,7 @@ One process serves one session, so the list has one `main` row:
 |---|---|
 | `id` | the session id |
 | `kind` | always `main` |
+| `holder` | `hub` when the process runs in the hub-held mode a hub starts, `tui` for every other hosting process (a `radian` TUI, an interactive `radian exec`, a `-p` run). The hub reports a session with `holder` `hub` as `live: hub` and every other live one as `live: tui`. |
 | `workspace` | the canonical workspace the session was opened in |
 | `model` | the model route in force |
 | `state` | `idle`, `working` or `blocked`; a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, and everything else is `idle` |
