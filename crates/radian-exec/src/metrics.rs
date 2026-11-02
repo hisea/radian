@@ -2066,9 +2066,11 @@ mod tests {
     }
 
     /// A record the host writes between two requests moves the anchor; the records it may write
-    /// while the next model call is already streaming do not. The 4 s `ContextFileAppended` is
+    /// while the next model call is already streaming do not. The 4.1 s `MemoryInjected` is
     /// therefore the anchor, not the 5.8-5.9 s `ConfigChanged`, `ApprovalPolicyChanged` and
-    /// `UserBash`.
+    /// `UserBash`. Neither the `ContextFileAppended` nor the `MemoryInjected` is in the anchor
+    /// list the fold used before it moved on every between-requests record, so this test fails
+    /// there with 3000 ms (the 3 s tool result).
     #[test]
     fn in_flight_config_and_user_bash_records_do_not_move_the_anchor() {
         let metrics = fold(&[
@@ -2107,27 +2109,35 @@ mod tests {
                 "ContextFileAppended",
                 json!({"path": "crates/x/AGENTS.md", "bytes": 120, "truncated": false}),
             ),
+            // The memory index is audited in `before_model_call`, immediately before the request
+            // is sent, so it is the last record written between the two requests.
             record(
                 8,
+                "2026-10-31T00:00:04.100000Z",
+                "MemoryInjected",
+                json!({"indexes": [{"path": "MEMORY.md", "hash": "abc"}]}),
+            ),
+            record(
+                9,
                 "2026-10-31T00:00:05.800000Z",
                 "ConfigChanged",
                 json!({"revision": 1, "change": {"thinking": "high"}}),
             ),
             record(
-                9,
+                10,
                 "2026-10-31T00:00:05.850000Z",
                 "ApprovalPolicyChanged",
                 json!({"policy": "never"}),
             ),
             record(
-                10,
+                11,
                 "2026-10-31T00:00:05.900000Z",
                 "UserBash",
                 json!({"command": "ls", "exclude_from_context": false}),
             ),
             assistant(2, "2026-10-31T00:00:05.950000Z"),
             record(
-                12,
+                13,
                 "2026-10-31T00:00:06Z",
                 "ModelUsageRecorded",
                 json!({"usage": {"input": 20}}),
@@ -2135,8 +2145,8 @@ mod tests {
         ]);
         assert_eq!(metrics.request_log.len(), 2);
         assert_eq!(
-            metrics.request_log[1]["latency_ms"], 2000,
-            "the anchor is the 4 s ContextFileAppended, not the 5.8-5.9 s host records"
+            metrics.request_log[1]["latency_ms"], 1900,
+            "the anchor is the 4.1 s MemoryInjected, not the 5.8-5.9 s host records"
         );
     }
 
