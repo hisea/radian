@@ -84,8 +84,11 @@ pub fn bind_address(port: u16) -> SocketAddr {
 /// `hub: listening on <addr>` as its first stdout line, and then runs the hub's own thread
 /// (registry re-reads, status lines and joins) while the HTTP API serves on a thread of its own
 /// and every repository's pass runs on its own thread (ADR 0048 decision 16). `config` is the
-/// top-level `--config` file the loop reads its `[hub] interval_secs` and `[hub] concurrency`
-/// from, and the session scanner its `[hub.hooks]` commands.
+/// top-level `--config` file the loop reads its `[hub] interval_secs`, `[hub] concurrency` and
+/// `[hub] session_idle_secs` from, the session scanner its `[hub.hooks]` commands, and every
+/// hub-held process the path it is started with (ADR 0048 §16). When no explicit file was given
+/// the machine's default path is resolved, so the first start still writes the commented
+/// default template there (ADR 0008 §2).
 ///
 /// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
 /// a test or a person stops the hub as soon as it announces itself, and the default action
@@ -99,6 +102,15 @@ pub fn bind_address(port: u16) -> SocketAddr {
 /// `hub.lock` is held by another hub, or the port cannot be bound.
 pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     crate::run::catch_stop_signals();
+    // ADR 0008 §2: a fresh install has no config file. The hub creates the commented default at
+    // the default location, exactly as the TUI and `radian exec` do, so a machine whose first
+    // radian process is the hub still gets the template. An explicit `--config`/`RADIAN_CONFIG`
+    // path is never created; a failure warns once and the hub continues.
+    match radian_host::ensure_default_config(config) {
+        Ok(Some(path)) => eprintln!("created a default config at {}", path.display()),
+        Ok(None) => {}
+        Err(warning) => eprintln!("[config] {warning}; continuing without creating it"),
+    }
     let registry = Registry::open()?;
     let dir = registry.dir().to_path_buf();
     radian_host::ensure_private_dir(&dir)

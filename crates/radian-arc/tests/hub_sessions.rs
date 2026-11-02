@@ -1905,10 +1905,12 @@ fn a_slow_hook_is_killed_at_the_timeout_and_another_sessions_hook_still_runs() {
     register(&home, "repo", &repo.canonical_clone());
     let slept = repo.clone.join("slept.txt");
     let woke = repo.clone.join("woke.txt");
+    let child_pid = repo.clone.join("child.pid");
     write_hub_hooks(
         &home,
         &[format!(
-            "if [ \"$RADIAN_HUB_SESSION\" = \"session-sleepy\" ]; then sleep 30; printf slept > '{}'; else printf woke > '{}'; fi",
+            "if [ \"$RADIAN_HUB_SESSION\" = \"session-sleepy\" ]; then sleep 30 & echo $! > '{}'; wait; printf slept > '{}'; else printf woke > '{}'; fi",
+            child_pid.display(),
             slept.display(),
             woke.display()
         )],
@@ -1932,10 +1934,32 @@ fn a_slow_hook_is_killed_at_the_timeout_and_another_sessions_hook_still_runs() {
     eventually(Duration::from_secs(15), || {
         hub_log(&home).contains("timed out after 5 s").then_some(())
     });
+    // The command left a background `sleep` in its process group. A timeout that killed only
+    // the shell would leave that child alive; the group kill must take it too. The marker alone
+    // cannot prove this (the shell writes it, so a killed shell skips it either way), and the
+    // old `sleep 30` assertion ran long before the marker could appear.
+    let child: u32 = std::fs::read_to_string(&child_pid)
+        .expect("the command wrote its background child's pid")
+        .trim()
+        .parse()
+        .expect("the pid is a number");
+    let alive = |pid: u32| {
+        // SAFETY: `kill(pid, 0)` only probes whether the process exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(child) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if alive(child) {
+        // Clean up a child the broken path left behind.
+        let _ = unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) };
+    }
     assert!(
-        !slept.exists(),
-        "the timed-out command was killed before its second step"
+        !alive(child),
+        "the timed-out command's process group was killed"
     );
+    assert!(!slept.exists(), "the timed-out command ran no further step");
     let log = hub_log(&home);
     assert!(
         log.contains("session-sleepy"),

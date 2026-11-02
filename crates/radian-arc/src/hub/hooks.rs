@@ -290,9 +290,14 @@ mod tests {
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("the home is creatable");
         let marker = repo.join("after.txt");
+        let pidfile = repo.join("child.pid");
         run_all(
             &home,
-            &[format!("sleep 30; printf after > '{}'", marker.display())],
+            &[format!(
+                "sleep 30 & echo $! > '{}'; wait; printf after > '{}'",
+                pidfile.display(),
+                marker.display()
+            )],
             &repo,
             "repo",
             "sleepy",
@@ -300,6 +305,23 @@ mod tests {
                 kind: "approval".to_owned(),
                 tool: "shell".to_owned(),
             },
+        );
+        // The command wrote its background `sleep`'s pid before the timeout. A path that
+        // returns `TimedOut` without killing the process **group** leaves that child alive
+        // (`run_all` blocks through the timeout, so the kill has already happened).
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the command wrote its child pid")
+            .trim()
+            .parse()
+            .expect("the pid is a number");
+        if crate::process::alive(pid) {
+            // Clean up a child the broken path left behind, so a failed assertion does not
+            // leak a sleeping process for its full 30 s.
+            let _ = crate::process::signal(pid, crate::process::SIGKILL);
+        }
+        assert!(
+            !crate::process::alive(pid),
+            "the timed-out command's process group was killed"
         );
         assert!(
             !marker.exists(),

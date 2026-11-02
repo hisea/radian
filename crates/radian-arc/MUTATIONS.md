@@ -2339,8 +2339,6 @@ which `cmp` found identical.
 
 1/1 caught.
 
-3/3 caught.
-
 ## TK0310 rework 2: a prompt's scan can miss a port that is listening (2026-11-02, branch `work/TK0310-tui-hub-marker-and-takeover`)
 
 The hub's prompt route treated a port that was bound but not yet serving as no host: its
@@ -2359,3 +2357,17 @@ sandbox (which denies socket connects), and restored from `.radian/sessions.rs.b
 | TK0310-M2 | `start_for` returns the spawn failure instead of probing the sockets again for the holder | `hub_session_write::a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it` (`502` `the session process exited before its control port answered (exit status: 2)` instead of `200`) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0314: the hub-session review follow-ups (2026-11-02, branch `work/TK0314-hub-sessions-followups`)
+
+Each mutation was applied in place and restored from a copy under `.radian/bak/` that `cmp`
+found identical. M5-M7 ran inside the workspace sandbox; M8's strengthened hook test also does.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0314-M5 | `socket_ino` returns `0` for every socket, so the head memory is keyed by path alone again | `hub::sessions::tests::a_reused_pid_socket_file_starts_the_head_memory_over` (the reused pid's first `request_id` 1 was not new) | ✅ 1 failed |
+| TK0314-M6 | `parse_input` loses the shape pre-check for `images`/`files` (a present `null` reaches the composer check as `422`) | `hub::sessions::tests::a_null_attachment_is_a_bad_body_not_an_absent_field` (`Invalid` instead of `Bad`) | ✅ 1 failed |
+| TK0314-M7 | `serve` no longer calls `ensure_default_config` | `hub_session_write::a_hubs_first_start_writes_the_default_config_template` (no `config/config.toml` appeared) | ✅ 1 failed |
+| TK0314-M8 | the timeout path kills only the shell (`child.kill()`) instead of the process group (`kill_group(pid)`) | `hub::hooks::tests::a_command_past_its_timeout_is_killed_and_logged` (the background `sleep` child stayed alive) | ✅ 1 failed |
+
+4/4 caught.
