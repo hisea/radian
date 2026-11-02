@@ -1655,8 +1655,10 @@ const HOLDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// ADR 0048 §16's one-process-per-journal rule: a session opener asks this before it takes the
 /// journal's single-writer lock, so a `--resume` of a session a hub-held process holds is
 /// refused by name instead of failing on the lock. `session_id` is the user-chosen id, which
-/// two session directories may share, so the row's journal path must match too. The scan is
-/// read-only: each socket gets one `list_sessions` request and the reply is never written back.
+/// two session directories may share, so a row that reports its journal path must match it
+/// too; a row that reports none (a process older than the field) is matched by the id alone
+/// rather than silently meaning "no holder". The scan is read-only: each socket gets one
+/// `list_sessions` request and the reply is never written back.
 #[cfg(unix)]
 pub fn hub_holder(session_id: &str, journal: &Path) -> Option<HubHolder> {
     let home = crate::home::radian_home()?;
@@ -1677,15 +1679,10 @@ pub fn hub_holder(session_id: &str, journal: &Path) -> Option<HubHolder> {
         let Some(rows) = answer.get("sessions").and_then(Value::as_array) else {
             continue;
         };
-        if rows.iter().any(|row| {
-            row.get("kind").and_then(Value::as_str) == Some("main")
-                && row.get("id").and_then(Value::as_str) == Some(session_id)
-                && row.get("holder").and_then(Value::as_str) == Some("hub")
-                && row
-                    .get("journal")
-                    .and_then(Value::as_str)
-                    .is_some_and(|held| same_journal(Path::new(held), journal))
-        }) {
+        if rows
+            .iter()
+            .any(|row| row_names_the_holder(row, session_id, journal))
+        {
             return Some(HubHolder { pid });
         }
     }
@@ -1695,6 +1692,26 @@ pub fn hub_holder(session_id: &str, journal: &Path) -> Option<HubHolder> {
 #[cfg(not(unix))]
 pub fn hub_holder(_session_id: &str, _journal: &Path) -> Option<HubHolder> {
     None
+}
+
+/// Whether one `list_sessions` row is the hub-held process for the journal at `journal`.
+///
+/// The journal path is what tells two sessions with the same user-chosen id under different
+/// session directories apart. A row that carries no path — a process older than the `journal`
+/// field, or a stand-in hub — has only its id to be matched by, so it counts as the holder:
+/// the lookup must fail closed rather than silently answer "no holder".
+#[cfg(unix)]
+fn row_names_the_holder(row: &Value, session_id: &str, journal: &Path) -> bool {
+    if row.get("kind").and_then(Value::as_str) != Some("main")
+        || row.get("id").and_then(Value::as_str) != Some(session_id)
+        || row.get("holder").and_then(Value::as_str) != Some("hub")
+    {
+        return false;
+    }
+    match row.get("journal").and_then(Value::as_str) {
+        Some(held) => same_journal(Path::new(held), journal),
+        None => true,
+    }
 }
 
 /// Whether two reported journal paths name the same file: the file name exactly, the parent
@@ -1844,6 +1861,8 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::row_names_the_holder;
     use super::same_journal;
 
     /// The one-holder lookup compares the journal file, not only the user-chosen session id: two
@@ -1866,5 +1885,34 @@ mod tests {
         );
         assert!(!same_journal(&shared_a, &a.join("other.jsonl")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row with no `journal` field — an older process, or a stand-in hub — is still the
+    /// holder of the requested id; it must not read as "no holder". A row that does report a
+    /// journal keeps the exact-file rule.
+    #[cfg(unix)]
+    #[test]
+    fn a_row_without_a_journal_is_matched_by_the_session_id() {
+        let wanted = std::path::Path::new("/tmp/sessions/shared.jsonl");
+        let bare = serde_json::json!({ "id": "shared", "kind": "main", "holder": "hub" });
+        assert!(row_names_the_holder(&bare, "shared", wanted));
+        assert!(!row_names_the_holder(&bare, "other", wanted));
+        let elsewhere = serde_json::json!({
+            "id": "shared",
+            "kind": "main",
+            "holder": "hub",
+            "journal": "/tmp/elsewhere/shared.jsonl",
+        });
+        assert!(
+            !row_names_the_holder(&elsewhere, "shared", wanted),
+            "a reported journal keeps the exact-file rule"
+        );
+        let same = serde_json::json!({
+            "id": "shared",
+            "kind": "main",
+            "holder": "hub",
+            "journal": "/tmp/sessions/shared.jsonl",
+        });
+        assert!(row_names_the_holder(&same, "shared", wanted));
     }
 }

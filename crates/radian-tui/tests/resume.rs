@@ -87,11 +87,11 @@ fn run_resume(home: &Path, sessions: &Path, workspace: &Path, id: &str) -> Outpu
 }
 
 /// A stand-in hub-held process: a control socket at `<home>/run/<test pid>.sock` whose
-/// `list_sessions` reports `id` as `holder: hub`. It keeps answering after the child exits,
-/// which is how the test proves the refusal left the holder untouched. The socket is named
-/// with the **test process's** pid (alive) so a concurrent app's stale-socket cleanup leaves
-/// it alone.
-fn start_fake_hub(home: &Path, id: &str, workspace: &Path) -> (PathBuf, u32) {
+/// `list_sessions` reports `id` (and `journal`) as `holder: hub`. It keeps answering after the
+/// child exits, which is how the test proves the refusal left the holder untouched. The socket
+/// is named with the **test process's** pid (alive) so a concurrent app's stale-socket cleanup
+/// leaves it alone.
+fn start_fake_hub(home: &Path, id: &str, journal: &Path, workspace: &Path) -> (PathBuf, u32) {
     let run = home.join("run");
     std::fs::create_dir_all(&run).unwrap();
     let pid = std::process::id();
@@ -99,6 +99,7 @@ fn start_fake_hub(home: &Path, id: &str, workspace: &Path) -> (PathBuf, u32) {
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).unwrap();
     let id = id.to_owned();
+    let journal = journal.to_string_lossy().into_owned();
     let workspace = std::fs::canonicalize(workspace)
         .unwrap()
         .to_string_lossy()
@@ -120,6 +121,7 @@ fn start_fake_hub(home: &Path, id: &str, workspace: &Path) -> (PathBuf, u32) {
                     "id": id,
                     "kind": "main",
                     "holder": "hub",
+                    "journal": journal,
                     "workspace": workspace,
                     "model": {"provider": "anthropic", "model": "m"},
                     "state": "idle",
@@ -196,7 +198,7 @@ async fn resume_refuses_a_session_a_hub_held_process_hosts() {
     let _ = std::fs::remove_file(home.join(format!("run/{}.sock", std::process::id())));
     let session = write_session(&sessions, "held", &ws, "held by the hub").await;
     let before = std::fs::read(&session).unwrap();
-    let (socket, holder_pid) = start_fake_hub(&home, "held", &ws);
+    let (socket, holder_pid) = start_fake_hub(&home, "held", &session, &ws);
 
     let output = run_resume(&home, &sessions, &ws, "held");
     let stderr = String::from_utf8_lossy(&output.stderr);

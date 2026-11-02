@@ -294,7 +294,7 @@ One `main` row (one process serves one session):
 | field | meaning |
 |---|---|
 | `workspace` | the canonical workspace this session was opened in |
-| `journal` | the journal file this process has open, so two sessions with the same user-chosen id under different session directories are told apart |
+| `journal` | the journal file this process has open, so two sessions with the same user-chosen id under different session directories are told apart. A process that does not report the field (an older build) is matched by `id` alone. |
 | `holder` | `hub` for a process a hub started in its hub-held mode (ADR 0048 §16), `tui` for every other hosting process. The hub turns `hub` into `live: hub` and `tui` into `live: tui`. |
 | `model` | the model route in force (ADR 0026 D8) |
 | `state` | `idle`, `working` or `blocked` by ADR 0034 H2: a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, an idle block (the wake budget, a `/goal` budget, a lost job notice, the intent-stop cap or the idle hook-continuation cap) is `blocked` while no turn runs, and everything else is `idle` |

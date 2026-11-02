@@ -2231,3 +2231,16 @@ sandbox. Each mutation was applied in place and restored from `.radian/bak/contr
 
 3/3 caught.
 
+
+## TK0314 rework 2: a row without a journal still names its holder (2026-11-02)
+
+Branch `work/TK0314-hub-sessions-followups` (continued from the TK0314 section above, whose
+rows stop at M8). The row matcher is a pure function, so the test runs inside the workspace
+sandbox. The mutation was applied in place and restored from `.radian/bak/control.rs.tk0314m9`,
+which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0314-M9 | a row that reports no journal is not the holder (`None => false` instead of the id fallback) | ✅ 1 failed (rc=100) | `control::tests::a_row_without_a_journal_is_matched_by_the_session_id` (a row with no `journal` field no longer matched its id) |
+
+1/1 caught.

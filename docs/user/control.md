@@ -264,7 +264,7 @@ One process serves one session, so the list has one `main` row:
 | `kind` | always `main` |
 | `holder` | `hub` when the process runs in the hub-held mode a hub starts, `tui` for every other hosting process (a `radian` TUI, an interactive `radian exec`, a `-p` run). The hub reports a session with `holder` `hub` as `live: hub` and every other live one as `live: tui`. |
 | `workspace` | the canonical workspace the session was opened in |
-| `journal` | the journal file this process has open; two sessions with the same `id` under different session directories are told apart by it |
+| `journal` | the journal file this process has open; two sessions with the same `id` under different session directories are told apart by it. A process that does not report the field (an older build) is matched by `id` alone, so a lookup never reads "no holder" from a missing field. |
 | `model` | the model route in force |
 | `state` | `idle`, `working` or `blocked`; a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, an idle block (a used-up wake budget, a `/goal` budget stop, a lost job notice, the intent-stop cap or the idle hook-continuation cap) is `blocked` while no turn runs, and everything else is `idle` |
 | `pending` | the pending approval/question count |
