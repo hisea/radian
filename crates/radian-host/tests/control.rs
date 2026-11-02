@@ -572,6 +572,13 @@ async fn a_followup_with_the_owner_token_is_user_with_the_hub_origin() {
         enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
         "{enqueued}"
     );
+    // The complement of a mid-turn input: with no turn running, this request sets the source
+    // of the turn it starts.
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "an owner followup that starts a turn sets the turn's source"
+    );
     fixture.stop().await;
 }
 

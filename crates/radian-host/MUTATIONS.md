@@ -2117,10 +2117,12 @@ the token ignored, the steer's source stayed `scheduler` and it had no `origin.v
 
 ## TK0304 rework: a mid-turn owner input must not raise the turn's source (2026-11-02)
 
-Same branch and same outside-the-sandbox command as above. The mutation was applied in place to
-`crates/radian-host/src/control.rs` and restored from `.radian/control.rs.fix.bak`, which `cmp`
-found identical afterwards.
+Same branch and same outside-the-sandbox command as above. Each mutation was applied in place to
+`crates/radian-host/src/control.rs` and restored from a copy under `.radian/`
+(`control.rs.fix.bak` for M6, `control.rs.fix2.bak` for M7); `cmp` found both identical
+afterwards.
 
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0304-M6 | `input` unconditionally calls `set_turn_source(Some(source))`, even while a turn runs (the review's defect) | ✅ 1 failed (rc=100) | `an_owner_input_does_not_raise_a_running_non_human_turn` (a token-bearing steer during a running `Scheduler` turn left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |
+| TK0304-M7 | the idle branch only observes (`observe_input_source`) and never resets the source | ✅ 1 failed (rc=100) | `a_followup_with_the_owner_token_is_user_with_the_hub_origin` (the idle owner followup left `turn_source()` at `None` instead of `Some(User)`) |
