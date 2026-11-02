@@ -1448,11 +1448,15 @@ fn a_slow_socket_delays_no_version_and_no_other_repositorys_listing() {
             drop_next: AtomicBool::new(false),
         },
     );
+    // The scanner lives in the hub, so the subscription can only appear once the hub is up.
+    let hub = Hub::in_short_home(short.path(), &quiet, &[]);
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
     // A socket that accepts and never answers, named after a live pid so the scanner probes it.
     let slow_pid = LivePid::new();
-    let _slow = bind_silent_socket(&run, slow_pid.pid());
-    let hub = Hub::in_short_home(short.path(), &quiet, &[]);
+    let slow = bind_silent_socket(&run, slow_pid.pid());
+    // The scanner finds the silent socket on a later scan, so wait for that scan to reach the
+    // probe: only then is the scanner really blocked while the requests are timed.
+    slow.wait_for_probe(Instant::now() + Duration::from_secs(30));
 
     // The scanner is blocked on the silent socket's probe; the routes answer anyway.
     let started = Instant::now();
@@ -1485,6 +1489,24 @@ fn a_slow_socket_delays_no_version_and_no_other_repositorys_listing() {
 /// scanner's probe runs into its timeout.
 struct SilentSocket {
     path: PathBuf,
+    /// How many connections were accepted: the scanner is inside its probe from the first one
+    /// until the probe's timeout expires.
+    accepted: Arc<AtomicUsize>,
+}
+
+impl SilentSocket {
+    /// Waits until the scanner has connected, so the requests timed afterwards run while the
+    /// scanner is blocked on the silent socket's answer.
+    fn wait_for_probe(&self, deadline: Instant) {
+        while self.accepted.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the scanner never probed {}",
+                self.path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 impl Drop for SilentSocket {
@@ -1498,12 +1520,15 @@ fn bind_silent_socket(run_dir: &Path, pid: u32) -> SilentSocket {
     let path = run_dir.join(format!("{pid}.sock"));
     let _ = fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("the silent socket binds");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&accepted);
     std::thread::spawn(move || {
         let mut held: Vec<UnixStream> = Vec::new();
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            seen.fetch_add(1, Ordering::SeqCst);
             held.push(stream);
         }
     });
-    SilentSocket { path }
+    SilentSocket { path, accepted }
 }
