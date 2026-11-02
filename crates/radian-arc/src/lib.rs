@@ -12,6 +12,9 @@
 //! - [`review`]: verification, the owner's approval and the merge, and reject.
 //! - [`attempt`]: one attempt's claim, wrapper child, applied result, cancel and heartbeat
 //!   liveness.
+//! - [`board`]: the arc TUI board's rule, which column an open task is in and whether a plan is
+//!   paused through one of its tasks. `list --json` and `show --json` write the column as a
+//!   task's `board_column`.
 //! - [`run`]: `radian arc run`, the scheduling loop that advances every auto level.
 //! - [`work`]: `radian arc work`, the trusted wrapper around one worker attempt. It is
 //!   internal: arc runs it, a person does not.
@@ -34,6 +37,7 @@
 //! The arc TUI lives in `radian-tui`; it reads through [`read`].
 pub mod acp;
 pub mod attempt;
+pub mod board;
 pub mod gate;
 mod git;
 pub mod hooks;
