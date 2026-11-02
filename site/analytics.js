@@ -8,7 +8,7 @@
 // key, or any value that is not a `phc_` key, turns analytics off and the page is
 // unchanged. The project is shared with anylut.com (one project per free plan); tell the
 // two sites apart by the `$host` property of each event.
-var POSTHOG_KEY = 'phc_ytxuan84PDF95SHcyCaMjW8m9dQW2DoudkUSRQG2aAey';
+var POSTHOG_KEY = 'phc_ytxuan84PDF95SHcyCaMjW8m9dQW2DoudkUSRQG2aAey'; // gitleaks:allow
 
 var analyticsEnabled =
   POSTHOG_KEY.indexOf('phc_') === 0 &&
