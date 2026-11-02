@@ -40,6 +40,7 @@ pub mod login;
 mod mcp;
 pub mod memory;
 mod model;
+mod model_list;
 pub mod oauth_chatgpt;
 pub mod observer;
 pub mod opencode_go;
@@ -182,6 +183,9 @@ pub use model::{
     build_model, check_provider_flags, compaction_settings_for, compaction_settings_for_route,
     redact_base_url, resolve_reasoning_replay, resolve_thinking, resolve_thinking_ref,
     route_adapter_for, route_replays_reasoning,
+};
+pub use model_list::{
+    ModelChoice, model_choices, model_provider_names, provider_models, provider_ref_for,
 };
 pub use oauth_chatgpt::{
     BrowserLogin, CallbackListener, DevicePoll, DeviceStart, Endpoints as OAuthEndpoints,

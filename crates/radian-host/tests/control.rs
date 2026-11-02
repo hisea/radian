@@ -13,14 +13,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
+use radian_coding::{QuestionAnswer, QuestionReply};
 use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::compose::{Attachment, user_message};
 use radian_host::control::MAX_REQUEST_BYTES;
 use radian_host::{
-    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionCommand, SessionFacade,
-    SessionId, SessionProjection, SessionSetup, TurnState, build_model, open_session,
+    ApprovalRouting, ControlServer, HostBindings, LocalSession, PendingResponse, SessionCommand,
+    SessionFacade, SessionId, SessionProjection, SessionSetup, TurnState, build_model,
+    open_session,
 };
-use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
+use radian_permissions::{
+    Action, ApprovalOutcome, ApprovalPolicy, NoopAudit, Preset, Profile, ResourceMatcher, Rule,
+    ToolMatcher,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -97,6 +102,31 @@ fn model(
     )
 }
 
+/// A test event sink that keeps the session projection's turn state current, so
+/// [`wait_idle`] means what it says. The TUI's own sink does the same.
+struct ProjectionSink {
+    projection: Arc<SessionProjection>,
+    inner: Arc<dyn radian_core::EventSink>,
+}
+
+impl radian_core::EventSink for ProjectionSink {
+    fn emit(&self, event: radian_core::AgentEvent) {
+        match &event {
+            radian_core::AgentEvent::TurnStarted => {
+                self.projection.set_turn(TurnState::Running);
+            }
+            radian_core::AgentEvent::RunFinished { status } => {
+                self.projection.set_turn(match status {
+                    radian_core::RunStatus::Cancelled(_) => TurnState::Cancelled,
+                    _ => TurnState::Idle,
+                });
+            }
+            _ => {}
+        }
+        self.inner.emit(event);
+    }
+}
+
 /// A session with the control server bound and a recording event sink (so the `subscribe`
 /// fan-out has something to carry).
 struct Fixture {
@@ -104,10 +134,31 @@ struct Fixture {
     home: PathBuf,
     session: Arc<LocalSession>,
     server: Arc<ControlServer>,
+    /// The config slot the driver writes: a test can apply a route without a turn
+    /// (`ConfigSlot::set_for_test`, the `testing` feature).
+    slot: Arc<radian_runtime::ConfigSlot>,
+}
+
+/// Whether the fixture asks for approvals and questions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answerable {
+    /// `full` with auto approval: no tool ever asks (the existing tests).
+    Auto,
+    /// `full` with one `ask` rule on `write` and `ask_user` mounted: a real approval or
+    /// question queues, and a script can answer it.
+    Asking,
 }
 
 impl Fixture {
     async fn new(label: &str, base_url: &str) -> Self {
+        Self::build(label, base_url, Answerable::Auto).await
+    }
+
+    async fn asking(label: &str, base_url: &str) -> Self {
+        Self::build(label, base_url, Answerable::Asking).await
+    }
+
+    async fn build(label: &str, base_url: &str, answerable: Answerable) -> Self {
         let _ = isolated_home();
         let scratch = scratch(label);
         // A per-test control home: the socket is `<home>/run/<pid>.sock`, and tests run
@@ -118,10 +169,32 @@ impl Fixture {
         std::fs::create_dir_all(&workspace).unwrap();
         let session_dir = scratch.join("sessions");
         std::fs::create_dir_all(&session_dir).unwrap();
+        let profile = match answerable {
+            Answerable::Auto => Profile::full_access(&workspace)
+                .unwrap()
+                .with_approval(ApprovalPolicy::Auto),
+            Answerable::Asking => Profile::custom(
+                Preset::FullAccess,
+                ApprovalPolicy::OnAsk,
+                &workspace,
+                vec![Rule::new(
+                    ToolMatcher::Name("write".into()),
+                    ResourceMatcher::Any,
+                    Action::Ask,
+                )],
+            )
+            .unwrap()
+            .with_allowed_tools(&["ask_user"]),
+        };
         // The server is bound first so its fan-out sinks can wrap the host's own sinks (ADR
         // 0030 O6): a subscriber sees exactly the committed events the session emits.
         let server = ControlServer::bind(&home).expect("bind the control socket");
-        let events = server.events(Arc::new(NoopSink));
+        let projection = Arc::new(SessionProjection::new());
+        let projection_events = Arc::new(ProjectionSink {
+            projection: Arc::clone(&projection),
+            inner: Arc::new(NoopSink),
+        });
+        let events = server.events(projection_events);
         let runtime_events =
             server.runtime_events(Arc::new(|_event: &radian_session::RuntimeEvent| {}));
         let slot = radian_runtime::ConfigSlot::new(Value::Null);
@@ -132,7 +205,7 @@ impl Fixture {
                 workspace: workspace.clone(),
                 coding_root: Some(workspace.clone()),
                 model: model(label, base_url, Arc::clone(&slot)),
-                config_slot: slot,
+                config_slot: Arc::clone(&slot),
                 config_queue: radian_runtime::ConfigQueue::new(),
                 budget_for: None,
                 price_for: None,
@@ -147,9 +220,7 @@ impl Fixture {
                 retries: 0,
                 sandbox: None,
                 tier: Preset::FullAccess,
-                profile: Profile::full_access(&workspace)
-                    .unwrap()
-                    .with_approval(ApprovalPolicy::Auto),
+                profile,
                 access_builder: None,
                 parent: None,
                 subagent: None,
@@ -175,12 +246,12 @@ impl Fixture {
             HostBindings {
                 approvals: ApprovalRouting::Queued,
                 shared_queue: None,
-                ask_user: false,
+                ask_user: answerable == Answerable::Asking,
                 audit: Arc::new(|_journal| {
                     Arc::new(NoopAudit) as Arc<dyn radian_permissions::AuditSink>
                 }),
                 events,
-                projection: Arc::new(SessionProjection::new()),
+                projection: Arc::clone(&projection),
                 runtime_events,
                 driver_stopped: Arc::new(|_| {}),
                 before_driver: None,
@@ -204,6 +275,7 @@ impl Fixture {
             home,
             session,
             server,
+            slot,
         }
     }
 
@@ -1075,5 +1147,748 @@ async fn an_owner_input_does_not_raise_a_running_non_human_turn() {
     );
     let enqueued = enqueued(&fixture.journal(), "turn left");
     assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    fixture.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The owner verbs (ADR 0043): pending, answer, config, models
+// ---------------------------------------------------------------------------
+
+fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
+    Reply::sse(&[
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": id, "type": "function",
+                "function": {"name": name, "arguments": arguments}}]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+    ])
+}
+
+fn write_reply(id: &str) -> Reply {
+    tool_reply(id, "write", r#"{"path":"out.txt","content":"hello"}"#)
+}
+
+fn ask_replies(questions: &Value) -> Vec<Reply> {
+    vec![
+        tool_reply("call_ask", "ask_user", &questions.to_string()),
+        text_reply("done"),
+    ]
+}
+
+/// The committed tool result for one call id (the transcript's tool message).
+fn tool_result(fixture: &Fixture, call_id: &str) -> Value {
+    fixture
+        .journal()
+        .into_iter()
+        .find(|line| {
+            line["event"] == "MessageAppended"
+                && line["data"]["message"]["tool"]["result"]["call_id"] == call_id
+        })
+        .map(|line| line["data"]["message"]["tool"]["result"].clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool result for {call_id}; journal events: {:?}",
+                fixture
+                    .journal()
+                    .iter()
+                    .map(|line| line["event"].clone())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// A settled result's text parts, joined.
+fn result_text(result: &Value) -> String {
+    result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"]["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Waits until the pending queue holds `want` entries.
+async fn wait_queue(fixture: &Fixture, want: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while fixture.session.queue().len() != want {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the queue never reached {want} entries (saw {}); journal: {:?}",
+            fixture.session.queue().len(),
+            fixture.journal()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Reads lines until one matches, with a watchdog.
+async fn read_until(
+    client: &mut Client,
+    limit: Duration,
+    matches: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let value = tokio::time::timeout_at(deadline, client.read())
+            .await
+            .expect("a matching event never arrived");
+        if matches(&value) {
+            return value;
+        }
+    }
+}
+
+/// A logged-in provider for one test, removed on drop. The process home is shared by the
+/// tests in one binary, so the lock serializes the writers.
+static AUTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct AuthGuard {
+    provider: String,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl AuthGuard {
+    fn login(provider: &str, base_url: &str) -> Self {
+        // The isolated `RADIAN_HOME` is process-wide and set on first use; set it before the
+        // store opens so the test never writes the user's real `~/.radian/credentials`.
+        let _ = isolated_home();
+        let lock = AUTH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(radian_host::RADIAN_BASE_URL.to_owned(), base_url.to_owned());
+        radian_host::auth::add_api_key(provider, "sk-test", None, &env).expect("the login writes");
+        Self {
+            provider: provider.to_owned(),
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for AuthGuard {
+    fn drop(&mut self) {
+        let _ = radian_host::auth::remove(&self.provider);
+    }
+}
+
+/// Edge 1: every owner verb without the matching token returns an error and changes nothing.
+/// An unauthenticated `answer` with a valid body must not complete the approval.
+#[tokio::test]
+async fn the_owner_verbs_require_the_token_and_change_nothing() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("owner-gate", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // The empty queue answers with a null head and a zero length.
+    let empty = client
+        .request(json!({"id": 0, "verb": "pending", "token": "owner-token"}))
+        .await;
+    assert_eq!(empty["ok"], true, "{empty}");
+    assert_eq!(empty["head"], Value::Null, "{empty}");
+    assert_eq!(empty["length"], 0, "{empty}");
+
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_queue(&fixture, 1).await;
+    let head_id = fixture.session.queue().head().expect("pending").request_id;
+
+    let attempts = [
+        json!({"id": 2, "verb": "pending"}),
+        json!({"id": 3, "verb": "answer", "request_id": head_id,
+               "response": "allow_once"}),
+        json!({"id": 4, "verb": "config", "config": {"thinking": "high"}}),
+        json!({"id": 5, "verb": "models"}),
+    ];
+    for request in attempts {
+        let refused = client.request(request).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains("token"),
+            "{refused}"
+        );
+    }
+    // A wrong token is no token.
+    let refused = client
+        .request(json!({"id": 6, "verb": "answer", "request_id": head_id,
+                        "response": "allow_once", "token": "wrong"}))
+        .await;
+    assert_eq!(refused["ok"], false, "{refused}");
+
+    // The approval is still there and the tool never ran.
+    assert_eq!(
+        fixture.session.queue().len(),
+        1,
+        "a refused answer changed the queue"
+    );
+    assert!(
+        !fixture.scratch.join("ws").join("out.txt").exists(),
+        "a refused answer ran the tool"
+    );
+
+    // Clean up: the owner answers and the turn finishes.
+    let answered = client
+        .request(json!({"id": 7, "verb": "answer", "request_id": head_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    wait_idle(&fixture).await;
+    fixture.stop().await;
+}
+
+/// Edge 2: an `allow_once` answer through the port runs the tool and empties the queue; a
+/// later answer for the same id is the late error.
+#[tokio::test]
+async fn an_allow_once_answer_from_the_port_runs_the_tool_and_a_later_answer_is_late() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("allow-once", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+
+    let pending = client
+        .request(json!({"id": 2, "verb": "pending", "token": "owner-token"}))
+        .await;
+    let head = &pending["head"];
+    assert_eq!(head["kind"], "approval", "{pending}");
+    assert_eq!(head["tool"], "write", "{pending}");
+    assert!(
+        head["resolved_resource"]
+            .as_str()
+            .unwrap()
+            .ends_with("out.txt"),
+        "{pending}"
+    );
+    assert_eq!(head["arguments"]["content"], "hello", "{pending}");
+    let request_id = head["request_id"].as_u64().expect("the queue id");
+
+    let answered = client
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    wait_idle(&fixture).await;
+    assert_eq!(fixture.session.queue().len(), 0, "the queue is empty");
+    assert_eq!(
+        std::fs::read_to_string(fixture.scratch.join("ws").join("out.txt")).unwrap(),
+        "hello",
+        "the approved tool ran"
+    );
+
+    let late = client
+        .request(json!({"id": 4, "verb": "answer", "request_id": request_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    assert_eq!(late["ok"], false, "{late}");
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap()
+            .contains("no longer pending"),
+        "the late error says which: {late}"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 3: the in-process approver (the TUI's path) answers first; a port answer for the
+/// same id is late and the outcome is unchanged.
+#[tokio::test]
+async fn an_answer_after_the_in_process_approver_is_late_and_the_outcome_is_unchanged() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("late-answer", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+    let head = fixture.session.queue().head().expect("pending");
+    fixture
+        .session
+        .answer(
+            head.request_id,
+            PendingResponse::Approval(ApprovalOutcome::AllowOnce),
+        )
+        .expect("the in-process answer");
+    wait_idle(&fixture).await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.scratch.join("ws").join("out.txt")).unwrap(),
+        "hello",
+        "the first answer ran the tool"
+    );
+
+    let late = client
+        .request(
+            json!({"id": 2, "verb": "answer", "request_id": head.request_id,
+                        "response": "allow_once", "token": "owner-token"}),
+        )
+        .await;
+    assert_eq!(late["ok"], false, "{late}");
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap()
+            .contains("no longer pending"),
+        "{late}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.scratch.join("ws").join("out.txt")).unwrap(),
+        "hello",
+        "the late answer did not change the outcome"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 4: `reject_once` with a reason lands that reason in the tool result, exactly like a
+/// keyboard reject's reason reaches the permission layer.
+#[tokio::test]
+async fn a_reject_once_answer_carries_its_reason_into_the_tool_result() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("reject-reason", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+    let request_id = fixture.session.queue().head().expect("pending").request_id;
+    let answered = client
+        .request(json!({"id": 2, "verb": "answer", "request_id": request_id,
+                        "response": {"kind": "reject_once", "reason": "not now"},
+                        "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    wait_idle(&fixture).await;
+
+    let settled = tool_result(&fixture, "call_write");
+    let result = &settled;
+    assert_eq!(result["is_error"], true, "{settled}");
+    assert_eq!(result["error_code"], "denied", "{settled}");
+    assert_eq!(result_text(result), "not now", "{settled}");
+    assert!(
+        !fixture.scratch.join("ws").join("out.txt").exists(),
+        "a rejected write never runs"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 5: a free-text question answered through the port lands exactly the tool result a
+/// keyboard answer (the in-process `Prompter` path) gives for the same text.
+#[tokio::test]
+async fn a_free_text_question_answer_through_the_port_equals_a_keyboard_answer() {
+    let questions = json!({"questions": [
+        {"id": "name", "prompt": "What is it called?", "kind": "text", "required": true}
+    ]});
+
+    // Through the port.
+    let port_server = MockServer::start(ask_replies(&questions)).await;
+    let port = Fixture::asking("ask-port", &port_server.base_url).await;
+    port.write_token("owner-token");
+    let mut client = Client::connect(port.socket()).await;
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "ask", "token": "owner-token"}))
+        .await;
+    wait_queue(&port, 1).await;
+    let pending = client
+        .request(json!({"id": 2, "verb": "pending", "token": "owner-token"}))
+        .await;
+    assert_eq!(pending["head"]["kind"], "question", "{pending}");
+    assert_eq!(
+        pending["head"]["question"]["questions"][0]["id"], "name",
+        "{pending}"
+    );
+    let request_id = pending["head"]["request_id"].as_u64().unwrap();
+    let answered = client
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": {"answers": [{"id": "name", "text": "radian"}]},
+                        "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    wait_idle(&port).await;
+    let port_settled = tool_result(&port, "call_ask");
+
+    // The keyboard path: the same `QuestionAnswer` the TUI's form builds.
+    let keyboard_server = MockServer::start(ask_replies(&questions)).await;
+    let keyboard = Fixture::asking("ask-keyboard", &keyboard_server.base_url).await;
+    let mut keyboard_client = Client::connect(keyboard.socket()).await;
+    keyboard_client
+        .request(json!({"id": 1, "verb": "followup", "text": "ask", "token": "owner-token"}))
+        .await;
+    wait_queue(&keyboard, 1).await;
+    let head = keyboard.session.queue().head().expect("pending");
+    keyboard
+        .session
+        .answer(
+            head.request_id,
+            PendingResponse::Question(Ok(QuestionAnswer::new(
+                format!("q-{}", head.request_id),
+                vec![QuestionReply {
+                    id: "name".into(),
+                    text: Some("radian".into()),
+                    ..QuestionReply::default()
+                }],
+            ))),
+        )
+        .expect("the keyboard answer");
+    wait_idle(&keyboard).await;
+    let keyboard_settled = tool_result(&keyboard, "call_ask");
+
+    assert_eq!(
+        port_settled["structured"], keyboard_settled["structured"],
+        "the port answer lands the keyboard answer's structured result"
+    );
+    assert_eq!(
+        result_text(&port_settled),
+        result_text(&keyboard_settled),
+        "the human-readable render is the same"
+    );
+    assert_eq!(
+        port_settled["structured"]["request_id"], "q-1",
+        "the port derives the TUI's `q-<queue id>` request id"
+    );
+
+    port.stop().await;
+    keyboard.stop().await;
+}
+
+/// Edge 6: `allow_always` is the process-local `AllowForSession` grant, so a second identical
+/// request in this process is not queued.
+#[tokio::test]
+async fn allow_always_stops_a_second_identical_request_from_being_queued() {
+    let server = MockServer::start(vec![
+        write_reply("call_first"),
+        text_reply("one"),
+        write_reply("call_second"),
+        text_reply("two"),
+    ])
+    .await;
+    let fixture = Fixture::asking("allow-always", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "first", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+    let request_id = fixture.session.queue().head().expect("pending").request_id;
+    let answered = client
+        .request(json!({"id": 2, "verb": "answer", "request_id": request_id,
+                        "response": "allow_always", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    wait_idle(&fixture).await;
+    assert_eq!(
+        fixture.session.queue().len(),
+        0,
+        "the first request is done"
+    );
+
+    // The second identical write runs without a queue entry; nothing would answer it if it
+    // did queue, so a finished turn is the proof.
+    client
+        .request(json!({"id": 3, "verb": "followup", "text": "second", "token": "owner-token"}))
+        .await;
+    wait_requests(&server, 4).await;
+    wait_idle(&fixture).await;
+    assert_eq!(
+        fixture.session.queue().len(),
+        0,
+        "an `allow_always` grant stops the second question"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.scratch.join("ws").join("out.txt")).unwrap(),
+        "hello"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 7: a `config` model switch mid-turn leaves the in-flight request on the old route;
+/// the next turn uses the new one and the journal records `ConfigChanged` (ADR 0004 D4).
+#[tokio::test]
+async fn a_mid_turn_config_model_switch_leaves_the_in_flight_request_on_the_old_route() {
+    let barrier = Barrier::new(2, Duration::from_millis(500));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("one")),
+        },
+        text_reply("two"),
+    ])
+    .await;
+    let _login = AuthGuard::login("opencode-go", &server.base_url);
+    let fixture = Fixture::new("config-switch", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "first", "token": "owner-token"}))
+        .await;
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is in flight");
+
+    let changed = client
+        .request(json!({"id": 2, "verb": "config", "token": "owner-token",
+                        "config": {"model": {"provider": "opencode-go",
+                                             "model": "deepseek-v4.1-flash"}}}))
+        .await;
+    assert_eq!(changed["ok"], true, "{changed}");
+    wait_idle(&fixture).await;
+
+    let first: Value = serde_json::from_str(&server.requests()[0].body).unwrap();
+    assert_eq!(
+        first["model"], "mock",
+        "the in-flight request keeps the old route"
+    );
+
+    client
+        .request(json!({"id": 3, "verb": "followup", "text": "second", "token": "owner-token"}))
+        .await;
+    wait_requests(&server, 2).await;
+    wait_idle(&fixture).await;
+    let second: Value = serde_json::from_str(&server.requests()[1].body).unwrap();
+    assert_eq!(
+        second["model"], "deepseek-v4.1-flash",
+        "the next turn uses the new route"
+    );
+
+    let change = fixture
+        .journal()
+        .into_iter()
+        .find(|line| line["event"] == "ConfigChanged")
+        .expect("a ConfigChanged record");
+    assert_eq!(
+        change["data"]["change"]["model"]["provider"], "opencode-go",
+        "{change}"
+    );
+    assert_eq!(
+        change["data"]["change"]["model"]["model"], "deepseek-v4.1-flash",
+        "{change}"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 8: an unknown config key, a bad thinking level and an unknown route each reject the
+/// whole request and queue nothing.
+#[tokio::test]
+async fn a_config_with_an_unknown_key_is_refused_and_queues_nothing() {
+    let server = MockServer::start(Vec::new()).await;
+    let fixture = Fixture::new("config-bad", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    for (id, config) in [
+        (1, json!({"approval": "auto"})),
+        (2, json!({"thinking": "turbo"})),
+        (3, json!({"model": {"provider": "nope", "model": "x"}})),
+        (
+            4,
+            json!({"model": {"provider": "openai-compatible", "model": "mock"},
+                   "thinking": "high", "approval": "auto"}),
+        ),
+    ] {
+        let refused = client
+            .request(json!({"id": id, "verb": "config", "token": "owner-token",
+                            "config": config}))
+            .await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert!(
+            fixture.session.config_queue().is_empty(),
+            "a refused config queued something: {refused}"
+        );
+    }
+    fixture.stop().await;
+}
+
+/// Edge 9: `subscribe` receives a `pending` event when an approval is queued and a `null`
+/// head after it is answered. Still committed facts only: no token deltas.
+#[tokio::test]
+async fn subscribe_receives_the_pending_head_and_a_null_after_the_answer() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("pending-event", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut subscriber = Client::connect(fixture.socket()).await;
+    let subscribed = subscriber
+        .request(json!({"id": 1, "verb": "subscribe", "token": "owner-token"}))
+        .await;
+    assert_eq!(subscribed["ok"], true, "{subscribed}");
+    let mut driver = Client::connect(fixture.socket()).await;
+
+    driver
+        .request(json!({"id": 2, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    let queued = read_until(&mut subscriber, Duration::from_secs(30), |value| {
+        value["event"]["name"] == "pending" && value["event"]["data"]["head"] != Value::Null
+    })
+    .await;
+    assert_eq!(queued["event"]["source"], "control", "{queued}");
+    assert_eq!(
+        queued["event"]["data"]["head"]["kind"], "approval",
+        "{queued}"
+    );
+    assert_eq!(queued["event"]["data"]["head"]["tool"], "write", "{queued}");
+    assert_eq!(queued["event"]["data"]["length"], 1, "{queued}");
+    let request_id = queued["event"]["data"]["head"]["request_id"]
+        .as_u64()
+        .expect("the queue id");
+
+    let answered = driver
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    let cleared = read_until(&mut subscriber, Duration::from_secs(30), |value| {
+        value["event"]["name"] == "pending" && value["event"]["data"]["head"] == Value::Null
+    })
+    .await;
+    assert_eq!(cleared["event"]["data"]["length"], 0, "{cleared}");
+    wait_idle(&fixture).await;
+    fixture.stop().await;
+}
+
+/// A subscriber without the token gets the `pending` event, but only the request id, the
+/// kind and the tool name: no arguments, no resource, no question text (ADR 0043).
+#[tokio::test]
+async fn a_subscriber_without_the_token_sees_only_the_redacted_pending_head() {
+    let questions = json!({"questions": [
+        {"id": "name", "prompt": "Secret question?", "kind": "text", "required": true}
+    ]});
+    // A question so the test can prove the question text never leaks.
+    let server = MockServer::start(ask_replies(&questions)).await;
+    let fixture = Fixture::asking("pending-redacted", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut subscriber = Client::connect(fixture.socket()).await;
+    let subscribed = subscriber
+        .request(json!({"id": 1, "verb": "subscribe"}))
+        .await;
+    assert_eq!(subscribed["ok"], true, "{subscribed}");
+    let mut driver = Client::connect(fixture.socket()).await;
+    driver
+        .request(json!({"id": 2, "verb": "followup", "text": "ask", "token": "owner-token"}))
+        .await;
+    let queued = read_until(&mut subscriber, Duration::from_secs(30), |value| {
+        value["event"]["name"] == "pending" && value["event"]["data"]["head"] != Value::Null
+    })
+    .await;
+    let head = &queued["event"]["data"]["head"];
+    assert_eq!(head["kind"], "question", "{queued}");
+    assert_eq!(head["tool"], Value::Null, "{queued}");
+    assert!(head["request_id"].as_u64().is_some(), "{queued}");
+    assert!(head.get("question").is_none(), "{queued}");
+    assert!(
+        !queued.to_string().contains("Secret question?"),
+        "the question text must not leak: {queued}"
+    );
+
+    let request_id = head["request_id"].as_u64().unwrap();
+    driver
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": {"answers": [{"id": "name", "text": "radian"}]},
+                        "token": "owner-token"}))
+        .await;
+    wait_idle(&fixture).await;
+    fixture.stop().await;
+}
+
+/// Edge 10: `list_sessions` reports the workspace, the model route, `blocked` while an
+/// approval waits and `idle` after the turn; none of it needs the token.
+#[tokio::test]
+async fn list_sessions_reports_blocked_while_an_approval_waits_and_idle_after_the_turn() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let fixture = Fixture::asking("session-state", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let idle = client
+        .request(json!({"id": 0, "verb": "list_sessions"}))
+        .await;
+    let row = &idle["sessions"][0];
+    assert_eq!(row["state"], "idle", "{idle}");
+    assert_eq!(row["pending"], 0, "{idle}");
+    assert!(row["workspace"].as_str().unwrap().ends_with("ws"), "{idle}");
+    assert_eq!(row["model"]["provider"], "openai-compatible", "{idle}");
+    assert_eq!(row["model"]["model"], "mock", "{idle}");
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+    let blocked = client
+        .request(json!({"id": 2, "verb": "list_sessions"}))
+        .await;
+    let row = &blocked["sessions"][0];
+    assert_eq!(row["state"], "blocked", "{blocked}");
+    assert_eq!(row["pending"], 1, "{blocked}");
+
+    let request_id = fixture.session.queue().head().expect("pending").request_id;
+    client
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    wait_idle(&fixture).await;
+    let idle = client
+        .request(json!({"id": 4, "verb": "list_sessions"}))
+        .await;
+    let row = &idle["sessions"][0];
+    assert_eq!(row["state"], "idle", "{idle}");
+    assert_eq!(row["pending"], 0, "{idle}");
+    fixture.stop().await;
+}
+
+/// `models`: the `/model` list, grouped by provider, with the current route marked.
+#[tokio::test]
+async fn models_returns_the_model_list_with_the_current_route_marked() {
+    let server = MockServer::start(Vec::new()).await;
+    let _login = AuthGuard::login("opencode-go", &server.base_url);
+    let fixture = Fixture::new("models", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let listed = client
+        .request(json!({"id": 1, "verb": "models", "token": "owner-token"}))
+        .await;
+    assert_eq!(listed["ok"], true, "{listed}");
+    let groups = listed["models"].as_array().expect("groups");
+    let opencode = groups
+        .iter()
+        .find(|group| group["provider"] == "opencode-go")
+        .expect("the logged-in provider is listed");
+    assert!(
+        opencode["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["id"] == "deepseek-v4.1-flash"),
+        "{listed}"
+    );
+
+    // Apply the route to the slot (the driver's turn-boundary write, via the test seam): the
+    // same route must now be marked.
+    fixture.slot.set_for_test(
+        json!({"model": {"provider": "opencode-go", "model": "deepseek-v4.1-flash"}}),
+    );
+    let listed = client
+        .request(json!({"id": 2, "verb": "models", "token": "owner-token"}))
+        .await;
+    let groups = listed["models"].as_array().expect("groups");
+    let current = groups
+        .iter()
+        .find(|group| group["provider"] == "opencode-go")
+        .and_then(|group| {
+            group["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["id"] == "deepseek-v4.1-flash")
+        })
+        .expect("the current model row");
+    assert_eq!(current["current"], true, "{listed}");
     fixture.stop().await;
 }

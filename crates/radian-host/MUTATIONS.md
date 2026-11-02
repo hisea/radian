@@ -2142,3 +2142,22 @@ its first mutation (`.radian/mut/hooks.rs.m8`, `.radian/mut/control.rs.m8`,
 | TK0304-M10 | the claim reset applies only to a `User` opener | ✅ 1 failed (rc=100) | `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (the scheduled followup's own turn stayed `Some(User)` instead of `Some(Scheduler)`) |
 | TK0304-M11 | the facade's `SendFollowup` keeps the old unconditional `set_turn_source(Some(User))` | ✅ 1 failed (rc=100) | `a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user` (the mid-turn send raised the running `Scheduler` turn to `Some(User)`) |
 
+
+## TK0305: the owner verbs on the control port (2026-11-02)
+
+Branch `work/TK0305-control-pending-answer-config`. The control tests bind `/tmp` sockets,
+which the workspace sandbox denies, so each mutation was applied in place to
+`crates/radian-host/src/control.rs` and the named test ran outside it with `cargo nextest run -p
+radian-host --test control --locked --no-fail-fast -E 'test(<name>)'`. Both mutations were
+applied to the same file, so it was restored from `.radian/mut/control.rs.tk0305` before the
+second; `cmp` found the file identical after each restore.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0305-M1 | the token check is skipped for `answer` (`if verb != "answer" && !self.is_owner(…)`) | ✅ 1 failed (rc=100) | `the_owner_verbs_require_the_token_and_change_nothing` (the unauthenticated `answer` returned `{"id":3,"ok":true}` and the approval was no longer pending) |
+| TK0305-M2 | a late answer reports success (`Err(Answered::Late) => success(id, None)`) | ✅ 1 failed (rc=100) | `an_answer_after_the_in_process_approver_is_late_and_the_outcome_is_unchanged` (the port's late `answer` returned `{"id":2,"ok":true}`) |
+
+The other edge tests are caught by the behaviour they name: `pending`'s head fields,
+`config`'s key/route/level checks, `models`' grouping and current mark, the `pending`
+subscription event and its redaction, and `list_sessions`' state/pending fields. The
+`nextest_profile` test keeps these names honest in `.config/nextest.toml`.

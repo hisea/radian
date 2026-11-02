@@ -254,7 +254,8 @@ sessions_index_max_lines = 1000
 
 Every hosting process on that socket serves one JSON object per line in each direction. The
 input verbs `followup`, `steer` and `inject` carry `text`, and may carry `token`, `images` and
-`files`.
+`files`. The full protocol, including the owner-token verbs and the event stream, is on
+[`control`](control.md).
 
 `token` is a string. When it equals the trimmed content of `$RADIAN_HOME/hub/token`, the request
 is the owner's: its source is `User`, and the message's host metadata records `{"via":"hub"}`.

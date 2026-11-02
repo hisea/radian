@@ -356,6 +356,13 @@ impl LocalSession {
         Arc::clone(&self.command_hooks)
     }
 
+    /// The switchable model, for a caller that reads the route without holding the session
+    /// (the control port's `list_sessions`/`models`/`config`). The clone keeps only the model
+    /// alive, never the session.
+    pub(crate) fn model_handle(&self) -> Arc<crate::model::SwitchableModel> {
+        Arc::clone(&self.side_model)
+    }
+
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
     /// between turns.
     pub fn turn_running(&self) -> bool {
