@@ -81,9 +81,15 @@ pub enum Input {
     Event(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
     Runtime(RuntimeEvent),
-    /// The pending queue's head changed (ADR 0023 U7): the request to show, and how many are
-    /// queued. `None` means nothing is pending.
-    Pending(Option<Box<PendingView<PendingRequest>>>, usize),
+    /// The pending queue's head changed (ADR 0023 U7): the request to show, how many are
+    /// queued, and the request ids the control port answered since the last wake (the hub's
+    /// answer; the transcript gets one weak line for a popup it was showing). `head` is
+    /// `None` when nothing is pending.
+    Pending {
+        head: Option<Box<PendingView<PendingRequest>>>,
+        len: usize,
+        answered_from_hub: Vec<u64>,
+    },
     /// One key inside the question form (ADR 0024 Q7).
     Form(FormKey),
     /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).

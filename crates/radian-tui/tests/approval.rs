@@ -35,7 +35,11 @@ fn view() -> PendingView<PendingRequest> {
 
 /// Puts the queue's head on screen the way the loop does.
 fn prompt(app: &mut App) {
-    app.update(Input::Pending(Some(Box::new(view())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(view())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
 }
 
 /// Answers the way the event loop does: the effect names the queue's request id and the
@@ -57,6 +61,50 @@ fn answer(app: &mut App, key: KeyEvent) -> (u64, ApprovalOutcome) {
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+#[test]
+fn a_popup_answered_from_the_hub_closes_with_a_weak_line() {
+    let mut app = App::new("m", "s");
+    prompt(&mut app);
+    let result = app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: vec![1],
+    });
+    assert!(
+        app.pending_approval().is_none(),
+        "the queue already completed it"
+    );
+    assert!(
+        result.effects.is_empty(),
+        "the TUI must not apply a second answer: {:?}",
+        result.effects
+    );
+    let entry = app.session.entries.last().expect("the hub line");
+    assert_eq!(entry.kind, radian_tui::app::EntryKind::Notice);
+    assert!(entry.dim, "the line is the weak (dim) level");
+    assert_eq!(entry.text, "answered from the hub");
+}
+
+/// Edge 3's negative half: a late hub answer (the TUI answered first, so the queue recorded
+/// nothing from the hub) adds no line.
+#[test]
+fn a_late_hub_answer_adds_no_line() {
+    let mut app = App::new("m", "s");
+    prompt(&mut app);
+    app.on_key(key(KeyCode::Char('y')));
+    let before = app.session.entries.len();
+    app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: vec![1],
+    });
+    assert_eq!(
+        app.session.entries.len(),
+        before,
+        "no line for a late answer"
+    );
 }
 
 #[test]
@@ -126,7 +174,11 @@ fn the_queue_head_drives_the_prompt_not_the_turn() {
         "the turn ending does not by itself clear the modal"
     );
 
-    app.update(Input::Pending(None, 0));
+    app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: Vec::new(),
+    });
     assert!(app.pending_approval().is_none(), "the queue's head is gone");
     assert_eq!(app.pending, 0);
 }
@@ -158,7 +210,11 @@ fn a_second_approval_does_not_supersede_the_first() {
         request: PendingRequest::Approval(request()),
     };
     // The queue's head is still the first request (the second is behind it), so nothing moves.
-    app.update(Input::Pending(Some(Box::new(view())), 2));
+    app.update(Input::Pending {
+        head: Some(Box::new(view())),
+        len: 2,
+        answered_from_hub: Vec::new(),
+    });
     assert_eq!(
         app.pending_approval().map(|r| r.request_id.as_str()),
         Some("perm-1")
@@ -167,7 +223,11 @@ fn a_second_approval_does_not_supersede_the_first() {
 
     // When the first is answered, the second becomes the head. Moving to it must not answer
     // (deny) the first: the queue already did, and a second answer would be a late one.
-    let result = app.update(Input::Pending(Some(Box::new(second)), 1));
+    let result = app.update(Input::Pending {
+        head: Some(Box::new(second)),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert!(app.pending_approval().is_some());
     assert_eq!(app.pending, 1);
@@ -272,14 +332,15 @@ fn draw(app: &mut App, width: u16, height: u16) -> String {
 
 fn shell_app(lines: usize) -> App {
     let mut app = App::new("mock", "s");
-    app.update(Input::Pending(
-        Some(Box::new(PendingView {
+    app.update(Input::Pending {
+        head: Some(Box::new(PendingView {
             request_id: 9,
             origin: "session".into(),
             request: PendingRequest::Approval(shell_request(&long_command(lines))),
         })),
-        1,
-    ));
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     app
 }
 
@@ -469,7 +530,11 @@ fn a_new_pending_request_resets_the_scroll() {
         origin: "session".into(),
         request: PendingRequest::Approval(shell_request(&long_command(60))),
     };
-    app.update(Input::Pending(Some(Box::new(second)), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(second)),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     let screen = draw(&mut app, 80, 24);
     let total = render::wrap(
         &render::approval_body(&shell_request(&long_command(60))),

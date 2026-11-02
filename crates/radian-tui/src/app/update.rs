@@ -137,7 +137,11 @@ impl App {
                 effects: self.apply_event(&event),
             },
             Input::Runtime(event) => self.apply_runtime_event(&event),
-            Input::Pending(head, len) => self.sync_pending(head, len),
+            Input::Pending {
+                head,
+                len,
+                answered_from_hub,
+            } => self.sync_pending(head, len, &answered_from_hub),
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
             Input::DroppedLoaded {

@@ -37,14 +37,15 @@ fn question(
 
 /// The queue's view of the request, and the app showing it (ADR 0023 U7).
 fn show(app: &mut App, questions: Vec<Question>) {
-    app.update(Input::Pending(
-        Some(Box::new(PendingView {
+    app.update(Input::Pending {
+        head: Some(Box::new(PendingView {
             request_id: 7,
             origin: "session".into(),
             request: PendingRequest::Question(radian_coding::QuestionRequest::new(questions)),
         })),
-        1,
-    ));
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
 }
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -206,7 +207,11 @@ fn drafts_are_kept_between_questions() {
         origin: "session".into(),
         request: PendingRequest::Question(radian_coding::QuestionRequest::new(Vec::new())),
     };
-    app.update(Input::Pending(Some(Box::new(head)), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(head)),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     assert_eq!(form(&app).answers[0].text.text(), "first");
     assert_eq!(form(&app).answers[1].text.text(), "second");
     // And the submit carries both.
@@ -370,7 +375,11 @@ fn the_pending_count_follows_the_queue() {
         vec![question("one", QuestionKind::Text, Vec::new(), false)],
     );
     assert_eq!(app.pending, 1);
-    app.update(Input::Pending(None, 0));
+    app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: Vec::new(),
+    });
     assert_eq!(app.pending, 0);
     assert!(
         app.layers()

@@ -12,11 +12,12 @@
 //! ```json
 //! {"kind": "assistant", "text": "Done.",
 //!  "is_error": false, "result": null, "error_code": null, "card": "none",
-//!  "tool": null, "compaction": null, "interrupted": false, "images": []}
+//!  "tool": null, "compaction": null, "interrupted": false, "images": [], "via": null}
 //! ```
 //!
 //! The fields are always present, in that order. A tool entry fills `tool` and `card`; a
-//! compaction summary fills `compaction`; a user or tool-result entry may carry `images`. One
+//! compaction summary fills `compaction`; a user or tool-result entry may carry `images`; a
+//! message the owner sent through the control port fills `via` (`hub`). One
 //! field is deliberately **not** serialized: an image's base64 payload (`ImagePart::data`). The
 //! placeholder line that stands in for it is in `text`, so a client that lists entries never
 //! receives the bytes the user attached.
@@ -24,6 +25,8 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+
+use radian_core::Message;
 
 /// Where a fold's entry list changed since a consumer last read it, so the consumer (the TUI's
 /// render entries, or the hub's copy) can mirror only what moved. See [`EntryList`].
@@ -318,6 +321,10 @@ pub struct Entry {
     /// The images the entry's message carried (ADR 0028 R10), in order. A user message's
     /// placeholder line is already in `text`.
     pub images: Vec<ImagePart>,
+    /// The message's `origin.via` value (ADR 0005 G1): `hub` when the owner token sent it
+    /// through the control port (ADR 0043), `None` for a typed message and for every entry
+    /// whose message carries no `origin`.
+    pub via: Option<String>,
 }
 
 impl Entry {
@@ -333,6 +340,20 @@ impl Entry {
             compaction: None,
             interrupted: false,
             images: Vec::new(),
+            via: None,
         }
     }
+}
+
+/// The `via` value of a message's `origin` metadata (ADR 0005 G1), if any. The control port
+/// records `{"via":"hub"}` on an owner's input (ADR 0043); the transcript draws a message
+/// whose value is `hub` with the marker ADR 0035 describes.
+pub fn origin_via(message: &Message) -> Option<String> {
+    let origin = match message {
+        Message::User { meta, .. } => meta.origin.as_ref()?,
+        Message::Assistant { meta, .. } => meta.origin.as_ref()?,
+        Message::Tool { meta, .. } => meta.origin.as_ref()?,
+    };
+    let value: serde_json::Value = serde_json::from_str(origin.get()).ok()?;
+    value.get("via")?.as_str().map(str::to_owned)
 }

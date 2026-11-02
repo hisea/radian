@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use crate::observer::{JournalObserver, SessionObserver};
 
-use super::entry::{Card, CompactionInfo, Entry, EntryKind, EntryList};
+use super::entry::{Card, CompactionInfo, Entry, EntryKind, EntryList, origin_via};
 use super::memory::MemoryRecords;
 use super::parts::{bash_entry_from_context, display_parts, image_parts, text_of};
 use super::tool::{ToolCard, body_line_count, call_text, result_display_text};
@@ -227,6 +227,9 @@ impl AttachFold {
                 // ADR 0018: an attachment is its own part, so the display renders it as
                 // `[file: P, N lines]` rather than joining its body into the message.
                 let mut entry = Entry::new(EntryKind::User, display_parts(content));
+                // ADR 0035: a message the owner sent through the control port carries
+                // `{"via":"hub"}` in its `origin`; the renderer shows that marker.
+                entry.via = origin_via(message);
                 // ADR 0028 R10: the images draw under their placeholder lines.
                 entry.images = image_parts(content);
                 self.entries.push(entry);

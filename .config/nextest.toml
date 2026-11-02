@@ -81,6 +81,12 @@ test-group = "pty"
 #    Unix-socket connect (`(deny network-outbound (remote unix-socket))`). The route
 #    these tests exercise without a socket (a session write route's body validation)
 #    runs in the sandbox.
+#
+# 8. The TUI's hub-side tests (5 names). They drive a real `radian` under a pty and
+#    talk to its control socket (the marker, the popup the hub answers, the late
+#    answer, and `--resume` of a hub-held session): the same short-home and
+#    Unix-socket-connect limits as groups 6 and 7, and the app cannot enter the
+#    alternate screen inside the sandbox either.
 
 [profile.sandbox]
 # See the group list above; the blank lines below separate the groups.
@@ -415,5 +421,11 @@ not (
   | test(=a_null_steer_or_model_is_bad_request_and_starts_no_process)
   | test(=a_hub_started_with_a_configuration_file_starts_its_sessions_on_it)
   | test(=a_relative_hub_configuration_path_is_made_absolute_before_the_child_sees_it)
+
+  | test(=pty_a_hub_followup_is_marked_and_a_plain_one_is_not)
+  | test(=pty_an_approval_answered_through_the_control_port_closes_the_popup)
+  | test(=pty_a_local_answer_first_makes_the_port_answer_late)
+  | test(=pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn)
+  | test(=resume_refuses_a_session_a_hub_held_process_hosts)
 )
 """

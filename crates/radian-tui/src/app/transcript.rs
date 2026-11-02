@@ -263,6 +263,16 @@ impl App {
             .push(Entry::new(EntryKind::Notice, text));
     }
 
+    /// The weak line that says a pending approval or question shown as a popup was answered
+    /// through the control port while the transcript holds the popup (ADR 0035). The popup's
+    /// removal comes from the queue itself; this line explains the disappearance. The TUI
+    /// answered nothing: the queue's first answer wins, and a late local answer changes nothing.
+    pub fn push_hub_answer(&mut self) {
+        let mut entry = Entry::new(EntryKind::Notice, "answered from the hub");
+        entry.dim = true;
+        self.session.entries.push(entry);
+    }
+
     /// A job completion notice was lost (every enqueue attempt failed): the burst's
     /// visible stop, on the same notice slot as [`App::wake_budget_notice`]. The first
     /// notice of a burst pushes the line; a later one rewrites it, so two stops still
@@ -669,6 +679,9 @@ impl App {
                 // ADR 0018: an attachment is its own part, so the display renders
                 // it as `[file: P, N lines]` rather than joining its body into the message.
                 let mut entry = Entry::new(EntryKind::User, crate::mention::display_parts(content));
+                // ADR 0035: a message the owner sent through the control port carries
+                // `{"via":"hub"}` in its `origin`; the renderer shows that marker.
+                entry.via = radian_host::transcript::origin_via(message);
                 // ADR 0028 R10: the images draw under their placeholder lines. The decode
                 // happens here, once; the drawn protocol is built from it.
                 entry.images = crate::media::images_of(&mut self.images, content);

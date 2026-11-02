@@ -75,7 +75,11 @@ fn a_wheel_down_scrolls_back() {
 #[test]
 fn a_modal_swallows_the_wheel() {
     let mut app = scrolled_app();
-    app.update(Input::Pending(Some(Box::new(view())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(view())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     let before = app.session.scroll;
     let result = app.mouse_scroll(MouseScrollDirection::Up);
     assert!(!result.dirty);

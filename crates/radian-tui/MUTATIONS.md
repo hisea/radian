@@ -3583,3 +3583,18 @@ from a copy under `.radian/`, which `cmp` found identical.
 | TK0300-M3 | `run_has_metrics` returns true, so an old run is selectable again | `arc_tui::a_page_of_old_runs_selects_nothing` (a `❯` appeared and `Enter` opened a detail) | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0310: the TUI's hub marker and takeover (2026-11-02, branch `work/TK0310-tui-hub-marker-and-takeover`)
+
+A user message the owner sent through the control port carries `origin.via = hub` (ADR 0005 G1)
+and draws the weak ` · hub` suffix; a keyboard message must not (ADR 0035). The mutation was
+applied by hand to `crates/radian-tui/src/render/transcript.rs`, the named `render` test ran with
+`cargo nextest run -p radian-tui --locked --profile sandbox --test render -E
+'test(a_hub_message_carries_the_weak_marker)'`, and the file was restored from a copy under
+`.radian/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0310-M1 | `tail_spans` appends the suffix to every user message (`entry.kind == EntryKind::User`, ignoring `via`) | `render::a_hub_message_carries_the_weak_marker_and_a_typed_one_does_not` (the typed message drew `typed-here · hub`) | ✅ 1 failed |
+
+1/1 caught.

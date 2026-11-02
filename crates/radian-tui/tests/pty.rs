@@ -2395,6 +2395,334 @@ async fn pty_approval_allow_once_runs_the_tool() {
     assert!(session.contains("\"decision\":\"allow\""), "{session}");
 }
 
+/// The hub's decision 2 and ADR 0035: a `followup` carrying the owner token records
+/// `origin.via = hub`, and the TUI marks that message; a followup without the token is a
+/// scheduled input and carries no marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_a_hub_followup_is_marked_and_a_plain_one_is_not() {
+    let dir = TempDir::new("hub-marker");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server =
+        MockServer::start(vec![text_reply("FIRST-REPLY"), text_reply("SECOND-REPLY")]).await;
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "hub-marker",
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+
+    let answer = control_request(
+        &socket,
+        json!({"id": 1, "verb": "followup", "text": "HUB-MESSAGE", "token": "owner-token"}),
+    );
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert!(
+        pty.wait_for_screen("HUB-MESSAGE · hub", wait_positive()),
+        "a hub message lost its marker:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("FIRST-REPLY", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+
+    // No token: the port decides `Scheduler`, and the message carries no `via`.
+    let answer = control_request(
+        &socket,
+        json!({"id": 2, "verb": "followup", "text": "TYPED-MESSAGE"}),
+    );
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert!(
+        pty.wait_for_screen("TYPED-MESSAGE", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.screen_absent("TYPED-MESSAGE · hub"),
+        "a plain followup carries the hub marker:\n{}",
+        pty.screen()
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
+/// The hub's decision 3: an approval the TUI shows as a popup, answered through the control
+/// port, closes the popup, runs the tool, and leaves one weak line saying the hub answered it.
+/// The TUI itself answers nothing a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_an_approval_answered_through_the_control_port_closes_the_popup() {
+    let dir = TempDir::new("hub-answer");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "call_1",
+            "write",
+            r#"{"path":"out.txt","content":"approved"}"#,
+        ),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "hub-answer",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        160,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    assert!(!ws.join("out.txt").exists(), "the tool ran before approval");
+
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+    let pending = control_request(
+        &socket,
+        json!({"id": 1, "verb": "pending", "token": "owner-token"}),
+    );
+    let request_id = pending["head"]["request_id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no pending head: {pending}"));
+    let answered = control_request(
+        &socket,
+        json!({"id": 2, "verb": "answer", "request_id": request_id,
+               "response": "allow_once", "token": "owner-token"}),
+    );
+    assert_eq!(answered["ok"], true, "{answered}");
+
+    assert!(
+        pty.wait_until_gone("approve tool call?", wait_positive()),
+        "the popup did not close after the hub answered:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("answered from the hub", wait_positive()),
+        "the transcript has no hub-answer line:\n{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the tool did not run after the hub's approval:\n{}",
+        pty.screen()
+    );
+    assert!(ws.join("out.txt").exists(), "the tool did not write");
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(sessions.join("hub-answer.jsonl")).unwrap();
+    assert_eq!(
+        session.matches("PermissionResolved").count(),
+        1,
+        "exactly one decision is durable: {session}"
+    );
+}
+
+/// Edge 3: the TUI answers first. The port's late `answer` gets the late error, changes
+/// nothing, and the transcript shows no hub-answer line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_a_local_answer_first_makes_the_port_answer_late() {
+    let dir = TempDir::new("hub-late");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply("call_1", "write", r#"{"path":"out.txt","content":"typed"}"#),
+        text_reply("WROTE-IT"),
+    ])
+    .await;
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "hub-late",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--approval",
+            "always",
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        160,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"please write\r");
+    assert!(
+        pty.wait_for_screen("approve tool call?", wait_positive()),
+        "no approval prompt:\n{}",
+        pty.screen()
+    );
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+    let pending = control_request(
+        &socket,
+        json!({"id": 1, "verb": "pending", "token": "owner-token"}),
+    );
+    let request_id = pending["head"]["request_id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no pending head: {pending}"));
+
+    // The TUI answers first: one decision, and the tool runs.
+    pty.send(b"y");
+    assert!(
+        pty.wait_for_screen("WROTE-IT", wait_positive()),
+        "the local answer did not run the tool:\n{}",
+        pty.screen()
+    );
+    let late = control_request(
+        &socket,
+        json!({"id": 2, "verb": "answer", "request_id": request_id,
+               "response": "allow_once", "token": "owner-token"}),
+    );
+    assert_eq!(late["ok"], false, "{late}");
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no longer pending"),
+        "the late answer is named: {late}"
+    );
+    assert!(
+        pty.screen_absent("answered from the hub"),
+        "a late hub answer left a line:\n{}",
+        pty.screen()
+    );
+    assert!(ws.join("out.txt").exists(), "the tool ran once");
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+    let session = std::fs::read_to_string(sessions.join("hub-late.jsonl")).unwrap();
+    assert_eq!(
+        session.matches("PermissionResolved").count(),
+        1,
+        "one durable decision: {session}"
+    );
+}
+
+/// Edge 5: a model switch through the control port's `config` is applied at the next turn
+/// boundary, and the TUI footer's model shows the new route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn() {
+    let server =
+        anth::MockServer::start(vec![anth_text_reply("FIRST"), anth_text_reply("SECOND")]).await;
+    let dir = TempDir::new("hub-config");
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_with_env(
+        &[
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-5-5",
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "hub-config",
+        ],
+        &[
+            ("ANTHROPIC_API_KEY", "sk-ant-hub-config"),
+            ("RADIAN_BASE_URL", &server.base_url),
+            ("RADIAN_HOME", home.to_str().unwrap()),
+        ],
+        24,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"first\r");
+    assert!(
+        pty.wait_for_screen("FIRST", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+    let switched = control_request(
+        &socket,
+        json!({"id": 1, "verb": "config", "token": "owner-token",
+               "config": {"model": {"provider": "anthropic", "model": "claude-sonnet-4-5"}}}),
+    );
+    assert_eq!(switched["ok"], true, "{switched}");
+
+    pty.send(b"second\r");
+    assert!(
+        pty.wait_for_screen("SECOND", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    assert!(
+        pty.wait_for_screen("claude-sonnet-4-5", wait_positive()),
+        "the footer kept the old model:\n{}",
+        pty.screen()
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "two turns");
+    assert_eq!(
+        requests[1].json()["model"],
+        "claude-sonnet-4-5",
+        "the next turn uses the new route"
+    );
+
+    pty.quit();
+    assert_eq!(pty.app_exit_code(), Some(0));
+}
+
 /// Denying feeds a denial result back to the model and never runs the tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_approval_deny_is_fed_back_to_the_model() {
@@ -4671,6 +4999,59 @@ fn app_pid(pty: &Pty) -> String {
         .expect("the app runs under the wrapper shell")
         .trim()
         .to_string()
+}
+
+/// Writes `$RADIAN_HOME/hub/token` under `home`, the value the owner verbs require.
+fn write_hub_token(home: &Path, token: &str) {
+    let dir = home.join("hub");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("token"), format!("{token}\n")).unwrap();
+}
+
+/// The shortest `RADIAN_HOME` inside the worktree: the control socket path
+/// (`<home>/run/<pid>.sock`) must stay under `SUN_LEN` (104 bytes on macOS), and the pty
+/// harness's descriptive `HOME` is longer than that. Each test still passes its own
+/// `--session-dir`, so sessions never share this root.
+fn short_radian_home() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the worktree root")
+        .join(".radian")
+}
+
+/// Waits for the app's own control socket (`<home>/run/<pid>.sock`) and returns its path.
+/// `pid` is the app's pid, not the wrapper shell's: several tests share one short
+/// `RADIAN_HOME` and each app binds its own socket there, so the pid is what selects it.
+fn wait_for_control_socket(home: &Path, pid: &str) -> PathBuf {
+    let path = home.join("run").join(format!("{pid}.sock"));
+    let deadline = Instant::now() + wait_positive();
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the control socket {} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    path
+}
+
+/// One control-port request on a fresh connection, answered by one JSON line.
+fn control_request(socket: &Path, request: serde_json::Value) -> serde_json::Value {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket).expect("connect to the control socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut line = request.to_string();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut reader = std::io::BufReader::new(stream);
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut answer).unwrap();
+    serde_json::from_str(answer.trim()).expect("a JSON answer")
 }
 
 /// Dogfooding D7: SIGTERM and SIGHUP leave like a quit. The terminal is restored, one reason

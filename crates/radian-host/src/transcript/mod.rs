@@ -38,7 +38,7 @@ pub mod tool;
 
 pub use acp::AcpFold;
 pub use attach::{AttachFold, WORKING_LINE};
-pub use entry::{Card, Change, CompactionInfo, Entry, EntryKind, EntryList, ImagePart};
+pub use entry::{Card, Change, CompactionInfo, Entry, EntryKind, EntryList, ImagePart, origin_via};
 pub use memory::{MemoryRecords, MemoryRef};
 pub use parts::{
     SUMMARY_KEYS, bash_context_command, bash_entry_from_context, display_parts, first_summary,

@@ -189,8 +189,8 @@ fn ctrl_f_is_refused_while_an_approval_is_pending() {
     let mut app = App::new("m", "s");
     fill(&mut app, &[5]);
     render(&mut app);
-    app.update(Input::Pending(
-        Some(Box::new(radian_host::PendingView {
+    app.update(Input::Pending {
+        head: Some(Box::new(radian_host::PendingView {
             request_id: 1,
             origin: "session".into(),
             request: radian_host::PendingRequest::Approval(ApprovalRequest::new(
@@ -203,8 +203,9 @@ fn ctrl_f_is_refused_while_an_approval_is_pending() {
                 None,
             )),
         })),
-        1,
-    ));
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     app.on_key(ctrl('f'));
     assert!(app.find_state().is_none(), "no find box over an approval");
 }

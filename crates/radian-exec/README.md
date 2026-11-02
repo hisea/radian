@@ -39,6 +39,8 @@ Every run is a durable session: one JSONL file per conversation.
 - **`--resume <id>`**: reopen a session and continue; the previous history is sent to the
   model on the next turn. The session must belong to the current workspace (the workspace its
   `SessionCreated` records); another workspace's session is refused, as it is for `--export`.
+  A session a hub-held process hosts is refused too, naming the hub and its pid: one process
+  opens one journal (ADR 0048 §16).
 - **`--list`**: the sessions of the current workspace (`--workspace`, else the current
   directory), newest activity first: id, created, last activity, message count.
 - One writer per file: a second process opening the same session is refused.

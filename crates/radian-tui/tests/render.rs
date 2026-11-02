@@ -3305,8 +3305,8 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
         .map(|index| option(&format!("o{index}"), &format!("Option {index}")))
         .collect();
     let mut app = App::new("m", "s");
-    app.update(radian_tui::app::Input::Pending(
-        Some(Box::new(PendingView {
+    app.update(radian_tui::app::Input::Pending {
+        head: Some(Box::new(PendingView {
             request_id: 7,
             origin: "session".into(),
             request: PendingRequest::Question(radian_coding::QuestionRequest {
@@ -3321,8 +3321,9 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
                 }],
             }),
         })),
-        1,
-    ));
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     let text = screen(&render(&mut app, 60, 18));
     assert!(
         text.contains("╰─ space select · ⏎ next · ↑/↓ move"),
@@ -3765,5 +3766,30 @@ fn an_interrupted_reply_with_no_text_still_shows_the_marker() {
         marker,
         thought + 2,
         "one blank row between the thinking block and the marker:\n{text}"
+    );
+}
+
+/// ADR 0035: a user message whose `origin.via` is `hub` carries the weak ` · hub` suffix at
+/// the end of its last row; a typed message carries none. The suffix is render-only: it is
+/// not part of the entry's text, so a copy or a search never sees it.
+#[test]
+fn a_hub_message_carries_the_weak_marker_and_a_typed_one_does_not() {
+    let mut app = App::new("m", "s");
+    classic_footer(&mut app);
+    let mut hub = Message::user("from-the-phone");
+    if let Message::User { meta, .. } = &mut hub {
+        meta.origin = Some(
+            radian_core::OpaqueJson::parse(serde_json::json!({"via": "hub"}).to_string())
+                .expect("valid origin JSON"),
+        );
+    }
+    app.push_message(&hub);
+    app.push_message(&Message::user("typed-here"));
+    let text = screen(&render(&mut app, 60, 12));
+    assert!(text.contains("from-the-phone · hub"), "{text}");
+    assert!(!text.contains("typed-here · hub"), "{text}");
+    assert_eq!(
+        app.session.entries[0].text, "from-the-phone",
+        "the suffix is render-only"
     );
 }

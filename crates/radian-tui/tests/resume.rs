@@ -3,6 +3,8 @@
 //! and nothing is written to its journal. The refusal happens on the normal screen, so this test
 //! runs the binary as an ordinary command, like `list.rs`.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -84,6 +86,68 @@ fn run_resume(home: &Path, sessions: &Path, workspace: &Path, id: &str) -> Outpu
         .expect("run radian --resume")
 }
 
+/// A stand-in hub-held process: a control socket at `<home>/run/<test pid>.sock` whose
+/// `list_sessions` reports `id` as `holder: hub`. It keeps answering after the child exits,
+/// which is how the test proves the refusal left the holder untouched. The socket is named
+/// with the **test process's** pid (alive) so a concurrent app's stale-socket cleanup leaves
+/// it alone.
+fn start_fake_hub(home: &Path, id: &str, workspace: &Path) -> (PathBuf, u32) {
+    let run = home.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let pid = std::process::id();
+    let socket = run.join(format!("{pid}.sock"));
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).unwrap();
+    let id = id.to_owned();
+    let workspace = std::fs::canonicalize(workspace)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let Ok(copy) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(copy);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let answer = serde_json::json!({
+                "id": 1, "ok": true,
+                "sessions": [{
+                    "id": id,
+                    "kind": "main",
+                    "holder": "hub",
+                    "workspace": workspace,
+                    "model": {"provider": "anthropic", "model": "m"},
+                    "state": "idle",
+                    "pending": 0,
+                }],
+            });
+            let mut bytes = answer.to_string().into_bytes();
+            bytes.push(b'\n');
+            let _ = stream.write_all(&bytes);
+        }
+    });
+    (socket, pid)
+}
+
+/// One `list_sessions` request on the fake hub's socket, to show it still answers.
+fn fake_hub_answer(socket: &Path) -> serde_json::Value {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"{\"id\":9,\"verb\":\"list_sessions\"}\n")
+        .unwrap();
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer).unwrap();
+    serde_json::from_str(answer.trim()).unwrap()
+}
+
 /// ADR 0006 §4: `--resume` of a session created in another workspace is refused by name, before
 /// the terminal is entered, and the journal is unchanged. The pre-change app resumed it.
 #[tokio::test]
@@ -110,4 +174,47 @@ async fn resume_refuses_another_workspaces_session() {
         before,
         "a refused resume writes nothing to the journal"
     );
+}
+
+/// Edge 4 / ADR 0048 §16: `--resume` of a session a hub-held process hosts is refused before
+/// the journal is locked, naming the hub and its pid, the same kind of message as the
+/// other-workspace refusal. The holder keeps running and the journal is unchanged.
+#[tokio::test]
+async fn resume_refuses_a_session_a_hub_held_process_hosts() {
+    let dir = TempDir::new("hub-held");
+    // A control socket path must stay under `SUN_LEN` (104 bytes on macOS), so `RADIAN_HOME`
+    // is the worktree's short `.radian` instead of the test's descriptive temp directory.
+    let home = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the worktree root")
+        .join(".radian");
+    let sessions = dir.path().join("sessions");
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::create_dir_all(&ws).unwrap();
+    let _ = std::fs::remove_file(home.join(format!("run/{}.sock", std::process::id())));
+    let session = write_session(&sessions, "held", &ws, "held by the hub").await;
+    let before = std::fs::read(&session).unwrap();
+    let (socket, holder_pid) = start_fake_hub(&home, "held", &ws);
+
+    let output = run_resume(&home, &sessions, &ws, "held");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("held by the hub")
+            && stderr.contains("held")
+            && stderr.contains(&format!("pid {holder_pid}")),
+        "the refusal names the holder and its pid: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&session).unwrap(),
+        before,
+        "a refused resume writes nothing to the journal"
+    );
+    // The hub-held process is untouched: it still answers its control port.
+    let answer = fake_hub_answer(&socket);
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(answer["sessions"][0]["id"], "held", "{answer}");
+    let _ = std::fs::remove_file(&socket);
 }

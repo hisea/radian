@@ -1,5 +1,5 @@
-//! The hub's session write routes and its hub-held processes (ADR 0048 §16;
-//! `docs/backlog/hub-sessions.md` decisions 3 and 4, the write half): starting a session,
+//! The hub's session write routes and its hub-held processes (ADR 0048 §16): starting a
+//! session,
 //! prompting (live and ended), cancelling, answering the pending queue, configuration, the
 //! one-process-per-journal rule, idle reclaim and hub shutdown.
 //!

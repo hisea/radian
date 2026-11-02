@@ -27,8 +27,10 @@ pub enum UiEvent {
     Agent(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
     Runtime(radian_session::RuntimeEvent),
-    /// The pending queue changed (ADR 0023 U7): the UI re-reads its head.
-    Pending,
+    /// The pending queue changed (ADR 0023 U7): the UI re-reads its head. The ids are the
+    /// requests the control port answered since the last wake; a popup showing one of them is
+    /// explained by one weak line after it closes (ADR 0035).
+    Pending { answered_from_hub: Vec<u64> },
     /// The result of an effect, as the input it becomes (ADR 0023 U3).
     Command(AppInput),
     /// The projection changed. At most one is in flight per session.

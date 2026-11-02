@@ -220,7 +220,7 @@ fn the_json_shape_of_every_entry_kind_is_stable() {
         ),
     ];
     // The tail every entry carries, unchanged by its kind.
-    let tail = r#""text":"x","is_error":false,"result":null,"error_code":null,"card":"none","tool":null,"compaction":null,"interrupted":false,"images":[]}"#;
+    let tail = r#""text":"x","is_error":false,"result":null,"error_code":null,"card":"none","tool":null,"compaction":null,"interrupted":false,"images":[],"via":null}"#;
     for (kind, head) in golden {
         let entry = Entry::new(kind, "x");
         let json = serde_json::to_string(&entry).unwrap();
@@ -449,4 +449,38 @@ fn a_late_acp_result_updates_the_call_entry_it_folded_earlier() {
     );
     assert_eq!(fold.entries()[1].text, "wrote 4 bytes");
     assert_eq!(fold.entries()[1].card, Card::Tail);
+}
+
+/// ADR 0035: the fold keeps a message's `origin.via` (ADR 0005 G1), so a message the owner
+/// sent through the control port is marked after a resume too. A typed message carries none.
+#[test]
+fn a_hub_message_keeps_its_origin_via_through_the_fold() {
+    let mut hub = Message::user("from the phone");
+    if let Message::User { meta, .. } = &mut hub {
+        meta.origin = Some(
+            radian_core::OpaqueJson::parse(serde_json::json!({"via": "hub"}).to_string())
+                .expect("valid origin JSON"),
+        );
+    }
+    let lines = vec![
+        envelope(
+            0,
+            "SessionCreated",
+            true,
+            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
+        ),
+        envelope(1, "MessageAppended", false, appended(0, hub)),
+        envelope(
+            2,
+            "MessageAppended",
+            false,
+            appended(1, Message::user("typed")),
+        ),
+    ];
+    let (_scratch, _path, fold) = open_fold("via", "shared-fold", &lines);
+    let entries = fold.entries();
+    assert_eq!(entries[0].kind, EntryKind::User);
+    assert_eq!(entries[0].via.as_deref(), Some("hub"));
+    assert_eq!(entries[1].kind, EntryKind::User);
+    assert_eq!(entries[1].via, None, "a typed message has no via marker");
 }

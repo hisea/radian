@@ -680,7 +680,7 @@ impl ControlServer {
                 ),
             );
         }
-        match queue.answer(request_id, response.into_pending(request_id)) {
+        match queue.answer_from_hub(request_id, response.into_pending(request_id)) {
             Ok(()) => success(id, None),
             Err(Answered::Late) => failure(
                 id,
@@ -1620,6 +1620,81 @@ fn success(id: Value, payload: Option<Value>) -> Value {
 /// A failed response: `{"id": n, "ok": false, "error": "…"}`.
 fn failure(id: Value, message: impl Into<String>) -> Value {
     json!({ "id": id, "ok": false, "error": message.into() })
+}
+
+// ---------------------------------------------------------------------------
+// The client side: the one-holder lookups a session opener makes
+// ---------------------------------------------------------------------------
+
+/// The hub-held process that hosts a session, found by scanning the control sockets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HubHolder {
+    /// The pid whose `<pid>.sock` reports the session as `holder: hub`.
+    pub pid: u32,
+}
+
+/// The longest a socket that accepted a connection may take to answer `list_sessions`, the
+/// same bound the hub's scanner uses. A socket that never answers costs one timeout.
+const HOLDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Finds the hub-held process hosting `session_id`, or `None` when no socket reports it.
+///
+/// ADR 0048 §16's one-process-per-journal rule: a session opener asks this before it takes the
+/// journal's single-writer lock, so a `--resume` of a session a hub-held process holds is
+/// refused by name instead of failing on the lock. The scan is read-only: each socket gets one
+/// `list_sessions` request and the reply is never written back.
+#[cfg(unix)]
+pub fn hub_holder(session_id: &str) -> Option<HubHolder> {
+    let home = crate::home::radian_home()?;
+    let dir = crate::home::run_dir_for(&home);
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(pid) = name
+            .strip_suffix(".sock")
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Some(answer) = list_sessions_at(&entry.path()) else {
+            continue;
+        };
+        let Some(rows) = answer.get("sessions").and_then(Value::as_array) else {
+            continue;
+        };
+        if rows.iter().any(|row| {
+            row.get("kind").and_then(Value::as_str) == Some("main")
+                && row.get("id").and_then(Value::as_str) == Some(session_id)
+                && row.get("holder").and_then(Value::as_str) == Some("hub")
+        }) {
+            return Some(HubHolder { pid });
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+pub fn hub_holder(_session_id: &str) -> Option<HubHolder> {
+    None
+}
+
+/// One `list_sessions` request on a fresh connection, bounded by [`HOLDER_PROBE_TIMEOUT`]. A
+/// socket that cannot be reached, does not answer, or answers no JSON is skipped.
+#[cfg(unix)]
+fn list_sessions_at(socket: &std::path::Path) -> Option<Value> {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    let _ = stream.set_read_timeout(Some(HOLDER_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(HOLDER_PROBE_TIMEOUT));
+    stream
+        .write_all(br#"{"id":1,"verb":"list_sessions"}"#)
+        .ok()?;
+    stream.write_all(b"\n").ok()?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).ok()?;
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
+    (value.get("ok") == Some(&Value::Bool(true))).then_some(value)
 }
 
 // ---------------------------------------------------------------------------

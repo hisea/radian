@@ -1,4 +1,4 @@
-//! The hub's session surface (ADR 0048 §16; `docs/backlog/hub-sessions.md` decision 3, the read
+//! The hub's session surface (ADR 0048 §16, the read
 //! half): discovery of the sessions the run directory's control ports report, the ended sessions
 //! the session index lists, the transcript, conversation, models and event-stream routes.
 //!

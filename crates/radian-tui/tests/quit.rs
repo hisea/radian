@@ -145,7 +145,11 @@ fn background_events_do_not_disarm_the_quit_window() {
         rows: 30,
         cols: 100,
     });
-    app.update(Input::Pending(None, 0));
+    app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: Vec::new(),
+    });
     app.update(Input::ClipboardDone("copied 3 chars".into()));
     app.update(Input::CompletionReady(None));
     assert!(

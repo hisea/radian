@@ -217,6 +217,18 @@ pub async fn open_session(
                 session_id.as_str()
             ))
         };
+        // ADR 0048 §16 (one process per journal): a hub-held process already has the journal
+        // open, and its single-writer lock would refuse with a generic lock error. Ask the
+        // control ports first, so the refusal names the holder and its pid — the same kind of
+        // message the other-workspace refusal gives. The scan reads only.
+        if let Some(holder) = crate::control::hub_holder(session_id.as_str()) {
+            return Err(SessionError::Message(format!(
+                "session {:?} is held by the hub (pid {}); only one process opens a journal, so \
+                 it is only opened there",
+                session_id.as_str(),
+                holder.pid
+            )));
+        }
         let t_parse = std::time::Instant::now();
         let lock =
             radian_session::SessionJournal::lock_for_resume(&journal_path).map_err(cannot)?;

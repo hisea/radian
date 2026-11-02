@@ -49,6 +49,10 @@ pub struct Entry {
     pub data: radian_host::transcript::Entry,
     /// True while the entry is fed by live deltas and not yet a committed message.
     pub live: bool,
+    /// Draw this entry's marker and body in the weak (`truncation`) role. Only the
+    /// `answered from the hub` line uses it: that line must read as the least important in
+    /// the transcript, below an ordinary notice's secondary level (ADR 0035).
+    pub dim: bool,
     /// The images the entry's message carried (ADR 0028 R10), decoded for drawing. A user
     /// message's placeholder line is already in `text`; a tool result's placeholder row is
     /// synthesized by the layout above the image run.
@@ -114,6 +118,7 @@ impl Entry {
         Self {
             data: radian_host::transcript::Entry::new(kind, text),
             live: false,
+            dim: false,
             images: Vec::new(),
             context: None,
             fold_override: None,
@@ -279,7 +284,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::Stream(_)
         | Input::Event(_)
         | Input::Runtime(_)
-        | Input::Pending(..)
+        | Input::Pending { .. }
         | Input::MentionsExpanded(_)
         | Input::DroppedLoaded { .. }
         | Input::ClipboardRead(_)

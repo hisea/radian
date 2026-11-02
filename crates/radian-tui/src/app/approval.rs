@@ -13,6 +13,7 @@ impl App {
         &mut self,
         head: Option<Box<PendingView<PendingRequest>>>,
         len: usize,
+        answered_from_hub: &[u64],
     ) -> UpdateResult {
         self.pending = len;
         let head_id = head.as_ref().map(|view| view.request_id);
@@ -25,11 +26,20 @@ impl App {
             Layer::Modal(Modal::Question(form)) => Some(form.request_id),
             _ => None,
         });
+        // The control port (the hub) answered the request the popup shows: the popup goes
+        // away like a local answer's, and one weak line says who answered it. Only a shown
+        // popup gets the line; a request the screen never drew needs no explanation.
+        let hub_answered = showing
+            .filter(|id| answered_from_hub.contains(id))
+            .is_some();
         if showing == head_id {
             return UpdateResult::dirty();
         }
         // A different request (or none): drop the old modal and show the new head.
         self.remove_modal(|modal| matches!(modal, Modal::Approval(_) | Modal::Question(_)));
+        if hub_answered {
+            self.push_hub_answer();
+        }
         let Some(view) = head else {
             return UpdateResult::dirty();
         };

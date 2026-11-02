@@ -160,6 +160,11 @@ pub struct PendingQueue<Req, Resp> {
     /// Bumped on every change that could alter the head or the count. A `watch` receiver
     /// `changed()`s once per version, so many changes coalesce into one wake-up.
     version: watch::Sender<u64>,
+    /// The ids completed through [`PendingQueue::answer_from_hub`] since the last
+    /// [`PendingQueue::take_answered_from_hub`]. The UI reads this to explain a popup that
+    /// closed without it (ADR 0035); only a successful answer is recorded, so a late answer
+    /// leaves nothing.
+    answered_from_hub: Mutex<Vec<u64>>,
     /// The highest `request_id` handed out; 0 before the first `push`.
     last_issued: AtomicU64,
 }
@@ -178,6 +183,7 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
                 entries: VecDeque::new(),
             }),
             version,
+            answered_from_hub: Mutex::new(Vec::new()),
             last_issued: AtomicU64::new(0),
         }
     }
@@ -240,6 +246,23 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
     /// answered/aborted) is [`Answered::Late`] and changes nothing; an id that was never
     /// issued is [`Answered::Unknown`]. Never panics and never completes twice.
     pub fn answer(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
+        self.answer_inner(request_id, response, false)
+    }
+
+    /// [`PendingQueue::answer`] for the control port's owner `answer`: the successful id is
+    /// also recorded for [`PendingQueue::take_answered_from_hub`], so the TUI can say that the
+    /// hub answered a popup it was showing. The queue is still the arbiter: a late answer is
+    /// [`Answered::Late`], records nothing, and changes nothing.
+    pub fn answer_from_hub(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
+        self.answer_inner(request_id, response, true)
+    }
+
+    fn answer_inner(
+        &self,
+        request_id: u64,
+        response: Resp,
+        from_hub: bool,
+    ) -> Result<(), Answered> {
         let entry = {
             let mut state = self.lock();
             match state
@@ -263,8 +286,25 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
             Ok(()) => Ok(()),
             Err(_) => Err(Answered::Late),
         };
+        if result.is_ok() && from_hub {
+            self.answered_from_hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request_id);
+        }
         self.bump();
         result
+    }
+
+    /// Takes the ids the control port answered since the last call. The UI reads it on a
+    /// queue wake-up; a queue with no UI reader collects them harmlessly.
+    pub fn take_answered_from_hub(&self) -> Vec<u64> {
+        std::mem::take(
+            &mut *self
+                .answered_from_hub
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
     }
 
     /// Completes every request of `origin` with `response` and removes them. Other sessions are

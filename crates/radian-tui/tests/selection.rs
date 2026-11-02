@@ -146,7 +146,11 @@ fn a_press_outside_the_transcript_never_starts_one() {
 #[test]
 fn a_press_on_a_modal_never_starts_one() {
     let mut app = app();
-    app.update(Input::Pending(Some(Box::new(approval())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(approval())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     // With the approval modal up the selection is off entirely: even a press inside the
     // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
     // the modal owns the input until it is answered.
@@ -343,7 +347,11 @@ fn the_drag_autoscrolls_at_the_edges_one_tick_at_a_time() {
 fn auto_scroll_only_ticks_while_a_drag_is_live() {
     let mut app = app();
     assert!(!app.mouse_autoscroll());
-    app.update(Input::Pending(Some(Box::new(approval())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(approval())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     assert!(
         !app.mouse_autoscroll(),
         "no drag, no tick — the loop stays in blocking recv"

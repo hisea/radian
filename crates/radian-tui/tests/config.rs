@@ -123,8 +123,8 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
         false,
     )
     .unwrap();
-    app.update(Input::Pending(
-        Some(Box::new(radian_host::PendingView {
+    app.update(Input::Pending {
+        head: Some(Box::new(radian_host::PendingView {
             request_id: 1,
             origin: "session".into(),
             request: radian_host::PendingRequest::Approval(
@@ -139,8 +139,9 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
                 ),
             ),
         })),
-        1,
-    ));
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     // The hardcoded prompt key wins over the keymap: it answers, it does not cancel.
     assert_eq!(
         app.on_key(key(KeyCode::Char('y'))).effects,

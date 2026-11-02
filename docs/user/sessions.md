@@ -20,6 +20,8 @@ Both paths are compared as directories, so a workspace reached through a symlink
 directory it names, and a session recorded under another spelling of the same directory (an
 older build, a symlinked home or project) still resumes.
 A recorded directory that no longer exists is compared as written.
+A session a hub-held process hosts is refused too, naming the hub and its pid: one process opens
+one journal, and the hub's process is the one that has it.
 Omit the value in the full screen interface to open the picker.
 Use arrow keys to move in the picker.
 Type to filter the list.

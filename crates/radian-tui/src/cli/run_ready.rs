@@ -310,11 +310,16 @@ pub(super) fn enter_terminal_and_history(
     // a waiter that gave up all bump it, so the UI re-reads the head and the modal matches the
     // queue even when nothing else happened.
     let queue_wake = {
-        let mut changes = session.queue().subscribe();
+        let queue = std::sync::Arc::clone(session.queue());
+        let mut changes = queue.subscribe();
         let pending_tx = tx.clone();
         runtime.spawn(async move {
             while changes.changed().await.is_ok() {
-                if pending_tx.send(UiEvent::Pending).is_err() {
+                let answered_from_hub = queue.take_answered_from_hub();
+                if pending_tx
+                    .send(UiEvent::Pending { answered_from_hub })
+                    .is_err()
+                {
                     break;
                 }
             }

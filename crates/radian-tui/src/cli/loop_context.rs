@@ -117,11 +117,17 @@ impl LoopContext<'_> {
                 }
                 app.update(AppInput::Runtime(event))
             }
-            UiEvent::Pending => {
+            UiEvent::Pending { answered_from_hub } => {
                 // ADR 0023 U7: the UI shows the queue's head. Reading it here is what makes a
-                // waiter that gave up (a cancelled turn) disappear immediately.
+                // waiter that gave up (a cancelled turn) disappear immediately. The ids the
+                // control port answered are passed on, so a popup it answered closes with one
+                // weak line saying so (ADR 0035).
                 let head = self.queue.head();
-                app.update(AppInput::Pending(head.map(Box::new), self.queue.len()))
+                app.update(AppInput::Pending {
+                    head: head.map(Box::new),
+                    len: self.queue.len(),
+                    answered_from_hub,
+                })
             }
             UiEvent::Command(input) => app.update(input),
             UiEvent::Input(InputEvent::Key(key)) => app.on_key(key),

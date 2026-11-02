@@ -73,6 +73,20 @@ fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
     glyphs.open_marker()
 }
 
+/// The suffix a user message the owner sent through the control port carries (ADR 0035):
+/// ` · hub`, drawn in the weak level at the end of the message's last row. It is render-only,
+/// like `[interrupted]`: neither a copy nor a search sees it.
+const HUB_SUFFIX: &str = " · hub";
+
+/// The weak suffixes an entry's last row carries (ADR 0035).
+fn tail_spans(entry: &Entry, theme: &Theme) -> Vec<Span<'static>> {
+    if entry.kind == EntryKind::User && entry.via.as_deref() == Some("hub") {
+        vec![Span::styled(HUB_SUFFIX, theme.truncation)]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
 /// normally, `> ` under `ascii`. Two cells either way, so the body column never moves.
 fn user_marker(glyphs: crate::footer::Glyphs) -> &'static str {
@@ -82,7 +96,8 @@ fn user_marker(glyphs: crate::footer::Glyphs) -> &'static str {
     }
 }
 
-fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'static str, Style) {
+fn marker(entry: &Entry, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'static str, Style) {
+    let kind = entry.kind;
     let style = match kind {
         EntryKind::User => theme.user,
         EntryKind::Assistant => Style::default(),
@@ -124,10 +139,15 @@ fn marker(kind: EntryKind, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'s
         EntryKind::Reasoning => reasoning_marker(glyphs),
         _ => marker_prefix(kind),
     };
+    // The hub-answer line is weaker than an ordinary notice (ADR 0035).
+    let style = if entry.dim { theme.truncation } else { style };
     (prefix, style)
 }
 
 fn body_style(entry: &Entry, theme: &Theme) -> Style {
+    if entry.dim {
+        return theme.truncation;
+    }
     match entry.kind {
         EntryKind::Reasoning => theme.reasoning,
         EntryKind::ToolCall => theme.tool_call,
@@ -226,7 +246,7 @@ fn entry_lines(
     spinner: crate::spinner::Frame,
     body_follows: bool,
 ) -> Vec<Line<'static>> {
-    let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+    let (prefix, prefix_style) = marker(entry, theme, modes.glyphs);
     let head_marker = blocks::head_marker(entry, modes, body_follows);
     let blocks = blocks::parse_blocks_for(entry, modes.reasoning);
     let body = blocks::layout_with(entry, &blocks, modes, width, height, spinner);
@@ -253,6 +273,9 @@ fn entry_lines(
         if Some(i) == last && entry.interrupted {
             line.spans
                 .push(Span::styled(" [interrupted]", theme.interrupted));
+        }
+        if Some(i) == last {
+            line.spans.extend(tail_spans(entry, theme));
         }
         lines.push(line);
     }
@@ -338,8 +361,11 @@ fn render_row(
         " ".repeat(prefix.width())
     };
     // A notice's content is the secondary level (the assignment: its value is 次,
-    // only its label is 强调); the marker's own role stays `notice`.
-    let body = if placeholder {
+    // only its label is 强调); the marker's own role stays `notice`. The hub-answer line is
+    // the weak level instead (ADR 0035).
+    let body = if entry.dim {
+        theme.truncation
+    } else if placeholder {
         theme.reasoning
     } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
@@ -609,7 +635,7 @@ pub fn visible_lines_images(
             let skip = start.saturating_sub(line);
             let blocks = blocks::blocks_for(entry, modes.reasoning);
             let body = blocks::layout_with(entry, &blocks, modes, width, height, spinner);
-            let (prefix, prefix_style) = marker(entry.kind, theme, modes.glyphs);
+            let (prefix, prefix_style) = marker(entry, theme, modes.glyphs);
             let head_marker = blocks::head_marker(entry, modes, body_follows);
             let style = body_style(entry, theme);
             let first_text = (!body.is_empty()).then_some(0);
@@ -640,6 +666,9 @@ pub fn visible_lines_images(
                 if Some(i) == last && entry.interrupted {
                     line.spans
                         .push(Span::styled(" [interrupted]", theme.interrupted));
+                }
+                if Some(i) == last {
+                    line.spans.extend(tail_spans(entry, theme));
                 }
                 out.push(line);
             }

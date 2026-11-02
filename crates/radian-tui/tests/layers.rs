@@ -60,7 +60,11 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     // The turn state is a session fact written by the event sink (ADR 0023 U5), so the test
     // sets it on the projection the way the sink would.
     app.session.projection.set_turn(TurnState::Running);
-    app.update(Input::Pending(Some(Box::new(approval_view())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(approval_view())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     assert!(app.pending_approval().is_some());
     assert_tiers(&app);
 
@@ -80,7 +84,11 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
         app.pending_approval().is_some(),
         "the queue's head still stands until the waiter is gone"
     );
-    app.update(Input::Pending(None, 0));
+    app.update(Input::Pending {
+        head: None,
+        len: 0,
+        answered_from_hub: Vec::new(),
+    });
     assert!(app.pending_approval().is_none());
 }
 
@@ -99,7 +107,11 @@ fn the_approval_keys_survive_a_keymap_that_rebinds_y() {
         )
         .expect("a valid config");
         app.apply_config(&config, false).expect("a valid keymap");
-        app.update(Input::Pending(Some(Box::new(approval_view())), 1));
+        app.update(Input::Pending {
+            head: Some(Box::new(approval_view())),
+            len: 1,
+            answered_from_hub: Vec::new(),
+        });
         let result = app.on_key(key(KeyCode::Char('y')));
         assert_eq!(
             result.effects,
@@ -118,7 +130,11 @@ fn the_approval_keys_survive_a_keymap_that_rebinds_y() {
 #[test]
 fn an_overlay_pushed_while_a_modal_is_up_stays_below_it() {
     let mut app = App::new("m", "s");
-    app.update(Input::Pending(Some(Box::new(approval_view())), 1));
+    app.update(Input::Pending {
+        head: Some(Box::new(approval_view())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
     // A push that ignores the rule would land on top; `push_overlay` must not.
     app.push_overlay(Overlay::Find(FindState::open(0)));
     assert_tiers(&app);
