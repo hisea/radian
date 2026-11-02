@@ -66,7 +66,7 @@ test-group = "pty"
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
 #
-# 6. The hub's session surface (14 names). Each test binds a fake control socket at
+# 6. The hub's session surface (15 names). Each test binds a fake control socket at
 #    `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`: `/tmp`
 #    is the only writable base that short, and the sandbox denies it (group 1),
 #    while `$TMPDIR` inside the workspace is too long (group 5). The routes these
@@ -381,6 +381,7 @@ not (
   | test(=a_message_committed_while_disconnected_is_in_the_reread_transcript)
   | test(=a_new_approval_head_runs_the_hook_once_with_only_the_four_variables)
   | test(=a_question_head_runs_the_hook_with_kind_question_and_an_empty_tool)
+  | test(=a_recovered_socket_does_not_run_the_hook_for_the_same_head_again)
   | test(=a_repeated_head_after_a_reconnect_runs_the_hook_once)
   | test(=a_slow_hook_is_killed_at_the_timeout_and_another_sessions_hook_still_runs)
   | test(=a_slow_socket_delays_no_version_and_no_other_repositorys_listing)

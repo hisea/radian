@@ -195,6 +195,9 @@ struct FakeInner {
     subscriptions: AtomicUsize,
     /// Close the next subscription right after its acknowledgement, so the hub has to reconnect.
     drop_next: AtomicBool,
+    /// How many of the next `list_sessions` probes wait past the hub's probe timeout before they
+    /// answer, the shape of a process too busy to answer in time.
+    silent_probes: AtomicUsize,
 }
 
 /// A control socket at `<run dir>/<pid>.sock` that speaks the protocol the hub uses.
@@ -255,6 +258,12 @@ impl FakePort {
         self.inner.subscriptions.load(Ordering::SeqCst)
     }
 
+    /// Makes the next `count` `list_sessions` probes wait past the hub's `PROBE_TIMEOUT` before
+    /// they answer, so the scanner counts them as failed probes.
+    fn silent_probes(&self, count: usize) {
+        self.inner.silent_probes.store(count, Ordering::SeqCst);
+    }
+
     /// Waits for the hub's subscription, so a pushed line is not lost before the hub follows.
     fn wait_for_subscription(&self, deadline: Instant) {
         while self.subscriptions() == 0 {
@@ -287,18 +296,25 @@ fn serve(mut stream: UnixStream, inner: Arc<FakeInner>) {
         let _ = stream.flush();
     };
     match request.get("verb").and_then(Value::as_str) {
-        Some("list_sessions") => answer(json!({
-            "id": 1,
-            "ok": true,
-            "sessions": [{
-                "id": inner.id,
-                "kind": "main",
-                "workspace": inner.workspace,
-                "model": { "provider": inner.provider, "model": inner.model },
-                "state": inner.state,
-                "pending": inner.pending,
-            }],
-        })),
+        Some("list_sessions") => {
+            if inner.silent_probes.load(Ordering::SeqCst) > 0 {
+                inner.silent_probes.fetch_sub(1, Ordering::SeqCst);
+                // The hub's probe read timeout is one second; answer after it has given up.
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            answer(json!({
+                "id": 1,
+                "ok": true,
+                "sessions": [{
+                    "id": inner.id,
+                    "kind": "main",
+                    "workspace": inner.workspace,
+                    "model": { "provider": inner.provider, "model": inner.model },
+                    "state": inner.state,
+                    "pending": inner.pending,
+                }],
+            }))
+        }
         Some("models") => answer(json!({
             "id": 1,
             "ok": true,
@@ -943,6 +959,7 @@ fn a_socket_whose_process_died_is_dropped_on_the_next_scan() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1083,6 +1100,7 @@ fn each_repository_lists_only_its_own_live_session() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     let _fake_b = FakePort::bind(
@@ -1098,6 +1116,7 @@ fn each_repository_lists_only_its_own_live_session() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
 
@@ -1171,6 +1190,7 @@ fn a_live_session_in_an_unregistered_workspace_is_not_listed_anywhere() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1219,6 +1239,7 @@ fn a_workspace_spelled_through_a_symlink_matches_its_repository() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1268,6 +1289,7 @@ fn a_message_committed_in_the_session_arrives_as_one_entry_event() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1328,6 +1350,7 @@ fn a_message_committed_while_disconnected_is_in_the_reread_transcript() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1399,6 +1422,7 @@ fn a_dropped_subscription_is_reconnected_and_its_events_still_arrive() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(true),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     // The hub's first subscription is dropped by the fake; only the second one is live.
@@ -1450,6 +1474,7 @@ fn a_config_change_in_the_session_arrives_as_one_config_frame() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1508,6 +1533,7 @@ fn a_slow_socket_delays_no_version_and_no_other_repositorys_listing() {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     // The scanner lives in the hub, so the subscription can only appear once the hub is up.
@@ -1631,6 +1657,7 @@ fn live_session(home: &Path, repo: &Repo, id: &str) -> (LivePid, FakePort) {
             lines: Mutex::new(Vec::new()),
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
+            silent_probes: AtomicUsize::new(0),
         },
     );
     (pid, fake)
@@ -1758,6 +1785,55 @@ fn a_repeated_head_after_a_reconnect_runs_the_hook_once() {
         .lines()
         .count();
     assert_eq!(count, 1, "the same request id is not a new head");
+}
+
+/// The review's trigger: a port that misses two `list_sessions` probes makes the scanner forget
+/// its session; when it answers again the hub subscribes afresh, and the head it already ran for
+/// is still not new.
+#[test]
+fn a_recovered_socket_does_not_run_the_hook_for_the_same_head_again() {
+    let repo = Repo::new("hub-hooks-recovered");
+    arc_store(&repo);
+    let short = ShortHome::new("hook-recovered");
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let runs = repo.clone.join("hook-runs.txt");
+    write_hub_hooks(&home, &[format!("printf 'run\\n' >> '{}'", runs.display())]);
+    let _hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (_pid, fake) = live_session(&home, &repo, "session-recovered");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let head = pending(
+        json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.push(head.clone());
+    eventually(Duration::from_secs(30), || {
+        fs::read_to_string(&runs)
+            .ok()
+            .filter(|text| !text.is_empty())
+    });
+
+    // The port misses its next two probes, each one past `PROBE_TIMEOUT`: the scanner stops the
+    // subscription and forgets the session. Then it answers again, the scanner records it as new
+    // and subscribes afresh, and the port re-sends the head it already pushed.
+    let before = fake.subscriptions();
+    fake.silent_probes(2);
+    eventually(Duration::from_secs(60), || {
+        (fake.subscriptions() > before).then_some(())
+    });
+    // The acknowledgement is written before the handler registers its sender.
+    std::thread::sleep(Duration::from_millis(100));
+    fake.push(head);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let count = fs::read_to_string(&runs)
+        .expect("the hook wrote its run record")
+        .lines()
+        .count();
+    assert_eq!(
+        count, 1,
+        "the head the hook already ran for is not new on a recovered socket"
+    );
 }
 
 /// Edge 3: a question's head sets kind `question` and an empty tool.

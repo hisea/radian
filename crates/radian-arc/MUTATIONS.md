@@ -2255,6 +2255,31 @@ it; it drives the same comparison through a real reconnect.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0309-M1 | `new_pending_head` drops the `last_pending_head` comparison, so every pending event with a non-null head fires the hook | `hub::sessions::tests::a_repeated_pending_head_is_not_new` (the second call with the same request id returned a head); `a_repeated_head_after_a_reconnect_runs_the_hook_once` fails the same way under the gate's default profile | ✅ 1 failed |
+| TK0309-M1 | `new_pending_head` drops the comparison (`last_pending_head`; now the hub's `claim_head`), so every pending event with a non-null head fires the hook | `hub::sessions::tests::a_repeated_pending_head_is_not_new` (the second call with the same request id returned a head); `a_repeated_head_after_a_reconnect_runs_the_hook_once` fails the same way under the gate's default profile | ✅ 1 failed |
+
+1/1 caught.
+
+## TK0309 rework 3: the head memory lives in the hub
+
+The review found that `Stream::last_pending_head` died with the subscription: a port that missed
+two `list_sessions` probes made the scanner forget the session, and the fresh `Stream` built when
+it answered again had no memory of the head it had already fired. The memory moved into the hub
+(`Inner::heads`, keyed by socket and session id, pruned when the socket's pid is gone), so it
+outlives a forgotten socket and starts over for a new process. M1's comparison is now
+`SessionHub::claim_head`; re-running it (dropping the check) fails three tests:
+`hub::sessions::tests::a_repeated_pending_head_is_not_new`,
+`hub::sessions::tests::a_forgotten_socket_does_not_fire_the_same_head_again` and
+`hub::sessions::tests::a_new_pending_head_runs_the_configured_hook_once`.
+
+Each mutation was applied by hand to the working file, run with `cargo nextest run -p radian-arc
+--locked --profile sandbox --lib -E 'test(/hub::sessions::tests::/)' --no-fail-fast`, and
+restored from a copy under `.radian/mut/`, which `cmp` found identical. The integration test
+`a_recovered_socket_does_not_run_the_hook_for_the_same_head_again` needs a `/tmp` control socket,
+so the `sandbox` profile skips it and the gate runs it; it drives the same recovery through two
+missed probes.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0309-M2 | `forget` drops the head memory with the session (`Inner::heads.remove(socket)`), the pre-fix behavior | `hub::sessions::tests::a_forgotten_socket_does_not_fire_the_same_head_again` (the recovered socket fired the head again) | ✅ 1 failed |
 
 1/1 caught.
