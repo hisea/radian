@@ -184,11 +184,10 @@ with the current route marked.
 ```
 
 The groups follow `/model`'s order: the current provider first, then providers and models by
-name. The current route's entry has `current: true`; a provider without any known model (for
-example `openai-compatible` with no cached list and no built-in list) contributes an empty
-`models` list, and the current route's provider is always present. Only logged-in providers
-(a usable `auth.json` entry) and the current route's provider are listed. A `config` `model`
-must name one of these entries or the current route.
+name. The current route's entry has `current: true` when it appears in the list. Only logged-in
+providers (a usable `auth.json` entry) and the current route's provider are considered; a
+provider with no known model contributes no group. A `config` `model` must name one of these
+entries or the current route.
 
 ### Attachments
 

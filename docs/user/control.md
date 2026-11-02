@@ -225,8 +225,8 @@ change.
 The same list `/model` shows for this session, grouped by provider and with the current route's
 entry marked `current: true`. Groups follow `/model`'s order: the current provider first, then
 providers and models by name. Only logged-in providers (a usable `auth.json` entry) and the
-current route's provider are listed; a provider with no known model contributes an empty
-`models` list. A `config` `model` must name one of these entries or the current route.
+current route's provider are considered; a provider with no known model contributes no group.
+A `config` `model` must name one of these entries or the current route.
 
 ## `list_sessions`
 
