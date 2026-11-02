@@ -120,6 +120,11 @@ struct Facts {
     mcp_configured: usize,
     mcp_open: Option<(usize, usize)>,
     last_tool: Option<LastToolCall>,
+    /// ADR 0034 H2: the session is idle-blocked — a used-up wake budget, a `/goal` budget
+    /// stop, a lost job notice, the intent-stop cap or the idle hook-continuation cap. The TUI
+    /// folds the five into this one bit so a host that does not see the TUI's own state (the
+    /// control port a hub reads) reports the same `blocked` state herdr does.
+    idle_blocked: bool,
 }
 
 /// One session's projection.
@@ -289,6 +294,12 @@ impl SessionProjection {
         self.write(|facts| facts.last_tool = Some(tool))
     }
 
+    /// Whether the session is idle-blocked (ADR 0034 H2). The TUI writes the folded five-way
+    /// bit; a turn start and a user message clear it.
+    pub fn set_idle_blocked(&self, blocked: bool) -> bool {
+        self.write(|facts| facts.idle_blocked = blocked)
+    }
+
     /// The effective input budget `B` (ADR 0018); `None` means no budget is configured.
     pub fn set_context_window(&self, budget: Option<u64>) -> bool {
         self.write(|facts| facts.context_window = budget)
@@ -424,6 +435,12 @@ impl ProjectionRead<'_> {
 
     pub fn last_tool(&self) -> Option<&LastToolCall> {
         self.facts.last_tool.as_ref()
+    }
+
+    /// Whether the session is idle-blocked (ADR 0034 H2): the wake budget, a `/goal` budget,
+    /// a lost job notice, the intent-stop cap or the idle hook-continuation cap.
+    pub fn idle_blocked(&self) -> bool {
+        self.facts.idle_blocked
     }
 
     pub fn stream(&self) -> StreamSnapshot {

@@ -2094,18 +2094,6 @@ the file was restored from `.radian/bak/sessions.rs`, which `cmp` found identica
 |---|---|---|---|
 | TK0302-M1 | `same_directory` compares the two values as raw strings again (no canonicalization) | ✅ 4 failed (rc=100) | `sessions::tests::a_symlinked_workspace_spelling_is_not_a_mismatch`, `sessions::tests::in_workspace_follows_the_symlinked_spelling`, `sessions::tests::list_finds_a_session_recorded_under_a_symlinked_spelling`, `sessions::tests::search_finds_a_session_recorded_under_a_symlinked_spelling` |
 
-## TK0306: the folded transcript shared by the TUI and the hub (2026-11-02)
-
-Branch `work/TK0306-shared-transcript-fold`. The folds moved from `radian-tui` into
-`radian-host::transcript` (ADR 0023 U1); each mutation was applied in place, the transcript
-tests were run, and the file was restored from a copy under `.radian/` that `cmp` found
-identical.
-
-| # | Mutation | Result | Test that caught it |
-|---|---|---|---|
-| TK0306-M1 | the journal fold drops one entry kind's mapping: an assistant message's text entry is not pushed (`transcript::attach`) | ✅ 1 failed (rc=100) | `radian-tui::attach the_tui_attach_path_folds_the_journal_through_the_shared_fold` (the fold produced `[User, ToolCall, ToolResult]` where `[User, Assistant, ToolCall, ToolResult]` is expected) |
-| TK0306-M2 | the ACP fold drops one entry kind's mapping: `tool_call` and `tool_call_update` are swallowed (`transcript::acp`) | ✅ 1 failed (rc=100) | `transcript::an_arc_result_jsonl_fixture_folds_to_the_conversation_entries` (the fold produced `[Reasoning, Notice, Assistant, Outcome]` where `[Reasoning, ToolCall, ToolResult, Notice, Assistant, Outcome]` is expected) |
-| TK0306-M3 | the conversation page stops truncating its mirrored tail in `sync`, so a rewritten entry keeps its old state (`radian-tui`, `arc/stdout/acp.rs`) | ✅ 1 failed (rc=100) | `arc::stdout::acp::tests::the_conversation_page_shows_the_folds_entries` (9 drawn entries against the fold's 6) |
 ## TK0304: the owner token on the control port (2026-11-02)
 
 Branch `work/TK0304-control-token-user-source`. The control tests bind `/tmp` sockets, which the
@@ -2213,3 +2201,46 @@ identical afterwards.
 |---|---|---|---|
 | TK0310-M3 | `answer_inner` records a hub answer with no reader held (drop `&& self.hub_answer_readers.receiver_count() > 0`) | ✅ 2 failed (rc=100) | `pending::a_queue_with_no_ui_reader_retains_no_hub_answer` (1000 ids kept with no UI) and `pending::a_ui_reader_sees_hub_answers_until_it_is_dropped` (an id kept after the reader was dropped) |
 
+## TK0306: the folded transcript shared by the TUI and the hub (2026-11-02)
+
+Branch `work/TK0306-shared-transcript-fold`. The folds moved from `radian-tui` into
+`radian-host::transcript` (ADR 0023 U1). Both mutated files are in this crate; M1 is caught by a
+`radian-tui` test (the TUI draws the same fold), M2 by this crate's `transcript` test. Each
+mutation was applied in place, the named test was run, and the file was restored from a copy
+under `.radian/` that `cmp` found identical. M3 mutates the TUI's conversation page, so its row
+is in `crates/radian-tui/MUTATIONS.md`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0306-M1 | the journal fold drops one entry kind's mapping: an assistant message's text entry is not pushed (`transcript::attach`) | ✅ 1 failed (rc=100) | `radian-tui::attach the_tui_attach_path_folds_the_journal_through_the_shared_fold` (the fold produced `[User, ToolCall, ToolResult]` where `[User, Assistant, ToolCall, ToolResult]` is expected) |
+| TK0306-M2 | the ACP fold drops one entry kind's mapping: `tool_call` and `tool_call_update` are swallowed (`transcript::acp`) | ✅ 1 failed (rc=100) | `transcript::an_arc_result_jsonl_fixture_folds_to_the_conversation_entries` (the fold produced `[Reasoning, Notice, Assistant, Outcome]` where `[Reasoning, ToolCall, ToolResult, Notice, Assistant, Outcome]` is expected) |
+
+## TK0314: the hub-session review follow-ups (2026-11-02)
+
+Branch `work/TK0314-hub-sessions-followups`. The control tests bind `/tmp` sockets, which the
+workspace sandbox denies, so M1 and M2 ran outside it with `cargo nextest run -p radian-host
+--test control --locked --no-fail-fast -E 'test(<name>)'`; M4's unit test runs inside the
+sandbox. Each mutation was applied in place and restored from `.radian/bak/control.rs`, which
+`cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0314-M1 | the control port's idle branch sets the turn source at the enqueue again (`else { hooks.set_turn_source(Some(source)) }`) | ✅ 1 failed (rc=100) | `an_idle_inject_does_not_set_the_turn_source_before_a_turn_claims_it` (an idle plain inject left `turn_source()` at `Some(Scheduler)` instead of `None`) |
+| TK0314-M2 | `sessions` passes `false` for the projection's idle-block bit (`let idle_block = false`) | ✅ 1 failed (rc=100) | `list_sessions_reports_an_idle_block_as_blocked` (the row said `"state": "idle"` while the bit was set) |
+| TK0314-M4 | `same_journal` compares only the file name, not its directory | ✅ 1 failed (rc=100) | `control::tests::the_same_journal_needs_the_same_file_not_only_the_id` (the same id in another session directory matched) |
+
+3/3 caught.
+
+
+## TK0314 rework 2: a row without a journal still names its holder (2026-11-02)
+
+Branch `work/TK0314-hub-sessions-followups` (continued from the TK0314 section above, whose
+rows stop at M8). The row matcher is a pure function, so the test runs inside the workspace
+sandbox. The mutation was applied in place and restored from `.radian/bak/control.rs.tk0314m9`,
+which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0314-M9 | a row that reports no journal is not the holder (`None => false` instead of the id fallback) | ✅ 1 failed (rc=100) | `control::tests::a_row_without_a_journal_is_matched_by_the_session_id` (a row with no `journal` field no longer matched its id) |
+
+1/1 caught.

@@ -250,6 +250,7 @@ A `config` `model` must name one of these entries or the current route.
 {"id": 1, "ok": true, "sessions": [{
   "id": "...", "kind": "main", "holder": "tui",
   "workspace": "/home/me/project",
+  "journal": "/home/me/.radian/sessions/....jsonl",
   "model": {"provider": "anthropic", "model": "claude-sonnet-4"},
   "state": "blocked",
   "pending": 1}]}
@@ -263,8 +264,9 @@ One process serves one session, so the list has one `main` row:
 | `kind` | always `main` |
 | `holder` | `hub` when the process runs in the hub-held mode a hub starts, `tui` for every other hosting process (a `radian` TUI, an interactive `radian exec`, a `-p` run). The hub reports a session with `holder` `hub` as `live: hub` and every other live one as `live: tui`. |
 | `workspace` | the canonical workspace the session was opened in |
+| `journal` | the journal file this process has open; two sessions with the same `id` under different session directories are told apart by it. A process that does not report the field (an older build) is matched by `id` alone, so a lookup never reads "no holder" from a missing field. |
 | `model` | the model route in force |
-| `state` | `idle`, `working` or `blocked`; a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, and everything else is `idle` |
+| `state` | `idle`, `working` or `blocked`; a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, an idle block (a used-up wake budget, a `/goal` budget stop, a lost job notice, the intent-stop cap or the idle hook-continuation cap) is `blocked` while no turn runs, and everything else is `idle` |
 | `pending` | the pending approval/question count |
 
 None of these fields needs the owner token.
@@ -320,7 +322,10 @@ error naming the item, and nothing is enqueued.
 ## Example
 
 ```sh
-sock="$RADIAN_HOME/run/$$.sock"  # the hosting process's pid, not the shell's
+# One socket per hosting process: $RADIAN_HOME/run/<pid>.sock. Pick the hosting process
+# you want; `$$` is this shell's pid, not the hosting process's.
+pid="$(ls "$RADIAN_HOME/run" | sed 's/\.sock$//' | head -n 1)"
+sock="$RADIAN_HOME/run/$pid.sock"
 printf '%s\n' '{"id":1,"verb":"subscribe"}' | nc -U "$sock"
 printf '%s\n' '{"id":2,"verb":"followup","text":"run the tests"}' | nc -U "$sock"
 printf '%s\n' '{"id":3,"verb":"pending","token":"…"}' | nc -U "$sock"

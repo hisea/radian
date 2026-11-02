@@ -2339,8 +2339,6 @@ which `cmp` found identical.
 
 1/1 caught.
 
-3/3 caught.
-
 ## TK0310 rework 2: a prompt's scan can miss a port that is listening (2026-11-02, branch `work/TK0310-tui-hub-marker-and-takeover`)
 
 The hub's prompt route treated a port that was bound but not yet serving as no host: its
@@ -2372,3 +2370,16 @@ nextest run` after rebuilding `radian`, and restored from `.radian/config.mod.rs
 |---|---|---|---|
 | TK0315-M1 | `parse_hub` drops the `bind` arm, so `hub.bind` is an unknown key that is skipped (the pre-change behavior) | `config::tests::hub_bind_is_an_ip_address`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the hub bound `127.0.0.1`), `hub_http::an_ipv6_loopback_bind_prints_the_bracketed_address` (the same), and `hub_http::a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds` (the hub started and the run timed out) | ✅ 3 failed, 1 timed out |
 | TK0315-M2 | `bind_warning` always returns `None`, so a non-loopback bind prints no warning | `hub::http::tests::a_non_loopback_bind_has_one_warning_and_loopback_has_none`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the warning never arrived) | ✅ 2 failed |
+## TK0314: the hub-session review follow-ups (2026-11-02, branch `work/TK0314-hub-sessions-followups`)
+
+Each mutation was applied in place and restored from a copy under `.radian/bak/` that `cmp`
+found identical. M5-M7 ran inside the workspace sandbox; M8's strengthened hook test also does.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0314-M5 | `socket_ino` returns `0` for every socket, so the head memory is keyed by path alone again | `hub::sessions::tests::a_reused_pid_socket_file_starts_the_head_memory_over` (the reused pid's first `request_id` 1 was not new) | ✅ 1 failed |
+| TK0314-M6 | `parse_input` loses the shape pre-check for `images`/`files` (a present `null` reaches the composer check as `422`) | `hub::sessions::tests::a_null_attachment_is_a_bad_body_not_an_absent_field` (`Invalid` instead of `Bad`) | ✅ 1 failed |
+| TK0314-M7 | `serve` no longer calls `ensure_default_config` | `hub_session_write::a_hubs_first_start_writes_the_default_config_template` (no `config/config.toml` appeared) | ✅ 1 failed |
+| TK0314-M8 | the timeout path kills only the shell (`child.kill()`) instead of the process group (`kill_group(pid)`) | `hub::hooks::tests::a_command_past_its_timeout_is_killed_and_logged` (the background `sleep` child stayed alive) | ✅ 1 failed |
+
+4/4 caught.

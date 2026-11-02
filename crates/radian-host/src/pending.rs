@@ -257,9 +257,11 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
         self.answer_inner(request_id, response, false)
     }
 
-    /// [`PendingQueue::answer`] for the control port's owner `answer`: the successful id is
+    /// [`PendingQueue::answer`] for the control port's owner `answer`: a successful id is
     /// also recorded for [`PendingQueue::take_answered_from_hub`], so the TUI can say that the
-    /// hub answered a popup it was showing. The queue is still the arbiter: a late answer is
+    /// hub answered a popup it was showing. The id is recorded only while a UI holds a
+    /// [`PendingQueue::watch_hub_answers`] receiver: a host with no UI (a hub-held `radian
+    /// exec`) records nothing. The queue is still the arbiter: a late answer is
     /// [`Answered::Late`], records nothing, and changes nothing.
     pub fn answer_from_hub(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
         self.answer_inner(request_id, response, true)
@@ -356,7 +358,14 @@ impl<Req: Clone, Resp> PendingQueue<Req, Resp> {
     /// The request the UI should show: the first valid entry in arrival order. Elements whose
     /// waiting end is gone are dropped here.
     pub fn head(&self) -> Option<PendingView<Req>> {
-        let (head, changed) = {
+        let (head, _) = self.head_and_len();
+        head
+    }
+
+    /// The head and the valid length, read under one lock. A reply that pairs them cannot show
+    /// a head from before a concurrent answer and a length from after it.
+    pub fn head_and_len(&self) -> (Option<PendingView<Req>>, usize) {
+        let (head, length, changed) = {
             let mut state = self.lock();
             let changed = retain_open(&mut state);
             let head = state.entries.front().map(|entry| PendingView {
@@ -364,12 +373,12 @@ impl<Req: Clone, Resp> PendingQueue<Req, Resp> {
                 origin: entry.origin.clone(),
                 request: entry.request.clone(),
             });
-            (head, changed)
+            (head, state.entries.len(), changed)
         };
         if changed {
             self.bump();
         }
-        head
+        (head, length)
     }
 
     /// The pending request with this id, without removing it, dropping anything or bumping the

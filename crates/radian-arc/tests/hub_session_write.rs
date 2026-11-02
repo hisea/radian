@@ -1361,6 +1361,39 @@ fn a_null_steer_or_model_is_bad_request_and_starts_no_process() {
         sockets(&fixture.home.run()).is_empty(),
         "the bad prompt resumed no process"
     );
+
+    // `images: null` and `files: null` are wrong-typed too: the create route answers `400` and
+    // starts nothing (ADR 0048 §16).
+    for field in ["images", "files"] {
+        let response = fixture.hub.post(
+            &format!("/v1/repos/{}/sessions", fixture.name),
+            &json!({ "text": "x", field: null }),
+        );
+        assert_eq!(response.status, 400, "{:?}", response.body);
+        assert!(
+            response.error().contains(field),
+            "the error names the field: {:?}",
+            response.body
+        );
+        assert!(
+            sockets(&fixture.home.run()).is_empty(),
+            "a null attachment started no process"
+        );
+    }
+}
+
+/// ADR 0008 §2: the first radian process on a machine may be the hub. It writes the commented
+/// default template at the default path, exactly as the TUI and `radian exec` do, even though
+/// every hub-held child is given an explicit `--config` afterwards.
+#[test]
+fn a_hubs_first_start_writes_the_default_config_template() {
+    let home = ShortHome::new();
+    let cwd = home.path().to_path_buf();
+    let _hub = Hub::start_in(&home, &[], None, &cwd);
+    let path = home.path().join("config").join("config.toml");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the hub's first start writes {}: {error}", path.display()));
+    assert!(text.contains("schema_version = 1"), "{text}");
 }
 
 /// `radian --config alt.toml hub` starts its sessions on `alt.toml`: the hub-held child is

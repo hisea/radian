@@ -323,6 +323,7 @@ impl App {
                 *self.session.goal_mode.goal() = Some(GoalState::fresh(objective.clone(), budget));
                 self.session.goal_mode.blocked = false;
                 self.session.goal_mode.next_due = None;
+                self.sync_idle_block();
                 self.open_goal_stretch();
                 self.push_notice(format!(
                     "goal set: {} ({}; /goal budget … to change it)",
@@ -350,6 +351,7 @@ impl App {
                 }
                 if status == GoalStatus::BudgetExhausted {
                     self.session.goal_mode.blocked = false;
+                    self.sync_idle_block();
                     self.open_goal_stretch();
                     self.push_notice(format!(
                         "goal budget: {}; goal active again",
@@ -426,6 +428,7 @@ impl App {
                 self.session.goal_mode.stretch_tokens = 0;
                 self.session.goal_mode.next_due = None;
                 self.session.goal_mode.blocked = false;
+                self.sync_idle_block();
                 self.push_notice("goal dropped");
                 UpdateResult::dirty()
             }
@@ -740,6 +743,7 @@ impl App {
         }
         self.session.goal_mode.next_due = None;
         self.session.goal_mode.blocked = true;
+        self.sync_idle_block();
         self.push_notice(notice);
         UpdateResult::effect(Effect::GoalAppend {
             event: RuntimeEvent::GoalBudgetExhausted {

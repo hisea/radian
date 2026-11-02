@@ -134,6 +134,9 @@ struct Fixture {
     home: PathBuf,
     session: Arc<LocalSession>,
     server: Arc<ControlServer>,
+    /// The projection the session's event sink folds into (and the control port reads for the
+    /// idle-block bit a `list_sessions` row reports).
+    projection: Arc<SessionProjection>,
     /// The config slot the driver writes: a test can apply a route without a turn
     /// (`ConfigSlot::set_for_test`, the `testing` feature).
     slot: Arc<radian_runtime::ConfigSlot>,
@@ -291,6 +294,7 @@ impl Fixture {
             home,
             session,
             server,
+            projection,
             slot,
         }
     }
@@ -386,11 +390,37 @@ impl Client {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// An input that is merely queued does not set the turn source: the turn it opens (or joins)
+/// applies its own source when the claim opens it. A plain `inject` opens no turn by itself,
+/// so the source stays unset until some turn admits it at a safe point (ADR 0011 L2). Before,
+/// an idle request set the source at the enqueue, which a token-bearing request could raise
+/// under a non-human turn that was about to be claimed.
+#[tokio::test]
+async fn an_idle_inject_does_not_set_the_turn_source_before_a_turn_claims_it() {
+    let server = MockServer::start(vec![text_reply("unused")]).await;
+    let fixture = Fixture::new("idle-inject-source", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let response = client
+        .request(json!({"id": 1, "verb": "inject", "text": "queued context"}))
+        .await;
+    assert_eq!(response["ok"], true, "{response}");
+    // No turn opens for a plain inject, so nothing has claimed it.
+    assert!(!fixture.session.turn_running());
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        None,
+        "a queued input sets no source before its turn claims it"
+    );
+    fixture.stop().await;
+}
+
 /// Sources (ADR 0043, decided item 4): `User` and `PermissionDecision` are refused without
 /// the owner token, and a refusal changes nothing (no `InboxEnqueued`); `Scheduler` is accepted
-/// and recorded with that source. `cancel` always goes; an approval/answer verb does not exist.
+/// and recorded with that source. `cancel` always goes; `approve` is not a verb (`answer` is
+/// the owner's separate one).
 #[tokio::test]
-async fn sources_are_fixed_by_the_port_and_an_approval_verb_does_not_exist() {
+async fn sources_are_fixed_by_the_port_and_an_unknown_verb_changes_nothing() {
     let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
     let fixture = Fixture::new("sources", &server.base_url).await;
     let mut client = Client::connect(fixture.socket()).await;
@@ -412,7 +442,8 @@ async fn sources_are_fixed_by_the_port_and_an_approval_verb_does_not_exist() {
         .await;
     assert_eq!(refused["ok"], false, "{refused}");
 
-    // An approval answer is not a verb: an unknown verb changes nothing.
+    // `approve` is not a verb (the owner's answer verb is `answer`): an unknown verb changes
+    // nothing.
     let refused = client
         .request(json!({"id": 3, "verb": "approve", "request_id": "x"}))
         .await;
@@ -674,12 +705,13 @@ async fn a_followup_with_the_owner_token_is_user_with_the_hub_origin() {
         enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
         "{enqueued}"
     );
-    // The complement of a mid-turn input: with no turn running, this request sets the source
-    // of the turn it starts.
+    // The turn the request opens runs with the request's source. The enqueue itself sets
+    // nothing: the driver claims the input and applies its source at the turn start.
+    wait_requests(&server, 1).await;
     assert_eq!(
         fixture.session.hooks().turn_source(),
         Some(InputSource::User),
-        "an owner followup that starts a turn sets the turn's source"
+        "the turn the owner followup opens runs with the user source"
     );
     fixture.stop().await;
 }
@@ -862,6 +894,21 @@ async fn a_bad_attachment_names_the_item_and_enqueues_nothing() {
             .any(|line| line["event"] == "InboxEnqueued"),
         "a refused attachment must not reach the inbox"
     );
+
+    // A present `null` is a wrong-typed field, not an absent one. The hub's write routes reject
+    // it as `400`; the port refuses it before anything is enqueued.
+    for (id, field) in [(3, "images"), (4, "files")] {
+        let response = client
+            .request(json!({
+                "id": id, "verb": "followup", "text": "null field", field: null
+            }))
+            .await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(
+            response["error"].as_str().unwrap().contains(field),
+            "the error names the field: {response}"
+        );
+    }
     fixture.stop().await;
 }
 
@@ -2027,6 +2074,30 @@ async fn list_sessions_reports_working_while_an_exec_hosts_turn_runs() {
     wait_not_running(&fixture).await;
     let idle = client
         .request(json!({"id": 3, "verb": "list_sessions"}))
+        .await;
+    assert_eq!(idle["sessions"][0]["state"], "idle", "{idle}");
+    fixture.stop().await;
+}
+
+/// ADR 0034 H2: an idle block the TUI folds into the projection (a used-up wake budget, a
+/// `/goal` budget, a lost job notice, or a stop cap) is `blocked` in a `list_sessions` row, the
+/// same state herdr and the footer report.
+#[tokio::test]
+async fn list_sessions_reports_an_idle_block_as_blocked() {
+    let server = MockServer::start(Vec::new()).await;
+    let fixture = Fixture::new("idle-block", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    fixture.projection.set_idle_blocked(true);
+    let blocked = client
+        .request(json!({"id": 1, "verb": "list_sessions"}))
+        .await;
+    assert_eq!(blocked["sessions"][0]["state"], "blocked", "{blocked}");
+
+    // A turn start (and a user message) clears the bit; the row is idle again.
+    fixture.projection.set_idle_blocked(false);
+    let idle = client
+        .request(json!({"id": 2, "verb": "list_sessions"}))
         .await;
     assert_eq!(idle["sessions"][0]["state"], "idle", "{idle}");
     fixture.stop().await;

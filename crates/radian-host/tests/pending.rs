@@ -62,6 +62,25 @@ async fn two_sessions_keep_arrival_order_and_do_not_overwrite_each_other() {
 }
 
 #[tokio::test]
+async fn head_and_len_pair_the_same_instant() {
+    let queue: PendingQueue<u32, u32> = PendingQueue::new();
+    assert_eq!(queue.head_and_len(), (None, 0));
+    let (first, _answer) = queue.push("s", 1);
+    let (second, _answer) = queue.push("s", 2);
+    let (head, length) = queue.head_and_len();
+    assert_eq!(head.expect("a head").request_id, first);
+    assert_eq!(length, 2);
+
+    queue.answer(first, 10).unwrap();
+    let (head, length) = queue.head_and_len();
+    assert_eq!(head.expect("the next head").request_id, second);
+    assert_eq!(length, 1, "the head and the length come from one read");
+
+    queue.answer(second, 20).unwrap();
+    assert_eq!(queue.head_and_len(), (None, 0));
+}
+
+#[tokio::test]
 async fn answer_completes_the_waiter_and_notifies() {
     let queue: PendingQueue<u32, u32> = PendingQueue::new();
     let mut rx = queue.subscribe();

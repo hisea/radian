@@ -175,8 +175,10 @@ pub struct SessionHub {
     /// `[hub.hooks]` (ADR 0048 §16), read once when the hub starts.
     hooks: HubHooks,
     /// The configuration file the hub was itself started with, passed on to every hub-held
-    /// process (ADR 0048 §16). `None` when the hub resolved the machine's file itself, in
-    /// which case the child resolves the same one.
+    /// process (ADR 0048 §16). `serve` always resolves a path (the explicit file or the
+    /// machine's default) and hands it to [`SessionHub::with_hooks`], so production never
+    /// takes the `None` branch; `None` is only a direct construction that has no file to pass
+    /// on (a test), and the child then resolves the machine's file itself.
     config: Option<PathBuf>,
     inner: Mutex<Inner>,
     /// The hub-held processes, keyed by pid. A process is listed here from the moment it is
@@ -206,8 +208,10 @@ struct Inner {
     /// The head the `after_pending` hook already ran for on each socket. It belongs to the hub
     /// and not to the subscription's [`Stream`] because the scanner forgets a socket that misses
     /// two probes and builds a fresh stream when the port answers again, and the port then
-    /// re-sends the head it already pushed (ADR 0048 §16: one run per new head).
-    heads: BTreeMap<PathBuf, SeenHead>,
+    /// re-sends the head it already pushed (ADR 0048 §16: one run per new head). The key pairs
+    /// the socket path with the socket file's inode, so a pid reused by a new process (a new
+    /// socket file at the same path) is a new process whose `request_id`s start over.
+    heads: BTreeMap<(PathBuf, u64), SeenHead>,
 }
 
 /// The last pending head the `after_pending` hook ran for on one socket.
@@ -324,16 +328,18 @@ impl SessionHub {
     /// Whether `request_id` is a head the `after_pending` hook has not run for on `socket` yet,
     /// which makes it a new one; records it when it is. The memory outlives a forgotten socket,
     /// so the port's re-sent head after a recovery is not new, and it starts over for another
-    /// socket (another process, whose `request_id`s begin at 1 again) or another session id.
+    /// socket file (another process, whose `request_id`s begin at 1 again; the inode tells a
+    /// reused pid's new socket from the old one) or another session id.
     fn claim_head(&self, socket: &Path, session: &str, request_id: u64) -> bool {
+        let key = (socket.to_path_buf(), socket_ino(socket));
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let new = inner
             .heads
-            .get(socket)
+            .get(&key)
             .is_none_or(|seen| seen.session != session || seen.request != request_id);
         if new {
             inner.heads.insert(
-                socket.to_path_buf(),
+                key,
                 SeenHead {
                     session: session.to_owned(),
                     request: request_id,
@@ -343,14 +349,16 @@ impl SessionHub {
         new
     }
 
-    /// Forgets the head memory of sockets whose pid is gone, so it does not grow with every
-    /// process that ever reported here. A socket whose process is still alive keeps its memory
-    /// while the scanner has forgotten the session: that is what a recovery needs.
+    /// Forgets the head memory of sockets whose pid is gone, and of entries whose socket file
+    /// has been replaced (a reused pid's new process), so it does not grow with every process
+    /// that ever reported here. A socket whose process is still alive and whose file is still the
+    /// one it recorded keeps its memory while the scanner has forgotten the session: that is what
+    /// a recovery needs.
     fn forget_dead_heads(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        inner
-            .heads
-            .retain(|socket, _| socket_pid(socket).is_some_and(process::alive));
+        inner.heads.retain(|(socket, ino), _| {
+            socket_pid(socket).is_some_and(process::alive) && *ino == socket_ino(socket)
+        });
     }
 
     /// The event fan-out of the live session `id`, or `None` when no process hosts it.
@@ -474,8 +482,9 @@ impl SessionHub {
     /// not seen yet is still found. A fresh row is not recorded: the scanner owns the cache and
     /// the subscription that goes with it.
     ///
-    /// A `None` from `alive`, or a port that reports another id, is no host, and the caller then
-    /// starts the process.
+    /// A dead cached socket, a `None` from `alive`, or a port that reports another id falls
+    /// through to a fresh scan (`probe_hosts`), so the cached row is never the only answer; a
+    /// fresh scan that finds no host is `None`, and the caller then starts the process.
     fn hosting(&self, id: &str, alive: impl Fn(&Path) -> bool) -> Option<PathBuf> {
         if let Some((socket, live)) = self.live(id)
             && live.id == id
@@ -758,6 +767,16 @@ fn socket_pid(path: &Path) -> Option<u32> {
         .and_then(|stem| stem.parse::<u32>().ok())
 }
 
+/// The socket file's inode, or `0` when it cannot be read. A reused pid binds a **new** socket
+/// file at the same path, so the inode tells its process from the one that owned the path
+/// before: the head memory of the old process does not block the new process's first head.
+fn socket_ino(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    fs::metadata(path)
+        .map(|metadata| metadata.ino())
+        .unwrap_or(0)
+}
+
 /// One subscription thread and the flag that stops it.
 struct Subscription {
     stop: Arc<AtomicBool>,
@@ -1024,6 +1043,15 @@ fn parse_input(body: &[u8]) -> Result<SessionInput, SessionError> {
         Some(Value::Bool(steer)) => *steer,
         Some(_) => return Err(SessionError::Bad("`steer` must be a boolean".to_owned())),
     };
+    // A present `null` is a wrong-typed field, not an absent one: the ADR says a missing or
+    // wrong-typed field is `400`, and the composer's own check (`validate_attachments`) cannot
+    // tell a shape error from a content refusal (`422`).
+    for field in ["images", "files"] {
+        match raw.get(field) {
+            None | Some(Value::Array(_)) => {}
+            Some(_) => return Err(SessionError::Bad(format!("`{field}` must be an array"))),
+        }
+    }
     radian_host::control::validate_attachments(&raw).map_err(SessionError::Invalid)?;
     Ok(SessionInput { raw, steer })
 }
@@ -1871,6 +1899,24 @@ mod tests {
     }
 
     #[test]
+    fn a_null_attachment_is_a_bad_body_not_an_absent_field() {
+        // A present `images: null`/`files: null` is wrong-typed, so the routes answer `400`
+        // before a process starts; an absent field is the empty list.
+        for field in ["images", "files"] {
+            let raw = json!({ "text": "x", field: null });
+            let error = match parse_input(raw.to_string().as_bytes()) {
+                Ok(_) => panic!("a null {field} is refused"),
+                Err(error) => error,
+            };
+            assert!(matches!(error, SessionError::Bad(_)), "{error:?}");
+        }
+        assert!(
+            parse_input(br#"{"text":"x"}"#).is_ok(),
+            "an absent attachment list is the empty one"
+        );
+    }
+
+    #[test]
     fn a_null_model_is_a_bad_body_not_an_absent_field() {
         let raw = json!({ "text": "x", "model": null });
         let error = match parse_model(&raw) {
@@ -1905,8 +1951,9 @@ mod tests {
             .expect("the child is told the hub's configuration file");
         assert_eq!(args.get(position + 1), Some(&config.display().to_string()));
 
-        // A hub started without `--config` has no file to pass on: its child resolves the
-        // machine's configuration exactly as the hub did.
+        // A hub built without a file passes none on: this branch is not reached through
+        // `serve` (which always resolves the explicit file or the machine's default), only by a
+        // direct construction. The child then resolves the machine's configuration itself.
         let plain = SessionHub::new(
             dir.path().to_path_buf(),
             radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
@@ -2051,6 +2098,49 @@ mod tests {
         assert!(
             elsewhere.new_pending_head(&head).is_some(),
             "a new socket's request ids start over"
+        );
+    }
+
+    /// Review: the head memory is per socket **file**, not per socket path alone. A pid reused
+    /// by a new process binds a new file at the same `<pid>.sock` path; its first head
+    /// (`request_id` 1, a new queue's first id) is new even before the next scan prunes the old
+    /// process's entry.
+    #[test]
+    fn a_reused_pid_socket_file_starts_the_head_memory_over() {
+        let dir = crate::test_support::TempDir::new("hub-sessions-reused-pid");
+        let socket = dir.path().join("run/1.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::write(&socket, b"old").unwrap();
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        let live = live_row("s", 0);
+        let head = json!({
+            "head": { "request_id": 1, "kind": "approval", "tool": "shell" },
+            "length": 1,
+        });
+        let journal = dir.path().join("s.jsonl");
+        let mut first = Stream::new(Arc::clone(&hub), socket.clone(), &live, journal.clone());
+        assert!(
+            first.new_pending_head(&head).is_some(),
+            "the old process's first head is new"
+        );
+
+        // The process dies and the pid is reused: the new process's socket file replaces the
+        // old one at the same path. Rename a separate file over it, so the new inode is
+        // certainly not the old one.
+        let replacement = dir.path().join("run/1.new");
+        fs::write(&replacement, b"new").unwrap();
+        fs::rename(&replacement, &socket).unwrap();
+        let mut reused = Stream::new(Arc::clone(&hub), socket.clone(), &live, journal);
+        assert!(
+            reused.new_pending_head(&head).is_some(),
+            "a reused pid's new socket file starts the head memory over"
+        );
+        assert!(
+            reused.new_pending_head(&head).is_none(),
+            "the new process's own repeated head is still not new"
         );
     }
 
