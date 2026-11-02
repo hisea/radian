@@ -174,6 +174,10 @@ pub struct SessionHub {
     idle_secs: u64,
     /// `[hub.hooks]` (ADR 0048 §16), read once when the hub starts.
     hooks: HubHooks,
+    /// The configuration file the hub was itself started with, passed on to every hub-held
+    /// process (ADR 0048 §16). `None` when the hub resolved the machine's file itself, in
+    /// which case the child resolves the same one.
+    config: Option<PathBuf>,
     inner: Mutex<Inner>,
     /// The hub-held processes, keyed by pid. A process is listed here from the moment it is
     /// spawned (with its session id) so a second request never starts a second process for
@@ -221,17 +225,23 @@ impl SessionHub {
     /// session_idle_secs`).
     #[must_use]
     pub fn new(home: PathBuf, idle_secs: u64) -> Arc<Self> {
-        Self::with_hooks(home, idle_secs, HubHooks::default())
+        Self::with_hooks(home, idle_secs, HubHooks::default(), None)
     }
 
     /// A hub that runs `hooks` for every new pending head of a live session, and tells each
     /// hub-held process that `idle_secs` is its reclaim window.
     #[must_use]
-    pub fn with_hooks(home: PathBuf, idle_secs: u64, hooks: HubHooks) -> Arc<Self> {
+    pub fn with_hooks(
+        home: PathBuf,
+        idle_secs: u64,
+        hooks: HubHooks,
+        config: Option<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             home,
             idle_secs,
             hooks,
+            config,
             inner: Mutex::new(Inner::default()),
             held: Mutex::new(BTreeMap::new()),
             start: Mutex::new(()),
@@ -519,33 +529,20 @@ impl SessionHub {
     ) -> Result<u32, SessionError> {
         let program = std::env::current_exe()
             .map_err(|error| SessionError::Failed(format!("cannot find this program: {error}")))?;
-        let mut command = Command::new(program);
-        command
-            .arg("exec")
-            .arg("--hub-held")
-            .arg("--hub-idle-secs")
-            .arg(self.idle_secs.to_string())
-            .arg("--workspace")
-            .arg(repo)
+        let arguments = self.held_arguments(repo, session_id, resume, route);
+        let child = Command::new(program)
+            .args(&arguments)
             .current_dir(repo)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        if resume {
-            command.arg("--resume").arg(session_id);
-        } else {
-            command.arg("--session-id").arg(session_id);
-        }
-        if let Some((provider, model)) = route {
-            command.arg("--provider").arg(provider);
-            command.arg("--model").arg(model);
-        }
-        let child = command.spawn().map_err(|error| {
-            SessionError::Failed(format!(
-                "cannot start a session process in {}: {error}",
-                repo.display()
-            ))
-        })?;
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| {
+                SessionError::Failed(format!(
+                    "cannot start a session process in {}: {error}",
+                    repo.display()
+                ))
+            })?;
         let pid = child.id();
         self.held
             .lock()
@@ -558,6 +555,43 @@ impl SessionHub {
                 },
             );
         Ok(pid)
+    }
+
+    /// The arguments a hub-held child is started with, the program name excluded.
+    fn held_arguments(
+        &self,
+        repo: &Path,
+        session_id: &str,
+        resume: bool,
+        route: Option<(&str, &str)>,
+    ) -> Vec<String> {
+        let mut arguments = vec![
+            "exec".to_owned(),
+            "--hub-held".to_owned(),
+            "--hub-idle-secs".to_owned(),
+            self.idle_secs.to_string(),
+            "--workspace".to_owned(),
+            repo.display().to_string(),
+        ];
+        if resume {
+            arguments.push("--resume".to_owned());
+        } else {
+            arguments.push("--session-id".to_owned());
+        }
+        arguments.push(session_id.to_owned());
+        if let Some((provider, model)) = route {
+            arguments.push("--provider".to_owned());
+            arguments.push(provider.to_owned());
+            arguments.push("--model".to_owned());
+            arguments.push(model.to_owned());
+        }
+        // The child resolves its own configuration otherwise, which is not the file the hub was
+        // told to read when the two differ (ADR 0048 §16).
+        if let Some(config) = &self.config {
+            arguments.push("--config".to_owned());
+            arguments.push(config.display().to_string());
+        }
+        arguments
     }
 
     /// Waits until `pid`'s control port answers `list_sessions` with `id`, or fails. A process
@@ -967,7 +1001,7 @@ fn parse_input(body: &[u8]) -> Result<SessionInput, SessionError> {
         Some(_) => return Err(SessionError::Bad("`text` must be a string".to_owned())),
     }
     let steer = match raw.get("steer") {
-        None | Some(Value::Null) => false,
+        None => false,
         Some(Value::Bool(steer)) => *steer,
         Some(_) => return Err(SessionError::Bad("`steer` must be a boolean".to_owned())),
     };
@@ -996,9 +1030,6 @@ fn parse_model(raw: &Value) -> Result<Option<ModelRoute<'_>>, SessionError> {
     let Some(model) = raw.get("model") else {
         return Ok(None);
     };
-    if model.is_null() {
-        return Ok(None);
-    }
     let Some(object) = model.as_object() else {
         return Err(SessionError::Bad(
             "`model` must be an object with `provider` and `model`".to_owned(),
@@ -1775,6 +1806,96 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_live_row_with_a_gone_socket_is_the_ended_session() {
+        // The scanner still lists the session, but its socket file is gone: the route must
+        // answer exactly what it answers for an ended session, not a port failure, and the
+        // stale row goes (ADR 0048 §16). No scanner runs here, so the row stays put until the
+        // call drops it: this is the deterministic form of the gate's race.
+        let dir = crate::test_support::TempDir::new("hub-sessions-stale-row");
+        let hub = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        // Short enough for `sun_path`, and never created: the connect finds it gone.
+        let socket = PathBuf::from("/nonexistent/4242.sock");
+        assert!(hub.record(&socket, live_row("s", 0)), "the row is new");
+        let error = call_live(&hub, "s", &socket, &json!({ "verb": "cancel", "id": 1 }))
+            .expect_err("a gone socket is no answer");
+        assert!(
+            matches!(error, SessionError::NotLive(_)),
+            "a gone socket is the ended session, not the port failing: {error:?}"
+        );
+        assert!(
+            hub.live("s").is_none(),
+            "the stale live row is dropped, so the next request sees the session ended"
+        );
+    }
+
+    #[test]
+    fn a_null_steer_is_a_bad_body_not_an_absent_field() {
+        // The manual and ADR 0048 §16: a wrong-typed field is `400` and nothing starts. A
+        // present `null` is not an absent field.
+        let error = match parse_input(br#"{"text":"x","steer":null}"#) {
+            Ok(_) => panic!("a null steer is refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SessionError::Bad(_)), "{error:?}");
+        assert!(
+            parse_input(br#"{"text":"x"}"#).is_ok(),
+            "an absent steer is false"
+        );
+    }
+
+    #[test]
+    fn a_null_model_is_a_bad_body_not_an_absent_field() {
+        let raw = json!({ "text": "x", "model": null });
+        let error = match parse_model(&raw) {
+            Ok(_) => panic!("a null model is refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SessionError::Bad(_)), "{error:?}");
+        assert!(
+            parse_model(&json!({ "text": "x" }))
+                .expect("an absent model is the configured route")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_held_process_is_started_with_the_hubs_own_configuration_file() {
+        // `radian --config alt.toml hub` must start its sessions on `alt.toml`, not on the home
+        // file the child would resolve by itself (ADR 0048 §16).
+        let dir = crate::test_support::TempDir::new("hub-sessions-held-config");
+        let config = dir.path().join("alt.toml");
+        fs::write(&config, "schema_version = 1\n").unwrap();
+        let hub = SessionHub::with_hooks(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+            HubHooks::default(),
+            Some(config.clone()),
+        );
+        let args = hub.held_arguments(dir.path(), "s", false, None);
+        let position = args
+            .iter()
+            .position(|arg| arg == "--config")
+            .expect("the child is told the hub's configuration file");
+        assert_eq!(args.get(position + 1), Some(&config.display().to_string()));
+
+        // A hub started without `--config` has no file to pass on: its child resolves the
+        // machine's configuration exactly as the hub did.
+        let plain = SessionHub::new(
+            dir.path().to_path_buf(),
+            radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS,
+        );
+        assert!(
+            !plain
+                .held_arguments(dir.path(), "s", false, None)
+                .iter()
+                .any(|arg| arg == "--config")
+        );
+    }
+
+    #[test]
     fn a_live_session_matches_a_repository_through_another_path_spelling() {
         let dir = std::env::temp_dir().join(format!("radian-hub-sessions-{}", std::process::id()));
         let real = dir.join("real").join("repo");
@@ -1938,6 +2059,7 @@ mod tests {
             HubHooks {
                 after_pending: vec![command],
             },
+            None,
         );
         let live = LiveSession {
             id: "s".to_owned(),

@@ -127,6 +127,9 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     // `[hub.hooks]` is read once at start; the hook list a running hub uses does not change
     // until it is restarted (the same rule as the other `[hub]` keys).
     let hooks = config_value.hub.hooks;
+    // The file the hub itself reads, passed on to every hub-held process, so an explicit
+    // `--config` reaches the sessions the hub starts (ADR 0048 §16).
+    let config_path = radian_host::config::resolved_path(config);
     // The live-session scanner: its own thread, its own blocking socket work, so no request and
     // no scheduling pass waits on a session's control port.
     let http_sessions = SessionHub::with_hooks(
@@ -135,6 +138,7 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
             .unwrap_or_else(|| dir.clone()),
         idle_secs,
         hooks,
+        config_path,
     );
     http_sessions.start();
     // The accept loop has a thread and a runtime of its own; no request waits on a pass.

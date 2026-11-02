@@ -73,7 +73,7 @@ test-group = "pty"
 #    tests exercise without a socket (the transcript, the conversation, the router,
 #    the version) run in the sandbox.
 #
-# 7. The hub's session write routes (13 names). Each test binds or connects to a
+# 7. The hub's session write routes (15 names). Each test binds or connects to a
 #    control socket at `<home>/run/<pid>.sock`, so its home must be short enough for
 #    `sun_path` and the connect must be allowed: `/tmp` is the only short base that is
 #    writable outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside
@@ -412,5 +412,7 @@ not (
   | test(=a_vanished_socket_is_the_ended_session_not_a_bad_gateway)
   | test(=a_prompt_to_a_vanished_socket_resumes_the_journal)
   | test(=a_config_route_queues_the_next_turns_route)
+  | test(=a_null_steer_or_model_is_bad_request_and_starts_no_process)
+  | test(=a_hub_started_with_a_configuration_file_starts_its_sessions_on_it)
 )
 """

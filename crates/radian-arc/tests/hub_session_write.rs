@@ -105,7 +105,13 @@ struct Hub {
 }
 
 impl Hub {
-    fn start(repo: &Repo, home: &ShortHome, envs: &[(&str, &str)]) -> Self {
+    /// Starts the hub with an explicit `--config`, as `radian --config <file> hub` does.
+    fn start_with(
+        repo: &Repo,
+        home: &ShortHome,
+        envs: &[(&str, &str)],
+        config: Option<&Path>,
+    ) -> Self {
         let stderr = fs::File::create(home.path().join("hub.stderr.log"))
             .expect("the hub stderr file is creatable");
         let mut command = Command::new(radian_bin());
@@ -116,7 +122,13 @@ impl Hub {
             .env("RADIAN_HOME", home.path())
             .env("RADIAN_SESSION_DIR", home.sessions())
             .env("RADIAN_CATALOG_URL", fast_catalog_url())
-            .current_dir(&repo.clone)
+            .current_dir(&repo.clone);
+        // `radian --config <file> hub --port 0`: the configuration is a top-level flag, before
+        // the subcommand (`crates/radian-arc/tests/hub_http.rs` starts its hubs the same way).
+        if let Some(config) = config {
+            command.arg("--config").arg(config);
+        }
+        command
             .args(["hub", "--port", "0"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -287,6 +299,20 @@ impl Fixture {
         extra_config: &str,
         idle: Option<u64>,
     ) -> Self {
+        Self::new_with_hub_config(label, replies, extra_config, idle, None)
+    }
+
+    /// [`Fixture::new`] with the hub started on its own `--config` file: `hub_config` is written
+    /// next to the home configuration (with `{base_url}` replaced by the mock's address) and
+    /// passed to `radian hub --config`, so it is the file the hub and every session it starts
+    /// read (ADR 0048 §16).
+    fn new_with_hub_config(
+        label: &'static str,
+        replies: Vec<Reply>,
+        extra_config: &str,
+        idle: Option<u64>,
+        hub_config: Option<&str>,
+    ) -> Self {
         let mock = Mock::start(replies);
         let repo = Repo::new(label);
         // A registered repository must be an arc repository; the scheduling loop schedules it
@@ -300,6 +326,12 @@ impl Fixture {
         .expect("the arc configuration writes");
         let home = ShortHome::new();
         home.write_config(mock.base_url(), extra_config);
+        let hub_config = hub_config.map(|text| {
+            let path = home.path().join("alt.toml");
+            fs::write(&path, text.replace("{base_url}", mock.base_url()))
+                .expect("the hub's own configuration writes");
+            path
+        });
         // The registered path is the canonical clone: arc and the hub compare workspaces after
         // canonicalizing both sides (macOS's /var is /private/var).
         Registry::at(home.path().join("hub"))
@@ -310,7 +342,7 @@ impl Fixture {
             .as_deref()
             .map(|secs| vec![("RADIAN_HUB_SESSION_IDLE_SECS", secs)])
             .unwrap_or_default();
-        let hub = Hub::start(&repo, &home, &envs);
+        let hub = Hub::start_with(&repo, &home, &envs, hub_config.as_deref());
         Self {
             hub,
             home,
@@ -1031,6 +1063,99 @@ fn a_bad_body_is_bad_request_and_starts_no_process() {
 
 // ---- the request bodies a process refuses ----------------------------------------------
 
+/// A present `null` is not an absent field: `steer: null` and `model: null` are `400`, and
+/// nothing starts or resumes (ADR 0048 §16; the manual says a wrong-typed field is `400`).
+#[test]
+fn a_null_steer_or_model_is_bad_request_and_starts_no_process() {
+    let fixture = Fixture::new(
+        "null-fields",
+        vec![text_reply("first"), text_reply("second")],
+        "",
+        Some(60),
+    );
+
+    // `model: null` must not start a hub-held process on the configured route.
+    let response = fixture.hub.post(
+        &format!("/v1/repos/{}/sessions", fixture.name),
+        &json!({ "text": "x", "model": null }),
+    );
+    assert_eq!(response.status, 400, "{:?}", response.body);
+    assert!(
+        response.error().contains("model"),
+        "the error names the field: {:?}",
+        response.body
+    );
+    assert!(
+        sockets(&fixture.home.run()).is_empty(),
+        "no process was started"
+    );
+    assert!(
+        fixture.hub.sessions(fixture.name).is_empty(),
+        "no session exists"
+    );
+
+    // `steer: null` on an ended session must not resume one for a followup.
+    let id = fixture.create(json!({ "text": "the one session" }));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    fixture.stop_sessions();
+    let response = fixture.prompt(&id, json!({ "text": "second", "steer": null }));
+    assert_eq!(response.status, 400, "{:?}", response.body);
+    assert!(
+        response.error().contains("steer"),
+        "the error names the field: {:?}",
+        response.body
+    );
+    assert!(
+        sockets(&fixture.home.run()).is_empty(),
+        "the bad prompt resumed no process"
+    );
+}
+
+/// `radian --config alt.toml hub` starts its sessions on `alt.toml`: the hub-held child is
+/// given the same file, so its route is the hub's and not the home configuration's
+/// (ADR 0048 §16).
+#[test]
+fn a_hub_started_with_a_configuration_file_starts_its_sessions_on_it() {
+    let fixture = Fixture::new_with_hub_config(
+        "hub-config",
+        vec![text_reply("done")],
+        "",
+        Some(60),
+        Some(
+            "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nbase_url = \
+             \"{base_url}\"\nmodel = \"alt-m\"\n",
+        ),
+    );
+    let id = fixture.create(json!({ "text": "hello" }));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    let mut route = Value::Null;
+    wait_until("the sessions route reports the session live", || {
+        fixture
+            .hub
+            .sessions(fixture.name)
+            .into_iter()
+            .find(|row| {
+                row.get("id").and_then(Value::as_str) == Some(id.as_str())
+                    && row.get("live").and_then(Value::as_str) == Some("hub")
+            })
+            .is_some_and(|row| {
+                route = row.get("model").cloned().unwrap_or(Value::Null);
+                !route.is_null()
+            })
+    });
+    assert_eq!(
+        route.get("model"),
+        Some(&json!("alt-m")),
+        "the child runs on the hub's own configuration file, not the home one: {route:?}"
+    );
+}
+
+// ---- the request bodies a process refuses ----------------------------------------------
+
 /// A bad attachment and a bad model object are refused before anything starts.
 #[test]
 fn a_bad_attachment_or_model_is_unprocessable_and_starts_no_process() {
@@ -1111,6 +1236,11 @@ impl Drop for KilledOnDrop {
 /// A live-only route whose socket has vanished while the scanner still lists the session
 /// answers exactly as it does for an ended session (`409`), not as a control port failure
 /// (`502`), and the stale entry is gone afterwards (ADR 0048 §16).
+///
+/// The scanner forgets the socket within one 2-second pass, so this route-level test is
+/// end-to-end coverage and the lib test `a_stale_live_row_with_a_gone_socket_is_the_ended_session`
+/// pins the branch itself: it holds the stale row and calls the route's own `call_live` with a
+/// socket that is gone, with no scanner running at all.
 #[test]
 fn a_vanished_socket_is_the_ended_session_not_a_bad_gateway() {
     let fixture = Fixture::new("stale-live", vec![text_reply("done")], "", Some(60));

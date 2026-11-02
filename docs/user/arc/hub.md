@@ -297,7 +297,7 @@ A session no process hosts is `409`; a port that fails mid-request is `502`; an 
 The write routes start a session and carry the phone's messages, approvals and model changes into it. `POST /v1/repos/<name>/sessions` starts a **hub-held process** and sends its first message; `POST …/sessions/<id>/prompt` sends a later one, resuming an ended session first; `…/cancel`, `…/answer` and `…/config` forward the control port's own verbs.
 A hub-held process is `radian exec` in its internal hub-held mode: it opens the session (new, or `--resume`), runs no turn by itself, takes every input from its control port, and sends approvals and questions to the session's pending queue, answered through `answer`, never a terminal.
 It always binds its control port, whatever [`control.enabled`](../configuration.md#control) says: that port is its only input.
-It is an ordinary session: its workspace is the repository's path, its configuration is this machine's, and its model is the request's `model` or the configuration's route.
+It is an ordinary session: its workspace is the repository's path, its configuration is the one the hub itself was started with (an explicit `--config` is passed on to the process), and its model is the request's `model` or the configuration's route.
 
 | Route | Body |
 |---|---|
