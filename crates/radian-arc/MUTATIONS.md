@@ -2392,10 +2392,14 @@ mutation was applied by hand to `crates/radian-arc/src/hub/http.rs` (`pairing_ur
 text) and the chooser mutation to the same file (`lan_address` returns the first candidate); each
 was run with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E
 'test(hub::http::tests)'` and restored from `.radian/http.rs.bak`, which `cmp` found identical.
+The rework's two mutations (M3, M4) were applied the same way and restored from
+`.radian/http.rs.rework-backup`, which `cmp` found identical.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0316-M1 | `pairing_url` accepts any text, so `--url ftp://x`, `--url mac.local` and `--url ""` reach the QR code | `hub::http::tests::a_url_flag_that_is_not_an_absolute_http_url_is_a_usage_error`; the command-line test `hub::pair_refuses_a_url_that_is_not_an_absolute_http_url` fails the same way | ✅ 1 failed |
 | TK0316-M2 | `lan_address` returns the first candidate, ignoring the up, loopback and link-local rules | `hub::http::tests::the_lan_chooser_skips_loopback_link_local_and_down_interfaces` (the answer was `127.0.0.1`) and `hub::http::tests::an_unspecified_bind_prints_the_first_lan_address` (a `127.0.0.1` URL) | ✅ 2 failed |
+| TK0316-M3 | drop the IPv6 loopback arm, so `hub.bind = "::1"` falls to the specific-address branch and prints `http://[::1]:<port>` | `hub::http::tests::a_loopback_bind_keeps_the_loopback_url` (the `::1` URL was `http://[::1]:7341`) | ✅ 1 failed |
+| TK0316-M4 | `is_absolute_http_url` checks only the `http://`/`https://` prefix instead of parsing, so `http://[not-an-ip]/` and `https://example.test/%zz` reach the QR code | `hub::http::tests::a_url_flag_that_is_not_an_absolute_http_url_is_a_usage_error` | ✅ 1 failed |
 
-2/2 caught.
+4/4 caught.

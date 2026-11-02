@@ -79,15 +79,15 @@ It creates the token when the file is missing, so a client can pair before the h
 The URL is the first of these that applies:
 
 1. `--url <URL>`, when it is given.
-2. `http://127.0.0.1:<port>` when `hub.bind` is a loopback IPv4 address; the default bind is `127.0.0.1`.
-3. `http://<hub.bind>:<port>` when `hub.bind` is a specific address. An IPv6 address is in brackets, as in `http://[::1]:7341`.
+2. `http://127.0.0.1:<port>` when `hub.bind` is a loopback address, `127.0.0.1` or `::1`; the default bind is `127.0.0.1`.
+3. `http://<hub.bind>:<port>` when `hub.bind` is another specific address. An IPv6 address is in brackets, as in `http://[2001:db8::1]:7341`.
 4. `http://<lan address>:<port>` when `hub.bind` is `0.0.0.0` or `::`: the LAN address is the first IPv4 address of this machine that is up, is not loopback and is not link-local (`169.254.x.x`), in interface order. When there is none, the URL is `http://127.0.0.1:<port>` and one line on stderr says so.
 
 When the URL's host is not a loopback address, one `other: <url>` line follows the token for `http://127.0.0.1:<port>` and for every other eligible IPv4 address of this machine, so the owner can pick another; the QR code still carries the URL above.
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
-| `--url` | `URL` | — | The URL the first line and the QR code carry. It must be an absolute `http` or `https` URL with a host; anything else is a usage error that names `--url` (exit `2`). A trailing `/` is dropped. |
+| `--url` | `URL` | — | The URL the first line and the QR code carry. It must parse as an absolute `http` or `https` URL with a host; anything else, such as a malformed IPv6 literal or an invalid `%` escape, is a usage error that names `--url` (exit `2`). A trailing `/` is dropped. |
 | `--no-qr` | a flag | off | Print the text lines without the QR code, even on a terminal. |
 
 `tailscale serve` is the encrypted way to reach a hub from a phone on the tailnet: it serves the hub's loopback port under the machine's HTTPS name, and `--url` puts that name in the QR code.
@@ -108,7 +108,7 @@ The old token fails on the next request, with no restart: the running hub checks
 |---|---|
 | `0` | success |
 | `1` | a registry or startup error: the file does not parse or breaks a rule, the path is not an arc repository, the name is unknown or taken, another hub holds `hub.lock`, or the port is in use |
-| `2` | a usage error: a missing argument, an unknown flag, a `--name` outside the rule, or a `--url` that is not an absolute `http` or `https` URL with a host |
+| `2` | a usage error: a missing argument, an unknown flag, a `--name` outside the rule, or a `--url` that does not parse as an absolute `http` or `https` URL with a host |
 
 A closed output pipe (`radian hub list | head`) is a normal stop: exit `0`.
 

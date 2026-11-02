@@ -61,6 +61,10 @@ hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"
 # `radian hub pair`'s QR code (ADR 0048 decision 16): pure Rust, no network, and the default
 # `image` feature is off because the code is drawn as Unicode half blocks.
 qrcode = { version = "0.14.1", default-features = false }
+# The URL parser `radian hub pair --url` validates with (ADR 0048 §16): the WHATWG parser the
+# `http` client stack already carries, so `Cargo.lock` gains no package. A hand split accepted
+# payloads that do not parse as URLs, such as a malformed IPv6 literal or percent escape.
+url = "2"
 # The token's 32 random bytes (ADR 0048 decision 16), from the OS. Already in `Cargo.lock`
 # through radian-host, which uses it for the PKCE verifier.
 getrandom = "0.3"

@@ -49,6 +49,10 @@ use serde_json::{Value, json};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
+// `--url` is a URL, not a shape this crate splits by hand (ADR 0048 §16): the WHATWG parser
+// checks the scheme, the host and an IPv6 literal, and the checks beside it close what that
+// parser leaves open (`http:///hub`, `http://host:` and `%zz`).
+use url::{Host, Url};
 
 use crate::gate::Stage;
 use crate::gate::Verdict;
@@ -441,9 +445,9 @@ pub struct Pairing {
 }
 
 /// The pairing URL for `[hub] bind`, `[hub] port`, an optional `--url` and this machine's
-/// candidate addresses (ADR 0048 §16): `--url` when given, else loopback for a loopback IPv4
-/// bind, else the bind's own address, else the first eligible LAN address for an unspecified
-/// bind, else loopback with `fallback` set.
+/// candidate addresses (ADR 0048 §16): `--url` when given, else loopback for any loopback bind
+/// (`127.0.0.0/8` or `::1`), else the bind's own address, else the first eligible LAN address
+/// for an unspecified bind, else loopback with `fallback` set.
 ///
 /// # Errors
 ///
@@ -459,6 +463,7 @@ pub fn pairing(
         Some(url) => (pairing_url(url)?, false),
         None => match bind {
             IpAddr::V4(address) if address.is_loopback() => (loopback_url(port), false),
+            IpAddr::V6(address) if address.is_loopback() => (loopback_url(port), false),
             IpAddr::V4(address) if address.is_unspecified() => unspecified_url(port, candidates),
             IpAddr::V6(address) if address.is_unspecified() => unspecified_url(port, candidates),
             IpAddr::V4(address) => (format!("http://{address}:{port}"), false),
@@ -568,69 +573,68 @@ fn interface_addresses() -> Vec<LanCandidate> {
 ///
 /// The text is not such a URL: a usage error that names `--url` and exits `2`.
 fn pairing_url(url: &str) -> Result<String, Error> {
-    if url_host(url).is_none() {
+    if !is_absolute_http_url(url) {
         return Err(Error::Usage(format!(
             "--url must be an absolute http or https URL with a host: {url:?}"
         )));
     }
-    Ok(url.trim_end_matches('/').to_owned())
+    Ok(url.strip_suffix('/').unwrap_or(url).to_owned())
 }
 
-/// The host of an absolute `http` or `https` URL, or `None` when `url` is not one: a scheme
-/// other than `http`/`https`, no authority, an empty host, or a port that is not a number from
-/// 0 to 65535.
-fn url_host(url: &str) -> Option<&str> {
-    let rest = if url
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-    {
-        &url[7..]
-    } else if url
-        .get(..8)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
-    {
-        &url[8..]
-    } else {
-        return None;
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    // A userinfo part (`user:password@`) is not the host; the host is what follows the last `@`.
-    let host_port = match rest[..end].rsplit_once('@') {
-        Some((_, host_port)) => host_port,
-        None => &rest[..end],
-    };
-    if let Some(after_bracket) = host_port.strip_prefix('[') {
-        // An IPv6 literal: `[...]` and an optional `:port`.
-        let close = after_bracket.find(']')?;
-        let tail = &after_bracket[close + 1..];
-        if !tail.is_empty() && !valid_port(tail.strip_prefix(':')?) {
-            return None;
+/// Whether `url` parses as an absolute `http` or `https` URL with a host. The `url` crate
+/// decides: a relative reference, another scheme, a missing host and a malformed IPv6 literal
+/// are refused. Two leniencies the WHATWG parser keeps are closed here: the authority as the
+/// text spells it must be present and must not end with `:` (`http:///hub` and `http://host:`
+/// parse otherwise), and every `%` must start a valid escape (`%zz` parses otherwise).
+fn is_absolute_http_url(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host().is_some()
+            && written_authority(url).is_some_and(|authority| !authority.ends_with(':'))
+            && has_valid_percent_escapes(url)
+    })
+}
+
+/// Whether every `%` in `url` starts a two-hex-digit escape. A path with `%zz` is not a URL
+/// under RFC 3986 even though the WHATWG parser accepts it.
+fn has_valid_percent_escapes(url: &str) -> bool {
+    let bytes = url.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let escape = bytes.get(index + 1..index + 3);
+            if !escape.is_some_and(|escape| escape.iter().all(u8::is_ascii_hexdigit)) {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
         }
-        let host = &after_bracket[..close];
-        return (!host.is_empty()).then_some(host);
     }
-    let (host, port) = match host_port.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (host_port, None),
-    };
-    if port.is_some_and(|port| !valid_port(port)) {
-        return None;
-    }
-    (!host.is_empty()).then_some(host)
+    true
 }
 
-/// Whether `port` is 1 to 5 digits in 0..=65535.
-fn valid_port(port: &str) -> bool {
-    !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit()) && {
-        port.parse::<u16>().is_ok()
-    }
+/// The authority of `url` as the text spells it, past the scheme and any userinfo, or `None`
+/// when it has none.
+fn written_authority(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_port)| host_port);
+    (!host_port.is_empty()).then_some(host_port)
 }
 
 /// Whether the URL's host is a loopback IP address. A host name is not one: `localhost` is a
 /// name, and the owner who wrote it can reach the hub by it.
 fn url_host_is_loopback(url: &str) -> bool {
-    url_host(url)
-        .and_then(|host| host.parse::<IpAddr>().ok())
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| match parsed.host()? {
+            Host::Ipv4(address) => Some(IpAddr::V4(address)),
+            Host::Ipv6(address) => Some(IpAddr::V6(address)),
+            Host::Domain(_) => None,
+        })
         .is_some_and(|address| address.is_loopback())
 }
 
@@ -2099,6 +2103,8 @@ mod tests {
             "http://:7341",
             "http://host:",
             "https://host:70000",
+            "http://[not-an-ip]/",
+            "https://example.test/%zz",
         ] {
             let error =
                 pairing(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341, Some(url), &[]).expect_err(url);
@@ -2114,6 +2120,7 @@ mod tests {
             "HTTPS://mac.example.ts.net",
             "http://[::1]:7341",
             "https://mac.example.ts.net/hub?x=1",
+            "https://mac.example.ts.net/a%20b",
         ] {
             assert!(
                 pairing(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341, Some(url), &[]).is_ok(),
@@ -2134,9 +2141,11 @@ mod tests {
         assert_eq!(chosen.url, "http://127.0.0.1:7341");
         assert!(chosen.others.is_empty(), "{chosen:?}");
         assert!(!chosen.fallback);
-        // `::1` is a specific address, so its URL is its own, in brackets.
+        // Any loopback bind, IPv6 included, prints the loopback URL a client can reach.
         let v6 = pairing(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 7341, None, &[]).unwrap();
-        assert_eq!(v6.url, "http://[::1]:7341");
+        assert_eq!(v6.url, "http://127.0.0.1:7341");
+        assert!(v6.others.is_empty(), "{v6:?}");
+        assert!(!v6.fallback);
     }
 
     #[test]

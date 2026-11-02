@@ -285,7 +285,13 @@ fn pair_with_a_url_prints_it_without_the_trailing_slash() {
 #[test]
 fn pair_refuses_a_url_that_is_not_an_absolute_http_url() {
     let scratch = Scratch::new("pair-url-bad");
-    for url in ["ftp://x", "mac.local", ""] {
+    for url in [
+        "ftp://x",
+        "mac.local",
+        "",
+        "http://[not-an-ip]/",
+        "https://example.test/%zz",
+    ] {
         let run = scratch.run(&["hub", "pair", "--url", url]);
         assert_eq!(run.code, Some(2), "{url:?}: {run:?}");
         assert!(run.err.contains("--url"), "{url:?}: {}", run.err);
@@ -299,6 +305,20 @@ fn pair_refuses_a_url_that_is_not_an_absolute_http_url() {
     assert!(
         !scratch.home().join("hub/token").exists(),
         "a refused --url creates no token"
+    );
+}
+
+#[test]
+fn pair_of_an_ipv6_loopback_bind_prints_the_loopback_url() {
+    let scratch = Scratch::new("pair-ipv6-loopback");
+    scratch.config("schema_version = 1\n[hub]\nbind = \"::1\"\n");
+    let run = scratch.run(&["hub", "pair"]);
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert_eq!(
+        run.out.lines().next(),
+        Some("http://127.0.0.1:7341"),
+        "any loopback bind prints the loopback URL a client can reach: {}",
+        run.out
     );
 }
 
