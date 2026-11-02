@@ -128,8 +128,22 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     // until it is restarted (the same rule as the other `[hub]` keys).
     let hooks = config_value.hub.hooks;
     // The file the hub itself reads, passed on to every hub-held process, so an explicit
-    // `--config` reaches the sessions the hub starts (ADR 0048 §16).
-    let config_path = radian_host::config::resolved_path(config);
+    // `--config` reaches the sessions the hub starts (ADR 0048 §16). It is made absolute here,
+    // while the hub's own working directory is still the one the flag was written against: a
+    // child starts in the repository (`spawn_held`), where a relative path names another file.
+    let config_path = match radian_host::config::resolved_path(config) {
+        Some(path) if path.is_absolute() => Some(path),
+        Some(path) => {
+            let cwd = std::env::current_dir().map_err(|error| {
+                Error::Failed(format!(
+                    "cannot resolve the configuration path {}: {error}",
+                    path.display()
+                ))
+            })?;
+            Some(absolute_config(path, &cwd))
+        }
+        None => None,
+    };
     // The live-session scanner: its own thread, its own blocking socket work, so no request and
     // no scheduling pass waits on a session's control port.
     let http_sessions = SessionHub::with_hooks(
@@ -154,6 +168,18 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     // process leaves; `hub.lock` was released by the loop just above.
     sessions_for_shutdown.shutdown();
     result
+}
+
+/// `path` as a hub-held child is told it, absolute against `cwd`. A relative `--config
+/// alt.toml` is the hub's file when the hub reads it, but the child runs in the repository
+/// (`spawn_held`), so it must be given the absolute path. It is joined, not canonicalized: a
+/// symlinked path still names the file the hub read (ADR 0048 §16).
+fn absolute_config(path: PathBuf, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
 }
 
 /// The configuration the hub's own loop reads, for the reclaim window.
@@ -1679,6 +1705,21 @@ mod tests {
         assert!(
             spawned.load(std::sync::atomic::Ordering::SeqCst),
             "the spawned stream task ran"
+        );
+    }
+
+    /// A relative `--config` names the file the hub read, not a file beside the child's
+    /// repository: `spawn_held` starts the child in the repository (ADR 0048 §16).
+    #[test]
+    fn a_relative_configuration_path_is_joined_with_the_hubs_directory() {
+        assert_eq!(
+            absolute_config(PathBuf::from("alt.toml"), Path::new("/srv/hub")),
+            PathBuf::from("/srv/hub/alt.toml")
+        );
+        assert_eq!(
+            absolute_config(PathBuf::from("/etc/radian.toml"), Path::new("/srv/hub")),
+            PathBuf::from("/etc/radian.toml"),
+            "an absolute path is passed through, symlinks and all"
         );
     }
 

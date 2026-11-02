@@ -2322,3 +2322,21 @@ sessions.rs`, run with `cargo nextest run -p radian-arc --locked --profile sandb
 | TK0308-M6 | `parse_model` maps a present `model: null` to `None`, the pre-fix behavior | `hub::sessions::tests::a_null_model_is_a_bad_body_not_an_absent_field` (the null model parsed as the configured route); the route case `a_null_steer_or_model_is_bad_request_and_starts_no_process` covers it end to end | ✅ 1 failed |
 
 3/3 caught.
+
+## TK0308 rework 5: the hub's relative `--config` reaches the child whole
+
+The hub passed its configuration path to a hub-held child as the raw string it was given, and
+`spawn_held` starts the child in the repository: a relative `--config alt.toml` therefore named
+the repository's file, or no file at all, instead of the hub's. The path is now joined with the
+hub's working directory once, in `serve`, before `SessionHub` stores it. The mutation was applied
+by hand to `crates/radian-arc/src/hub/http.rs`, run with `cargo nextest run -p radian-arc
+--locked --profile sandbox --lib -E 'test(<name>)'`, and restored from `.radian/http.rs.bak`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0308-M7 | `absolute_config` returns `path` unchanged, the pre-fix behavior, so `serve` hands the child a relative path | `hub::http::tests::a_relative_configuration_path_is_joined_with_the_hubs_directory` (`alt.toml` instead of `/srv/hub/alt.toml`); the route case `hub_session_write::a_relative_hub_configuration_path_is_made_absolute_before_the_child_sees_it` drives the same defect through `radian --config alt.toml hub` from another working directory and needs sockets the sandbox denies | ✅ 1 failed |
+
+1/1 caught.
+
+3/3 caught.

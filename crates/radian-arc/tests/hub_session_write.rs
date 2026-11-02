@@ -105,12 +105,14 @@ struct Hub {
 }
 
 impl Hub {
-    /// Starts the hub with an explicit `--config`, as `radian --config <file> hub` does.
-    fn start_with(
-        repo: &Repo,
+    /// Starts the hub with an explicit `--config`, as `radian --config <file> hub` does, from
+    /// `cwd`: a relative `config` is relative to that directory, while the held children start
+    /// in the repository.
+    fn start_in(
         home: &ShortHome,
         envs: &[(&str, &str)],
         config: Option<&Path>,
+        cwd: &Path,
     ) -> Self {
         let stderr = fs::File::create(home.path().join("hub.stderr.log"))
             .expect("the hub stderr file is creatable");
@@ -122,7 +124,7 @@ impl Hub {
             .env("RADIAN_HOME", home.path())
             .env("RADIAN_SESSION_DIR", home.sessions())
             .env("RADIAN_CATALOG_URL", fast_catalog_url())
-            .current_dir(&repo.clone);
+            .current_dir(cwd);
         // `radian --config <file> hub --port 0`: the configuration is a top-level flag, before
         // the subcommand (`crates/radian-arc/tests/hub_http.rs` starts its hubs the same way).
         if let Some(config) = config {
@@ -281,6 +283,14 @@ fn parse_response(raw: &[u8]) -> Response {
 
 // ---- the fixture -----------------------------------------------------------------------
 
+/// How the fixture names the hub's own `--config` file to the hub.
+enum HubConfig<'a> {
+    /// Written beside the home configuration and passed as an absolute path.
+    Absolute(&'a str),
+    /// Written in a directory of its own and passed by its relative name.
+    Relative(&'a str),
+}
+
 /// A repository, a short home with the mock model's route, the mock and a running hub.
 struct Fixture {
     /// Dropped first: its `Drop` stops the hub and every held session before the home and the
@@ -313,6 +323,41 @@ impl Fixture {
         idle: Option<u64>,
         hub_config: Option<&str>,
     ) -> Self {
+        Self::build(
+            label,
+            replies,
+            extra_config,
+            idle,
+            hub_config.map(HubConfig::Absolute),
+        )
+    }
+
+    /// [`Fixture::new_with_hub_config`] with the file written in a directory of its own and
+    /// named to the hub as just `alt.toml`: `cd <that directory> && radian --config alt.toml hub`.
+    /// It reaches the child only when the hub makes the path absolute before it starts one.
+    fn new_with_relative_hub_config(
+        label: &'static str,
+        replies: Vec<Reply>,
+        extra_config: &str,
+        idle: Option<u64>,
+        hub_config: &str,
+    ) -> Self {
+        Self::build(
+            label,
+            replies,
+            extra_config,
+            idle,
+            Some(HubConfig::Relative(hub_config)),
+        )
+    }
+
+    fn build(
+        label: &'static str,
+        replies: Vec<Reply>,
+        extra_config: &str,
+        idle: Option<u64>,
+        hub_config: Option<HubConfig<'_>>,
+    ) -> Self {
         let mock = Mock::start(replies);
         let repo = Repo::new(label);
         // A registered repository must be an arc repository; the scheduling loop schedules it
@@ -326,12 +371,25 @@ impl Fixture {
         .expect("the arc configuration writes");
         let home = ShortHome::new();
         home.write_config(mock.base_url(), extra_config);
-        let hub_config = hub_config.map(|text| {
-            let path = home.path().join("alt.toml");
-            fs::write(&path, text.replace("{base_url}", mock.base_url()))
+        let (hub_config, hub_cwd) = match hub_config {
+            Some(HubConfig::Absolute(text)) => {
+                let path = home.path().join("alt.toml");
+                fs::write(&path, text.replace("{base_url}", mock.base_url()))
+                    .expect("the hub's own configuration writes");
+                (Some(path), repo.clone.clone())
+            }
+            Some(HubConfig::Relative(text)) => {
+                let cwd = home.path().join("cwd");
+                fs::create_dir_all(&cwd).expect("the hub's working directory is creatable");
+                fs::write(
+                    cwd.join("alt.toml"),
+                    text.replace("{base_url}", mock.base_url()),
+                )
                 .expect("the hub's own configuration writes");
-            path
-        });
+                (Some(PathBuf::from("alt.toml")), cwd)
+            }
+            None => (None, repo.clone.clone()),
+        };
         // The registered path is the canonical clone: arc and the hub compare workspaces after
         // canonicalizing both sides (macOS's /var is /private/var).
         Registry::at(home.path().join("hub"))
@@ -342,7 +400,7 @@ impl Fixture {
             .as_deref()
             .map(|secs| vec![("RADIAN_HUB_SESSION_IDLE_SECS", secs)])
             .unwrap_or_default();
-        let hub = Hub::start_with(&repo, &home, &envs, hub_config.as_deref());
+        let hub = Hub::start_in(&home, &envs, hub_config.as_deref(), &hub_cwd);
         Self {
             hub,
             home,
@@ -1151,6 +1209,49 @@ fn a_hub_started_with_a_configuration_file_starts_its_sessions_on_it() {
         route.get("model"),
         Some(&json!("alt-m")),
         "the child runs on the hub's own configuration file, not the home one: {route:?}"
+    );
+}
+
+/// A relative `--config` is resolved against the hub's working directory, not the repository a
+/// hub-held child starts in: `cd <dir> && radian --config alt.toml hub` starts its sessions on
+/// `<dir>/alt.toml`, even when the repository has no such file (ADR 0048 §16).
+#[test]
+fn a_relative_hub_configuration_path_is_made_absolute_before_the_child_sees_it() {
+    let fixture = Fixture::new_with_relative_hub_config(
+        "relative-hub-config",
+        vec![text_reply("done")],
+        "",
+        Some(60),
+        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nbase_url = \
+         \"{base_url}\"\nmodel = \"alt-m\"\n",
+    );
+    assert!(
+        !fixture.repo.clone.join("alt.toml").exists(),
+        "the repository has no alt.toml, so a path resolved there names no file"
+    );
+    let id = fixture.create(json!({ "text": "hello" }));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    let mut route = Value::Null;
+    wait_until("the sessions route reports the session live", || {
+        fixture
+            .hub
+            .sessions(fixture.name)
+            .into_iter()
+            .find(|row| {
+                row.get("id").and_then(Value::as_str) == Some(id.as_str())
+                    && row.get("live").and_then(Value::as_str) == Some("hub")
+            })
+            .is_some_and(|row| {
+                route = row.get("model").cloned().unwrap_or(Value::Null);
+                !route.is_null()
+            })
+    });
+    assert_eq!(
+        route.get("model"),
+        Some(&json!("alt-m")),
+        "the child ran on the hub's relative --config file, not the home one: {route:?}"
     );
 }
 
