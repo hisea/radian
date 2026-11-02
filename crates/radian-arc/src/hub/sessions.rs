@@ -699,7 +699,9 @@ impl Stream {
                     .unwrap_or(self.pending);
                 frames.push(frame("pending", &data));
             }
-            ("runtime", "config_changed") => frames.push(frame("config", &data)),
+            // The port fans a `RuntimeEvent` out under `event.name()`, the v1 disk name
+            // (ADR 0006 §4) — `ConfigChanged`, not a lowercase spelling.
+            ("runtime", "ConfigChanged") => frames.push(frame("config", &data)),
             _ => {}
         }
         frames.extend(self.poll_fold());
@@ -1113,7 +1115,7 @@ mod tests {
         let event = |revision: u64| {
             format!(
                 "{}\n",
-                json!({"event": {"source": "runtime", "name": "config_changed",
+                json!({"event": {"source": "runtime", "name": "ConfigChanged",
                        "data": {"revision": revision, "change": {}}}})
             )
         };
@@ -1149,7 +1151,7 @@ mod tests {
             dir.path().join("s.jsonl"),
         );
         let out = stream.on_line(
-            r#"{"event":{"source":"runtime","name":"config_changed","data":{"revision":2,"change":{"model":{"provider":"p","model":"m"}}}}}"#,
+            r#"{"event":{"source":"runtime","name":"ConfigChanged","data":{"revision":2,"change":{"model":{"provider":"p","model":"m"}}}}}"#,
         );
         let decoded = frames(&out);
         let config = decoded

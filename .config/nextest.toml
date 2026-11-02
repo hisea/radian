@@ -66,7 +66,7 @@ test-group = "pty"
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
 #
-# 6. The hub's session surface (8 names). Each test binds a fake control socket at
+# 6. The hub's session surface (9 names). Each test binds a fake control socket at
 #    `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`: `/tmp`
 #    is the only writable base that short, and the sandbox denies it (group 1),
 #    while `$TMPDIR` inside the workspace is too long (group 5). The routes these
@@ -374,6 +374,7 @@ not (
   | test(=herdr::tests::the_slot_keeps_only_the_latest)
   | test(=herdr::tests::the_slots_keep_the_latest_per_kind_and_the_queue_order)
 
+  | test(=a_config_change_in_the_session_arrives_as_one_config_frame)
   | test(=a_dropped_subscription_is_reconnected_and_its_events_still_arrive)
   | test(=a_live_session_in_an_unregistered_workspace_is_not_listed_anywhere)
   | test(=a_message_committed_in_the_session_arrives_as_one_entry_event)

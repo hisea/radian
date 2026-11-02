@@ -1409,6 +1409,58 @@ fn a_dropped_subscription_is_reconnected_and_its_events_still_arrive() {
     assert_eq!(event["entry"]["text"], json!("after the reconnect"));
 }
 
+// ---- a committed ConfigChanged record arrives as one `config` frame -----------------------
+
+#[test]
+fn a_config_change_in_the_session_arrives_as_one_config_frame() {
+    let repo = Repo::new("hub-sessions-config");
+    arc_store(&repo);
+    let short = ShortHome::new("config");
+    register(&short.path().join("home"), "repo", &repo.canonical_clone());
+    let id = "session-config";
+    let journal = write_journal(
+        &short.path().join("home/sessions"),
+        id,
+        &repo.canonical_clone().to_string_lossy(),
+        &[user_message("first")],
+    );
+    let _writer = JournalLock::take(&journal);
+    let hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let pid = LivePid::new();
+    let fake = FakePort::bind(
+        &short.path().join("home/run"),
+        pid.pid(),
+        FakeInner {
+            id: id.to_owned(),
+            workspace: repo.canonical_clone().to_string_lossy().into_owned(),
+            state: "working".to_owned(),
+            pending: 0,
+            provider: "p".to_owned(),
+            model: "m".to_owned(),
+            lines: Mutex::new(Vec::new()),
+            subscriptions: AtomicUsize::new(0),
+            drop_next: AtomicBool::new(false),
+        },
+    );
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+
+    // The line the control port fans out for a `/model` or `config` change: a `RuntimeEvent`
+    // carries its v1 disk name (`ConfigChanged`), never a lowercase spelling.
+    fake.push(json!({
+        "source": "runtime",
+        "name": "ConfigChanged",
+        "data": { "revision": 2, "change": { "model": { "provider": "p", "model": "m" } } },
+    }));
+
+    let event = stream
+        .next_named("config", Duration::from_secs(20))
+        .expect("a committed ConfigChanged record is one config frame");
+    assert_eq!(event["revision"], json!(2));
+    assert_eq!(event["change"]["model"]["provider"], json!("p"));
+    assert_eq!(event["change"]["model"]["model"], json!("m"));
+}
+
 // ---- edge 10: a slow socket delays no request --------------------------------------------
 
 #[test]
