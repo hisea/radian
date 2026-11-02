@@ -2653,7 +2653,9 @@ async fn pty_a_local_answer_first_makes_the_port_answer_late() {
 }
 
 /// Edge 5: a model switch through the control port's `config` is applied at the next turn
-/// boundary, and the TUI footer's model shows the new route.
+/// boundary, and the TUI footer's model shows the new route. The next turn is the hub's own
+/// `followup`, so the test covers the hand-off this task adds as well: the hub's message is
+/// drawn with its marker and the hub's model switch lands on the turn the hub started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn() {
     let server =
@@ -2700,7 +2702,18 @@ async fn pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn() {
     );
     assert_eq!(switched["ok"], true, "{switched}");
 
-    pty.send(b"second\r");
+    // The phone sends the next message. It carries the hub marker, and the model switch the
+    // phone made applies to the turn that message starts.
+    let sent = control_request(
+        &socket,
+        json!({"id": 2, "verb": "followup", "text": "HUB-SWITCH", "token": "owner-token"}),
+    );
+    assert_eq!(sent["ok"], true, "{sent}");
+    assert!(
+        pty.wait_for_screen("HUB-SWITCH · hub", wait_positive()),
+        "the hub's message lost its marker:\n{}",
+        pty.screen()
+    );
     assert!(
         pty.wait_for_screen("SECOND", wait_positive()),
         "{}",
