@@ -120,6 +120,9 @@ An approval response is one of:
 | `"reject_once"` | `ApprovalOutcome::Deny { reason: null }`; the permission layer turns this into “denied by the user” |
 | `{"kind": "reject_once", "reason": "…"}` | `ApprovalOutcome::Deny { reason }`; the reason lands verbatim in the tool result |
 
+The same three may be written as objects: `{"kind": "allow_once"}` or
+`{"kind": "allow_always"}` (no `reason`), and the `reject_once` object above.
+
 A question response carries the `QuestionAnswer` as `answers`, one object per question:
 
 ```json

@@ -160,6 +160,9 @@ An approval response is one of:
 | `"reject_once"` | deny; the tool result says “denied by the user” |
 | `{"kind": "reject_once", "reason": "…"}` | deny with that reason; it lands verbatim in the tool result |
 
+The same three may be written as objects: `{"kind": "allow_once"}` or
+`{"kind": "allow_always"}` (no `reason`), and the `reject_once` object above.
+
 A question response carries one answer per question:
 
 ```json
