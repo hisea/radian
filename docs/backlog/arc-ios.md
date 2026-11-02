@@ -21,7 +21,7 @@
 ## 待决问题
 
 - Bark / ntfy 的通知链接能否直接打开第三方 app 的 URL scheme：落地前在真机上核对。
-- 第二版是否加实时会话（需要 hub 投影 journal，见 `arc-serve.md` 第 3 条末尾）与 app 自带推送（需要 APNs 密钥与一个新的出站网络面，按 ADR 0013 默认关闭）。
+- 第二版的会话（看、开、接管 radian 会话）已定，见 `hub-sessions.md`；app 自带推送仍未定（需要 APNs 密钥与一个新的出站网络面，按 ADR 0013 默认关闭）。
 
 ## 验收
 
