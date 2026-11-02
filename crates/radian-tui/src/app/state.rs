@@ -2,6 +2,10 @@
 //! the Markdown caches an entry carries, the `!`/`!!` block builders, the startup phase, and the
 //! status bar's budget/usage/MCP wording. Pure data and the functions that only format it; the
 //! behavior that mutates it lives in `app.rs` and the modules beside this one.
+//!
+//! The entry's own data and the text helpers are the host's (`radian_host::transcript`, ADR 0023
+//! U1) and are re-exported here, so `crate::app::Entry` and `crate::app::EntryKind` keep
+//! naming one type shared with the folds.
 
 use super::*;
 
@@ -21,181 +25,69 @@ pub(crate) type LayoutKey = (
     Option<(bool, String)>,
 );
 
-/// A compaction summary's display data (ADR 0028 R5). The `summary` and the verbatim user
-/// words come from the message's `origin` (ADR 0018) through Core's own readers;
-/// the revision and the token counts are **live only** — the journaled message does not carry
-/// them, so a resume replay shows `── context compacted ──` without inventing numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CompactionInfo {
-    pub summary: String,
-    pub user_messages: Vec<String>,
-    pub revision: Option<u64>,
-    pub tokens_before: Option<u64>,
-    pub tokens_after: Option<u64>,
-    /// ADR 0018: live only — `true` when the summary path failed and the
-    /// deterministic fallback committed instead. A resume replay does not carry it.
-    pub deterministic: bool,
-    /// The messages the deterministic fallback dropped; live only, like the numbers above.
-    pub dropped: Option<u64>,
-}
+/// A compaction summary's display data (ADR 0028 R5). The type lives in the host's folded
+/// transcript (ADR 0023 U1), because a fold of a finished journal produces it too; the TUI
+/// adds nothing to it.
+pub use radian_host::transcript::CompactionInfo;
 
-impl CompactionInfo {
-    /// The text the entry shows when expanded: the model's summary, then the user's words
-    /// (ADR 0018), each as its own paragraph. This **is** the entry's text, so it
-    /// is what the selection copies and the search matches.
-    pub fn display_text(&self) -> String {
-        let mut out = self.summary.trim().to_owned();
-        for message in &self.user_messages {
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(message.trim());
-        }
-        out
-    }
+/// What kind of transcript line an entry is. The type is the host's (`radian_host::transcript`),
+/// so the two folds and the renderer name one set of kinds (ADR 0023 U1).
+pub use radian_host::transcript::EntryKind;
 
-    /// The folded one-liner, omitting whatever is not known: `── context compacted (rev 3,
-    /// 12000 → 4000) ──`, `── context compacted (rev 3) ──` or `── context compacted ──`. A
-    /// deterministic compaction (ADR 0018) says "without a summary".
-    pub fn line(&self) -> String {
-        let label = if self.deterministic {
-            "context compacted without a summary"
-        } else {
-            "context compacted"
-        };
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(revision) = self.revision {
-            parts.push(format!("rev {revision}"));
-        }
-        if let (Some(before), Some(after)) = (self.tokens_before, self.tokens_after) {
-            parts.push(format!("{before} → {after}"));
-        }
-        if let Some(dropped) = self.dropped {
-            parts.push(format!("{dropped} dropped"));
-        }
-        if parts.is_empty() {
-            format!("── {label} ──")
-        } else {
-            format!("── {label} ({}) ──", parts.join(", "))
-        }
-    }
-}
-
-/// What kind of transcript line an entry is. The renderer maps this to a style; the tests
-/// assert that reasoning and assistant text are distinguishable by style and position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryKind {
-    User,
-    Assistant,
-    /// The model's separate reasoning channel (ADR 0014); never sent to a provider.
-    Reasoning,
-    ToolCall,
-    ToolResult,
-    Notice,
-    /// The startup screen's wordmark (ADR 0027 §标志: the primary text
-    /// color). It is the first entry in a session.
-    Banner,
-    /// The startup information's collapsed/expanded lines. Their `label: value` first lines
-    /// use the same accent label / secondary body levels as a notice (`split_label`, ADR
-    /// 0028 / ADR 0029).
-    Startup,
-    /// The project trust line under the wordmark (ADR 0031 T3). Its own kind so the
-    /// renderer paints it with the `trust_hint` role and nothing else uses that role.
-    TrustHint,
-    /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown
-    /// window, a memory/config warning): it is **never** folded away, and it uses the
-    /// warning color.
-    Warning,
-    /// The one-line `Tip: …` under the startup block. Its `Tip:` prefix is dim, the body
-    /// muted.
-    Tip,
-    /// A compaction summary (ADR 0028 R5): one line when folded, the summary and the user's
-    /// verbatim words when expanded.
-    Compaction,
-    /// The `/context` grid view (spec `tui-context-grid`): the estimated
-    /// categories as a 10 × 20 grid with a legend and detail rows, laid out by
-    /// [`crate::blocks::context_lines`]. Same surface as the notices it
-    /// replaces (the transcript).
-    Context,
-    /// The attempt's outcome line the conversation tab draws for an ACP worker's `Result`
-    /// record: `Result <outcome> <text>`, in the done or the failed colour (ADR 0048 §13).
-    /// Every other transcript entry is a committed message or a host notice; this is the one
-    /// row a worker's stream contributes that is not a message.
-    Outcome {
-        ok: bool,
-    },
-    /// A user's `!`/`!!` command and its output (ADR 0033). The renderer colors `!` (goes to
-    /// the model's context) and `!!` (does not) differently; the first line is `$ cmd`.
-    Bash {
-        exclude_from_context: bool,
-    },
-}
-
+/// One transcript entry as the renderer sees it: the **folded entry** plus render state.
+///
+/// The folded part ([`Entry::data`]) is exactly what the host's folds produce
+/// (`radian_host::transcript::Entry`) and what the hub sends to a remote client. Field access
+/// goes through `Deref`, so the renderer, the live update path and the tests name `entry.text`,
+/// `entry.kind` and `entry.tool` exactly as the folds do, and a field can never be added on one
+/// side only. What is left here is state only a screen has: the live flag, the decoded images,
+/// the `/context` grid's data, the selection's fold override, the reasoning clock and the layout
+/// caches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
-    pub kind: EntryKind,
-    pub text: String,
+    /// The folded entry's data: the one type both folds produce.
+    pub data: radian_host::transcript::Entry,
     /// True while the entry is fed by live deltas and not yet a committed message.
     pub live: bool,
-    /// The committed assistant message was an interrupted prefix (ADR 0003).
-    pub interrupted: bool,
-    pub is_error: bool,
-    /// A tool call's outcome, once its result has arrived: `None` while it is running,
-    /// `Some(is_error)` after. The card's background follows it (ADR 0028 R4's states).
-    pub result: Option<bool>,
-    /// The card's data (ADR 0028 R4): the tool name, the argument JSON, the structured result
-    /// and (no producer yet) the duration. `None` for every non-tool entry, and for a tool
-    /// entry whose message carried nothing to model.
-    pub tool: Option<Box<crate::tools::ToolCard>>,
-    /// The `/context` grid's structured data (spec `tui-context-grid`).
-    /// `None` for every other entry.
+    /// The images the entry's message carried (ADR 0028 R10), decoded for drawing. A user
+    /// message's placeholder line is already in `text`; a tool result's placeholder row is
+    /// synthesized by the layout above the image run.
+    pub images: Vec<crate::media::EntryImage>,
+    /// The `/context` grid's structured data (spec `tui-context-grid`). `None` for every other
+    /// entry.
     pub context: Option<crate::blocks::ContextView>,
-    /// A compaction summary's data (ADR 0028 R5). `None` for every other entry.
-    pub compaction: Option<Box<CompactionInfo>>,
-    /// Where this tool entry sits in a merged card (ADR 0028). Derived from the
-    /// entry order, refreshed whenever the entries change; the data stays two entries.
-    pub card: crate::blocks::Card,
-    /// A tool result's error code (`interrupted` for a cancelled call, ADR 0001), for the
-    /// card's `cancelled` meta. `None` for every other entry.
-    pub error_code: Option<String>,
     /// A **per-entry** fold override (ADR 0028 R6): `Some(true)` expands this entry whatever
     /// the global fold says, which is how a search hit opens exactly one folded entry.
     /// Cleared by the next global fold toggle. Part of the layout cache key.
     pub fold_override: Option<bool>,
-    /// The images the entry's message carried (ADR 0028 R10), in order. A user message's
-    /// placeholder line is already in `text`; a tool result's placeholder row is synthesized
-    /// by the layout above the image run.
-    pub images: Vec<crate::media::EntryImage>,
-    /// True for the wake-budget notice entry of the current degrade burst. `update`
-    /// rewrites this entry (not a new line per degrade) while the burst lasts; the next
-    /// turn start clears the session's index, leaving the line as plain history.
+    /// True for the wake-budget notice entry of the current degrade burst. `update` rewrites
+    /// this entry (not a new line per degrade) while the burst lasts; the next turn start
+    /// clears the session's index, leaving the line as plain history.
     pub wake_notice: bool,
-    /// When the live reasoning channel's **first delta** arrived (ADR 0028
-    /// decision 4). Live-only: never journaled, so a resumed entry has `None` and shows no
-    /// duration. The pair with [`Entry::reasoning_ended`] is the entry's own wall clock; the
-    /// duration is their difference.
+    /// When the live reasoning channel's **first delta** arrived (ADR 0028 decision 4).
+    /// Live-only: never journaled, so a resumed entry has `None` and shows no duration. The
+    /// pair with [`Entry::reasoning_ended`] is the entry's own wall clock; the duration is
+    /// their difference.
     pub reasoning_started: Option<Instant>,
-    /// When the reasoning entry **ended**: the commit that replaced the live view (ADR 0028
-    /// ). Live-only, like [`Entry::reasoning_started`]; a resumed entry
-    /// carries neither.
+    /// When the reasoning entry **ended**: the commit that replaced the live view (ADR 0028).
+    /// Live-only, like [`Entry::reasoning_started`]; a resumed entry carries neither.
     pub reasoning_ended: Option<Instant>,
-    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Filled
-    /// for assistant prose and the thinking channel's body (ADR 0028:
-    /// both carry fence grammar).
+    /// The parsed blocks (ADR 0028 R1), keyed by text length and the reasoning mode. Filled for
+    /// assistant prose and the thinking channel's body (ADR 0028: both carry fence grammar).
     pub(crate) block_cache: Option<((usize, ReasoningMode), Vec<Block>)>,
-    /// How many lines this entry laid out to, for the width, text length and mode it was
-    /// last measured at. The renderer keeps it so a frame only re-lays out entries that
-    /// changed or are on screen.
+    /// How many lines this entry laid out to, for the width, text length and mode it was last
+    /// measured at. The renderer keeps it so a frame only re-lays out entries that changed or
+    /// are on screen.
     pub(crate) layout_cache: Option<(LayoutKey, usize)>,
     /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
-    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable
-    /// measure pass; the immutable layout paths render fresh on a miss.
+    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable measure
+    /// pass; the immutable layout paths render fresh on a miss.
     pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
     /// The entry's laid-out Markdown paragraph lines (ADR 0028 R2), keyed by `(width,
     /// text_len)` and indexed by the paragraph block's start. The layout does not depend on
-    /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing
-    /// every Assistant entry (the R7 toggle gate). Filled lazily by the layout/text paths
-    /// (interior mutability), because the measure pass counts Markdown without laying it out.
+    /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing every
+    /// Assistant entry (the R7 toggle gate). Filled lazily by the layout/text paths (interior
+    /// mutability), because the measure pass counts Markdown without laying it out.
     pub(crate) md_cache: std::cell::RefCell<Option<MdCache>>,
     /// The Markdown paragraph **line counts**, keyed the same way (resume-perf2). The measure
     /// pass fills this from [`crate::blocks::line_count`], so the first frame (and a fold
@@ -203,22 +95,28 @@ pub struct Entry {
     pub(crate) md_count_cache: Option<MdCountCache>,
 }
 
+impl std::ops::Deref for Entry {
+    type Target = radian_host::transcript::Entry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for Entry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
 impl Entry {
     pub fn new(kind: EntryKind, text: impl Into<String>) -> Self {
         Self {
-            kind,
-            text: text.into(),
+            data: radian_host::transcript::Entry::new(kind, text),
             live: false,
-            interrupted: false,
-            is_error: false,
-            result: None,
-            tool: None,
-            context: None,
-            compaction: None,
-            card: crate::blocks::Card::None,
-            error_code: None,
-            fold_override: None,
             images: Vec::new(),
+            context: None,
+            fold_override: None,
             wake_notice: false,
             reasoning_started: None,
             reasoning_ended: None,
@@ -228,6 +126,23 @@ impl Entry {
             md_cache: std::cell::RefCell::new(None),
             md_count_cache: None,
         }
+    }
+
+    /// The render entry for one entry a host fold produced (ADR 0023 U1): the folded data
+    /// as-is, and the images decoded for drawing (`decode` fills `decodable` from the same
+    /// cache the live path uses, so a broken payload reserves no rows).
+    pub(crate) fn from_fold(
+        folded: &radian_host::transcript::Entry,
+        images: &mut crate::media::ImageCache,
+    ) -> Self {
+        let mut entry = Self::new(folded.kind, folded.text.clone());
+        entry.data = folded.clone();
+        entry.images = folded
+            .images
+            .iter()
+            .map(|part| crate::media::EntryImage::from_part_facts(part, images))
+            .collect();
+        entry
     }
 }
 
@@ -323,24 +238,11 @@ pub(super) fn bash_context_text(command: &str, run: &radian_coding::UserBash) ->
     out
 }
 
-/// The command in a `Ran \`cmd\`` context message, or `None` when the text is not one.
-fn bash_context_command(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("Ran `")?;
-    let end = rest.find('`')?;
-    Some(&rest[..end])
-}
+/// Concatenated text parts, for display. The host's fold uses the same function (ADR 0023 U1).
+pub use radian_host::transcript::parts::text_of;
 
-/// A resumed `!` context message as a Bash block: `$ cmd` (its first line) and the fenced body.
-pub(super) fn bash_entry_from_context(text: &str) -> Option<Entry> {
-    let command = bash_context_command(text)?;
-    let body = text.find('\n').map_or("", |i| &text[i + 1..]);
-    Some(Entry::new(
-        EntryKind::Bash {
-            exclude_from_context: false,
-        },
-        format!("{command}\n{}", body.trim_end_matches('\n')),
-    ))
-}
+/// A resumed `!` context message as a Bash block. The host's fold uses the same function.
+pub use radian_host::transcript::parts::bash_entry_from_context;
 
 pub(super) fn is_user_input(input: &Input) -> bool {
     match input {
@@ -479,16 +381,4 @@ pub fn mcp_text(configured: usize, open: Option<(usize, usize)>) -> String {
         (configured, None) => format!("mcp {configured}/…"),
         (_, Some((servers, tools))) => format!("mcp {servers}/{tools}"),
     }
-}
-
-/// Concatenated text parts, for display.
-pub fn text_of(parts: &[ContentPart]) -> String {
-    parts
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
 }

@@ -109,27 +109,9 @@ pub fn user_message(text: &str, attachments: &[Attachment], images: &[LoadedImag
     }
 }
 
-/// The display text of a user message's parts: an attachment part becomes
-/// `[file: P, N lines]`, an image part `[image: <name>, W×H, N KB]` (ADR 0028 R5); neither
-/// ever shows its content.
-pub fn display_parts(parts: &[ContentPart]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for part in parts {
-        match part {
-            ContentPart::Text { text, .. } => match part.attachment_path() {
-                Some(path) => lines.push(format!("[file: {path}, {} lines]", text.lines().count())),
-                None => lines.push(text.clone()),
-            },
-            ContentPart::Image { .. } => {
-                if let Some(line) = image::part_placeholder(part) {
-                    lines.push(line);
-                }
-            }
-            _ => {}
-        }
-    }
-    lines.join("\n\n")
-}
+/// The display text of a user message's parts. The host's fold writes the same text into an
+/// entry (ADR 0023 U1).
+pub use radian_host::transcript::parts::display_parts;
 
 /// One referenced file that exists but cannot be attached.
 #[derive(Debug, Clone, PartialEq, Eq)]

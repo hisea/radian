@@ -59,6 +59,9 @@ pub mod subagent;
 #[cfg(test)]
 mod test_support;
 mod tools;
+/// The folded transcript: one entry type and the folds that produce it (ADR 0023 U1). Ratatui
+/// free, so `radian attach`, the arc TUI and the hub fold the same journal to the same entries.
+pub mod transcript;
 pub mod trust;
 pub mod usage;
 pub mod wake_gate;
