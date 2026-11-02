@@ -11,7 +11,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -44,6 +44,7 @@ struct Hub {
     stdout: BufReader<std::process::ChildStdout>,
     home: PathBuf,
     stderr_path: PathBuf,
+    address: SocketAddr,
     port: u16,
 }
 
@@ -76,6 +77,16 @@ impl Hub {
         Self::start_with_args(home, 0, &[], &["--config", config])
     }
 
+    /// Starts a hub whose `--config` file holds `config_text`, on port `0`. The file is written
+    /// inside `home`.
+    fn start_with_config(home: &Path, config_text: &str) -> Self {
+        fs::create_dir_all(home).expect("the hub home is creatable");
+        let config = home.join("config.toml");
+        fs::write(&config, config_text).expect("the hub configuration writes");
+        let config = config.to_str().expect("the config path is UTF-8");
+        Self::start_with_args(home, 0, &[], &["--config", config])
+    }
+
     fn start_with_args(home: &Path, port: u16, envs: &[(&str, &str)], leading: &[&str]) -> Self {
         fs::create_dir_all(home).expect("the hub home is creatable");
         let stderr_path = home.join("hub.stderr.log");
@@ -103,16 +114,18 @@ impl Hub {
             .read_line(&mut line)
             .expect("the hub's first stdout line reads");
         let first = line.trim_end();
-        let port: u16 = first
-            .strip_prefix("hub: listening on 127.0.0.1:")
+        let address: SocketAddr = first
+            .strip_prefix("hub: listening on ")
             .unwrap_or_else(|| panic!("the first stdout line names the listener: {first:?}"))
             .parse()
-            .expect("the first stdout line names a port");
+            .expect("the first stdout line names an address and a port");
+        let port = address.port();
         Self {
             child,
             stdout: reader,
             home: home.to_path_buf(),
             stderr_path,
+            address,
             port,
         }
     }
@@ -205,12 +218,36 @@ fn http_with_body(
     header: Option<&str>,
     body: Option<&str>,
 ) -> Response {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the hub accepts a connection");
+    http_at(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+        method,
+        path,
+        header,
+        body,
+    )
+}
+
+/// One request to `address` on `port`, over a fresh connection.
+fn http_at(
+    address: IpAddr,
+    port: u16,
+    method: &str,
+    path: &str,
+    header: Option<&str>,
+    body: Option<&str>,
+) -> Response {
+    let mut stream =
+        TcpStream::connect(SocketAddr::new(address, port)).expect("the hub accepts a connection");
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .expect("a read timeout is settable");
+    let host = match address {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
     let mut request =
-        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+        format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n");
     if let Some(header) = header {
         request.push_str(&format!("Authorization: {header}\r\n"));
     }
@@ -2052,4 +2089,189 @@ fn a_repository_added_while_a_client_is_connected_sends_on_the_same_stream() {
             "review.rework_pending"
         )
     );
+}
+
+// ---- `[hub] bind` (ADR 0048 §16) ---------------------------------------------------------
+
+/// A non-loopback IPv4 address this machine holds, found without sending a packet: a connected
+/// UDP socket has no traffic, and its local address is the interface the route would use.
+fn non_loopback_ipv4() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
+}
+
+/// Whether this machine has an IPv6 loopback to bind `::1` on.
+fn has_ipv6_loopback() -> bool {
+    TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok()
+}
+
+/// Waits until `hub`'s stderr contains `needle`, and returns it. The warning follows the first
+/// stdout line, so a test that read the line may need a moment.
+fn wait_for_stderr(hub: &Hub, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let stderr = hub.stderr();
+        if stderr.contains(needle) {
+            return stderr;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub stderr never contained {needle:?}: {stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The default configuration listens on `127.0.0.1` and prints no warning.
+#[test]
+fn the_default_bind_is_loopback_and_prints_no_warning() {
+    let a = Repo::new("hub-bind-default");
+    let home = hub_home(&a);
+    let hub = Hub::start(&home);
+    assert_eq!(hub.address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert_eq!(hub.authorized("GET", "/v1/version").status, 200);
+    let stderr = hub.stderr();
+    assert!(
+        !stderr.to_lowercase().contains("warning"),
+        "the default bind prints no warning: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unencrypted"),
+        "the default bind prints no warning: {stderr}"
+    );
+}
+
+/// `hub.bind = "0.0.0.0"` answers `/v1/version` on loopback and, when this machine has a
+/// non-loopback IPv4 address, on that address too; stderr has the warning exactly once.
+#[test]
+fn a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning() {
+    let a = Repo::new("hub-bind-wildcard");
+    let home = hub_home(&a);
+    let hub = Hub::start_with_config(&home, "schema_version = 1\n[hub]\nbind = \"0.0.0.0\"\n");
+    assert_eq!(hub.address.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(
+        http_at(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            hub.port,
+            "GET",
+            "/v1/version",
+            Some(&format!("Bearer {}", hub.token())),
+            None,
+        )
+        .status,
+        200,
+        "the wildcard bind answers on loopback"
+    );
+    if let Some(ip) = non_loopback_ipv4() {
+        assert_eq!(
+            http_at(
+                IpAddr::V4(ip),
+                hub.port,
+                "GET",
+                "/v1/version",
+                Some(&format!("Bearer {}", hub.token())),
+                None,
+            )
+            .status,
+            200,
+            "the wildcard bind answers on {ip}"
+        );
+    }
+    let stderr = wait_for_stderr(&hub, "unencrypted");
+    assert_eq!(
+        stderr.matches("unencrypted").count(),
+        1,
+        "the warning appears exactly once: {stderr}"
+    );
+}
+
+/// `hub.bind = "::1"` prints the bracketed IPv6 address as its first stdout line.
+#[test]
+fn an_ipv6_loopback_bind_prints_the_bracketed_address() {
+    if !has_ipv6_loopback() {
+        return;
+    }
+    let a = Repo::new("hub-bind-ipv6");
+    let home = hub_home(&a);
+    let hub = Hub::start_with_config(&home, "schema_version = 1\n[hub]\nbind = \"::1\"\n");
+    assert_eq!(hub.address.ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+    assert!(
+        hub.address.to_string().starts_with("[::1]:"),
+        "the startup address is bracketed: {}",
+        hub.address
+    );
+    assert_eq!(
+        http_at(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            hub.port,
+            "GET",
+            "/v1/version",
+            Some(&format!("Bearer {}", hub.token())),
+            None,
+        )
+        .status,
+        200,
+        "the IPv6 loopback bind answers"
+    );
+    assert!(
+        !hub.stderr().contains("unencrypted"),
+        "a loopback bind prints no warning: {}",
+        hub.stderr()
+    );
+}
+
+/// A host name, an empty string and an address with a port are configuration errors naming
+/// `hub.bind`; nothing binds and nothing is printed on stdout.
+#[test]
+fn a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds() {
+    let a = Repo::new("hub-bind-invalid");
+    let home = hub_home(&a);
+    for value in ["localhost", "", "127.0.0.1:7341"] {
+        let config = home.join("bad-bind.toml");
+        fs::write(
+            &config,
+            format!("schema_version = 1\n[hub]\nbind = \"{value}\"\n"),
+        )
+        .expect("the bad configuration writes");
+        let output = radian(
+            &home,
+            &[
+                "--config",
+                config.to_str().expect("the path is UTF-8"),
+                "hub",
+                "--port",
+                "0",
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{value:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("hub.bind"), "{value:?}: {stderr}");
+        assert!(stderr.contains("an IP address"), "{value:?}: {stderr}");
+        assert!(
+            output.stdout.is_empty(),
+            "{value:?}: nothing binds, so nothing is on stdout: {output:?}"
+        );
+    }
+}
+
+/// A non-loopback bind does not turn the token off: a request without it is `401`.
+#[test]
+fn a_non_loopback_bind_still_requires_the_bearer_token() {
+    let a = Repo::new("hub-bind-token");
+    let home = hub_home(&a);
+    let hub = Hub::start_with_config(&home, "schema_version = 1\n[hub]\nbind = \"0.0.0.0\"\n");
+    let response = http_at(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        hub.port,
+        "GET",
+        "/v1/version",
+        None,
+        None,
+    );
+    assert_eq!(response.status, 401);
+    assert_eq!(response.json(), serde_json::json!({}));
 }

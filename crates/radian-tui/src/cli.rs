@@ -1222,10 +1222,11 @@ fn run_theme(command: ThemeCommand) -> ExitCode {
 }
 
 /// Runs `radian hub` (ADR 0048 decision 16): the HTTP API and the scheduling loop, the
-/// repository registry, pairing and the token. A bare `radian hub` binds `[hub] port`, takes
-/// `hub.lock` for its life and runs the loop until the process is stopped; its first stdout
-/// line is `hub: listening on 127.0.0.1:<port>`. An error exits `1` and prints one
-/// `radian hub:` line on stderr.
+/// repository registry, pairing and the token. A bare `radian hub` binds `[hub] bind` on
+/// `[hub] port` (`127.0.0.1` by default), takes `hub.lock` for its life and runs the loop
+/// until the process is stopped; its first stdout line is `hub: listening on <addr>:<port>`,
+/// and a bind that is not loopback prints one warning on stderr. An error exits `1` and
+/// prints one `radian hub:` line on stderr.
 fn run_hub(
     command: Option<HubCommand>,
     port: Option<u16>,

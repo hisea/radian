@@ -260,15 +260,18 @@ attachments, and the line limit. This key only turns the port on or off.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. The API binds `127.0.0.1` only. |
+| `hub.bind` | string | `127.0.0.1` | an IPv4 or IPv6 address, not a host name or an address with a port | The IP address the hub HTTP API listens on. A bind that is not loopback prints one warning at startup: the bearer token and every request travel unencrypted on that network; `tailscale serve` or an ssh forward is the encrypted way. |
+| `hub.port` | integer | `7341` | `1` to `65535` | The hub HTTP API's port. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 | `hub.session_idle_secs` | integer | `3600` | `60` to `86400` | How long a hub-held session may have no running turn, nothing pending and no running background job before its process exits cleanly; the journal stays and the next prompt resumes it. |
 | `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's pending queue gets a new head. See [the hub page](arc/hub.md#the-after-pending-hook) for the variables, the timeout and the log. |
 
 A value outside its range is a configuration error naming the key and the range.
+A `hub.bind` that is not an IP address (a host name, an empty string, an address with a port) is a configuration error naming the key and "an IP address".
 An unknown key under `[hub]` is skipped and named at startup.
-`radian hub` reads `hub.port` at start and binds the HTTP API there, on `127.0.0.1` only.
+`radian hub` reads `hub.bind` and `hub.port` at start and binds the HTTP API on that address and port.
+A bind that is not loopback prints one warning line on stderr at startup: the bearer token and every request travel unencrypted on that network, and `tailscale serve` or an ssh forward is the encrypted way.
 `hub.concurrency` and `hub.interval_secs` drive the hub's scheduling loop.
 `hub.session_idle_secs` is the reclaim window the hub gives each hub-held session's process; it takes effect for every process the hub starts after its next start.
 A change takes effect at the hub's next start.
@@ -276,6 +279,7 @@ See `arc/hub` for the registry, the routes, the loop and the subcommands.
 
 ```toml
 [hub]
+bind = "127.0.0.1"
 port = 7341
 concurrency = 4
 interval_secs = 30

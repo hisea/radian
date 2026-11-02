@@ -1,8 +1,9 @@
-//! `radian hub`'s HTTP API (ADR 0048 decision 16): loopback only, a bearer token on every
-//! request, the read routes that return exactly what `radian arc list --json` and
+//! `radian hub`'s HTTP API (ADR 0048 decision 16): loopback by default, a bearer token on
+//! every request, the read routes that return exactly what `radian arc list --json` and
 //! `radian arc show --json` print, and the owner's write routes.
 //!
-//! The listener binds `127.0.0.1:<[hub] port>` and nothing else. The server takes `hub.lock`
+//! The listener binds `<[hub] bind>:<[hub] port>` and nothing else, and a bind that is not
+//! loopback prints one warning at startup. The server takes `hub.lock`
 //! before it binds, so a second hub is refused by the lock and not by the port; a port another
 //! program holds is a startup error that names it. The token file is read at start and
 //! re-read whenever its mtime changed, one `stat` per request, so `radian hub token rotate`
@@ -28,7 +29,7 @@ use std::convert::Infallible;
 use std::fs;
 use std::future::poll_fn;
 use std::io::IsTerminal;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -73,19 +74,33 @@ pub const API_VERSION: u32 = 2;
 /// The most diff text `GET …/diff/<path>` returns, in bytes.
 pub const DIFF_TEXT_LIMIT: usize = 256 * 1024;
 
-/// The address every hub binds: loopback IPv4, on `port`. There is no key that moves it.
+/// The address the hub binds: `[hub] bind` on `[hub] port` (ADR 0048 §16).
 #[must_use]
-pub fn bind_address(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+pub fn bind_address(bind: IpAddr, port: u16) -> SocketAddr {
+    SocketAddr::new(bind, port)
 }
 
-/// Runs the hub until the process ends: it installs the stop-signal handler, creates the
-/// token when it is missing, takes `hub.lock`, binds [`bind_address`], prints
-/// `hub: listening on <addr>` as its first stdout line, and then runs the hub's own thread
-/// (registry re-reads, status lines and joins) while the HTTP API serves on a thread of its own
-/// and every repository's pass runs on its own thread (ADR 0048 decision 16). `config` is the
-/// top-level `--config` file the loop reads its `[hub] interval_secs` and `[hub] concurrency`
-/// from, and the session scanner its `[hub.hooks]` commands.
+/// The one warning a non-loopback bind prints on stderr at startup (ADR 0048 §16): the
+/// bearer token and every request travel unencrypted on that network. `None` for a loopback
+/// address, so the default bind prints nothing.
+fn bind_warning(address: IpAddr) -> Option<String> {
+    (!address.is_loopback()).then(|| {
+        format!(
+            "hub: warning: {address} is not a loopback address; the bearer token and every \
+             request travel unencrypted on that network. Use `tailscale serve` or an ssh \
+             forward for an encrypted connection."
+        )
+    })
+}
+
+/// Runs the hub until the process ends: it installs the stop-signal handler, reads the
+/// configuration, creates the token when it is missing, takes `hub.lock`, binds
+/// `[hub] bind` on the port, prints `hub: listening on <addr>` as its first stdout line,
+/// and then runs the hub's own thread (registry re-reads, status lines and joins) while the
+/// HTTP API serves on a thread of its own and every repository's pass runs on its own thread
+/// (ADR 0048 decision 16). A bind that is not loopback prints one warning line on stderr. The
+/// configuration is the top-level `--config` file the loop reads its `[hub]` keys from, and
+/// the session scanner its `[hub.hooks]` commands.
 ///
 /// The SIGINT and SIGTERM handler comes first, before the lock, the bind and the first line:
 /// a test or a person stops the hub as soon as it announces itself, and the default action
@@ -107,20 +122,25 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
     // Before any bind or any repository: two hubs are refused by the lock, never by the port
     // (ADR 0048 §16).
     let lock = HubLock::take(&dir)?;
-    let address = bind_address(port);
+    // A bad `[hub] bind` is a configuration error before anything binds. The configuration is
+    // read once here and shared by the listener, the reclaim window and the hooks.
+    let config_value = load_config(config)?;
+    let address = bind_address(config_value.hub.bind, port);
     let listener = bind_listener(address)?;
     let bound = listener
         .local_addr()
         .map_err(|error| Error::Failed(format!("cannot read the hub address: {error}")))?;
     radian_host::write_line(&format!("hub: listening on {bound}"))
         .map_err(|error| Error::Failed(format!("cannot print the hub address: {error}")))?;
+    if let Some(warning) = bind_warning(bound.ip()) {
+        eprintln!("{warning}");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
     let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
     let http_registry = registry.clone();
-    let config_value = load_config(config)?;
     // The reclaim window a hub-held process is told (ADR 0048 §16). `[hub] session_idle_secs`
     // comes from the same file the scheduling loop reads.
     let idle_secs = session_idle_secs(&config_value);
@@ -205,7 +225,11 @@ fn session_idle_secs(config: &radian_host::config::Config) -> u64 {
 /// same port while the previous process's last connections are still in `TIME_WAIT`. Without
 /// it the new hub fails with `Address already in use` and exits `1` (ADR 0048 decision 16).
 fn bind_listener(address: SocketAddr) -> Result<std::net::TcpListener, Error> {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+    let domain = match address {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
         .map_err(|error| Error::Failed(format!("cannot open a socket for {address}: {error}")))?;
     socket
         .set_reuse_address(true)
@@ -1680,6 +1704,7 @@ fn no_content() -> Response<ResponseBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     /// The session event stream's producer is spawned from a route, and a route runs on a
     /// blocking thread. `tokio::spawn` must be usable there, or the stream would never produce a
@@ -1724,11 +1749,25 @@ mod tests {
     }
 
     #[test]
-    fn the_bind_address_is_loopback() {
-        let address = bind_address(7341);
+    fn the_bind_address_is_the_configured_one() {
+        let address = bind_address(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341);
         assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(address.port(), 7341);
-        assert_ne!(address.ip(), IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        let any = bind_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7341);
+        assert_eq!(any.to_string(), "0.0.0.0:7341");
+        let v6 = bind_address(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 7341);
+        assert_eq!(v6.to_string(), "[::1]:7341");
+    }
+
+    #[test]
+    fn a_non_loopback_bind_has_one_warning_and_loopback_has_none() {
+        assert!(bind_warning(IpAddr::V4(Ipv4Addr::LOCALHOST)).is_none());
+        assert!(bind_warning(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)).is_none());
+        let warning = bind_warning(IpAddr::V4(Ipv4Addr::UNSPECIFIED)).expect("0.0.0.0 warns");
+        assert!(warning.contains("unencrypted"), "{warning}");
+        assert!(warning.contains("tailscale serve"), "{warning}");
+        let v6 = bind_warning(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).expect(":: warns");
+        assert!(v6.contains("unencrypted"), "{v6}");
     }
 
     #[test]

@@ -2359,3 +2359,16 @@ sandbox (which denies socket connects), and restored from `.radian/sessions.rs.b
 | TK0310-M2 | `start_for` returns the spawn failure instead of probing the sockets again for the holder | `hub_session_write::a_prompt_rescans_and_uses_the_holder_when_its_scan_missed_it` (`502` `the session process exited before its control port answered (exit status: 2)` instead of `200`) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0315: `hub.bind` and its non-loopback warning
+
+The hub binds `<[hub] bind>:<[hub] port>` and prints one warning on stderr when the address is
+not loopback. The parse mutation was applied by hand to `crates/radian-host/src/config/mod.rs`
+and the warning mutation to `crates/radian-arc/src/hub/http.rs`; each was run with `cargo
+nextest run` after rebuilding `radian`, and restored from `.radian/config.mod.rs.bak` and
+`.radian/http.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0315-M1 | `parse_hub` drops the `bind` arm, so `hub.bind` is an unknown key that is skipped (the pre-change behavior) | `config::tests::hub_bind_is_an_ip_address`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the hub bound `127.0.0.1`), `hub_http::an_ipv6_loopback_bind_prints_the_bracketed_address` (the same), and `hub_http::a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds` (the hub started and the run timed out) | ✅ 3 failed, 1 timed out |
+| TK0315-M2 | `bind_warning` always returns `None`, so a non-loopback bind prints no warning | `hub::http::tests::a_non_loopback_bind_has_one_warning_and_loopback_has_none`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the warning never arrived) | ✅ 2 failed |
