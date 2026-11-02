@@ -5,8 +5,11 @@
 //! `$RADIAN_HOME/run/<pid>.sock` (directory 0700, file 0600). The socket is where an external
 //! script or agent drives the session: it can enqueue `followup`/`steer`/`inject` inputs,
 //! `cancel` the running turn, `list_sessions` (the hosting session), and `subscribe` to the
-//! committed event stream. There are no task verbs (`spawn_task`, `wait_task`, `task_status`)
-//! and no separate `radian serve` (ADR 0043): the process that owns a session owns its socket.
+//! committed event stream. With the owner token it also answers the pending approval/question
+//! queue (`pending`, `answer`), queues a turn-boundary configuration change (`config`), and
+//! lists the routes `/model` offers (`models`). There are no task verbs (`spawn_task`,
+//! `wait_task`, `task_status`) and no separate `radian serve` (ADR 0043): the process that owns
+//! a session owns its socket.
 //!
 //! **Sources (ADR 0043, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
 //! the port, never by the client's word: it defaults to [`InputSource::Scheduler`], a client
@@ -18,9 +21,10 @@
 //! running keeps its own effective source, which only ever lowers (ADR 0011 L2): a `steer` or
 //! `inject` joins it and can lower it, never raise it, while a `followup` belongs to a later
 //! turn and leaves the running turn alone — the turn it opens applies its own source when the
-//! driver claims it. Approvals cannot be answered over the port —
-//! there is deliberately no such verb, and an unknown verb (including an `approve`) changes
-//! nothing.
+//! driver claims it. The owner token also gates the four queue/config verbs: without it they
+//! return an error line and change nothing, and an unknown verb changes nothing. `answer` is a
+//! front end on the pending queue (ADR 0023 U7, ADR 0024 Q9), never a new permission source:
+//! the first answer wins and a late one changes nothing.
 //!
 //! **Inputs carry attachments.** `followup`/`steer`/`inject` may carry `images` (base64 plus a
 //! MIME) and `files` (a name plus text). They become the message's parts through
@@ -32,7 +36,9 @@
 //! **Never blocks the runtime.** Handlers run on the runtime and use the async `Inbox`, not
 //! `LocalSession`'s `block_on` wrappers (ADR 0043; the background's rule). `subscribe`
 //! fans the committed events out to each client through a **bounded** per-client channel: a
-//! client that falls behind is disconnected, and the producer never waits on a client.
+//! client that falls behind is disconnected, and the producer never waits on a client. A queue
+//! change also pushes one `pending` event (source `control`): the head and length, full for an
+//! owner subscriber and redacted to the request id, kind and tool name for every other one.
 //!
 //! **Cleanup (ADR 0043).** The socket is removed when the server is dropped — the normal
 //! exit path and the panic-unwind path both drop it. At startup every `*.sock` whose pid is no
@@ -43,15 +49,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use radian_coding::image::LoadedImage;
+use radian_coding::{QuestionAnswer, QuestionReply};
 use radian_core::{AgentEvent, EventSink, InputSource, Message, OpaqueJson};
-use radian_runtime::{CancelCause, RuntimeEvents};
+use radian_permissions::ApprovalOutcome;
+use radian_runtime::{CancelCause, ConfigQueue, ModelRoute, RuntimeEvents};
 use radian_session::RuntimeEvent;
 use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::compose::{Attachment, MAX_FILE_BYTES, MAX_TOTAL_BYTES, user_message};
-use crate::session::LocalSession;
+use crate::model::SwitchableModel;
+use crate::pending::{Answered, PendingRequest, PendingResponse, PendingView};
+use crate::projection::{SessionProjection, TurnState};
+use crate::session::{LocalSession, SessionQueue};
 
 /// What the port needs from the hosting session: its id, its inbox, its permission hooks and
 /// whether a turn is running. Every session handle is **weak**, so serving the socket never
@@ -60,21 +71,48 @@ use crate::session::LocalSession;
 #[derive(Clone)]
 pub struct ControlTarget {
     pub session_id: String,
+    /// The canonical workspace this session was opened in (`list_sessions` reports it so a
+    /// hub can group sessions by repository).
+    pub workspace: PathBuf,
+    /// The route this session started on: the fallback when the model handle has closed.
+    initial_route: ModelRoute,
     inbox: Weak<radian_runtime::Inbox>,
     hooks: Weak<radian_permissions::PermissionHooks>,
     /// The driver's turn flag (a standalone atomic, cloned weakly): a mid-turn input must not
-    /// raise the turn's source (ADR 0011 L2).
+    /// raise the turn's source (ADR 0011 L2), and it is the live turn state a `list_sessions`
+    /// row reports — the one signal a host that does not fold committed events has.
     turn_running: Weak<AtomicBool>,
+    /// The pending approval/question queue (ADR 0023 U7): the owner verbs read and answer it.
+    queue: Weak<SessionQueue>,
+    /// The turn-boundary config queue the `config` verb pushes into (ADR 0004).
+    config_queue: Weak<ConfigQueue>,
+    /// The turn state the `list_sessions` row reports when no turn is running: the last
+    /// committed outcome (ADR 0034 H2).
+    projection: Weak<SessionProjection>,
+    /// The switchable model: `current_route` is the route in force, and a `config` change
+    /// names a route this session can switch to (ADR 0026 D5).
+    model: Weak<SwitchableModel>,
+    /// The background-job registry: running jobs make an idle session `working` (ADR 0034 H2).
+    jobs: Option<Weak<radian_coding::Jobs>>,
 }
 
 impl ControlTarget {
     /// The port's view of an open session.
     pub fn of(session: &LocalSession) -> Self {
+        let model = session.model_handle();
+        let initial_route = model.current_route();
         Self {
             session_id: session.id().as_str().to_owned(),
+            workspace: session.workspace().to_path_buf(),
+            initial_route,
             inbox: Arc::downgrade(session.inbox()),
             hooks: Arc::downgrade(session.hooks()),
             turn_running: Arc::downgrade(&session.turn_running_handle()),
+            queue: Arc::downgrade(session.queue()),
+            config_queue: Arc::downgrade(session.config_queue()),
+            projection: Arc::downgrade(session.projection()),
+            model: Arc::downgrade(&model),
+            jobs: session.jobs_registry().map(|jobs| Arc::downgrade(&jobs)),
         }
     }
 
@@ -93,6 +131,77 @@ impl ControlTarget {
         self.turn_running
             .upgrade()
             .map(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    /// The pending queue, or `None` once the session has closed.
+    fn queue(&self) -> Option<Arc<SessionQueue>> {
+        self.queue.upgrade()
+    }
+
+    /// The turn-boundary config queue, or `None` once the session has closed.
+    fn config_queue(&self) -> Option<Arc<ConfigQueue>> {
+        self.config_queue.upgrade()
+    }
+
+    /// The turn projection, or `None` once the session has closed.
+    fn projection(&self) -> Option<Arc<SessionProjection>> {
+        self.projection.upgrade()
+    }
+
+    /// The turn state a `list_sessions` row reports (ADR 0034 H2). The driver's flag is the
+    /// live truth in a process that does not fold committed events: `radian exec` builds a
+    /// fresh projection and never sets a turn on it, so only the flag knows a turn is in
+    /// flight there. The projection still carries the last committed outcome when no turn
+    /// runs (the TUI's journal observer writes it).
+    fn turn_state(&self) -> TurnState {
+        if self.turn_running() == Some(true) {
+            return TurnState::Running;
+        }
+        self.projection()
+            .map_or(TurnState::Idle, |projection| projection.read().turn())
+    }
+
+    /// The switchable model, or `None` once the session has closed.
+    fn model(&self) -> Option<Arc<SwitchableModel>> {
+        self.model.upgrade()
+    }
+
+    /// The route in force: the live model's current route, else the startup route of a closed
+    /// session.
+    fn current_route(&self) -> ModelRoute {
+        self.model()
+            .map(|model| model.current_route())
+            .unwrap_or_else(|| self.initial_route.clone())
+    }
+
+    /// The running background-job count (ADR 0034 H2). `0` for a host with no jobs or a
+    /// closed registry.
+    fn running_jobs(&self) -> usize {
+        self.jobs
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map_or(0, |jobs| {
+                jobs.list()
+                    .iter()
+                    .filter(|job| job.state.is_running())
+                    .count()
+            })
+    }
+
+    /// The config's `[providers.<name>]` declarations this session resolved with. Empty once
+    /// the session has closed.
+    fn config_providers(&self) -> std::collections::BTreeMap<String, crate::ProviderDecl> {
+        self.model()
+            .map(|model| model.config_providers().clone())
+            .unwrap_or_default()
+    }
+
+    /// A queue-version receiver and the queue itself for the `pending` subscription. `None`
+    /// once the session has closed.
+    fn pending_watch(&self) -> Option<(Weak<SessionQueue>, tokio::sync::watch::Receiver<u64>)> {
+        let queue = self.queue.upgrade()?;
+        let changes = queue.subscribe();
+        Some((Arc::downgrade(&queue), changes))
     }
 }
 
@@ -120,6 +229,9 @@ struct Client {
     tx: mpsc::Sender<Value>,
     /// Woken (and removed) when the client falls behind or the connection ends.
     close: Arc<Notify>,
+    /// Whether this subscriber carried the owner token when it subscribed: only an owner sees
+    /// the full `pending` head (arguments, question text).
+    owner: bool,
 }
 
 /// The process's control socket and the live subscribers feeding off its committed events.
@@ -215,6 +327,29 @@ impl ControlServer {
         else {
             return;
         };
+        // The `pending` subscription runs alongside the accept loop: whenever the queue's
+        // version changes, every subscriber gets the current head (or `null`), redacted for a
+        // subscriber without the owner token. The task holds the queue and this server weakly,
+        // so a closed session or a dropped server ends it.
+        if let Some((queue, mut changes)) = target.pending_watch() {
+            let weak_server = Arc::downgrade(self);
+            runtime.spawn(async move {
+                loop {
+                    let Some(server) = weak_server.upgrade() else {
+                        break;
+                    };
+                    let Some(queue) = queue.upgrade() else {
+                        break;
+                    };
+                    let (full, redacted) = pending_event(&queue);
+                    server.push_pending(full, redacted);
+                    drop(queue);
+                    if changes.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         let weak = Arc::downgrade(self);
         runtime.spawn(async move {
             loop {
@@ -240,13 +375,19 @@ impl ControlServer {
     #[cfg(not(unix))]
     pub fn serve(self: &Arc<Self>, _runtime: &tokio::runtime::Handle, _target: ControlTarget) {}
 
-    /// Registers a subscriber's output channel and returns its id.
-    fn register(&self, tx: mpsc::Sender<Value>, close: Arc<Notify>) -> u64 {
+    /// Registers a subscriber's output channel and returns its id. `owner` decides whether the
+    /// `pending` event carries the full head or only the redacted one.
+    fn register(&self, tx: mpsc::Sender<Value>, close: Arc<Notify>, owner: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.clients
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(Client { id, tx, close });
+            .push(Client {
+                id,
+                tx,
+                close,
+                owner,
+            });
         id
     }
 
@@ -261,10 +402,27 @@ impl ControlServer {
     /// Fans one pre-serialized line out to every subscriber. Non-blocking: a full or closed
     /// slot means the client is gone, so it is removed and its connection woken to close.
     fn push(&self, value: Value) {
+        self.push_each(|_| value.clone());
+    }
+
+    /// Fans the `pending` event out: an owner subscriber gets the full head, every other
+    /// subscriber the redacted one (ADR 0043: no arguments or question text without the
+    /// token).
+    fn push_pending(&self, full: Value, redacted: Value) {
+        self.push_each(|client| {
+            if client.owner {
+                full.clone()
+            } else {
+                redacted.clone()
+            }
+        });
+    }
+
+    fn push_each(&self, make: impl Fn(&Client) -> Value) {
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let mut slow: Vec<u64> = Vec::new();
         for client in clients.iter() {
-            if client.tx.try_send(value.clone()).is_err() {
+            if client.tx.try_send(make(client)).is_err() {
                 slow.push(client.id);
             }
         }
@@ -375,12 +533,26 @@ impl ControlServer {
             }
             "list_sessions" => success(id, Some(json!({ "sessions": self.sessions(target) }))),
             "subscribe" => {
-                *client_id = Some(self.register(tx.clone(), Arc::clone(close)));
+                let owner = self.is_owner(&request);
+                *client_id = Some(self.register(tx.clone(), Arc::clone(close), owner));
                 success(id, None)
+            }
+            // The owner verbs (ADR 0043): every one of them requires the token, and a refusal
+            // changes nothing.
+            "pending" | "answer" | "config" | "models" => {
+                if !self.is_owner(&request) {
+                    return failure(id, OWNER_REQUIRED);
+                }
+                match verb {
+                    "pending" => self.pending(id, target),
+                    "answer" => self.answer(id, &request, target),
+                    "config" => self.config(id, &request, target),
+                    _ => self.models(id, target),
+                }
             }
             other => failure(
                 id,
-                format!("unknown verb `{other}`: the control port has no approval or answer verb"),
+                format!("unknown verb `{other}`: the control port has no such verb"),
             ),
         }
     }
@@ -448,6 +620,184 @@ impl ControlServer {
         }
     }
 
+    /// `pending`: the queue head and length. An approval carries its tool, both resources, the
+    /// raw arguments and the queue's `request_id`; a question carries the full
+    /// `QuestionRequest`. An empty queue is `head: null, length: 0`.
+    fn pending(&self, id: Value, target: &ControlTarget) -> Value {
+        let Some(queue) = target.queue() else {
+            return failure(id, "the session has closed");
+        };
+        let head = queue.head();
+        let length = queue.len();
+        let head = head.as_ref().map(pending_head).unwrap_or(Value::Null);
+        success(id, Some(json!({ "head": head, "length": length })))
+    }
+
+    /// `answer { request_id, response }` (ADR 0024 Q9): an approval answers `allow_once`,
+    /// `allow_always` or `reject_once` with an optional reason; a question answers its full
+    /// `answers` list. The queue is the arbiter: a late answer and an unknown id both return
+    /// an error and change nothing.
+    fn answer(&self, id: Value, request: &Value, target: &ControlTarget) -> Value {
+        let Some(queue) = target.queue() else {
+            return failure(id, "the session has closed");
+        };
+        let Some(request_id) = request.get("request_id").and_then(Value::as_u64) else {
+            return failure(
+                id,
+                "`request_id` is required and must be a non-negative integer",
+            );
+        };
+        let Some(response) = request.get("response") else {
+            return failure(id, "`response` is required");
+        };
+        let response = match parse_answer(response) {
+            Ok(response) => response,
+            Err(reason) => return failure(id, reason),
+        };
+        // A response for the other kind would complete the entry with a value its waiter turns
+        // into a failure (a denied approval, a gone prompter). Refuse it before anything moves.
+        if let Some(view) = queue.peek(request_id)
+            && !response.matches(&view.request)
+        {
+            return failure(
+                id,
+                format!(
+                    "request {request_id} is a {}, not a {}; nothing changed",
+                    request_kind(&view.request),
+                    response.kind()
+                ),
+            );
+        }
+        match queue.answer(request_id, response.into_pending(request_id)) {
+            Ok(()) => success(id, None),
+            Err(Answered::Late) => failure(
+                id,
+                "the request is no longer pending: a late answer changes nothing",
+            ),
+            Err(Answered::Unknown) => failure(id, "no pending request has that id"),
+        }
+    }
+
+    /// `config`: one turn-boundary change for the driver's `ConfigQueue` (ADR 0004 path B),
+    /// exactly the `/model` and `/thinking` path. Only `model` (`{provider, model}`) and
+    /// `thinking` (the `/thinking` closed set) are accepted; any other key, an unknown route
+    /// or a bad level rejects the whole request and queues nothing.
+    fn config(&self, id: Value, request: &Value, target: &ControlTarget) -> Value {
+        let Some(config) = request.get("config") else {
+            return failure(id, "`config` is required");
+        };
+        let Some(object) = config.as_object() else {
+            return failure(id, "`config` must be an object");
+        };
+        if let Some(key) = object
+            .keys()
+            .find(|key| key.as_str() != "model" && key.as_str() != "thinking")
+        {
+            return failure(
+                id,
+                format!("unknown config key `{key}`: only `model` and `thinking` are accepted"),
+            );
+        }
+        if object.is_empty() {
+            return failure(id, "`config` needs `model` or `thinking`");
+        }
+        let mut change = Map::new();
+        if let Some(model) = object.get("model") {
+            let Some(model) = model.as_object() else {
+                return failure(id, "`model` must be an object with `provider` and `model`");
+            };
+            if let Some(key) = model
+                .keys()
+                .find(|key| key.as_str() != "provider" && key.as_str() != "model")
+            {
+                return failure(
+                    id,
+                    format!("unknown model key `{key}`: only `provider` and `model` are accepted"),
+                );
+            }
+            let Some(provider) = model.get("provider").and_then(Value::as_str) else {
+                return failure(id, "`model.provider` is required and must be a string");
+            };
+            let Some(name) = model.get("model").and_then(Value::as_str) else {
+                return failure(id, "`model.model` is required and must be a string");
+            };
+            if provider.is_empty() || name.is_empty() {
+                return failure(id, "`model.provider` and `model.model` must not be empty");
+            }
+            if !self.is_switchable_route(target, provider, name) {
+                return failure(
+                    id,
+                    format!(
+                        "unknown provider/model `{provider}/{name}`: `models` lists the routes \
+                         this session can switch to"
+                    ),
+                );
+            }
+            change.insert(
+                "model".to_owned(),
+                json!({ "provider": provider, "model": name }),
+            );
+        }
+        if let Some(thinking) = object.get("thinking") {
+            let Some(level) = thinking.as_str() else {
+                return failure(id, "`thinking` must be a string");
+            };
+            if !crate::THINKING_LEVELS.contains(&level) {
+                return failure(
+                    id,
+                    format!(
+                        "unknown thinking level `{level}`: {}",
+                        crate::THINKING_LEVELS.join(", ")
+                    ),
+                );
+            }
+            change.insert("thinking".to_owned(), Value::String(level.to_owned()));
+        }
+        let Some(queue) = target.config_queue() else {
+            return failure(id, "the session has closed");
+        };
+        queue.push(Value::Object(change));
+        success(id, None)
+    }
+
+    /// `models`: the `/model` list for this session (ADR 0026 D5), grouped by provider and
+    /// with the current route's entry marked. The same [`crate::model_choices`] the TUI's
+    /// `/model` reads.
+    fn models(&self, id: Value, target: &ControlTarget) -> Value {
+        let current = target.current_route();
+        let config_providers = target.config_providers();
+        let choices = crate::model_choices(Some(&current.provider), &config_providers);
+        let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+        for choice in choices {
+            let entry = json!({
+                "id": choice.model,
+                "current": choice.provider == current.provider && choice.model == current.model,
+            });
+            match groups.last_mut() {
+                Some((provider, models)) if *provider == choice.provider => models.push(entry),
+                _ => groups.push((choice.provider, vec![entry])),
+            }
+        }
+        let models: Vec<Value> = groups
+            .into_iter()
+            .map(|(provider, models)| json!({ "provider": provider, "models": models }))
+            .collect();
+        success(id, Some(json!({ "models": models })))
+    }
+
+    /// Whether `config` may name this route: the route in force, or one of the [`crate::model_choices`]
+    /// entries this session's `/model` offers. A route never carries a key or a header value.
+    fn is_switchable_route(&self, target: &ControlTarget, provider: &str, model: &str) -> bool {
+        let current = target.current_route();
+        if provider == current.provider && model == current.model {
+            return true;
+        }
+        let config_providers = target.config_providers();
+        crate::model_choices(Some(&current.provider), &config_providers)
+            .into_iter()
+            .any(|choice| choice.provider == provider && choice.model == model)
+    }
+
     /// Whether the request carries the owner's token. The token file is read on every request
     /// (`$RADIAN_HOME/hub/token`, so a rotation takes effect at once); a missing, unreadable or
     /// empty file means no token matches. The comparison is constant-time over the content.
@@ -471,9 +821,195 @@ impl ControlServer {
     }
 
     /// `list_sessions`: the hosting session (ADR 0043). The port serves one process, so this
-    /// is one `main` row.
+    /// is one `main` row, plus the facts a hub groups and displays without the token: the
+    /// workspace, the model route in force, the turn state (ADR 0034 H2) and the pending count.
     fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
-        vec![json!({ "id": target.session_id, "kind": "main" })]
+        let pending = target.queue().map_or(0, |queue| queue.len());
+        let turn = target.turn_state();
+        // ADR 0034 H2's pure state function: a non-empty queue is `blocked`, a running turn
+        // (or background jobs) is `working`, everything else `idle`.
+        let state =
+            crate::herdr::state(turn, pending, false, false, target.running_jobs()).as_str();
+        let route = target.current_route();
+        vec![json!({
+            "id": target.session_id,
+            "kind": "main",
+            "workspace": target.workspace.to_string_lossy(),
+            "model": { "provider": route.provider, "model": route.model },
+            "state": state,
+            "pending": pending,
+        })]
+    }
+}
+
+/// The error every owner verb returns without the matching hub token. It changes nothing.
+const OWNER_REQUIRED: &str =
+    "this verb needs the owner token: send `token` equal to the content of $RADIAN_HOME/hub/token";
+
+/// The `pending` event pair: the full payload for an owner subscriber and the redacted one for
+/// every other subscriber (request id, kind and tool name only — no arguments, no question
+/// text). The event source is `control`.
+fn pending_event(queue: &SessionQueue) -> (Value, Value) {
+    let head = queue.head();
+    let length = queue.len();
+    let full = head.as_ref().map(pending_head).unwrap_or(Value::Null);
+    let redacted = head.as_ref().map(redacted_head).unwrap_or(Value::Null);
+    (
+        json!({ "event": { "source": "control", "name": "pending",
+                           "data": { "head": full, "length": length } } }),
+        json!({ "event": { "source": "control", "name": "pending",
+                           "data": { "head": redacted, "length": length } } }),
+    )
+}
+
+/// The full `pending` head for one queue entry.
+fn pending_head(view: &PendingView<PendingRequest>) -> Value {
+    match &view.request {
+        PendingRequest::Approval(request) => json!({
+            "request_id": view.request_id,
+            "kind": "approval",
+            "call_id": request.call_id,
+            "tool": request.tool,
+            "resource": request.resource,
+            "resolved_resource": request.resolved_resource,
+            "arguments": request.arguments,
+            "reason": request.reason,
+            "approval_id": request.request_id,
+        }),
+        PendingRequest::Question(request) => json!({
+            "request_id": view.request_id,
+            "kind": "question",
+            "question": { "questions": request.questions },
+        }),
+    }
+}
+
+/// The redacted `pending` head: the queue id, the kind and (for an approval) the tool name.
+fn redacted_head(view: &PendingView<PendingRequest>) -> Value {
+    match &view.request {
+        PendingRequest::Approval(request) => json!({
+            "request_id": view.request_id,
+            "kind": "approval",
+            "tool": request.tool,
+        }),
+        PendingRequest::Question(_) => json!({
+            "request_id": view.request_id,
+            "kind": "question",
+            "tool": Value::Null,
+        }),
+    }
+}
+
+/// The kind name of one pending request, for a mismatch error.
+fn request_kind(request: &PendingRequest) -> &'static str {
+    match request {
+        PendingRequest::Approval(_) => "approval",
+        PendingRequest::Question(_) => "question",
+    }
+}
+
+/// A parsed `answer` response. The kind decides which pending entry it can complete.
+enum WireAnswer {
+    Approval(ApprovalOutcome),
+    Question {
+        request_id: Option<String>,
+        answers: Vec<QuestionReply>,
+    },
+}
+
+impl WireAnswer {
+    fn matches(&self, request: &PendingRequest) -> bool {
+        matches!(
+            (self, request),
+            (WireAnswer::Approval(_), PendingRequest::Approval(_))
+                | (WireAnswer::Question { .. }, PendingRequest::Question(_))
+        )
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            WireAnswer::Approval(_) => "approval",
+            WireAnswer::Question { .. } => "question",
+        }
+    }
+
+    /// The queue response. A question's `request_id` is the TUI's `q-<queue id>` when the
+    /// client does not name one, so a port answer and a keyboard answer land the same tool
+    /// result.
+    fn into_pending(self, queue_id: u64) -> PendingResponse {
+        match self {
+            WireAnswer::Approval(outcome) => PendingResponse::Approval(outcome),
+            WireAnswer::Question {
+                request_id,
+                answers,
+            } => PendingResponse::Question(Ok(QuestionAnswer::new(
+                request_id.unwrap_or_else(|| format!("q-{queue_id}")),
+                answers,
+            ))),
+        }
+    }
+}
+
+/// Parses `answer.response`: an approval response is one of the three strings (or an object
+/// with `kind` and, for `reject_once`, an optional `reason`); a question response is an object
+/// with `answers` (and an optional `request_id`). A bad shape rejects the whole request before
+/// the queue is touched.
+fn parse_answer(value: &Value) -> Result<WireAnswer, String> {
+    if let Some(kind) = value.as_str() {
+        return approval_response(kind, None);
+    }
+    let Some(object) = value.as_object() else {
+        return Err("`response` must be a string or an object".to_owned());
+    };
+    if let Some(kind) = object.get("kind").and_then(Value::as_str) {
+        let reason = match object.get("reason") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(reason)) => Some(reason.clone()),
+            Some(_) => return Err("`reason` must be a string".to_owned()),
+        };
+        return approval_response(kind, reason);
+    }
+    let Some(answers) = object.get("answers") else {
+        return Err(
+            "a question answer needs `answers` (an approval answer is `allow_once`, \
+             `allow_always` or `reject_once`)"
+                .to_owned(),
+        );
+    };
+    let answers: Vec<QuestionReply> = serde_json::from_value(answers.clone())
+        .map_err(|error| format!("`answers` is not a valid answer list: {error}"))?;
+    let request_id = match object.get("request_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(request_id)) => Some(request_id.clone()),
+        Some(_) => return Err("`request_id` must be a string".to_owned()),
+    };
+    Ok(WireAnswer::Question {
+        request_id,
+        answers,
+    })
+}
+
+/// One approval response. `allow_once`/`allow_always` take no reason; `reject_once` takes an
+/// optional one (a keyboard reject's `None` becomes the permission layer's "denied by the
+/// user").
+fn approval_response(kind: &str, reason: Option<String>) -> Result<WireAnswer, String> {
+    match kind {
+        "allow_once" => {
+            if reason.is_some() {
+                return Err("`allow_once` takes no `reason`".to_owned());
+            }
+            Ok(WireAnswer::Approval(ApprovalOutcome::AllowOnce))
+        }
+        "allow_always" => {
+            if reason.is_some() {
+                return Err("`allow_always` takes no `reason`".to_owned());
+            }
+            Ok(WireAnswer::Approval(ApprovalOutcome::AllowForSession))
+        }
+        "reject_once" => Ok(WireAnswer::Approval(ApprovalOutcome::Deny { reason })),
+        other => Err(format!(
+            "unknown approval response `{other}`: allow_once, allow_always or reject_once"
+        )),
     }
 }
 

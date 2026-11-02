@@ -480,7 +480,7 @@ impl LoopContext<'_> {
                             .model_route()
                             .unwrap_or_else(|| self.startup_route.clone());
                         let provider_ref =
-                            provider_ref_for(&route_provider, &self.config_providers);
+                            radian_host::provider_ref_for(&route_provider, &self.config_providers);
                         radian_tui::command::thinking_candidates(
                             &provider_ref,
                             &route_model,
@@ -757,7 +757,8 @@ impl LoopContext<'_> {
                         // `queue_model` prints `provider/model` itself and wraps this detail
                         // in the parentheses, so only the detail belongs here.
                         let route = {
-                            let provider_ref = provider_ref_for(&provider, &self.config_providers);
+                            let provider_ref =
+                                radian_host::provider_ref_for(&provider, &self.config_providers);
                             radian_host::describe_model_route_detail(&provider_ref, &model)
                         };
                         AppInput::ModelChecked {
@@ -819,7 +820,8 @@ impl LoopContext<'_> {
                     .session
                     .model_route()
                     .unwrap_or_else(|| self.startup_route.clone());
-                let provider_ref = provider_ref_for(&route_provider, &self.config_providers);
+                let provider_ref =
+                    radian_host::provider_ref_for(&route_provider, &self.config_providers);
                 let supported: Vec<String> = radian_host::supported_thinking_levels_ref_with(
                     &provider_ref,
                     &route_model,

@@ -51,7 +51,7 @@ use herdr::{HerdrReporter, herdr_reporter};
 use loop_context::LoopContext;
 use models::{
     mark_current_route, memory_record_candidates, model_refresh_targets, model_route_candidates,
-    provider_ref_for, refresh_provider_models,
+    refresh_provider_models,
 };
 use session::{
     JournalAudit, SessionHost, coding_root, handle_session_request, list_sessions, load_picker,

@@ -20,6 +20,7 @@ Each line names one page and what it covers.
 
 - `acp`: serve radian to an editor over the Agent Client Protocol.
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
+- `control`: the local process control port: its socket, the owner token, every verb and the event stream.
 - `arc/index`: the arc manual: plan and task orchestration, its commands and exit codes.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.

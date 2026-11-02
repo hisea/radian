@@ -313,6 +313,22 @@ impl<Req: Clone, Resp> PendingQueue<Req, Resp> {
         }
         head
     }
+
+    /// The pending request with this id, without removing it, dropping anything or bumping the
+    /// version. `None` once it has been answered, aborted or abandoned; the caller then asks
+    /// [`PendingQueue::answer`], which reports `Late`/`Unknown` and changes nothing.
+    pub fn peek(&self, request_id: u64) -> Option<PendingView<Req>> {
+        let state = self.lock();
+        state
+            .entries
+            .iter()
+            .find(|entry| entry.request_id == request_id)
+            .map(|entry| PendingView {
+                request_id: entry.request_id,
+                origin: entry.origin.clone(),
+                request: entry.request.clone(),
+            })
+    }
 }
 
 impl PendingQueue<PendingRequest, PendingResponse> {

@@ -4,47 +4,6 @@
 
 use super::*;
 
-/// The provider names `/model` considers (ADR 0026 D5/D10), before any per-provider model list
-/// is read: every usable `auth.json` entry, every config-declared provider with a usable key,
-/// and the current route's provider. The background refresh covers the same set (D0), so a
-/// provider the list would show is never left without a cache.
-pub(super) fn model_provider_names(
-    auth_entries: &[radian_host::AuthEntry],
-    current_provider: Option<&str>,
-    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
-) -> Vec<String> {
-    let logged_in = |name: &str| {
-        auth_entries
-            .iter()
-            .any(|entry| entry.provider_id == name && entry.usable)
-    };
-    let mut names: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for descriptor in radian_host::descriptors() {
-        if logged_in(descriptor.id) && seen.insert(descriptor.id.to_owned()) {
-            names.push(descriptor.id.to_owned());
-        }
-    }
-    for name in config_providers.keys() {
-        if logged_in(name) && seen.insert(name.clone()) {
-            names.push(name.clone());
-        }
-    }
-    for entry in auth_entries {
-        if entry.usable && seen.insert(entry.provider_id.clone()) {
-            names.push(entry.provider_id.clone());
-        }
-    }
-    // The current route's provider stays listed even without a credential, so its `✓` row is
-    // never missing (D5); switching to it still refuses without one (D6).
-    if let Some(current) = current_provider
-        && seen.insert(current.to_owned())
-    {
-        names.push(current.to_owned());
-    }
-    names
-}
-
 /// The providers the background refresh covers: the same set `/model` would offer (ADR 0026
 /// D0), read fresh from `auth.json`. A provider without a usable key is included here and
 /// skipped by the refresh itself, exactly like a switch would refuse it.
@@ -53,7 +12,7 @@ pub(super) fn model_refresh_targets(
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<String> {
     let auth_entries = radian_host::auth::list().unwrap_or_default();
-    model_provider_names(&auth_entries, current_provider, config_providers)
+    radian_host::model_provider_names(&auth_entries, current_provider, config_providers)
 }
 
 /// The base URL one provider's model-list refresh GETs from (ADR 0026 D0/D10): a named
@@ -135,34 +94,17 @@ pub(super) fn model_route_candidates(
     current_provider: Option<&str>,
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<radian_tui::command::Candidate> {
-    // Only providers a switch could accept (ADR 0026 D5/D6): one with a usable `auth.json`
-    // entry — a built-in descriptor, a config `[providers.<name>]` declaration, or a custom
-    // name stored by `/login custom` (D10) — plus the current route's provider, whose `✓` row
-    // is never missing even without a credential. Each is resolved with `resolve_provider` so
-    // the list matches what a switch would accept, then its models are flattened into one
-    // list (ADR 0035): the label is the model, the description the provider.
-    let auth_entries = radian_host::auth::list().unwrap_or_default();
-    let names = model_provider_names(&auth_entries, current_provider, config_providers);
-    let mut candidates = Vec::new();
-    for name in &names {
-        let auth_env = auth_entries
-            .iter()
-            .find(|entry| &entry.provider_id == name)
-            .and_then(|_| radian_host::AuthStore::open().ok())
-            .and_then(|store| store.entry_env(name));
-        if radian_host::resolve_provider(name, config_providers, auth_env.as_ref()).is_err() {
-            continue;
-        }
-        for model in provider_models(name) {
-            candidates.push(radian_tui::command::Candidate {
-                insert: format!("{name}/{model}"),
-                description: name.clone(),
-                current: false,
-            });
-        }
-    }
-    sort_model_candidates(&mut candidates, current_provider);
-    candidates
+    // Only providers a switch could accept (ADR 0026 D5/D6): the host's one `/model` list
+    // (`radian_host::model_choices`, shared with the control port's `models` verb). The label
+    // is the model, the description the provider (ADR 0035).
+    radian_host::model_choices(current_provider, config_providers)
+        .into_iter()
+        .map(|choice| radian_tui::command::Candidate {
+            insert: format!("{}/{}", choice.provider, choice.model),
+            description: choice.provider,
+            current: false,
+        })
+        .collect()
 }
 
 /// Marks the row in effect in a `/model` candidate list: the `provider/model` row (or the
@@ -183,79 +125,6 @@ pub(super) fn mark_current_route(
             candidate
         })
         .collect()
-}
-
-/// The flat `/model` list's order (ADR 0035): the current provider's models first,
-/// then by provider and model name.
-fn sort_model_candidates(
-    candidates: &mut [radian_tui::command::Candidate],
-    current_provider: Option<&str>,
-) {
-    let is_current = |candidate: &radian_tui::command::Candidate| {
-        current_provider.is_some_and(|provider| {
-            candidate
-                .insert
-                .strip_prefix(provider)
-                .is_some_and(|rest| rest.starts_with('/'))
-        })
-    };
-    candidates.sort_by(|left, right| {
-        is_current(right)
-            .cmp(&is_current(left))
-            .then_with(|| left.description.cmp(&right.description))
-            .then_with(|| left.insert.cmp(&right.insert))
-    });
-}
-
-/// One provider's model ids: the built-in descriptor's list, then the cached `/v1/models` ids
-/// (D0), merged by id.
-fn provider_models(provider: &str) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    if let Some(descriptor) = radian_host::descriptor(provider) {
-        for model in descriptor.models {
-            if seen.insert(model.id.to_owned()) {
-                out.push(model.id.to_owned());
-            }
-        }
-    }
-    if let Some(key) = radian_host::auth::resolve_key(provider)
-        .ok()
-        .flatten()
-        .map(|resolved| resolved.key)
-        && let Some(cache) = radian_host::read_provider_models(provider, &key)
-    {
-        for id in cache.models {
-            if seen.insert(id.clone()) {
-                out.push(id);
-            }
-        }
-    }
-    out
-}
-
-/// The [`ProviderRef`] a `/thinking` clamp/completion resolves against: the route's provider
-/// name through the config's declarations and the auth entry's env (ADR 0026 D10), with its
-/// model list attached so the thinking map follows the **resolved** protocol (D10). A name that
-/// does not resolve falls back to the generic descriptor, whose map sends nothing.
-pub(super) fn provider_ref_for(
-    name: &str,
-    config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
-) -> radian_host::ProviderRef {
-    let auth_env = radian_host::AuthStore::open()
-        .ok()
-        .and_then(|store| store.entry_env(name));
-    let model_list = radian_host::auth::resolve_key(name)
-        .ok()
-        .flatten()
-        .and_then(|resolved| radian_host::read_provider_models(name, &resolved.key));
-    radian_host::resolve_provider_with_models(name, config_providers, auth_env.as_ref(), model_list)
-        .map(|(provider, _warning)| provider)
-        .unwrap_or_else(|_| {
-            radian_host::ProviderRef::BuiltIn(
-                radian_host::descriptor(radian_host::GENERIC_ID).expect("the generic descriptor"),
-            )
-        })
 }
 
 pub(super) fn memory_record_candidates(
@@ -462,47 +331,6 @@ mod tests {
             );
         }
     }
-    /// ADR 0035: the current provider's models come first in the flat `/model`
-    /// list, then the rest by provider and model name.
-    #[test]
-    fn the_flat_model_list_puts_the_current_provider_first() {
-        let candidate = |insert: &str, provider: &str| radian_tui::command::Candidate {
-            insert: insert.to_owned(),
-            description: provider.to_owned(),
-            current: false,
-        };
-        let mut candidates = vec![
-            candidate("openai/gpt-5", "openai"),
-            candidate("opencode-go/zeta", "opencode-go"),
-            candidate("anthropic/claude-4", "anthropic"),
-            candidate("opencode-go/alpha", "opencode-go"),
-        ];
-        sort_model_candidates(&mut candidates, Some("opencode-go"));
-        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
-        assert_eq!(
-            order,
-            [
-                "opencode-go/alpha",
-                "opencode-go/zeta",
-                "anthropic/claude-4",
-                "openai/gpt-5"
-            ],
-            "the current provider's models first, then by provider and model"
-        );
-        // Without a current provider, only the name order applies.
-        sort_model_candidates(&mut candidates, None);
-        let order: Vec<&str> = candidates.iter().map(|c| c.insert.as_str()).collect();
-        assert_eq!(
-            order,
-            [
-                "anthropic/claude-4",
-                "openai/gpt-5",
-                "opencode-go/alpha",
-                "opencode-go/zeta"
-            ]
-        );
-    }
-
     /// A one-shot HTTP server standing in for a provider's model-list endpoint (the
     /// `radian-host` catalog tests' pattern): it records the request head and answers once.
     fn capturing_server(
