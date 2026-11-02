@@ -151,14 +151,25 @@ enum Answerable {
 
 impl Fixture {
     async fn new(label: &str, base_url: &str) -> Self {
-        Self::build(label, base_url, Answerable::Auto).await
+        Self::build(label, base_url, Answerable::Auto, true).await
     }
 
     async fn asking(label: &str, base_url: &str) -> Self {
-        Self::build(label, base_url, Answerable::Asking).await
+        Self::build(label, base_url, Answerable::Asking, true).await
     }
 
-    async fn build(label: &str, base_url: &str, answerable: Answerable) -> Self {
+    /// A host like `radian exec`: its event sink never folds committed events into the session
+    /// projection, so the driver's turn flag is the only live signal `list_sessions` has.
+    async fn exec_like(label: &str, base_url: &str) -> Self {
+        Self::build(label, base_url, Answerable::Auto, false).await
+    }
+
+    async fn build(
+        label: &str,
+        base_url: &str,
+        answerable: Answerable,
+        folds_events: bool,
+    ) -> Self {
         let _ = isolated_home();
         let scratch = scratch(label);
         // A per-test control home: the socket is `<home>/run/<pid>.sock`, and tests run
@@ -190,11 +201,16 @@ impl Fixture {
         // 0030 O6): a subscriber sees exactly the committed events the session emits.
         let server = ControlServer::bind(&home).expect("bind the control socket");
         let projection = Arc::new(SessionProjection::new());
-        let projection_events = Arc::new(ProjectionSink {
-            projection: Arc::clone(&projection),
-            inner: Arc::new(NoopSink),
-        });
-        let events = server.events(projection_events);
+        let plain: Arc<dyn radian_core::EventSink> = Arc::new(NoopSink);
+        let session_events: Arc<dyn radian_core::EventSink> = if folds_events {
+            Arc::new(ProjectionSink {
+                projection: Arc::clone(&projection),
+                inner: plain,
+            })
+        } else {
+            plain
+        };
+        let events = server.events(session_events);
         let runtime_events =
             server.runtime_events(Arc::new(|_event: &radian_session::RuntimeEvent| {}));
         let slot = radian_runtime::ConfigSlot::new(Value::Null);
@@ -493,6 +509,19 @@ async fn wait_requests(server: &MockServer, want: usize) {
 async fn wait_idle(fixture: &Fixture) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while fixture.session.projection().read().turn() != TurnState::Idle {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the turn never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Waits until the driver's turn flag clears. Needed for a host whose event sink never folds
+/// the projection, where [`wait_idle`] would return at once.
+async fn wait_not_running(fixture: &Fixture) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while fixture.session.turn_running() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the turn never finished"
@@ -1839,6 +1868,53 @@ async fn list_sessions_reports_blocked_while_an_approval_waits_and_idle_after_th
     let row = &idle["sessions"][0];
     assert_eq!(row["state"], "idle", "{idle}");
     assert_eq!(row["pending"], 0, "{idle}");
+    fixture.stop().await;
+}
+
+/// Edge 10's exec half: `list_sessions` reads the turn from the driver's live flag, not only
+/// from the projection. An exec-hosted session never folds committed events, so its projection
+/// stays `idle` during a turn while the flag is set (ADR 0034 H2).
+#[tokio::test]
+async fn list_sessions_reports_working_while_an_exec_hosts_turn_runs() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![Reply::Barrier {
+        barrier,
+        reply: Box::new(text_reply("done")),
+    }])
+    .await;
+    let fixture = Fixture::exec_like("exec-session-state", &server.base_url).await;
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "go"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    // The mock's request is at the barrier, so the turn is provably in flight. Nothing folds
+    // `TurnStarted` into this host's projection, exactly as in `radian exec`.
+    wait_requests(&server, 1).await;
+    assert!(
+        fixture.session.turn_running(),
+        "the driver says a turn runs"
+    );
+    assert_eq!(
+        fixture.session.projection().read().turn(),
+        TurnState::Idle,
+        "an exec host never writes the projection"
+    );
+
+    let running = client
+        .request(json!({"id": 2, "verb": "list_sessions"}))
+        .await;
+    let row = &running["sessions"][0];
+    assert_eq!(row["state"], "working", "{running}");
+    assert_eq!(row["pending"], 0, "{running}");
+
+    // The barrier expires, the turn ends, and the flag clears: idle again.
+    wait_not_running(&fixture).await;
+    let idle = client
+        .request(json!({"id": 3, "verb": "list_sessions"}))
+        .await;
+    assert_eq!(idle["sessions"][0]["state"], "idle", "{idle}");
     fixture.stop().await;
 }
 

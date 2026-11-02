@@ -2173,3 +2173,15 @@ The other edge tests are caught by the behaviour they name: `pending`'s head fie
 `config`'s key/route/level checks, `models`' grouping and current mark, the `pending`
 subscription event and its redaction, and `list_sessions`' state/pending fields. The
 `nextest_profile` test keeps these names honest in `.config/nextest.toml`.
+
+## TK0305 rework 5: `list_sessions` reads the live turn (2026-11-02)
+
+Branch `work/TK0305-control-pending-answer-config`. The test binds a `/tmp` socket, so the
+mutation was applied in place to `crates/radian-host/src/control.rs` and the test ran outside
+the sandbox with `cargo nextest run -p radian-host --test control --locked --no-fail-fast -E
+'test(=list_sessions_reports_working_while_an_exec_hosts_turn_runs)'`. The source was restored
+from `.radian/mut/control.rs.m3`, which `cmp` found identical afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0305-M3 | `sessions` reads only the projection again, ignoring the driver's turn flag (`turn_state()` unused) | ✅ 1 failed (rc=100) | `list_sessions_reports_working_while_an_exec_hosts_turn_runs` (the row said `"state": "idle"` while the driver's flag was set) |

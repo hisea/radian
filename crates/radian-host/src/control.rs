@@ -79,13 +79,15 @@ pub struct ControlTarget {
     inbox: Weak<radian_runtime::Inbox>,
     hooks: Weak<radian_permissions::PermissionHooks>,
     /// The driver's turn flag (a standalone atomic, cloned weakly): a mid-turn input must not
-    /// raise the turn's source (ADR 0011 L2).
+    /// raise the turn's source (ADR 0011 L2), and it is the live turn state a `list_sessions`
+    /// row reports — the one signal a host that does not fold committed events has.
     turn_running: Weak<AtomicBool>,
     /// The pending approval/question queue (ADR 0023 U7): the owner verbs read and answer it.
     queue: Weak<SessionQueue>,
     /// The turn-boundary config queue the `config` verb pushes into (ADR 0004).
     config_queue: Weak<ConfigQueue>,
-    /// The turn state the `list_sessions` row reports (ADR 0034 H2).
+    /// The turn state the `list_sessions` row reports when no turn is running: the last
+    /// committed outcome (ADR 0034 H2).
     projection: Weak<SessionProjection>,
     /// The switchable model: `current_route` is the route in force, and a `config` change
     /// names a route this session can switch to (ADR 0026 D5).
@@ -144,6 +146,19 @@ impl ControlTarget {
     /// The turn projection, or `None` once the session has closed.
     fn projection(&self) -> Option<Arc<SessionProjection>> {
         self.projection.upgrade()
+    }
+
+    /// The turn state a `list_sessions` row reports (ADR 0034 H2). The driver's flag is the
+    /// live truth in a process that does not fold committed events: `radian exec` builds a
+    /// fresh projection and never sets a turn on it, so only the flag knows a turn is in
+    /// flight there. The projection still carries the last committed outcome when no turn
+    /// runs (the TUI's journal observer writes it).
+    fn turn_state(&self) -> TurnState {
+        if self.turn_running() == Some(true) {
+            return TurnState::Running;
+        }
+        self.projection()
+            .map_or(TurnState::Idle, |projection| projection.read().turn())
     }
 
     /// The switchable model, or `None` once the session has closed.
@@ -810,9 +825,7 @@ impl ControlServer {
     /// workspace, the model route in force, the turn state (ADR 0034 H2) and the pending count.
     fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
         let pending = target.queue().map_or(0, |queue| queue.len());
-        let turn = target
-            .projection()
-            .map_or(TurnState::Idle, |projection| projection.read().turn());
+        let turn = target.turn_state();
         // ADR 0034 H2's pure state function: a non-empty queue is `blocked`, a running turn
         // (or background jobs) is `working`, everything else `idle`.
         let state =
