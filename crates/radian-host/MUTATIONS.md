@@ -2201,3 +2201,15 @@ which `cmp` found identical after each restore.
 | TK0312-M1 | the claim restates only the opener's source (`let _ = queued` instead of observing the queued waking sources) | ✅ 1 failed (rc=100) | `turn_source::an_idle_owner_turn_that_absorbs_a_queued_scheduler_steer_runs_non_human` (the claim left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |
 | TK0312-M2 | the safe-point drain does not lower (`inbox.input_drained(source)` removed) | ✅ 1 failed (rc=100) | `control::a_queued_inject_lowers_the_owner_turn_it_is_absorbed_into` (the owner turn that absorbed the Scheduler inject was still `Some(User)` at its second model request) |
 
+## TK0310 rework 3: hub answers are retained only while a UI reads them (2026-11-02, branch `work/TK0310-tui-hub-marker-and-takeover`)
+
+The trigger is the review's: a hub-held `radian exec` (no TUI) answers through the control port for
+the life of the process. The test is in-process, so it ran inside the workspace sandbox with
+`cargo nextest run -p radian-host --test pending --locked --profile sandbox --no-fail-fast`. The
+mutation was applied in place and restored from `.radian/pending.rs.bak`, which `cmp` found
+identical afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0310-M3 | `answer_inner` records a hub answer with no reader held (drop `&& self.hub_answer_readers.receiver_count() > 0`) | ✅ 2 failed (rc=100) | `pending::a_queue_with_no_ui_reader_retains_no_hub_answer` (1000 ids kept with no UI) and `pending::a_ui_reader_sees_hub_answers_until_it_is_dropped` (an id kept after the reader was dropped) |
+

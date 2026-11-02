@@ -312,8 +312,12 @@ pub(super) fn enter_terminal_and_history(
     let queue_wake = {
         let queue = std::sync::Arc::clone(session.queue());
         let mut changes = queue.subscribe();
+        // Holding this receiver for the task's life is what makes the queue remember the ids
+        // the control port answers; a host with no TUI never registers one and keeps nothing.
+        let hub_answers = queue.watch_hub_answers();
         let pending_tx = tx.clone();
         runtime.spawn(async move {
+            let _hub_answers = hub_answers;
             while changes.changed().await.is_ok() {
                 let answered_from_hub = queue.take_answered_from_hub();
                 if pending_tx

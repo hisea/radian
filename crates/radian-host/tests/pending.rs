@@ -217,3 +217,52 @@ fn a_thousand_interleaved_pushes_and_answers() {
     assert!(results.iter().all(|r| *r == Ok(())), "{results:?}");
     assert!(queue.is_empty());
 }
+
+/// A host with no UI (a hub-held `radian exec` runs no TUI and no queue-wake task) answers
+/// through the control port, but there is no reader for the ids, so nothing is retained: the
+/// list cannot grow for the life of the process. The trigger is many answers, not one.
+#[test]
+fn a_queue_with_no_ui_reader_retains_no_hub_answer() {
+    let queue: PendingQueue<u32, u32> = PendingQueue::new();
+    for i in 0..1000u32 {
+        let (id, _answer) = queue.push("hub-held", i);
+        queue
+            .answer_from_hub(id, i)
+            .expect("the waiter is alive and the id is pending");
+    }
+    assert!(
+        queue.take_answered_from_hub().is_empty(),
+        "a queue nobody reads kept the hub's ids"
+    );
+}
+
+/// The other half: while a UI reader is held, a hub answer is reported once and a local answer
+/// never is; dropping the reader stops the recording.
+#[test]
+fn a_ui_reader_sees_hub_answers_until_it_is_dropped() {
+    let queue: PendingQueue<u32, u32> = PendingQueue::new();
+    let reader = queue.watch_hub_answers();
+
+    let (hub_id, _hub_answer) = queue.push("s", 1);
+    queue.answer_from_hub(hub_id, 10).unwrap();
+    assert_eq!(queue.take_answered_from_hub(), vec![hub_id]);
+    assert!(
+        queue.take_answered_from_hub().is_empty(),
+        "an id is reported once"
+    );
+
+    let (local_id, _local_answer) = queue.push("s", 2);
+    queue.answer(local_id, 20).unwrap();
+    assert!(
+        queue.take_answered_from_hub().is_empty(),
+        "a local answer is not the hub's"
+    );
+
+    drop(reader);
+    let (after_id, _after_answer) = queue.push("s", 3);
+    queue.answer_from_hub(after_id, 30).unwrap();
+    assert!(
+        queue.take_answered_from_hub().is_empty(),
+        "the UI is gone: its ids are not needed and must not be retained"
+    );
+}
