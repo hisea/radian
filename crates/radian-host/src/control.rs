@@ -94,6 +94,9 @@ pub struct ControlTarget {
     model: Weak<SwitchableModel>,
     /// The background-job registry: running jobs make an idle session `working` (ADR 0034 H2).
     jobs: Option<Weak<radian_coding::Jobs>>,
+    /// `true` when a hub started this process in its hub-held mode (ADR 0048 §16), so the
+    /// `list_sessions` row names the hub as the holder and the hub reports `live: hub`.
+    hub_held: bool,
 }
 
 impl ControlTarget {
@@ -113,7 +116,16 @@ impl ControlTarget {
             projection: Arc::downgrade(session.projection()),
             model: Arc::downgrade(&model),
             jobs: session.jobs_registry().map(|jobs| Arc::downgrade(&jobs)),
+            hub_held: false,
         }
+    }
+
+    /// Mark this target as a hub-held process (ADR 0048 §16). The `list_sessions` row then
+    /// reports `holder: "hub"`, the fact the hub turns into `live: hub`.
+    #[must_use]
+    pub fn held_by_hub(mut self) -> Self {
+        self.hub_held = true;
+        self
     }
 
     /// The session's inbox, or `None` once the session has closed.
@@ -834,6 +846,7 @@ impl ControlServer {
         vec![json!({
             "id": target.session_id,
             "kind": "main",
+            "holder": if target.hub_held { "hub" } else { "tui" },
             "workspace": target.workspace.to_string_lossy(),
             "model": { "provider": route.provider, "model": route.model },
             "state": state,
@@ -1134,10 +1147,22 @@ const IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/we
 /// Parses the optional `images` and `files` of an input request into the composer's inputs. A
 /// failure names the item (an image by its 1-based position, a file by its name) and rejects
 /// the whole request before anything is enqueued.
+///
+/// [`validate_attachments`] is the same check for a caller that only needs the verdict — the
+/// hub validates a session write route's body before it starts a process, so a bad attachment
+/// never costs a process start (ADR 0048 §16).
 fn parse_attachments(request: &Value) -> Result<(Vec<LoadedImage>, Vec<Attachment>), String> {
     let images = parse_images(request)?;
     let files = parse_files(request)?;
     Ok((images, files))
+}
+
+/// The verdict of the attachment check without building the parts: `Ok(())` when the optional
+/// `images` and `files` of a request are acceptable to the composer, `Err(reason)` naming the
+/// item otherwise. The hub calls it on a session write route's body before it starts a
+/// process; the port calls the same parser when it enqueues (ADR 0048 §16).
+pub fn validate_attachments(request: &Value) -> Result<(), String> {
+    parse_attachments(request).map(|_| ())
 }
 
 fn parse_images(request: &Value) -> Result<Vec<LoadedImage>, String> {

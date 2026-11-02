@@ -72,6 +72,15 @@ test-group = "pty"
 #    while `$TMPDIR` inside the workspace is too long (group 5). The routes these
 #    tests exercise without a socket (the transcript, the conversation, the router,
 #    the version) run in the sandbox.
+#
+# 7. The hub's session write routes (16 names). Each test binds or connects to a
+#    control socket at `<home>/run/<pid>.sock`, so its home must be short enough for
+#    `sun_path` and the connect must be allowed: `/tmp` is the only short base that is
+#    writable outside the workspace (the sandbox denies it, group 1), `$TMPDIR` inside
+#    the workspace is too long (group 5), and the `workspace` tier denies every
+#    Unix-socket connect (`(deny network-outbound (remote unix-socket))`). The route
+#    these tests exercise without a socket (a session write route's body validation)
+#    runs in the sandbox.
 
 [profile.sandbox]
 # See the group list above; the blank lines below separate the groups.
@@ -389,5 +398,22 @@ not (
   | test(=a_workspace_spelled_through_a_symlink_matches_its_repository)
   | test(=an_emptied_queue_runs_no_hook)
   | test(=each_repository_lists_only_its_own_live_session)
+
+  | test(=a_created_session_sends_its_first_message_as_the_owner_with_the_hub_origin)
+  | test(=a_prompt_to_an_ended_session_resumes_the_same_journal)
+  | test(=a_prompt_to_a_live_process_outside_the_hub_uses_its_socket)
+  | test(=two_concurrent_prompts_to_an_ended_session_start_one_process)
+  | test(=an_approval_waits_in_the_queue_and_proceeds_after_the_hub_answers)
+  | test(=a_late_answer_is_conflict_and_nothing_changes)
+  | test(=an_idle_process_exits_and_the_next_prompt_resumes_it)
+  | test(=a_process_with_a_running_background_job_is_not_reclaimed)
+  | test(=a_bad_body_is_bad_request_and_starts_no_process)
+  | test(=the_live_only_routes_refuse_an_ended_session)
+  | test(=a_vanished_socket_is_the_ended_session_not_a_bad_gateway)
+  | test(=a_prompt_to_a_vanished_socket_resumes_the_journal)
+  | test(=a_config_route_queues_the_next_turns_route)
+  | test(=a_null_steer_or_model_is_bad_request_and_starts_no_process)
+  | test(=a_hub_started_with_a_configuration_file_starts_its_sessions_on_it)
+  | test(=a_relative_hub_configuration_path_is_made_absolute_before_the_child_sees_it)
 )
 """

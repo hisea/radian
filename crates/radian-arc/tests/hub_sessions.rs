@@ -1035,14 +1035,14 @@ fn every_version_one_route_still_answers_and_the_version_is_two() {
 // ---- the router's method and unknown-route answers ---------------------------------------
 
 #[test]
-fn the_session_routes_take_get_only_and_unknown_paths_are_404() {
+fn the_session_read_routes_take_get_the_write_routes_post_and_unknown_paths_are_404() {
     let repo = Repo::new("hub-sessions-router");
     arc_store(&repo);
     register(&repo.home, "repo", &repo.canonical_clone());
     let hub = Hub::over(&repo);
     let token = format!("Bearer {}", hub.token());
+    // A read route, or the conversation: `GET` only.
     for path in [
-        "/v1/repos/repo/sessions",
         "/v1/repos/repo/sessions/x/transcript",
         "/v1/repos/repo/sessions/x/events",
         "/v1/repos/repo/sessions/x/models",
@@ -1053,7 +1053,23 @@ fn the_session_routes_take_get_only_and_unknown_paths_are_404() {
         let no_token = http(hub.port, "GET", path, None);
         assert_eq!(no_token.status, 401, "{path}");
     }
-    let unknown = hub.get("/v1/repos/repo/sessions/x/prompt");
+    // `/sessions` takes both: a `GET` lists, a `POST` starts one. A `POST` with no body is a
+    // body error (`400`), never `405`, and it starts no process.
+    assert_eq!(
+        http(hub.port, "GET", "/v1/repos/repo/sessions", Some(&token)).status,
+        200
+    );
+    let empty_create = http(hub.port, "POST", "/v1/repos/repo/sessions", Some(&token));
+    assert_eq!(empty_create.status, 400, "{:?}", empty_create.body);
+    // The four forwarded control verbs are `POST` only.
+    for suffix in ["prompt", "cancel", "answer", "config"] {
+        let path = format!("/v1/repos/repo/sessions/x/{suffix}");
+        let get = http(hub.port, "GET", &path, Some(&token));
+        assert_eq!(get.status, 405, "{path}");
+        let no_token = http(hub.port, "POST", &path, None);
+        assert_eq!(no_token.status, 401, "{path}");
+    }
+    let unknown = hub.get("/v1/repos/repo/sessions/x/nope");
     assert_eq!(unknown.status, 404);
     assert_eq!(unknown.error(), "no such route");
 }

@@ -6,6 +6,7 @@
 
 use std::io::Write;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use radian_core::{InputSource, RunStatus};
 use radian_permissions::PermissionHooks;
@@ -508,6 +509,101 @@ async fn run_compact(run: &mut Run, instructions: Option<String>) -> Option<i32>
     stop
 }
 
+/// How often a hub-held process re-checks its own idleness (ADR 0048 §16). The idle window's
+/// resolution is this poll, so it is short enough that a short test window is exact.
+const HUB_HELD_POLL: Duration = Duration::from_millis(250);
+
+/// Whether the state a hub-held session reports means it must stay alive (ADR 0048 §16): a
+/// running turn, an input the driver has claimed but not ended, an input still in the inbox,
+/// a pending approval or question, or a running background job. A queued turn-boundary
+/// config change is not on the list: it applies at the next turn, exactly as `/model` does.
+fn hub_held_working(
+    turn_running: bool,
+    inflight: u64,
+    queued: bool,
+    pending: bool,
+    running_jobs: usize,
+) -> bool {
+    turn_running || inflight > 0 || queued || pending || running_jobs > 0
+}
+
+/// [`hub_held_working`] against the live session.
+async fn hub_held_busy(run: &Run) -> bool {
+    let session = &run.session;
+    let running_jobs = session.jobs_registry().map_or(0, |jobs| {
+        jobs.list()
+            .iter()
+            .filter(|job| job.state.is_running())
+            .count()
+    });
+    hub_held_working(
+        session.turn_running(),
+        session.inbox().inflight_turns(),
+        !session.inbox().is_empty().await,
+        !session.queue().is_empty(),
+        running_jobs,
+    )
+}
+
+/// The hub-held loop (ADR 0048 §16): no terminal, no prompt loop. The driver opens turns from
+/// the inputs the control port enqueues; this loop only watches for a stop signal, the driver
+/// ending, and the idle window passing. When the session has had no running turn, nothing
+/// pending and no background job for `idle`, it closes the session through the ordinary
+/// shutdown path (so queued work still runs and the journal is complete) and exits `0`; the
+/// journal stays, and the hub resumes it on the next prompt. SIGTERM/SIGINT takes the same
+/// termination path the line loop takes.
+pub(crate) async fn hub_held_loop(run: &mut Run, idle: Duration) -> LoopDone {
+    let mut idle_since: Option<Instant> = None;
+    loop {
+        tokio::select! {
+            biased;
+            Some(signal) = run.signals.recv() => {
+                let code = terminate(&run.inbox, &run.session, &run.secrets, signal).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::Terminated,
+                };
+            }
+            _ = run.driver_ended.notified() => {
+                let (code, ok) = report_task(&run.session, &run.secrets).await;
+                return LoopDone {
+                    code,
+                    end: ExecEnd::DriverEnded { code, ok },
+                };
+            }
+            _ = tokio::time::sleep(HUB_HELD_POLL) => {}
+        }
+        if hub_held_busy(run).await {
+            idle_since = None;
+            continue;
+        }
+        let since = *idle_since.get_or_insert_with(Instant::now);
+        if since.elapsed() < idle {
+            continue;
+        }
+        // A prompt can land between the busy check and this decision: look again before the
+        // session closes, so an input that arrived just before the window did is run.
+        if hub_held_busy(run).await {
+            idle_since = None;
+            continue;
+        }
+        if let Some(code) = report_error(
+            &shutdown(&run.inbox, &run.ui, &run.session).await,
+            &run.secrets,
+        ) {
+            return LoopDone {
+                code,
+                end: ExecEnd::Status(run.ui.last_status()),
+            };
+        }
+        let end = match run.ui.last_status() {
+            Some(status) => ExecEnd::Status(Some(status)),
+            None => ExecEnd::NoTurns,
+        };
+        return LoopDone { code: 0, end };
+    }
+}
+
 pub(crate) async fn interactive_loop(run: &mut Run, lines: &LineHub) -> LoopDone {
     // True once the first Ctrl-C of a wind-down has been seen: the second one forces exit.
     let mut cancelling = false;
@@ -662,6 +758,36 @@ mod tests {
         assert!(
             message.contains("a job completion notice was lost") && message.contains('2'),
             "the stderr line names the loss: {message}"
+        );
+    }
+
+    /// The hub-held idle predicate: the empty state alone is idle, and every one of a running
+    /// turn, a claimed input, a queued input, a pending approval or question, and a running
+    /// background job keeps the process alive by itself (ADR 0048 §16).
+    /// Mutation: drop the `running_jobs` term → the job row fails and a process with a running
+    /// job would reclaim itself.
+    #[test]
+    fn a_hub_held_session_stays_alive_for_every_kind_of_work() {
+        assert!(
+            !hub_held_working(false, 0, false, false, 0),
+            "no turn, no input, nothing pending, no job: idle"
+        );
+        assert!(hub_held_working(true, 0, false, false, 0), "a running turn");
+        assert!(
+            hub_held_working(false, 1, false, false, 0),
+            "an input claimed but not ended"
+        );
+        assert!(
+            hub_held_working(false, 0, true, false, 0),
+            "an input still in the inbox"
+        );
+        assert!(
+            hub_held_working(false, 0, false, true, 0),
+            "a pending approval or question"
+        );
+        assert!(
+            hub_held_working(false, 0, false, false, 1),
+            "a running background job"
         );
     }
 

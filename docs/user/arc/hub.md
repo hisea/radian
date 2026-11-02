@@ -150,6 +150,11 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/sessions/<id>/transcript` | `GET` | `session` (string) and `entries` (array): the journal folded into [transcript entries](#transcript-entries). | `200`, `401`, `404`, `500` |
 | `/v1/repos/<name>/sessions/<id>/events` | `GET` | A server-sent-event stream of the session's changes; see [the session event stream](#the-session-event-stream). | `200`, `401`, `404`, `409`, `500` |
 | `/v1/repos/<name>/sessions/<id>/models` | `GET` | `models` (array): the control port's `models` answer, grouped by provider with the current route marked. | `200`, `401`, `404`, `409`, `500`, `502` |
+| `/v1/repos/<name>/sessions` | `POST` | Starts a hub-held session and sends its first message: `session` (string), the new id. See [starting and driving a session](#starting-and-driving-a-session). | `200`, `400`, `401`, `404`, `413`, `422`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/prompt` | `POST` | One message: `session` (string) and `message_id` (string). See [starting and driving a session](#starting-and-driving-a-session). | `200`, `400`, `401`, `404`, `413`, `422`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/cancel` | `POST` | The control port's `cancel`: `ok` (boolean, `true`). | `200`, `401`, `404`, `409`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/answer` | `POST` | The control port's `answer`, with the hub token: `ok` (boolean). A late answer is `409`. | `200`, `400`, `401`, `404`, `409`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/config` | `POST` | The control port's `config`, applied at the next turn boundary: `ok` (boolean). | `200`, `400`, `401`, `404`, `409`, `422`, `500`, `502` |
 | `/v1/repos/<name>/items/<task>/conversation` | `GET` | `task` (string), `attempt` (integer or `null`) and `entries` (array): one attempt's `result.jsonl` folded with the ACP fold. `?attempt=<n>` picks an attempt by number. | `200`, `400`, `401`, `404`, `500` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
@@ -250,7 +255,7 @@ The body is one object with a `sessions` array; each entry has these fields:
 | `created` | string or `null` | The session's creation time, RFC 3339 UTC (the `SessionCreated` line's `ts`), or `null` when the index has no row for it. |
 | `last_activity` | string or `null` | The time of the newest journal line, the same value `radian exec --list` prints, or `null`. |
 | `title` | string or `null` | The first user message as one line, cut at 80 characters with `…`; `null` when the session has no user message or the index has no row for it. |
-| `live` | string | `tui` when a `radian` or `radian exec` process hosts the session, `hub` for a session a hub-started process hosts, `none` when it has ended. This build reports `tui` for every live session: it starts no process of its own yet, so `hub` never appears. |
+| `live` | string | `tui` when a `radian` or `radian exec` process hosts the session, `hub` for a session a hub-held process hosts (a process the hub started, or any process with the hub-held mode), `none` when it has ended. |
 | `state` | string | The turn state: `idle`, `working` or `blocked` (the same classification the herdr report uses, with `blocked` winning over `working`). A live session's value is the one its port reports; an ended session reads `idle`. |
 | `pending` | integer | The length of the approval and question queue. An ended session reads `0`. |
 | `model` | object or `null` | The model route in force, `{"provider": string, "model": string}`, as the live session's port reports it; `null` for an ended session, whose route no process reports. |
@@ -286,6 +291,36 @@ Every entry is one object. The fields are always present, in this order; `kind` 
 `{"models": [ … ]}`: exactly the list `/model` shows in that session, grouped by provider, with the current route's entry marked `current: true`.
 The hub asks the session's control port, so the list is the process's own (only logged-in providers, and the current route's provider).
 A session no process hosts is `409`; a port that fails mid-request is `502`; an unknown session or repository is `404`.
+
+### Starting and driving a session
+
+The write routes start a session and carry the phone's messages, approvals and model changes into it. `POST /v1/repos/<name>/sessions` starts a **hub-held process** and sends its first message; `POST …/sessions/<id>/prompt` sends a later one, resuming an ended session first; `…/cancel`, `…/answer` and `…/config` forward the control port's own verbs.
+A hub-held process is `radian exec` in its internal hub-held mode: it opens the session (new, or `--resume`), runs no turn by itself, takes every input from its control port, and sends approvals and questions to the session's pending queue, answered through `answer`, never a terminal.
+It always binds its control port, whatever [`control.enabled`](../configuration.md#control) says: that port is its only input.
+It is an ordinary session: its workspace is the repository's path, its configuration is the one the hub itself was started with (an explicit `--config` is passed on to the process), and its model is the request's `model` or the configuration's route.
+
+| Route | Body |
+|---|---|
+| `POST /v1/repos/<name>/sessions` | `text` (string, required), `model` (object, optional), `images` (array, optional), `files` (array, optional). The first message is the same body's `text`, `images` and `files`. |
+| `POST /v1/repos/<name>/sessions/<id>/prompt` | `text` (string, required), `steer` (boolean, default `false`), `images` (array, optional), `files` (array, optional). |
+| `POST /v1/repos/<name>/sessions/<id>/cancel` | No field; an empty body is the same as `{}`. |
+| `POST /v1/repos/<name>/sessions/<id>/answer` | `request_id` (integer, required) and `response`, the control port's own answer value. |
+| `POST /v1/repos/<name>/sessions/<id>/config` | `config` (object, required), the control port's own change: `model` (`{provider, model}`) and/or `thinking`. |
+
+`model` is exactly `{"provider": string, "model": string}`; any other key, a missing or empty value, or a value that is not an object is `400`.
+`images` and `files` are the control port's own attachment shapes and limits ([attachments](../control.md#attachments)): a bad image, an over-limit file or an unknown MIME is `422` naming the item.
+A missing or wrong-typed `text`, `steer`, `request_id`, `response` or `config` is `400`.
+A body is validated before any process starts, so a refused body starts nothing and changes nothing.
+A session write route reads at most 16 MiB (16,777,216 bytes) minus 1 KiB of body and answers `413` beyond it: the control port's own request line is 16 MiB, and forwarding adds a small envelope.
+
+A session a process already hosts — a TUI's or the hub's own — is never started twice: the prompt goes through that process's socket.
+An ended session is resumed by a new hub-held process on the same journal.
+An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer` and `config` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`.
+A socket that has gone while the hub's last scan still listed the session is the ended-session case, not a port failure: a live-only route answers `409` (the same body as for an ended session) and a `prompt` resumes the journal, and the stale entry is dropped.
+
+A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
+Only hub-started processes are reclaimed; a TUI decides its own session's life.
+A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period).
 
 ### `GET /v1/repos/<name>/items/<task>/conversation`
 
@@ -430,6 +465,7 @@ A change takes effect at the hub's next start.
 | `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. The API binds `127.0.0.1` only. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
+| `hub.session_idle_secs` | integer | `3600` | `60` to `86400` | How long a hub-held session may have no running turn, nothing pending and no running background job before its process exits cleanly; the journal stays and the next prompt resumes it. |
 | `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's queue gets a new head; see [the after_pending hook](#the-after-pending-hook). |
 
 A value outside its range is a configuration error naming the key and the range.

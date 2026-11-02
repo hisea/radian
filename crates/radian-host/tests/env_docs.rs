@@ -237,6 +237,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "read in radian-arc/src/hub/loop.rs: a hub test's interval below the documented five-second minimum, so one repository's slow pass can be shown not to gate another",
     ),
     (
+        "RADIAN_HUB_SESSION_IDLE_SECS",
+        "read in radian-arc/src/hub/http.rs: a hub test's reclaim window below the documented sixty-second minimum, so a hub-held process can be shown to exit and the next prompt to resume it",
+    ),
+    (
         "RADIAN_HUB_EVENTS_POLL_SECS",
         "read in radian-arc/src/hub/http.rs: seconds between two reads of the hub's event stream, so a test does not wait the channel's five seconds per transition; unset uses the channel's interval",
     ),

@@ -2242,6 +2242,28 @@ drives end to end.
 
 2/2 caught.
 
+## TK0308: the hub's session write routes and hub-held processes (2026-11-02, branch `work/TK0308-hub-session-write-and-hold`)
+
+The hub gained the session write routes (`start_session`, `prompt`, `cancel`, `answer`, `config`)
+and `radian exec --hub-held`, the process those routes start and hold (ADR 0048 §16). Each mutation
+was applied by hand to `crates/radian-arc/src/hub/sessions.rs` and `crates/radian-exec/src/turn.rs`,
+run with `cargo nextest run -p <crate> --lib --locked --profile sandbox -E 'test(<name>)'`, and
+restored from a copy under `.radian/mut/`, which `cmp` found identical.
+
+The suite's end-to-end cases live in `crates/radian-arc/tests/hub_session_write.rs`. The
+`workspace` sandbox denies every Unix-socket connect (`(deny network-outbound (remote
+unix-socket))`) and `$TMPDIR` is too long for `sun_path`, so those tests are excluded from the
+`sandbox` profile and the gate's default profile runs them; the three unit tests below name the
+decisions they cover, so each mutation is still caught inside the sandbox.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0308-M1 | the one-process check skipped: `hosting` answers `None` for a session another process already hosts | `hub::sessions::tests::a_session_another_process_hosts_is_not_started_again` (the cached, answering host is no longer found) | ✅ 1 failed |
+| TK0308-M2 | reclaim ignores background jobs: `hub_held_working` drops the `running_jobs` term | `turn::tests::a_hub_held_session_stays_alive_for_every_kind_of_work` (the running-job row reads idle) | ✅ 1 failed |
+| TK0308-M3 | the gone-socket branch removed: `connect_error` reports every connect failure as a failed port, so a session whose socket is gone answers `502` instead of the ended session's `409` | `hub::sessions::tests::a_gone_socket_is_an_ended_session_not_a_port_failure` (a `NotFound` connect no longer maps to `Gone`); the route cases `hub_session_write::a_vanished_socket_is_the_ended_session_not_a_bad_gateway` and `a_prompt_to_a_vanished_socket_resumes_the_journal` cover the same branch end to end but need sockets the sandbox denies | ✅ 1 failed |
+
+3/3 caught.
+
 ## TK0309: the hub's after_pending hook (2026-11-02, branch `work/TK0309-hub-after-pending-hook`)
 
 The hub gained `[hub.hooks] after_pending`: a new head of a live session's pending queue starts the
@@ -2283,3 +2305,38 @@ missed probes.
 | TK0309-M2 | `forget` drops the head memory with the session (`Inner::heads.remove(socket)`), the pre-fix behavior | `hub::sessions::tests::a_forgotten_socket_does_not_fire_the_same_head_again` (the recovered socket fired the head again) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0308 rework 4: the hub-held child's configuration and a present `null`
+
+The review found three gaps in the session write routes: a hub-held child was started without the
+`--config` file the hub itself was given, and a present `"steer": null` or `"model": null` was
+treated as an absent field although the manual and ADR 0048 §16 make a wrong-typed field `400`
+before anything starts. Each mutation was applied by hand to `crates/radian-arc/src/hub/
+sessions.rs`, run with `cargo nextest run -p radian-arc --locked --profile sandbox --lib -E
+'test(<name>)'`, and restored from `.radian/sessions.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0308-M4 | `held_arguments` omits `--config`, so the child resolves `RADIAN_CONFIG` or the home file instead of the hub's | `hub::sessions::tests::a_held_process_is_started_with_the_hubs_own_configuration_file` (no `--config` in the child's arguments); the route case `a_hub_started_with_a_configuration_file_starts_its_sessions_on_it` drives the same defect through `radian --config alt.toml hub` and needs sockets the sandbox denies | ✅ 1 failed |
+| TK0308-M5 | `parse_input` maps a present `steer: null` to `false`, the pre-fix behavior | `hub::sessions::tests::a_null_steer_is_a_bad_body_not_an_absent_field` (the null steer parsed as a followup); the route case `a_null_steer_or_model_is_bad_request_and_starts_no_process` covers it end to end | ✅ 1 failed |
+| TK0308-M6 | `parse_model` maps a present `model: null` to `None`, the pre-fix behavior | `hub::sessions::tests::a_null_model_is_a_bad_body_not_an_absent_field` (the null model parsed as the configured route); the route case `a_null_steer_or_model_is_bad_request_and_starts_no_process` covers it end to end | ✅ 1 failed |
+
+3/3 caught.
+
+## TK0308 rework 5: the hub's relative `--config` reaches the child whole
+
+The hub passed its configuration path to a hub-held child as the raw string it was given, and
+`spawn_held` starts the child in the repository: a relative `--config alt.toml` therefore named
+the repository's file, or no file at all, instead of the hub's. The path is now joined with the
+hub's working directory once, in `serve`, before `SessionHub` stores it. The mutation was applied
+by hand to `crates/radian-arc/src/hub/http.rs`, run with `cargo nextest run -p radian-arc
+--locked --profile sandbox --lib -E 'test(<name>)'`, and restored from `.radian/http.rs.bak`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0308-M7 | `absolute_config` returns `path` unchanged, the pre-fix behavior, so `serve` hands the child a relative path | `hub::http::tests::a_relative_configuration_path_is_joined_with_the_hubs_directory` (`alt.toml` instead of `/srv/hub/alt.toml`); the route case `hub_session_write::a_relative_hub_configuration_path_is_made_absolute_before_the_child_sees_it` drives the same defect through `radian --config alt.toml hub` from another working directory and needs sockets the sandbox denies | ✅ 1 failed |
+
+1/1 caught.
+
+3/3 caught.

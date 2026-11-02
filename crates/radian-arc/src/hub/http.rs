@@ -120,36 +120,85 @@ pub fn serve(port: u16, config: Option<&Path>) -> Result<(), Error> {
         .map_err(|error| Error::Failed(format!("cannot start the hub runtime: {error}")))?;
     let tokens = Arc::new(Mutex::new(TokenState::new(&dir, value)));
     let http_registry = registry.clone();
+    let config_value = load_config(config)?;
+    // The reclaim window a hub-held process is told (ADR 0048 §16). `[hub] session_idle_secs`
+    // comes from the same file the scheduling loop reads.
+    let idle_secs = session_idle_secs(&config_value);
     // `[hub.hooks]` is read once at start; the hook list a running hub uses does not change
     // until it is restarted (the same rule as the other `[hub]` keys).
-    let hooks = hub_hooks(config)?;
+    let hooks = config_value.hub.hooks;
+    // The file the hub itself reads, passed on to every hub-held process, so an explicit
+    // `--config` reaches the sessions the hub starts (ADR 0048 §16). It is made absolute here,
+    // while the hub's own working directory is still the one the flag was written against: a
+    // child starts in the repository (`spawn_held`), where a relative path names another file.
+    let config_path = match radian_host::config::resolved_path(config) {
+        Some(path) if path.is_absolute() => Some(path),
+        Some(path) => {
+            let cwd = std::env::current_dir().map_err(|error| {
+                Error::Failed(format!(
+                    "cannot resolve the configuration path {}: {error}",
+                    path.display()
+                ))
+            })?;
+            Some(absolute_config(path, &cwd))
+        }
+        None => None,
+    };
     // The live-session scanner: its own thread, its own blocking socket work, so no request and
     // no scheduling pass waits on a session's control port.
     let http_sessions = SessionHub::with_hooks(
         dir.parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| dir.clone()),
+        idle_secs,
         hooks,
+        config_path,
     );
     http_sessions.start();
     // The accept loop has a thread and a runtime of its own; no request waits on a pass.
+    let sessions_for_shutdown = Arc::clone(&http_sessions);
     std::thread::spawn(move || {
         runtime.block_on(serve_http(listener, http_registry, tokens, http_sessions));
     });
     let emit = Arc::new(|text: &str| {
         let _ = radian_host::write_stdout(text);
     });
-    super::r#loop::run(&registry, emit, lock, config)
+    let result = super::r#loop::run(&registry, emit, lock, config);
+    // SIGINT/SIGTERM (or a failed restart) stops the hub-held sessions cleanly before the
+    // process leaves; `hub.lock` was released by the loop just above.
+    sessions_for_shutdown.shutdown();
+    result
 }
 
-/// The `[hub.hooks]` commands the hub runs. The same configuration file the scheduling loop
-/// reads; the hooks are taken from it here because the session scanner is started before the
-/// loop. A configuration error keeps the hub from starting, the rule every `[hub]` key follows.
-fn hub_hooks(explicit: Option<&Path>) -> Result<radian_host::config::HubHooks, Error> {
+/// `path` as a hub-held child is told it, absolute against `cwd`. A relative `--config
+/// alt.toml` is the hub's file when the hub reads it, but the child runs in the repository
+/// (`spawn_held`), so it must be given the absolute path. It is joined, not canonicalized: a
+/// symlinked path still names the file the hub read (ADR 0048 §16).
+fn absolute_config(path: PathBuf, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// The configuration the hub's own loop reads, for the reclaim window.
+fn load_config(explicit: Option<&Path>) -> Result<radian_host::config::Config, Error> {
     let path = radian_host::config::resolved_path(explicit);
     radian_host::config::load_path(path.as_deref())
-        .map(|config| config.hub.hooks)
         .map_err(|error| Error::Failed(format!("cannot read the configuration: {error}")))
+}
+
+/// `[hub] session_idle_secs` (ADR 0048 §16). `RADIAN_HUB_SESSION_IDLE_SECS` is a test-only
+/// seam: a hub test needs a window shorter than the documented sixty-second minimum to see a
+/// process reclaim itself and the next prompt resume it. radian never sets it and the manual
+/// does not document it; `crates/radian-host/tests/env_docs.rs` lists it in `TEST_ONLY`.
+fn session_idle_secs(config: &radian_host::config::Config) -> u64 {
+    std::env::var("RADIAN_HUB_SESSION_IDLE_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(config.hub.session_idle_secs)
 }
 
 /// Binds `address` with `SO_REUSEADDR`, so a rebuilt binary that `exec`s the hub binds the
@@ -222,26 +271,25 @@ async fn serve_http(
                     if !authorized(&tokens, header).await {
                         return Ok::<_, Infallible>(unauthorized_response());
                     }
-                    // Decide the route and the method before reading any body too: an unknown
-                    // route or a wrong method answers `404`/`405`, and a read route answers
-                    // without the body, whatever the client declares or sends.
+                    // Decide the route, the method and the body limit before reading any
+                    // body: an unknown route or a wrong method answers `404`/`405`, and a
+                    // read route answers without the body, whatever the client declares or
+                    // sends.
                     let route = route(&path);
-                    let is_action = matches!(route, Route::Action(..));
                     if matches!(route, Route::Unknown) {
                         return Ok::<_, Infallible>(error_response(
                             StatusCode::NOT_FOUND,
                             "no such route",
                         ));
                     }
-                    let expected = if is_action { Method::POST } else { Method::GET };
-                    if method != expected {
+                    if !accepts(&route, &method) {
                         return Ok::<_, Infallible>(error_response(
                             StatusCode::METHOD_NOT_ALLOWED,
                             "method not allowed",
                         ));
                     }
-                    let body = if is_action {
-                        match request_body(request).await {
+                    let body = match body_limit(&route, &method) {
+                        Some(limit) => match request_body(request, limit).await {
                             RequestBody::Bytes(body) => body,
                             RequestBody::TooLarge => {
                                 return Ok::<_, Infallible>(error_response(
@@ -249,9 +297,8 @@ async fn serve_http(
                                     "request body too large",
                                 ));
                             }
-                        }
-                    } else {
-                        Bytes::new()
+                        },
+                        None => Bytes::new(),
                     };
                     let response = tokio::task::spawn_blocking(move || {
                         handle(method, &path, query.as_deref(), &body, &registry, &sessions)
@@ -381,6 +428,10 @@ enum Route {
     Transcript(String, String),
     SessionEvents(String, String),
     SessionModels(String, String),
+    SessionPrompt(String, String),
+    SessionCancel(String, String),
+    SessionAnswer(String, String),
+    SessionConfig(String, String),
     Events,
     Action(String, String, OwnerAction),
     Unknown,
@@ -452,7 +503,54 @@ fn route(path: &str) -> Route {
         ["v1", "repos", name, "sessions", id, "models"] => {
             Route::SessionModels(decode(name), decode(id))
         }
+        ["v1", "repos", name, "sessions", id, "prompt"] => {
+            Route::SessionPrompt(decode(name), decode(id))
+        }
+        ["v1", "repos", name, "sessions", id, "cancel"] => {
+            Route::SessionCancel(decode(name), decode(id))
+        }
+        ["v1", "repos", name, "sessions", id, "answer"] => {
+            Route::SessionAnswer(decode(name), decode(id))
+        }
+        ["v1", "repos", name, "sessions", id, "config"] => {
+            Route::SessionConfig(decode(name), decode(id))
+        }
         _ => Route::Unknown,
+    }
+}
+
+/// Whether `route` takes `method`. `/v1/repos/<name>/sessions` takes both: a `GET` lists the
+/// repository's sessions and a `POST` starts one. Every other session route is `GET` except
+/// the four that forward a control verb, which are `POST`, like an owner action.
+fn accepts(route: &Route, method: &Method) -> bool {
+    match route {
+        Route::Sessions(_) => method == Method::GET || method == Method::POST,
+        Route::Action(..)
+        | Route::SessionPrompt(..)
+        | Route::SessionCancel(..)
+        | Route::SessionAnswer(..)
+        | Route::SessionConfig(..) => *method == Method::POST,
+        Route::Unknown => false,
+        _ => *method == Method::GET,
+    }
+}
+
+/// The most body bytes a route keeps, or `None` when it reads no body. An owner action's body
+/// is `{}` or one short field; a session write route carries a prompt's attachments, so it
+/// reads up to [`sessions::SESSION_BODY_LIMIT`], the control port's own 16 MiB line limit with
+/// the forwarding envelope's headroom.
+fn body_limit(route: &Route, method: &Method) -> Option<usize> {
+    if method != Method::POST {
+        return None;
+    }
+    match route {
+        Route::Action(..) => Some(REQUEST_BODY_LIMIT),
+        Route::Sessions(_)
+        | Route::SessionPrompt(..)
+        | Route::SessionCancel(..)
+        | Route::SessionAnswer(..)
+        | Route::SessionConfig(..) => Some(sessions::SESSION_BODY_LIMIT),
+        _ => None,
     }
 }
 
@@ -489,11 +587,27 @@ fn handle(
     if matches!(route, Route::Unknown) {
         return error_response(StatusCode::NOT_FOUND, "no such route");
     }
-    if let Route::Action(name, id, action) = route {
-        if method != Method::POST {
-            return error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    // The write routes: an owner action, or one of the session verbs the hub forwards.
+    match &route {
+        Route::Action(name, id, action) => {
+            return action_route(registry, name, id, *action, body);
         }
-        return action_route(registry, &name, &id, action, body);
+        Route::SessionPrompt(name, id) => {
+            return session_prompt(registry, sessions, name, id, body);
+        }
+        Route::SessionCancel(name, id) => {
+            return session_cancel(registry, sessions, name, id);
+        }
+        Route::SessionAnswer(name, id) => {
+            return session_answer(registry, sessions, name, id, body);
+        }
+        Route::SessionConfig(name, id) => {
+            return session_config(registry, sessions, name, id, body);
+        }
+        Route::Sessions(name) if method == Method::POST => {
+            return session_create(registry, sessions, name, body);
+        }
+        _ => {}
     }
     if method != Method::GET {
         return error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
@@ -519,8 +633,13 @@ fn handle(
         Route::SessionEvents(name, id) => session_events(registry, sessions, &name, &id),
         Route::SessionModels(name, id) => session_models(registry, sessions, &name, &id),
         Route::Events => events(registry),
-        Route::Action(..) | Route::Unknown => {
-            unreachable!("an action or unknown route returned above")
+        Route::Action(..)
+        | Route::SessionPrompt(..)
+        | Route::SessionCancel(..)
+        | Route::SessionAnswer(..)
+        | Route::SessionConfig(..)
+        | Route::Unknown => {
+            unreachable!("a write or unknown route returned above")
         }
     }
 }
@@ -556,8 +675,8 @@ enum RequestBody {
 /// [`BODY_DRAIN_LIMIT`] and [`BODY_DRAIN_TIMEOUT`], so a client that is still sending can read
 /// the `413` without a huge or endless body keeping the task reading. Authorization and routing
 /// have already run, so no unauthenticated body and no read route's body is read at all.
-async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> RequestBody {
-    let mut too_large = declared_over_limit(request.headers());
+async fn request_body(request: hyper::Request<hyper::body::Incoming>, limit: usize) -> RequestBody {
+    let mut too_large = declared_over_limit(request.headers(), limit);
     let mut body = request.into_body();
     let mut bytes = Vec::new();
     let mut drained = 0usize;
@@ -591,7 +710,7 @@ async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> Request
             }
             continue;
         }
-        if bytes.len().saturating_add(data.len()) > REQUEST_BODY_LIMIT {
+        if bytes.len().saturating_add(data.len()) > limit {
             bytes = Vec::new();
             too_large = true;
             drained = data.len();
@@ -612,13 +731,13 @@ async fn request_body(request: hyper::Request<hyper::body::Incoming>) -> Request
 const BODY_DRAIN_LIMIT: usize = 1024 * 1024;
 const BODY_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Whether a declared `Content-Length` is over [`REQUEST_BODY_LIMIT`], before any byte is kept.
-fn declared_over_limit(headers: &hyper::HeaderMap) -> bool {
+/// Whether a declared `Content-Length` is over `limit`, before any byte is kept.
+fn declared_over_limit(headers: &hyper::HeaderMap, limit: usize) -> bool {
     headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > REQUEST_BODY_LIMIT as u64)
+        .is_some_and(|length| length > limit as u64)
 }
 
 // ---- the owner's write routes ------------------------------------------------------------
@@ -1055,7 +1174,9 @@ fn repo_path(registry: &Registry, name: &str) -> Result<PathBuf, Error> {
 fn session_failure(error: SessionError) -> Response<ResponseBody> {
     let status = match error {
         SessionError::Unknown(_) => StatusCode::NOT_FOUND,
-        SessionError::NotLive(_) => StatusCode::CONFLICT,
+        SessionError::NotLive(_) | SessionError::Late(_) => StatusCode::CONFLICT,
+        SessionError::Bad(_) => StatusCode::BAD_REQUEST,
+        SessionError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         SessionError::Port(_) => StatusCode::BAD_GATEWAY,
         SessionError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -1071,6 +1192,104 @@ fn session_list(registry: &Registry, sessions: &SessionHub, name: &str) -> Respo
     };
     match sessions::sessions_body(sessions, &path) {
         Ok(body) => json_response(StatusCode::OK, body),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST /v1/repos/<name>/sessions`: start a hub-held process for a new session, send it the
+/// body's first message, and answer `{"session": "<id>"}` (ADR 0048 §16). The body is
+/// validated before anything starts.
+fn session_create(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    body: &[u8],
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::start_session(sessions, &path, body) {
+        Ok(id) => json_response(StatusCode::OK, json!({ "session": id })),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST …/sessions/<id>/prompt`: deliver one message, resuming an ended session first.
+fn session_prompt(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+    body: &[u8],
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::prompt(sessions, &path, id, body) {
+        Ok(answer) => json_response(
+            StatusCode::OK,
+            json!({
+                "session": id,
+                "message_id": answer.get("message_id").cloned().unwrap_or(Value::Null),
+            }),
+        ),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST …/sessions/<id>/cancel`: the control port's `cancel`, with the hub token.
+fn session_cancel(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::cancel(sessions, &path, id) {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST …/sessions/<id>/answer`: the control port's `answer`. A late answer is `409` and
+/// changes nothing; an unknown request id is `404`.
+fn session_answer(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+    body: &[u8],
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::answer(sessions, &path, id, body) {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST …/sessions/<id>/config`: the control port's `config`, applied at the next turn
+/// boundary (ADR 0004).
+fn session_config(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+    body: &[u8],
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::config(sessions, &path, id, body) {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
         Err(error) => session_failure(error),
     }
 }
@@ -1486,6 +1705,21 @@ mod tests {
         assert!(
             spawned.load(std::sync::atomic::Ordering::SeqCst),
             "the spawned stream task ran"
+        );
+    }
+
+    /// A relative `--config` names the file the hub read, not a file beside the child's
+    /// repository: `spawn_held` starts the child in the repository (ADR 0048 §16).
+    #[test]
+    fn a_relative_configuration_path_is_joined_with_the_hubs_directory() {
+        assert_eq!(
+            absolute_config(PathBuf::from("alt.toml"), Path::new("/srv/hub")),
+            PathBuf::from("/srv/hub/alt.toml")
+        );
+        assert_eq!(
+            absolute_config(PathBuf::from("/etc/radian.toml"), Path::new("/srv/hub")),
+            PathBuf::from("/etc/radian.toml"),
+            "an absolute path is passed through, symlinks and all"
         );
     }
 
