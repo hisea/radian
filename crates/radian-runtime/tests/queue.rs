@@ -493,33 +493,57 @@ async fn the_pending_wake_callback_fires_only_for_a_promoted_open() {
 
 /// The turn-claimed callback fires with every entry `claim_next_turn` takes — the input
 /// that opens the turn — and never for an entry absorbed mid-turn through
-/// `claim_next_step`. The host attributes `stop_hook_active` from this (ADR 0045 §2).
+/// `claim_next_step`. The host attributes `stop_hook_active` from this (ADR 0045 §2) and
+/// applies the sources of the waking `next_step` entries still queued at the claim
+/// (ADR 0011 L2).
 #[tokio::test]
 async fn the_turn_claimed_callback_fires_for_every_opened_turn() {
     use std::sync::Mutex;
+    /// Each fired claim: the entry's id and text, and the queued waking sources.
+    type Fired = Vec<(String, String, Vec<InputSource>)>;
     let inbox = Inbox::new(8);
-    let fired: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let fired: Arc<Mutex<Fired>> = Arc::new(Mutex::new(Vec::new()));
     let fired_in = Arc::clone(&fired);
-    inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
-        fired_in
-            .lock()
-            .unwrap()
-            .push((entry.id.0.clone(), entry.message.text()));
-    })));
+    inbox.set_turn_claimed_callback(Some(Arc::new(
+        move |entry: &InboxEntry, queued: &[InputSource]| {
+            fired_in.lock().unwrap().push((
+                entry.id.0.clone(),
+                entry.message.text(),
+                queued.to_vec(),
+            ));
+        },
+    )));
 
     let first = inbox.followup("first", InputSource::User).await.unwrap();
     inbox.inject("absorbed", InputSource::System).await.unwrap();
+    inbox
+        .steer("steered", InputSource::Scheduler)
+        .await
+        .unwrap();
     let claimed = inbox.claim_next_turn().await.unwrap();
     assert_eq!(claimed.id, first);
     assert_eq!(
         *fired.lock().unwrap(),
-        vec![(first.0.clone(), "first".to_owned())],
-        "a turn-opening claim reports its message"
+        vec![(
+            first.0.clone(),
+            "first".to_owned(),
+            vec![InputSource::Scheduler]
+        )],
+        "a turn-opening claim reports its message and the queued waking sources"
     );
 
     // Absorbed mid-turn: not a turn opener, so nothing fires.
     inbox.claim_next_step().await.unwrap();
-    assert_eq!(fired.lock().unwrap().len(), 1);
+    inbox.claim_next_step().await.unwrap();
+    assert_eq!(
+        *fired.lock().unwrap(),
+        vec![(
+            first.0.clone(),
+            "first".to_owned(),
+            vec![InputSource::Scheduler]
+        )],
+        "the queued steer is still reported, not consumed"
+    );
 
     // An empty queue claims nothing and fires nothing.
     assert!(inbox.claim_next_turn().await.is_none());

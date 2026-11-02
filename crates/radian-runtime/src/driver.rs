@@ -860,6 +860,9 @@ async fn drain_steering(
         } = entry;
         match steering.steer(message.clone()) {
             Ok(()) => {
+                // The input is admitted: the host lowers the running turn's effective
+                // source before the next step can read it (ADR 0011 L2).
+                inbox.input_drained(source);
                 claimed.push(id.clone());
                 // Core accepted the steer, but it is only applied at the next safe point. If
                 // the turn ends first, the entry goes back to the inbox (see

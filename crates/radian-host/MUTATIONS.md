@@ -2185,3 +2185,19 @@ from `.radian/mut/control.rs.m3`, which `cmp` found identical afterwards.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0305-M3 | `sessions` reads only the projection again, ignoring the driver's turn flag (`turn_state()` unused) | ✅ 1 failed (rc=100) | `list_sessions_reports_working_while_an_exec_hosts_turn_runs` (the row said `"state": "idle"` while the driver's flag was set) |
+
+## TK0312: a turn's source is the least-privileged of every input it admits (2026-11-02)
+
+Branch `work/TK0312-turn-source-least-privileged`. The claim-side test is an in-process
+`Inbox`/`CommandHooks`/`PermissionHooks` seam, so it runs inside the workspace sandbox. The
+drain-side test binds a `/tmp` control socket, which the sandbox denies, so it ran outside it
+with `cargo nextest run -p radian-host --test control --locked --no-fail-fast -E
+'test(=a_queued_inject_lowers_the_owner_turn_it_is_absorbed_into)'`. Each mutation was applied
+in place and restored from `.radian/mut/hooks.rs.tk0312` / `.radian/mut/driver.rs.tk0312`,
+which `cmp` found identical after each restore.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0312-M1 | the claim restates only the opener's source (`let _ = queued` instead of observing the queued waking sources) | ✅ 1 failed (rc=100) | `turn_source::an_idle_owner_turn_that_absorbs_a_queued_scheduler_steer_runs_non_human` (the claim left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |
+| TK0312-M2 | the safe-point drain does not lower (`inbox.input_drained(source)` removed) | ✅ 1 failed (rc=100) | `control::a_queued_inject_lowers_the_owner_turn_it_is_absorbed_into` (the owner turn that absorbed the Scheduler inject was still `Some(User)` at its second model request) |
+

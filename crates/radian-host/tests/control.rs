@@ -1179,6 +1179,120 @@ async fn an_owner_input_does_not_raise_a_running_non_human_turn() {
     fixture.stop().await;
 }
 
+/// Edge 2: a no-token `inject` left waiting in `next_step` when a turn ends is absorbed by
+/// the owner's next turn. The owner's followup opens that turn as `User`; the inject is
+/// admitted at the first safe point, so the turn must run as `Scheduler` from there on
+/// (ADR 0011 L2). The barrier keeps the inject out of the first turn: a turn paused in its
+/// first model request has no safe point before it finishes.
+#[tokio::test]
+async fn a_queued_inject_lowers_the_owner_turn_it_is_absorbed_into() {
+    let barrier = Barrier::new(2, Duration::from_secs(5));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("inject-into-owner-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler` turn is paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+
+    // The no-token inject waits for a safe point; the owner's followup is for the next turn.
+    let injected = client
+        .request(json!({"id": 2, "verb": "inject", "text": "queued context"}))
+        .await;
+    assert_eq!(injected["ok"], true, "{injected}");
+    let queued = client
+        .request(json!({
+            "id": 3, "verb": "followup", "text": "owner task", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert!(
+        fixture.session.turn_running(),
+        "the first turn is still running"
+    );
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "the inject lowered the running Scheduler turn, not raised it"
+    );
+
+    // The owner's followup opens the next turn; the queued inject joins it at the first
+    // safe point, before the second model request.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "the owner turn that absorbs a Scheduler inject runs non-human (ADR 0011 L2)"
+    );
+    assert_eq!(
+        enqueued(&fixture.journal(), "queued context")["data"]["source"],
+        "scheduler"
+    );
+    fixture.stop().await;
+}
+
+/// Edge 3: an `Mcp`-source input absorbed into an owner turn takes the turn down to `Mcp`.
+#[tokio::test]
+async fn an_mcp_input_absorbed_into_an_owner_turn_lowers_it_to_mcp() {
+    let barrier = Barrier::new(2, Duration::from_secs(5));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("mcp-into-owner-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler` turn is paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+
+    // The MCP steer wakes but cannot be admitted before the first turn ends, so it joins
+    // the owner's next turn instead.
+    let steered = client
+        .request(json!({"id": 2, "verb": "steer", "text": "from mcp", "source": "mcp"}))
+        .await;
+    assert_eq!(steered["ok"], true, "{steered}");
+    let queued = client
+        .request(json!({
+            "id": 3, "verb": "followup", "text": "owner task", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Mcp),
+        "the owner turn that absorbs an Mcp input runs as Mcp (ADR 0011 L2)"
+    );
+    assert_eq!(
+        enqueued(&fixture.journal(), "from mcp")["data"]["source"],
+        "mcp"
+    );
+    fixture.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // The owner verbs (ADR 0043): pending, answer, config, models
 // ---------------------------------------------------------------------------
