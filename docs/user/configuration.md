@@ -264,8 +264,9 @@ with a wrong one behaves as if this field did not exist. Without a matching toke
 `Scheduler` when `source` is absent or `scheduler`, `Subagent` for `subagent`, and `Mcp` for
 `mcp`; `user` and `permission_decision` are refused, and no `via` metadata is recorded. With a
 matching token the `source` field is ignored. A request that arrives while a turn is already
-running does not raise that turn's permission source: the source above belongs to the queued
-input, and a running turn's effective source only ever lowers.
+running never raises that turn's permission source. A `steer` or `inject` joins the running
+turn, so it can lower that turn's source. A `followup` belongs to a later turn: it leaves the
+running turn's source alone, and the turn it opens runs with the input's source.
 
 `images` is an array of objects with `mime` and `data`; `data` is standard base64 and `mime` is
 one of `image/png`, `image/jpeg`, `image/gif` or `image/webp` (the bytes' magic number decides

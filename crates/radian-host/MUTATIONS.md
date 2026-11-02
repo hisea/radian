@@ -2126,3 +2126,19 @@ afterwards.
 |---|---|---|---|
 | TK0304-M6 | `input` unconditionally calls `set_turn_source(Some(source))`, even while a turn runs (the review's defect) | ✅ 1 failed (rc=100) | `an_owner_input_does_not_raise_a_running_non_human_turn` (a token-bearing steer during a running `Scheduler` turn left `turn_source()` at `Some(User)` instead of `Some(Scheduler)`) |
 | TK0304-M7 | the idle branch only observes (`observe_input_source`) and never resets the source | ✅ 1 failed (rc=100) | `a_followup_with_the_owner_token_is_user_with_the_hub_origin` (the idle owner followup left `turn_source()` at `None` instead of `Some(User)`) |
+
+## TK0304 rework 2: the source is applied when the input's own turn starts (2026-11-02)
+
+Same branch and same outside-the-sandbox command as above. M8 and M10 were applied in place to
+`crates/radian-host/src/hooks.rs`, M9 to `crates/radian-host/src/control.rs`, and M11 to
+`crates/radian-host/src/session/local.rs`; each source was restored from the copy taken before
+its first mutation (`.radian/mut/hooks.rs.m8`, `.radian/mut/control.rs.m8`,
+`.radian/mut/local.rs.m11`) and `cmp` found all identical afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M8 | the turn-claimed observer does not reset the source at the claim | ✅ 3 failed (rc=100) | `a_mid_turn_owner_followup_gives_its_own_turn_the_user_source` (its turn stayed `Some(Scheduler)` instead of `Some(User)`), `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (its turn stayed `Some(User)` instead of `Some(Scheduler)`), and `a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user` (a direct-inbox `Scheduler` input left the source `None`) |
+| TK0304-M9 | `input` observes a mid-turn `followup` like a `steer` (it lowers the running turn) | ✅ 1 failed (rc=100) | `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (the queued `Scheduler` followup lowered the running `User` turn to `Some(Scheduler)`) |
+| TK0304-M10 | the claim reset applies only to a `User` opener | ✅ 1 failed (rc=100) | `a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn` (the scheduled followup's own turn stayed `Some(User)` instead of `Some(Scheduler)`) |
+| TK0304-M11 | the facade's `SendFollowup` keeps the old unconditional `set_turn_source(Some(User))` | ✅ 1 failed (rc=100) | `a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user` (the mid-turn send raised the running `Scheduler` turn to `Some(User)`) |
+

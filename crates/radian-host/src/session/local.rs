@@ -369,6 +369,22 @@ impl LocalSession {
         Arc::clone(&self.turn_running)
     }
 
+    /// Applies a facade input's source to the permission layer (ADR 0011 L2). The turn the
+    /// input opens restates it at the claim; here only a turn already in flight matters: a
+    /// `steer`/`inject` joins it and can only lower its source, while a `followup` belongs to a
+    /// later turn and leaves it alone. This is the same rule the control port applies.
+    fn note_input_source(&self, followup: bool) {
+        if self.turn_running() || self.inbox.inflight_turns() > 0 {
+            if !followup {
+                self.hooks
+                    .observe_input_source(radian_core::InputSource::User);
+            }
+        } else {
+            self.hooks
+                .set_turn_source(Some(radian_core::InputSource::User));
+        }
+    }
+
     /// Resolves whenever the driver stops running a turn or control request. Pair with
     /// [`LocalSession::turn_running`]: subscribe first, then check, so a clear between
     /// the check and the wait still resolves the wait.
@@ -883,9 +899,10 @@ impl SessionFacade for LocalSession {
         match command {
             SessionCommand::SendFollowup(text) => {
                 // `HookContext` has no source field, so the host declares each turn's source
-                // before it starts; an unset source is treated as non-human and denied.
-                self.hooks
-                    .set_turn_source(Some(radian_core::InputSource::User));
+                // before it starts; an unset source is treated as non-human and denied. A
+                // followup queued mid-turn belongs to the next turn: it must not raise the
+                // running one, and the claim gives its own turn `User`.
+                self.note_input_source(true);
                 // A user message resets the notification wake budgets (ADR 0037 decision 3,
                 // ADR 0045).
                 if let Some(notifier) = &self.job_notifier {
@@ -898,8 +915,7 @@ impl SessionFacade for LocalSession {
                     .map_err(|error| CommandRefused::inbox(name, &error))
             }
             SessionCommand::Steer(text) => {
-                self.hooks
-                    .set_turn_source(Some(radian_core::InputSource::User));
+                self.note_input_source(false);
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }
@@ -912,8 +928,7 @@ impl SessionFacade for LocalSession {
             SessionCommand::Inject(message) => {
                 // ADR 0033 + ADR 0011: `inject` is the "no wake" lane, so a `!` output never
                 // starts a turn; the source is `User` (the human typed the command).
-                self.hooks
-                    .set_turn_source(Some(radian_core::InputSource::User));
+                self.note_input_source(false);
                 if let Some(notifier) = &self.job_notifier {
                     notifier.reset_wakes();
                 }

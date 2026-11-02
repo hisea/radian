@@ -99,7 +99,9 @@ use radian_core::{
     ContentPart, HookContext, HookError, Hooks, InputSource, Message, MessageId, ModelError,
     RunOutcome, RunStatus, ToolCall, ToolDecision, ToolResult,
 };
-use radian_permissions::{NotificationHooks, PermissionRequestDecision, PermissionRequestHooks};
+use radian_permissions::{
+    NotificationHooks, PermissionHooks, PermissionRequestDecision, PermissionRequestHooks,
+};
 use radian_runtime::{Inbox, InboxEntry};
 use radian_sandbox::SandboxSlot;
 use serde::Deserialize;
@@ -452,6 +454,11 @@ pub struct CommandHooks {
     /// non-completed turn clears it; a user message does not touch a turn that already
     /// started.
     turn_continuation: Arc<AtomicU8>,
+    /// The permission layer, for the turn-source reset the turn-claimed observer does. The
+    /// host installs it with [`CommandHooks::set_turn_source_hooks`]; absent (tests that build
+    /// the hooks alone), the observer skips the reset and a turn-starting input keeps the
+    /// source the enqueuer set.
+    turn_source_hooks: Arc<std::sync::Mutex<Option<Weak<PermissionHooks>>>>,
     /// Consecutive hook-opened continuations whose turns ended `Completed` with no tool
     /// call (`model_calls == 1`). A continued turn that called a tool, a non-`Completed`
     /// turn, and a user message all reset it. At [`MAX_HOOK_IDLE_CONTINUATIONS`] the next
@@ -517,13 +524,28 @@ fn continuation_message_id() -> MessageId {
 
 /// Installs the inbox's turn-claimed observer: the id of each message that opens a turn
 /// is looked up in the pending continuation map, and the verdict that drove it becomes
-/// the running turn's provenance. A claim of any other input clears it (a new turn).
+/// the running turn's provenance. A claim of any other input clears it (a new turn). It is
+/// also the turn-start seam for the permission source: the turn runs with the source of the
+/// input that opened it (ADR 0011 L2, ADR 0043), so a `User` input the control port queued
+/// mid-turn resets the source here, when its own turn starts, and never while another turn
+/// runs.
 fn install_turn_claimed_callback(
     inbox: &Arc<Inbox>,
     pending: Arc<std::sync::Mutex<HashMap<MessageId, bool>>>,
     turn_continuation: Arc<AtomicU8>,
+    turn_source_hooks: Arc<std::sync::Mutex<Option<Weak<PermissionHooks>>>>,
 ) {
     inbox.set_turn_claimed_callback(Some(Arc::new(move |entry: &InboxEntry| {
+        // The source reset comes first, before any turn work can read the source. A weaker
+        // source can only lower the turn; the input's own source is the turn's starting point.
+        let hooks = turn_source_hooks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(hooks) = hooks {
+            hooks.set_turn_source(Some(entry.source));
+        }
         let continuation = entry.message.meta().id.as_ref().and_then(|id| {
             pending
                 .lock()
@@ -574,10 +596,13 @@ impl CommandHooks {
         let pending_continuations: Arc<std::sync::Mutex<HashMap<MessageId, bool>>> =
             Arc::new(std::sync::Mutex::new(HashMap::new()));
         let turn_continuation = Arc::new(AtomicU8::new(Continuation::None.as_u8()));
+        let turn_source_hooks: Arc<std::sync::Mutex<Option<Weak<PermissionHooks>>>> =
+            Arc::new(std::sync::Mutex::new(None));
         install_turn_claimed_callback(
             inbox,
             Arc::clone(&pending_continuations),
             Arc::clone(&turn_continuation),
+            Arc::clone(&turn_source_hooks),
         );
         Self {
             pre: compile_layered(
@@ -635,6 +660,7 @@ impl CommandHooks {
             loop_active: Arc::new(AtomicBool::new(false)),
             pending_continuations,
             turn_continuation,
+            turn_source_hooks,
             hook_idle: Arc::new(AtomicU32::new(0)),
             consecutive: Arc::new(AtomicU32::new(0)),
             runs: Arc::new(std::sync::Mutex::new(VecDeque::new())),
@@ -688,6 +714,16 @@ impl CommandHooks {
             .jobs
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = jobs.map(Arc::downgrade);
+    }
+
+    /// The permission layer whose turn source the claimed-input observer resets. The host
+    /// calls this once, right after it builds the hooks; a `Weak` keeps the session from
+    /// holding itself alive through the inbox's callback.
+    pub fn set_turn_source_hooks(&self, hooks: Weak<PermissionHooks>) {
+        *self
+            .turn_source_hooks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hooks);
     }
 
     /// The persistent goal for the active-goal suppression (an `Active` or `Paused` goal

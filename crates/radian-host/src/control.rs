@@ -14,9 +14,11 @@
 //! line. The one exception is the owner's token: a request whose `token` equals the trimmed
 //! content of `$RADIAN_HOME/hub/token` is the owner's input and is `User` (with
 //! `{"via":"hub"}` recorded in the message's `origin`, ADR 0005 G1). The input's source is
-//! what the inbox records and what the turn it starts runs with; a turn that is already
-//! running keeps its own effective source, which only ever lowers (ADR 0011 L2), so an owner
-//! input arriving mid-turn never raises it. Approvals cannot be answered over the port —
+//! what the inbox records and what the turn it starts runs with. A turn that is already
+//! running keeps its own effective source, which only ever lowers (ADR 0011 L2): a `steer` or
+//! `inject` joins it and can lower it, never raise it, while a `followup` belongs to a later
+//! turn and leaves the running turn alone — the turn it opens applies its own source when the
+//! driver claims it. Approvals cannot be answered over the port —
 //! there is deliberately no such verb, and an unknown verb (including an `approve`) changes
 //! nothing.
 //!
@@ -418,15 +420,18 @@ impl ControlServer {
             return failure(id.clone(), "the session has closed");
         };
         // The source the port fixed is what the durable record and the inbox enqueue see
-        // (ADR 0011 L2). A turn's **effective** source only ever lowers: when a turn is
-        // already running, an owner input is admitted with `User` but must not raise the
-        // turn's permission source before that safe-point admission, so only an input that
-        // arrives while no turn runs may reset it for the turn it will start.
-        if turn_running {
-            hooks.observe_input_source(source);
+        // (ADR 0011 L2), and the turn-claimed observer resets the permission source to it
+        // when this input's own turn starts. Here only a turn that is already in flight
+        // matters: a `steer`/`inject` is admitted into it, so it can lower its source but
+        // never raise it; a `followup` belongs to a later turn, so it must not touch this
+        // one at all. With nothing in flight the input may start the next turn, and the set
+        // keeps the state right until the claim restates it.
+        if turn_running || inbox.inflight_turns() > 0 {
+            if verb != "followup" {
+                hooks.observe_input_source(source);
+            }
         } else {
             hooks.set_turn_source(Some(source));
-            hooks.observe_input_source(source);
         }
         let mut message = user_message(text, &files, &images);
         if via_hub {

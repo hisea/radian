@@ -13,12 +13,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
-use radian_core::{InputSource, NoopSink, TurnOptions};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::compose::{Attachment, user_message};
 use radian_host::control::MAX_REQUEST_BYTES;
 use radian_host::{
-    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionId, SessionProjection,
-    SessionSetup, TurnState, build_model, open_session,
+    ApprovalRouting, ControlServer, HostBindings, LocalSession, SessionCommand, SessionFacade,
+    SessionId, SessionProjection, SessionSetup, TurnState, build_model, open_session,
 };
 use radian_permissions::{ApprovalPolicy, NoopAudit, Preset, Profile};
 use serde_json::{Value, json};
@@ -535,8 +535,9 @@ async fn the_socket_is_private_cleans_stale_files_and_is_removed_on_drop() {
 // The owner token (ADR 0043): the port decides `User`, and the hub origin
 // ---------------------------------------------------------------------------
 
-/// A minimal PNG header with these dimensions (24 bytes: signature, IHDR, width, height).
-/// `imagesize` reads only the header, so the rest may be anything.
+/// A minimal PNG header with these dimensions (33 bytes: the 8-byte signature, the IHDR
+/// chunk's length and type, width, height, the bit-depth/colour/compression/filter/interlace
+/// bytes, and a CRC). `imagesize` reads only the header, so the rest may be anything.
 fn png_photo(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     bytes.extend_from_slice(&13u32.to_be_bytes());
@@ -845,6 +846,185 @@ async fn a_steer_with_the_token_during_a_running_turn_is_a_user_steer() {
     assert_eq!(
         enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
         "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// ADR 0011 L2: a `followup` belongs to the next turn, so a token-bearing one that arrives
+/// while a turn runs must not touch that running turn's source — but the turn it opens is the
+/// owner's, and runs with `User`. Nothing resets the source at the enqueue, because the turn it
+/// belongs to has not started yet.
+#[tokio::test]
+async fn a_mid_turn_owner_followup_gives_its_own_turn_the_user_source() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("owner-followup-mid-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // A `Scheduler` input opens the first turn, paused in its first model request.
+    let started = client
+        .request(json!({"id": 1, "verb": "followup", "text": "start"}))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The owner's followup is queued for the next turn, not admitted into this one: the
+    // running turn keeps its own source.
+    let queued = client
+        .request(json!({
+            "id": 2, "verb": "followup", "text": "owner task", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn owner followup must not raise the running turn's source"
+    );
+
+    // The next turn is the one the owner's followup opens: it runs with `User`.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the turn the owner's followup opens is the owner's (ADR 0011 L2)"
+    );
+    let enqueued = enqueued(&fixture.journal(), "owner task");
+    assert_eq!(enqueued["data"]["source"], "user", "{enqueued}");
+    assert_eq!(
+        enqueued["data"]["message"]["user"]["meta"]["origin"]["via"], "hub",
+        "{enqueued}"
+    );
+    fixture.stop().await;
+}
+
+/// The mirror of the owner case: a `followup` queued mid-turn belongs to the next turn, so a
+/// `Scheduler` one must not lower the running human turn either — and the turn it opens is
+/// non-human.
+#[tokio::test]
+async fn a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("scheduler-followup-mid-turn", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    // The owner's token opens the first turn, paused in its first model request.
+    let started = client
+        .request(json!({
+            "id": 1, "verb": "followup", "text": "start", "token": "owner-token"
+        }))
+        .await;
+    assert_eq!(started["ok"], true, "{started}");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the owner's input started a human turn"
+    );
+
+    // A scheduled followup is queued for the next turn, not admitted into this one.
+    let queued = client
+        .request(json!({"id": 2, "verb": "followup", "text": "scheduled task"}))
+        .await;
+    assert_eq!(queued["ok"], true, "{queued}");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "a mid-turn followup of any source must not change the running turn's source"
+    );
+
+    // The scheduled followup's own turn is non-human.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "the turn the scheduled followup opens is non-human (ADR 0011 L2)"
+    );
+    assert_eq!(
+        enqueued(&fixture.journal(), "scheduled task")["data"]["source"],
+        "scheduler"
+    );
+    fixture.stop().await;
+}
+
+/// The TUI's facade is the other caller that fixes a turn's source. Its `SendFollowup` while a
+/// turn runs belongs to the next turn too: it must not raise the running turn's source, and the
+/// turn it opens runs with `User` (ADR 0011 L2).
+#[tokio::test]
+async fn a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user() {
+    let barrier = Barrier::new(2, Duration::from_secs(2));
+    let server = MockServer::start(vec![
+        Reply::Barrier {
+            barrier,
+            reply: Box::new(text_reply("first")),
+        },
+        text_reply("second"),
+    ])
+    .await;
+    let fixture = Fixture::new("facade-followup-mid-turn", &server.base_url).await;
+
+    // A `Scheduler` input opens the first turn, paused in its first model request.
+    fixture
+        .session
+        .inbox()
+        .followup(Message::user("start"), InputSource::Scheduler)
+        .await
+        .expect("enqueue the Scheduler input");
+    wait_requests(&server, 1).await;
+    assert!(fixture.session.turn_running(), "the turn is running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a Scheduler input started the turn"
+    );
+
+    // The TUI's send is queued for the next turn. `command` blocks on the inbox, so it runs on
+    // a blocking thread, as a real host's synchronous UI thread does.
+    let command = Arc::clone(&fixture.session);
+    tokio::task::spawn_blocking(move || {
+        command.command(SessionCommand::SendFollowup("typed".into()))
+    })
+    .await
+    .expect("the blocking task joins")
+    .expect("the send is accepted");
+    assert!(fixture.session.turn_running(), "the turn is still running");
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::Scheduler),
+        "a mid-turn facade followup must not raise the running turn's source"
+    );
+
+    // The next turn is the one the facade followup opens: it is the user's.
+    wait_requests(&server, 2).await;
+    assert_eq!(
+        fixture.session.hooks().turn_source(),
+        Some(InputSource::User),
+        "the turn the facade followup opens is the user's (ADR 0011 L2)"
     );
     fixture.stop().await;
 }
