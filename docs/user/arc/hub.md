@@ -1,11 +1,11 @@
 ---
-description: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
+description: The hub: its HTTP API on a configurable address (loopback by default), pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 ---
 
 # hub
 
 A hub is one process that manages every repository registered on this machine.
-[`radian hub`](#radian-hub) serves the HTTP API on loopback and runs the scheduling loop for every registered repository; `radian hub add`, `remove` and `list` manage the registry; [`radian hub pair`](#radian-hub-pair) and [`radian hub token rotate`](#radian-hub-token-rotate) handle the bearer token every request carries.
+[`radian hub`](#radian-hub) serves the HTTP API on `<hub.bind>:<hub.port>` (loopback by default) and runs the scheduling loop for every registered repository; `radian hub add`, `remove` and `list` manage the registry; [`radian hub pair`](#radian-hub-pair) and [`radian hub token rotate`](#radian-hub-token-rotate) handle the bearer token every request carries.
 The API also reads the radian sessions on this machine: [the session routes](#sessions) list a repository's sessions, read a session's transcript, follow its event stream, list its models and read a worker's conversation.
 
 ## The registry file
@@ -36,11 +36,12 @@ A file that does not parse, a name outside its rule, a path that is not an arc r
 ## `radian hub`
 
 `radian hub` with no subcommand starts the hub and runs until the process is stopped.
-It binds `127.0.0.1:<hub.port>` and only that address; there is no key for another address and no key that turns the listener off.
+It binds `<hub.bind>:<hub.port>`; `hub.bind` defaults to `127.0.0.1`, and there is no key that turns the listener off.
 The bind happens after it takes `$RADIAN_HOME/hub/hub.lock`, a lock that holds the process's pid and lives as long as the process: a second `radian hub` exits `1` with a line that names `hub.lock` and the holder's pid, before it binds anything or touches any repository.
 A port another program holds exits `1` with a line that names the port.
 
-Its first stdout line is `hub: listening on 127.0.0.1:<port>`.
+Its first stdout line is `hub: listening on <addr>:<port>`; an IPv6 address is in brackets, as in `hub: listening on [::1]:7341`.
+A bind that is not loopback prints one warning line on stderr at startup: the bearer token and every request travel unencrypted on that network, and `tailscale serve` or an ssh forward is the encrypted way.
 The scheduling loop then runs in the same process; [the loop](#the-loop) describes it.
 
 ### `radian hub add <PATH> [--name <NAME>]`
@@ -463,11 +464,13 @@ A change takes effect at the hub's next start.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
-| `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. The API binds `127.0.0.1` only. |
+| `hub.bind` | string | `127.0.0.1` | an IPv4 or IPv6 address, not a host name or an address with a port | The IP address the HTTP API listens on. A bind that is not loopback prints one warning at startup: the bearer token and every request travel unencrypted on that network; `tailscale serve` or an ssh forward is the encrypted way. |
+| `hub.port` | integer | `7341` | `1` to `65535` | The HTTP API's port. |
 | `hub.concurrency` | integer | `4` | `1` or more | The machine-wide cap on tasks in `doing` across every registered repository. |
 | `hub.interval_secs` | integer | `30` | `5` to `3600` | Seconds between two registry reads and two scheduling passes of each repository. |
 | `hub.session_idle_secs` | integer | `3600` | `60` to `86400` | How long a hub-held session may have no running turn, nothing pending and no running background job before its process exits cleanly; the journal stays and the next prompt resumes it. |
 | `hub.hooks.after_pending` | array of strings | `[]` | shell command lines | The commands the hub runs when a live session's queue gets a new head; see [the after_pending hook](#the-after-pending-hook). |
 
 A value outside its range is a configuration error naming the key and the range.
+A `hub.bind` that is not an IP address (a host name, an empty string, an address with a port) is a configuration error naming the key and "an IP address".
 An unknown key under `[hub]` is skipped and named at startup.

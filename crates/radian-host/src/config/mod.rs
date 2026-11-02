@@ -37,6 +37,7 @@ mod model;
 mod sandbox;
 mod tui;
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
@@ -197,7 +198,10 @@ impl Default for ControlConfig {
     }
 }
 
-/// The `[hub]` default port (ADR 0048): the HTTP API listens only on loopback.
+/// The `[hub] bind` default: the API listens on loopback unless the owner names another
+/// address (ADR 0048 §16).
+pub const DEFAULT_HUB_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// The `[hub]` default port (ADR 0048): the HTTP API listens on `hub.port`.
 pub const DEFAULT_HUB_PORT: u16 = 7341;
 /// The `[hub]` default concurrency: tasks in `doing` across every registered repository.
 pub const DEFAULT_HUB_CONCURRENCY: u64 = 4;
@@ -224,6 +228,8 @@ pub const MAX_HUB_SESSION_IDLE_SECS: u64 = 86400;
 /// skipped and named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubConfig {
+    /// `[hub] bind`: the IP address the HTTP API listens on (ADR 0048 §16).
+    pub bind: IpAddr,
     pub port: u16,
     pub concurrency: u64,
     pub interval_secs: u64,
@@ -237,6 +243,7 @@ pub struct HubConfig {
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
+            bind: DEFAULT_HUB_BIND,
             port: DEFAULT_HUB_PORT,
             concurrency: DEFAULT_HUB_CONCURRENCY,
             interval_secs: DEFAULT_HUB_INTERVAL_SECS,
@@ -590,6 +597,12 @@ fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), Conf
     };
     for (key, value) in table {
         match (key.as_str(), value) {
+            ("bind", Value::String(text)) => {
+                config.hub.bind = text
+                    .parse()
+                    .map_err(|_| wrong_type(path, "hub.bind", "an IP address"))?;
+            }
+            ("bind", _) => return Err(wrong_type(path, "hub.bind", "an IP address")),
             ("port", Value::Integer(port))
                 if (i64::from(MIN_HUB_PORT)..=i64::from(MAX_HUB_PORT)).contains(port) =>
             {
@@ -2215,6 +2228,7 @@ future_option = "alpha"
             "sandbox.allow_env",
             "integrations.herdr",
             "control.enabled",
+            "hub.bind",
             "hub.port",
             "hub.concurrency",
             "hub.interval_secs",
@@ -2365,6 +2379,7 @@ future_option = "alpha"
                 "[control]\n",
                 "enabled = false\n",
                 "[hub]\n",
+                "bind = \"127.0.0.1\"\n",
                 "port = 7341\n",
                 "concurrency = 4\n",
                 "interval_secs = 30\n",
@@ -2766,6 +2781,7 @@ future_option = "alpha"
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
             ),
+            ("hub.bind", HubConfig::default().bind.to_string()),
             ("hub.port", HubConfig::default().port.to_string()),
             (
                 "hub.concurrency",
@@ -2822,6 +2838,36 @@ future_option = "alpha"
         let config =
             parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 7\n").unwrap();
         assert_eq!(config.memory.injection().sessions_index_max_lines, 7);
+    }
+
+    /// `[hub] bind` is an IP address (ADR 0048 §16): IPv4 and IPv6 are carried, and a host
+    /// name, an empty string or an address with a port is refused naming the key and saying
+    /// "an IP address".
+    #[test]
+    fn hub_bind_is_an_ip_address() {
+        for (value, expected) in [
+            ("127.0.0.1", IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            ("0.0.0.0", IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            ("::1", IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+        ] {
+            let text = format!("schema_version = 1\n[hub]\nbind = \"{value}\"\n");
+            let config = parse_str(&text).expect("an IP address is accepted");
+            assert_eq!(config.hub.bind, expected);
+        }
+        for value in ["localhost", "", "127.0.0.1:7341"] {
+            let text = format!("schema_version = 1\n[hub]\nbind = \"{value}\"\n");
+            let error = parse_str(&text).unwrap_err().to_string();
+            assert!(error.contains("hub.bind"), "{value:?}: {error}");
+            assert!(error.contains("an IP address"), "{value:?}: {error}");
+        }
+        // A non-string value names the key too.
+        let error = parse_str("schema_version = 1\n[hub]\nbind = 7341\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("hub.bind"), "{error}");
+        // Absent, the default is loopback.
+        let config = parse_str("schema_version = 1\n[hub]\nport = 7341\n").unwrap();
+        assert_eq!(config.hub.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     /// `[hub] session_idle_secs` is the closed range `60` to `86400`: a value outside it is a

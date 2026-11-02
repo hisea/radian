@@ -231,12 +231,13 @@ fn the_control_enabled_flag_is_carried() {
     assert!(config.control.enabled);
 }
 
-/// `hub.toml` (ADR 0048): the three keys are carried with their defaults, a value outside a
+/// `hub.toml` (ADR 0048): the keys are carried with their defaults, a value outside a
 /// range is refused naming the key and the range, and an unknown key is skipped.
 #[test]
 fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
     let (path, text) = fixture("hub.toml");
     let config = config::parse(&path, &text).unwrap();
+    assert_eq!(config.hub.bind, config::DEFAULT_HUB_BIND);
     assert_eq!(config.hub.port, 7341);
     assert_eq!(config.hub.concurrency, 4);
     assert_eq!(config.hub.interval_secs, 30);
@@ -252,6 +253,7 @@ fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
     assert_eq!(
         parsed.hub,
         config::HubConfig {
+            bind: config::DEFAULT_HUB_BIND,
             port: config::DEFAULT_HUB_PORT,
             concurrency: config::DEFAULT_HUB_CONCURRENCY,
             interval_secs: config::DEFAULT_HUB_INTERVAL_SECS,

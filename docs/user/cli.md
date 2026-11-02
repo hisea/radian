@@ -213,8 +213,9 @@ radian arc reset-budget TK0001-first-work
 
 ## `radian hub`
 
-`radian hub` manages the repository registry one hub process schedules (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `127.0.0.1`, runs the scheduling loop, and prints or rotates the bearer token every request carries.
-A bare `radian hub` serves the HTTP API and schedules every registered repository until it is stopped; its first stdout line is `hub: listening on 127.0.0.1:<port>`.
+`radian hub` manages the repository registry one hub process schedules (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `<hub.bind>:<hub.port>` (loopback by default), runs the scheduling loop, and prints or rotates the bearer token every request carries.
+A bare `radian hub` serves the HTTP API and schedules every registered repository until it is stopped; its first stdout line is `hub: listening on <addr>:<port>`, an IPv6 address in brackets.
+A bind that is not loopback prints one warning line on stderr at startup: the bearer token and every request travel unencrypted on that network, and `tailscale serve` or an ssh forward is the encrypted way.
 The registry file, every subcommand, the pairing and token rules, every route and the loop are on [`arc/hub`](arc/hub.md).
 
 | Subcommand | Arguments | What it does |
@@ -414,7 +415,7 @@ arc/gate-failures: The gate's failure classes, the retry rules, the budget, and 
 arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
 arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
 arc/hooks: The `[hooks]` points, their rules and their environment.
-arc/hub: The hub: its HTTP API on loopback, pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
+arc/hub: The hub: its HTTP API on a configurable address (loopback by default), pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
 arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
 arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
 arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.

@@ -71,7 +71,7 @@ radian decisions as a first-class herdr agent live in **ADR 0034**: state, sessi
 - No in-process orchestration: parallel work uses many `subagent` calls in one reply. Cross-session keeps need own journals each, viewed through `attach`.
 - Default `full`: safety rests on user-explicit sandbox choices, approval rules, and project trust. Strange repos with unattended runs open `workspace`.
 - Parallel `general` children can stack load. No extra process-level concurrency cap exists.
-- The control port and herdr reports are local IPC, never remote protocols. The hub is the control port's only remote entry: its existing loopback listener plus the bearer token. Radian adds no listener and no outbound connection for this (ADR 0013).
+- The control port and herdr reports are local IPC, never remote protocols. The hub is the control port's only remote entry: its listener (`[hub] bind`, `127.0.0.1` by default) plus the bearer token. Radian adds no listener and no outbound connection for this (ADR 0013).
 - `attach` is read-only. It never answers approvals for watched sessions, and never sees streaming output.
 
 ## Verification

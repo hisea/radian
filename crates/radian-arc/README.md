@@ -254,10 +254,12 @@ name the loop it is watching.
 `hub` owns `$RADIAN_HOME/hub/`: `repos.toml` (the registry `radian hub add`/`remove`/`list`
 read and write), `token` (the bearer token every HTTP request carries), `hub.lock` (the flock
 one hub holds for its life, with its pid inside) and the scheduler (`hub::run`).
-`hub::http::serve` is what `radian hub` with no subcommand calls: it takes `hub.lock`, binds
-`127.0.0.1:<[hub] port>`, prints `hub: listening on <addr>` as its first stdout line, serves
-the HTTP API on a thread of its own, and runs the hub's own thread (registry re-reads, status
-lines and joins) while every repository's pass runs on a thread of its own. The
+`hub::http::serve` is what `radian hub` with no subcommand calls: it reads the configuration,
+takes `hub.lock`, binds `<[hub] bind>:<[hub] port>` (`127.0.0.1` by default), prints
+`hub: listening on <addr>` as its first stdout line (one warning on stderr when the bind is
+not loopback), serves the HTTP API on a thread of its own, and runs the hub's own thread
+(registry re-reads, status lines and joins) while every repository's pass runs on a thread of
+its own. The
 scheduler keeps one `run::LoopState` per registered repository on
 its own OS thread, because a pass blocks; it re-reads the registry every `[hub] interval_secs`,
 records a repository whose `runner.lock` another process holds as read-only (with the holder's
@@ -831,8 +833,8 @@ gate stages `mutation` and `ci` are refused until they are built.
 - **A phone on the tailnet.** Expose the hub with `tailscale serve` (the phone has no ssh
   client), pair with `radian hub pair`, and from the phone browse the plans and tasks of two
   registered repositories, do one owner action, and receive one lock-screen notification from
-  an `after_awaiting_human` hook. The hub binds `127.0.0.1` only; the tailnet exposure is the
-  proxy's.
+  an `after_awaiting_human` hook. The hub's default `[hub] bind` is `127.0.0.1`; this test
+  exposes it through the proxy.
 - **The phone driving a TUI session** (ADR 0048 §16). With a `radian` session open on the Mac
   and the hub running, from the phone send one message, answer one approval, switch the model
   and send a photo. The TUI must show the message with the dim ` · hub` suffix, close the
