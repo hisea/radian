@@ -308,12 +308,19 @@ mod tests {
         );
         // The command wrote its background `sleep`'s pid before the timeout. A path that
         // returns `TimedOut` without killing the process **group** leaves that child alive
-        // (`run_all` blocks through the timeout, so the kill has already happened).
+        // (`run_all` blocks through the timeout, so the kill has already happened). A killed
+        // process also stays a zombie until its new parent reaps it: `sh` died with the group,
+        // so the `sleep` is reparented and reaped asynchronously. Poll before deciding the kill
+        // missed the group, as the route test does.
         let pid: u32 = std::fs::read_to_string(&pidfile)
             .expect("the command wrote its child pid")
             .trim()
             .parse()
             .expect("the pid is a number");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while crate::process::alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         if crate::process::alive(pid) {
             // Clean up a child the broken path left behind, so a failed assertion does not
             // leak a sleeping process for its full 30 s.
