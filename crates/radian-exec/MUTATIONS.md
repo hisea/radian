@@ -860,4 +860,19 @@ identical.
 |---|---|---|---|
 | TK0301-M1 | `InputAdmitted` joins the in-flight exclusion arm, so it no longer moves the anchor | ✅ 1 failed (rc=100) | `metrics::tests::an_input_admitted_between_requests_moves_the_anchor` (`left: 4500`, `right: 4000`) |
 | TK0301-M2 | `MemoryInjected` joins the in-flight exclusion arm, so it no longer moves the anchor | ✅ 1 failed (rc=100) | `metrics::tests::a_memory_injected_before_a_request_moves_the_anchor` (`left: 4400`, `right: 4200`) |
-| TK0301-M3 | the in-flight exclusion arm is removed, so `InboxEnqueued`, `BackgroundJobSettled`, `ConfigChanged`, `ApprovalPolicyChanged` and `UserBash` move the anchor again | ✅ 2 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) and `metrics::tests::in_flight_config_and_user_bash_records_do_not_move_the_anchor` (`left: 100`, `right: 3000`) |
+| TK0301-M3 | the in-flight exclusion arm is removed, so `InboxEnqueued`, `BackgroundJobSettled`, `ConfigChanged`, `ApprovalPolicyChanged` and `UserBash` move the anchor again | ✅ 2 failed (rc=100) | `metrics::tests::an_inbox_enqueue_during_a_response_does_not_move_the_anchor` (`left: 150`, `right: 3000`) and `metrics::tests::in_flight_config_and_user_bash_records_do_not_move_the_anchor` (`left: 100`, `right: 2000`) |
+
+## TK0301: the between-turns anchor (2026-11-01)
+
+Branch `work/TK0301-task-metrics-followups-3`, rework 2. A record the host may write while a
+model call streams moves the anchor when the fold is between turns, because the only request
+there is a `/compact` that writes no record of its own; the next `TurnStarted` restores the
+in-flight exclusion. Each mutation was applied to `src/metrics.rs`, the named tests were run with
+`cargo nextest run -p radian-exec --lib --locked --profile sandbox --no-fail-fast -E
+'test(<name>)'`, and the source was restored from `.radian/metrics-mut.rs.bak`, which `cmp` found
+identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0301-M4 | the in-flight arm ignores `between_turns` and never moves the anchor | ✅ 3 failed (rc=100) | `metrics::tests::a_between_turns_record_moves_the_anchor` (`left: 60000`, `right: 5000`), `metrics::tests::a_range_that_begins_at_a_turn_finished_has_an_anchor` (`left: 11000`, `right: 1000`) and `metrics::tests::a_turn_after_a_between_turns_record_excludes_in_flight_records_again` (`left: 2000`, `right: 1000`) |
+| TK0301-M5 | `TurnStarted` does not clear `between_turns`, so the in-flight exclusion stays off inside the next turn | ✅ 1 failed (rc=100) | `metrics::tests::a_turn_after_a_between_turns_record_excludes_in_flight_records_again` (`left: 1000`, `right: 9000`) |

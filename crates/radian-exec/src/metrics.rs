@@ -37,16 +37,18 @@
 //!   max-tokens notice, or the previous turn's `TurnFinished` (a `/compact` served between
 //!   turns). A response's own records (its assistant `MessageAppended` and its usage record)
 //!   never move it; the usage record closes the request and is itself the anchor of a request
-//!   that follows with no record in between (a `PauseTurn` continuation). The records the host
-//!   may write while a request is in flight (`InboxEnqueued` for a steer or a background-job
-//!   notice, `BackgroundJobSettled`, `ConfigChanged`, `ApprovalPolicyChanged`, `UserBash`) do
-//!   not move it, and the turn's opening records (`MessageAppended`, `InputAdmitted`,
-//!   `MemoryInjected`) do not move its `TurnStarted`. So inside a turn the value is the model's
-//!   whole response time, not the gap between two writes of one response; a between-turns
-//!   `/compact` anchors on the previous turn's `TurnFinished` when no other record that cannot
-//!   be in flight followed it, so its value can span the idle time from the turn's end. A range
-//!   with no `TurnStarted`, usage record or `TurnFinished` before its first request has no
-//!   anchor, so that first `latency_ms` is null.
+//!   that follows with no record in between (a `PauseTurn` continuation). Inside a turn the
+//!   records the host may write while a model call is in flight (`InboxEnqueued` for a steer
+//!   or a background-job notice, `BackgroundJobSettled`, `ConfigChanged`,
+//!   `ApprovalPolicyChanged`, `UserBash`) do not move it, and the turn's opening records
+//!   (`MessageAppended`, `InputAdmitted`, `MemoryInjected`) do not move its `TurnStarted`. So
+//!   inside a turn the value is the model's whole response time, not the gap between two writes
+//!   of one response. Between turns no model call is in flight except a between-turns
+//!   `/compact`, which writes no record of its own, so every record after the turn's
+//!   `TurnFinished` moves the anchor: the compaction is timed from the last record before it
+//!   (the `TurnFinished` when nothing followed), so its value can span the idle time from that
+//!   record. A range with no `TurnStarted`, usage record or `TurnFinished` before its first
+//!   request has no anchor, so that first `latency_ms` is null.
 //!
 //! A counter no record reported is `None` ("not reported", never 0, ADR 0007 J1). `retries`
 //! counts the live `ModelRetrying` events of the folded range (ADR 0010: they are not journal
@@ -305,6 +307,11 @@ struct Folder {
     /// `MemoryInjected`) belong to the turn's opening, so they do not move the anchor: the first
     /// request is timed from its `TurnStarted` (docs/user/cli.md).
     opening: bool,
+    /// Whether the folded range is between turns, as far as its records show. `TurnFinished`
+    /// sets it and the next `TurnStarted` clears it. Until either is seen (a range that began
+    /// mid-turn) it is false, so the records the host may write while a model call streams are
+    /// treated as in flight, the conservative answer.
+    between_turns: bool,
     /// The `ts` of the last record written before the pending request, and not part of the
     /// response being timed. Its event set is named in [`Folder::observe`].
     request_anchor: Option<String>,
@@ -331,6 +338,7 @@ impl Folder {
             previous_ts: None,
             anchor_ready: false,
             opening: false,
+            between_turns: false,
             request_anchor: None,
             pending: HashMap::new(),
             denied_calls: HashSet::new(),
@@ -444,14 +452,17 @@ impl Folder {
             _ => {}
         }
         // The anchor rule and its event set. The anchor is the `ts` of the last journal record
-        // written before the request was sent, so only the records that are written between a
-        // response and the next request may move it; a record the host may write while a
-        // request is already streaming is not before that request and must not move it.
+        // written before the request was sent. Inside a turn only the records written between a
+        // response and the next request may move it; a record the host may write while a model
+        // call is already streaming is not before that request and does not move it. Between
+        // turns the only request is a `/compact` that writes no record of its own, so every
+        // record is before it and moves the anchor.
         match event {
             "TurnStarted" => {
                 // The turn's start is the anchor of its first request.
                 self.anchor_ready = true;
                 self.opening = true;
+                self.between_turns = false;
                 self.request_anchor = ts.map(str::to_owned);
             }
             "ModelUsageRecorded" | "CompactionUsageRecorded" => {
@@ -464,31 +475,38 @@ impl Folder {
                 self.request_anchor = ts.map(str::to_owned);
             }
             // The turn's end. A control request the driver serves between turns (a manual
-            // `/compact`, ADR 0018) writes no record of its own, so the turn's last record
-            // anchors it: this `TurnFinished` when nothing that may be in flight followed. A
-            // record that lands between turns is one the host may also write while that
-            // `/compact` streams (see the in-flight arm below), so it does not move the anchor
-            // and the value spans the idle time from the turn's end. This arm also opens the
-            // anchor for a folded range whose first record is a `TurnFinished`.
+            // `/compact`, ADR 0018) writes no record of its own, so the last record written
+            // before it anchors it: this `TurnFinished` when nothing followed, otherwise the
+            // last record of the in-flight arm below, which moves the anchor between turns.
+            // This arm also opens the anchor for a folded range whose first record is a
+            // `TurnFinished`.
             "TurnFinished" => {
                 self.anchor_ready = true;
                 self.opening = false;
+                self.between_turns = true;
                 self.request_anchor = ts.map(str::to_owned);
             }
             // The response has begun. Its assistant message is the response's own first write
             // and never moves the anchor; the records after it belong to the tool work the
             // next request follows.
             "MessageAppended" if response_message => self.opening = false,
-            // The records the host may write while a request is already streaming: a steer's
-            // or a background-job notice's `InboxEnqueued` (ADR 0037), a `BackgroundJobSettled`,
-            // a `ConfigChanged`, an `ApprovalPolicyChanged` and a `UserBash`. None is known to
-            // be before the pending request (a between-turns `/compact` can be streaming when
-            // one lands too), so none moves the anchor.
+            // The records the host may write while a model call is already streaming: a
+            // steer's or a background-job notice's `InboxEnqueued` (ADR 0037), a
+            // `BackgroundJobSettled`, a `ConfigChanged`, an `ApprovalPolicyChanged` and a
+            // `UserBash`. Inside a turn none of them is known to be before the pending request,
+            // so none moves the anchor. Between turns no model call is in flight except a
+            // between-turns `/compact`, which writes no record of its own, so each is the last
+            // record before that request and moves the anchor; one that lands while the
+            // compaction streams cannot be told apart from one before it.
             "InboxEnqueued"
             | "BackgroundJobSettled"
             | "ConfigChanged"
             | "ApprovalPolicyChanged"
-            | "UserBash" => {}
+            | "UserBash" => {
+                if self.between_turns {
+                    self.move_anchor(ts);
+                }
+            }
             // Every other record is written between two requests: a tool start or settle, a
             // tool-result or steer `MessageAppended`, an `InputAdmitted`, a `MemoryInjected`, a
             // compaction's write sequence, a permission decision, a goal record, a context-file
@@ -2047,9 +2065,10 @@ mod tests {
         );
     }
 
-    /// Every record the host may write while a request streams is excluded, not only the inbox
-    /// and job ones: a `ConfigChanged`, an `ApprovalPolicyChanged` and a `UserBash` landing
-    /// after the tool result must not shorten the response's latency.
+    /// A record the host writes between two requests moves the anchor; the records it may write
+    /// while the next model call is already streaming do not. The 4 s `ContextFileAppended` is
+    /// therefore the anchor, not the 5.8-5.9 s `ConfigChanged`, `ApprovalPolicyChanged` and
+    /// `UserBash`.
     #[test]
     fn in_flight_config_and_user_bash_records_do_not_move_the_anchor() {
         let metrics = fold(&[
@@ -2080,27 +2099,35 @@ mod tests {
                 json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
             ),
             tool_message(6, "2026-10-31T00:00:03Z", "c1"),
+            // The tool read a subtree context file, so its audit record is written before the
+            // next request and moves the anchor.
             record(
                 7,
+                "2026-10-31T00:00:04Z",
+                "ContextFileAppended",
+                json!({"path": "crates/x/AGENTS.md", "bytes": 120, "truncated": false}),
+            ),
+            record(
+                8,
                 "2026-10-31T00:00:05.800000Z",
                 "ConfigChanged",
                 json!({"revision": 1, "change": {"thinking": "high"}}),
             ),
             record(
-                8,
+                9,
                 "2026-10-31T00:00:05.850000Z",
                 "ApprovalPolicyChanged",
                 json!({"policy": "never"}),
             ),
             record(
-                9,
+                10,
                 "2026-10-31T00:00:05.900000Z",
                 "UserBash",
                 json!({"command": "ls", "exclude_from_context": false}),
             ),
             assistant(2, "2026-10-31T00:00:05.950000Z"),
             record(
-                11,
+                12,
                 "2026-10-31T00:00:06Z",
                 "ModelUsageRecorded",
                 json!({"usage": {"input": 20}}),
@@ -2108,13 +2135,15 @@ mod tests {
         ]);
         assert_eq!(metrics.request_log.len(), 2);
         assert_eq!(
-            metrics.request_log[1]["latency_ms"], 3000,
-            "the anchor is the 3 s tool result, not the 5.8-5.9 s host records"
+            metrics.request_log[1]["latency_ms"], 2000,
+            "the anchor is the 4 s ContextFileAppended, not the 5.8-5.9 s host records"
         );
     }
 
     /// A folded range whose first record is a `TurnFinished` (a resume or tee boundary between
-    /// a turn's end and a between-turns `/compact`) still has an anchor: the turn's end.
+    /// a turn's end and a between-turns `/compact`) still has an anchor: the turn's end opens it
+    /// and a record written after it moves it, so the compaction is timed from the last record
+    /// before it.
     #[test]
     fn a_range_that_begins_at_a_turn_finished_has_an_anchor() {
         let metrics = fold(&[
@@ -2124,31 +2153,38 @@ mod tests {
                 "TurnFinished",
                 json!({"turn_id": "t-1", "outcome": "completed"}),
             ),
+            // The user switched thinking while idle, then ran `/compact`.
             record(
                 2,
                 "2026-10-31T00:00:15Z",
-                "CompactionUsageRecorded",
-                json!({"revision": 1, "usage": {"input": 50}}),
+                "ConfigChanged",
+                json!({"revision": 1, "change": {"thinking": "high"}}),
             ),
             record(
                 3,
                 "2026-10-31T00:00:16Z",
+                "CompactionUsageRecorded",
+                json!({"revision": 1, "usage": {"input": 50}}),
+            ),
+            record(
+                4,
+                "2026-10-31T00:00:17Z",
                 "ContextCompacted",
                 json!({"revision": 1}),
             ),
         ]);
         assert_eq!(metrics.request_log.len(), 1);
         assert_eq!(
-            metrics.request_log[0]["latency_ms"], 10000,
-            "the first record is a TurnFinished, so it anchors the compaction"
+            metrics.request_log[0]["latency_ms"], 1000,
+            "the TurnFinished opens the anchor and the 15 s ConfigChanged moves it"
         );
     }
 
-    /// A record that may be written while a request streams does not move the anchor even
-    /// between turns: the between-turns `/compact` it lands during can be streaming too, so the
-    /// value stays measured from the turn's `TurnFinished` and spans the idle time.
+    /// A record that may be written while a model call streams still moves the anchor between
+    /// turns: the only request there is a between-turns `/compact`, which writes no record of its
+    /// own, so the settle is the last record before it.
     #[test]
-    fn a_between_turns_in_flight_record_does_not_move_the_anchor() {
+    fn a_between_turns_record_moves_the_anchor() {
         let metrics = fold(&[
             route_record(0, "2026-10-31T00:00:00Z", "example"),
             record(
@@ -2192,8 +2228,104 @@ mod tests {
         ]);
         assert_eq!(metrics.request_log.len(), 2);
         assert_eq!(
-            metrics.request_log[1]["latency_ms"], 60000,
-            "the anchor is the 5 s TurnFinished, not the 60 s settle"
+            metrics.request_log[1]["latency_ms"], 5000,
+            "the anchor is the 60 s settle, not the 5 s TurnFinished"
+        );
+    }
+
+    /// The next `TurnStarted` ends the between-turns phase, so a record that may be written
+    /// while a model call streams is excluded again inside the new turn.
+    #[test]
+    fn a_turn_after_a_between_turns_record_excludes_in_flight_records_again() {
+        let metrics = fold(&[
+            route_record(0, "2026-10-31T00:00:00Z", "example"),
+            record(
+                1,
+                "2026-10-31T00:00:00Z",
+                "TurnStarted",
+                json!({"turn_id": "t-1"}),
+            ),
+            assistant(2, "2026-10-31T00:00:01Z"),
+            record(
+                3,
+                "2026-10-31T00:00:01Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 10}}),
+            ),
+            record(
+                4,
+                "2026-10-31T00:00:05Z",
+                "TurnFinished",
+                json!({"turn_id": "t-1", "outcome": "completed"}),
+            ),
+            record(
+                5,
+                "2026-10-31T00:00:06Z",
+                "BackgroundJobSettled",
+                json!({"job_id": "job-1", "state": "exited 0"}),
+            ),
+            record(
+                6,
+                "2026-10-31T00:00:07Z",
+                "CompactionUsageRecorded",
+                json!({"revision": 1, "usage": {"input": 20}}),
+            ),
+            record(
+                7,
+                "2026-10-31T00:00:08Z",
+                "ContextCompacted",
+                json!({"revision": 1}),
+            ),
+            record(
+                8,
+                "2026-10-31T00:00:10Z",
+                "TurnStarted",
+                json!({"turn_id": "t-2"}),
+            ),
+            assistant(3, "2026-10-31T00:00:11Z"),
+            record(
+                10,
+                "2026-10-31T00:00:11Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 30}}),
+            ),
+            record(
+                11,
+                "2026-10-31T00:00:11.100000Z",
+                "ToolExecutionStarted",
+                json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            ),
+            record(
+                12,
+                "2026-10-31T00:00:12Z",
+                "ToolExecutionSettled",
+                json!({"call_id": "c1", "result": {"call_id": "c1", "content": []}}),
+            ),
+            tool_message(13, "2026-10-31T00:00:12Z", "c1"),
+            // The job notice lands while the second request streams.
+            record(
+                14,
+                "2026-10-31T00:00:20Z",
+                "InboxEnqueued",
+                json!({"message_id": "m-1", "source": "System", "lane": "next_step"}),
+            ),
+            assistant(4, "2026-10-31T00:00:20.500000Z"),
+            record(
+                16,
+                "2026-10-31T00:00:21Z",
+                "ModelUsageRecorded",
+                json!({"usage": {"input": 40}}),
+            ),
+        ]);
+        assert_eq!(metrics.request_log.len(), 4);
+        assert_eq!(
+            metrics.request_log[1]["latency_ms"], 1000,
+            "the 6 s settle moves the between-turns compaction's anchor"
+        );
+        assert_eq!(metrics.request_log[2]["latency_ms"], 1000);
+        assert_eq!(
+            metrics.request_log[3]["latency_ms"], 9000,
+            "inside the new turn the 20 s notice is in flight, so the anchor is the 12 s tool result"
         );
     }
 }
