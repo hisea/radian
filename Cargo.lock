@@ -3070,6 +3070,7 @@ dependencies = [
  "agent-provider-anthropic",
  "agent-provider-openai-compatible",
  "agent-provider-openai-responses",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "futures-util",

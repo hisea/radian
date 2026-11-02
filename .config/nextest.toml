@@ -71,6 +71,14 @@ test-group = "pty"
 default-filter = """
 not (
     test(=a_bad_mcp_config_leaves_no_session)
+  | test(=a_bad_attachment_names_the_item_and_enqueues_nothing)
+  | test(=a_followup_with_the_owner_token_is_user_with_the_hub_origin)
+  | test(=a_steer_with_the_token_during_a_running_turn_is_a_user_steer)
+  | test(=a_token_file_with_a_trailing_newline_matches_the_token_without_it)
+  | test(=a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin)
+  | test(=an_over_limit_line_gets_an_error_and_the_connection_stays_usable)
+  | test(=attachments_become_the_same_parts_as_the_tui_composer)
+  | test(=without_a_token_file_any_token_stays_scheduler)
   | test(=a_base_url_with_credentials_is_redacted_in_errors)
   | test(=a_budget_exceeded_turn_names_the_limit_and_the_flag)
   | test(=a_cancelled_run_has_no_model_error)

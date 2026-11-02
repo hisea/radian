@@ -2093,3 +2093,24 @@ the file was restored from `.radian/bak/sessions.rs`, which `cmp` found identica
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0302-M1 | `same_directory` compares the two values as raw strings again (no canonicalization) | ✅ 4 failed (rc=100) | `sessions::tests::a_symlinked_workspace_spelling_is_not_a_mismatch`, `sessions::tests::in_workspace_follows_the_symlinked_spelling`, `sessions::tests::list_finds_a_session_recorded_under_a_symlinked_spelling`, `sessions::tests::search_finds_a_session_recorded_under_a_symlinked_spelling` |
+
+## TK0304: the owner token on the control port (2026-11-02)
+
+Branch `work/TK0304-control-token-user-source`. The control tests bind `/tmp` sockets, which the
+workspace sandbox denies, so each mutation was applied in place to
+`crates/radian-host/src/control.rs` and the named test ran outside it with `cargo nextest run -p
+radian-host --test control --locked --no-fail-fast -E 'test(<name>)'`. The source was restored
+from `.radian/control.rs.bak`, which `cmp` found identical after every mutation.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0304-M1 | `input` ignores the token (`let via_hub = false`) | ✅ 1 failed (rc=100) | `a_followup_with_the_owner_token_is_user_with_the_hub_origin` (the enqueue's source stayed `scheduler` and carried no `origin.via`) |
+| TK0304-M2 | `token_matches` accepts a non-empty prefix (`expected.starts_with(provided)`) | ✅ 1 failed (rc=100) | `a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin` (the prefix token `owner` enqueued with `source: "user"` and `via: "hub"`) |
+| TK0304-M3 | `is_owner` grants on the field's presence (any string `token`) | ✅ 2 failed (rc=100) | `without_a_token_file_any_token_stays_scheduler` (no token file, yet `source: "user"`) and `a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin` (a wrong token became the owner) |
+| TK0304-M4 | `parse_attachments` drops `images`/`files` | ✅ 2 failed (rc=100) | `attachments_become_the_same_parts_as_the_tui_composer` (the journal held only the text part) and `a_bad_attachment_names_the_item_and_enqueues_nothing` (the invalid image was accepted) |
+| TK0304-M5 | `read_request_line` never enforces `MAX_REQUEST_BYTES` (both checks short-circuited) | ✅ 1 failed (rc=100) | `an_over_limit_line_gets_an_error_and_the_connection_stays_usable` (the over-limit line was dispatched and answered `ok: true`) |
+
+M1 and M2 are the two the brief names. M3–M5 are the other three behaviours the edge tests pin:
+the missing token file, the attachment path, and the line limit. Edge 8
+(`a_steer_with_the_token_during_a_running_turn_is_a_user_steer`) is caught by M1 as well: with
+the token ignored, the steer's source stayed `scheduler` and it had no `origin.via`.
