@@ -381,6 +381,7 @@ cli: Every radian command, subcommand, flag, and exit code.
 commands: Every slash command, shell command, and what happens while a turn runs.
 configuration: Every configuration key, where the file lives, and how it is checked.
 context-files: Which project direction files load, from where, in which order, and their limits.
+control: The local process control port: its socket, the owner token, every verb and the event stream.
 environment: Every environment variable radian reads, and what each controls.
 extensions: Which extension mechanism fits which need, where each lives, and a first example.
 footer: Shape the status line under the input box: presets, rows, items and command items.
