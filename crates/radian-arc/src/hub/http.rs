@@ -25,6 +25,7 @@
 //! runtime's async threads, so the scheduling loop's threads (ADR 0048 decision 13) are not
 //! blocked by a request.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::fs;
 use std::future::poll_fn;
@@ -1663,13 +1664,31 @@ fn session_events(
         // The first frame is the queue's current state, so a client that subscribes while an
         // approval or question waits learns the head without a transcript re-read. The control
         // port's `pending` verb is blocking socket work, so it runs on a blocking task.
-        let snapshot =
-            match tokio::task::spawn_blocking(move || sessions::pending(&hub, &session)).await {
-                Ok(Ok(snapshot)) => snapshot,
-                // The port went away or refused after the stream opened: end it exactly as a
-                // session whose process goes away ends it.
-                Ok(Err(_)) | Err(_) => return,
-            };
+        let mut read = tokio::task::spawn_blocking(move || sessions::pending(&hub, &session));
+        // The subscription is drained into this buffer while the read is in flight. Left
+        // unread, the fan-out's 64-frame ring would drop the oldest changes of a busy session
+        // before the snapshot could be sent, and the client would never see them.
+        let mut buffered: VecDeque<Bytes> = VecDeque::new();
+        let snapshot = loop {
+            tokio::select! {
+                result = &mut read => break Some(result),
+                event = events.recv() => match event {
+                    Ok(frame) => buffered.push_back(frame),
+                    // The drain above runs as fast as the session emits, so this cannot hide a
+                    // frame of the read's window the way an unread receiver would.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // The session was forgotten while the read was in flight: the stream ends,
+                    // exactly as it does when the process goes away under a live stream.
+                    Err(broadcast::error::RecvError::Closed) => break None,
+                },
+            }
+        };
+        let snapshot = match snapshot {
+            Some(Ok(Ok(snapshot))) => snapshot,
+            // The port went away or refused after the stream opened: end it exactly as a
+            // session whose process goes away ends it.
+            Some(Ok(Err(_)) | Err(_)) | None => return,
+        };
         if sender
             .send(Ok(Frame::data(sessions::pending_frame(&snapshot))))
             .await
@@ -1683,6 +1702,14 @@ fn session_events(
         // means, so the first tick is dropped.
         ticker.tick().await;
         loop {
+            // The frames raised while the snapshot was read follow it, in the order the
+            // session emitted them, before anything newer.
+            if let Some(frame) = buffered.pop_front() {
+                if sender.send(Ok(Frame::data(frame))).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             tokio::select! {
                 event = events.recv() => match event {
                     Ok(frame) => {

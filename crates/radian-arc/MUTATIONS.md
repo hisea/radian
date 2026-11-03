@@ -2433,3 +2433,18 @@ which `cmp` found identical.
 | TK0318-M1 | the stream producer skips the `pending` read and its frame, so a subscriber that opens the stream while a head waits never learns it | `the_first_frame_is_the_waiting_approvals_snapshot`, `an_empty_queue_opens_with_a_null_head_and_zero_length`, `a_live_pending_change_during_the_snapshot_read_follows_it`, `a_reconnect_opens_with_the_snapshot_again`, `a_refused_pending_read_ends_the_stream_instead_of_hanging`, `two_subscribers_each_get_their_own_snapshot` | ✅ 6 failed |
 
 6/6 caught.
+
+## TK0318 rework: the snapshot read drains the fan-out
+
+The stream producer now keeps reading the session's fan-out while the blocking `pending` read is in
+flight, holding every frame in an unbounded buffer that follows the snapshot. The mutation (await
+the read with the receiver unread) was applied by hand to `crates/radian-arc/src/hub/http.rs`, run
+with `cargo nextest run -p radian-arc --test hub_sessions --locked -E
+'test(=a_burst_during_the_snapshot_read_drops_no_live_frame)'`, and restored from
+`.radian/http.rs.bak2`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0318-M2 | the producer awaits the `pending` read with the fan-out receiver unread, so a burst of more than 64 live frames raised during the read overflows the ring and the oldest are dropped | `a_burst_during_the_snapshot_read_drops_no_live_frame` (the first live frame delivered was revision 36, not 0) | ✅ 1 failed |
+
+1/1 caught.

@@ -276,6 +276,13 @@ impl FakePort {
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // macOS gives an accepted socket the listener's non-blocking flag, and
+                        // the listener polls so that `stop` is noticed. A port's own connection
+                        // is blocking: a burst of events waits for the hub's reader instead of
+                        // failing its write with `WouldBlock`.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("the fake connection is blocking");
                         let inner = Arc::clone(&shared);
                         std::thread::spawn(move || serve(stream, inner));
                     }
@@ -1680,6 +1687,54 @@ fn a_live_pending_change_during_the_snapshot_read_follows_it() {
         json!(2),
         "the last pending frame is the port's newest state"
     );
+}
+
+#[test]
+fn a_burst_during_the_snapshot_read_drops_no_live_frame() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-burst");
+    fake.set_queue(
+        json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.hold_pending();
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+    fake.wait_for_pending_read(Instant::now() + Duration::from_secs(30));
+    // The session emits more changes than the fan-out holds while the snapshot read waits:
+    // every one of them has to follow the snapshot, in order, and none may be dropped.
+    const BURST: usize = 100;
+    for n in 0..BURST {
+        fake.push(json!({
+            "source": "runtime",
+            "name": "ConfigChanged",
+            "data": { "revision": n, "change": {} },
+        }));
+    }
+    // Wait until the hub has read every line. Closing the subscription makes it read what the
+    // socket still holds before the EOF, and then subscribe again; the second subscription is
+    // the sign that the whole burst reached the hub while the snapshot read is held.
+    fake.disconnect();
+    eventually(Duration::from_secs(30), || {
+        (fake.subscriptions() >= 2).then_some(())
+    });
+    fake.release_pending();
+
+    let (event, snapshot) = stream
+        .next(Duration::from_secs(20))
+        .expect("the snapshot is still the first frame");
+    assert_eq!(event, "pending");
+    assert_eq!(snapshot["head"]["request_id"], json!(1));
+
+    for n in 0..BURST {
+        let live = stream
+            .next_named("config", Duration::from_secs(20))
+            .unwrap_or_else(|| panic!("live frame {n} of the burst arrives"));
+        assert_eq!(
+            live["revision"],
+            json!(n),
+            "live frame {n} arrives in the order the session emitted it"
+        );
+    }
 }
 
 #[test]

@@ -391,6 +391,7 @@ not (
   | test(=herdr::tests::the_slot_keeps_only_the_latest)
   | test(=herdr::tests::the_slots_keep_the_latest_per_kind_and_the_queue_order)
 
+  | test(=a_burst_during_the_snapshot_read_drops_no_live_frame)
   | test(=a_config_change_in_the_session_arrives_as_one_config_frame)
   | test(=a_dropped_subscription_is_reconnected_and_its_events_still_arrive)
   | test(=a_live_pending_change_during_the_snapshot_read_follows_it)
