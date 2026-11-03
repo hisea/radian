@@ -2458,8 +2458,16 @@ mutation (skip a `Lagged` answer with `continue`) was applied by hand to
 --profile sandbox -E 'test(drain)'`, and restored from `.radian/backup/http.rs`, which `cmp` found
 identical.
 
+The follow-up fix checks the receiver before it accepts the read's answer, so a lag that already
+happened cannot be hidden by the read winning the same poll. That mutation (accept the read's
+answer without probing the receiver) was applied by hand to `crates/radian-arc/src/hub/http.rs`,
+run with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E
+'test(a_finished_read_does_not_hide_a_lag)'`, and restored from
+`.radian/backup-tk0319/http.rs`, which `cmp` found identical.
+
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0319-M1 | the drain skips a `Lagged` answer (`continue`) instead of reporting it, so the frames the ring dropped are silently missing from its buffer | `hub::http::tests::a_drain_that_falls_behind_the_ring_reports_the_lag` (the drain answered `Read` with the two frames the ring still held) | ✅ 1 failed |
+| TK0319-M3 | the drain accepts the read's answer without probing the receiver, so a lag already in the ring is hidden by the snapshot | `hub::http::tests::a_finished_read_does_not_hide_a_lag_that_already_happened` (round 0 answered `Read` with the ring three frames past its capacity) | ✅ 1 failed |
 
-1/1 caught.
+2/2 caught.

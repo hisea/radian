@@ -1757,7 +1757,9 @@ enum SnapshotDrain<T> {
 /// on its own and can emit more than the ring's capacity between a `recv` that returns
 /// `Pending` and this task's next poll, so a `Lagged` answer is reported, never skipped: the
 /// caller ends the stream, and the client re-reads the transcript instead of following a stream
-/// with a silent hole in it.
+/// with a silent hole in it. A lag that happened before the read answered is reported too: the
+/// receiver's state is checked before the read's answer is accepted, because the two can become
+/// ready in the same poll and no branch order may let the snapshot hide the lost frames.
 async fn drain_snapshot<T, F>(
     events: &mut broadcast::Receiver<Bytes>,
     read: &mut F,
@@ -1768,7 +1770,30 @@ where
     let mut buffered = VecDeque::new();
     loop {
         tokio::select! {
-            result = &mut *read => return (SnapshotDrain::Read(result), buffered),
+            // The read is polled first, so a read that answers in the same turn in which the
+            // fan-out has a `Lagged` answer ready cannot be hidden behind the order in which
+            // `select!` polls ready branches. The receiver is still checked below before the
+            // answer is accepted: `select!` alone cannot decide whether lost frames are
+            // reported, because an unbiased `select!` picks either ready branch.
+            biased;
+            result = &mut *read => {
+                // `Lagged` is answered before the frames the ring still holds, so one probe
+                // of the receiver tells whether frames of the read's window were already
+                // dropped. The probe is not a wait: the read has answered, so every frame
+                // it copied or that the ring still holds follows the snapshot as an
+                // ordinary live frame.
+                match events.try_recv() {
+                    Ok(frame) => buffered.push_back(frame),
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                        return (SnapshotDrain::Lagged, buffered);
+                    }
+                    Err(broadcast::error::TryRecvError::Closed) => {
+                        return (SnapshotDrain::Closed, buffered);
+                    }
+                    Err(broadcast::error::TryRecvError::Empty) => {}
+                }
+                return (SnapshotDrain::Read(result), buffered);
+            }
             event = events.recv() => match event {
                 Ok(frame) => buffered.push_back(frame),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -2159,6 +2184,39 @@ mod tests {
                 matches!(drained, SnapshotDrain::Lagged),
                 "a drain that fell behind the ring reports it instead of skipping frames"
             );
+        });
+    }
+
+    /// The trigger: the read answers in the same poll in which the fan-out already has a
+    /// `Lagged` answer ready, because the subscription thread emitted more frames than the ring
+    /// holds while this task was not polled. The read used to win that poll and the stream went
+    /// on with the snapshot and the ring's retained tail; the lag must be reported instead.
+    ///
+    /// `select!` picks a ready branch at random, so one round proves nothing: every round has
+    /// both branches ready, and the old behavior needs only one round that chose the read.
+    #[test]
+    fn a_finished_read_does_not_hide_a_lag_that_already_happened() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            for round in 0..64 {
+                let (sender, mut events) = broadcast::channel(2);
+                for n in 0..5 {
+                    sender
+                        .send(Bytes::from(format!("frame {n}")))
+                        .expect("the drain's subscription is open");
+                }
+                // The read is ready before the drain's first poll, so both branches are ready
+                // at once and the ring is already three frames past its capacity.
+                let mut read = Box::pin(std::future::ready("snapshot"));
+                let (drained, _buffered) = drain_snapshot(&mut events, &mut read).await;
+                assert!(
+                    matches!(drained, SnapshotDrain::Lagged),
+                    "round {round}: a read that answers after the ring fell behind reports the lag"
+                );
+            }
         });
     }
 
