@@ -2448,3 +2448,18 @@ with `cargo nextest run -p radian-arc --test hub_sessions --locked -E
 | TK0318-M2 | the producer awaits the `pending` read with the fan-out receiver unread, so a burst of more than 64 live frames raised during the read overflows the ring and the oldest are dropped | `a_burst_during_the_snapshot_read_drops_no_live_frame` (the first live frame delivered was revision 36, not 0) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0319: the snapshot drain reports a fan-out lag
+
+The drain now reports a `Lagged` answer instead of skipping it, so a stream that fell more than the
+fan-out's ring behind ends and the client re-reads, rather than continuing with a silent hole. The
+mutation (skip a `Lagged` answer with `continue`) was applied by hand to
+`crates/radian-arc/src/hub/http.rs`, run with `cargo nextest run -p radian-arc --lib --locked
+--profile sandbox -E 'test(drain)'`, and restored from `.radian/backup/http.rs`, which `cmp` found
+identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0319-M1 | the drain skips a `Lagged` answer (`continue`) instead of reporting it, so the frames the ring dropped are silently missing from its buffer | `hub::http::tests::a_drain_that_falls_behind_the_ring_reports_the_lag` (the drain answered `Read` with the two frames the ring still held) | ✅ 1 failed |
+
+1/1 caught.

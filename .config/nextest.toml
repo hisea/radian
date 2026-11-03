@@ -66,7 +66,7 @@ test-group = "pty"
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
 #
-# 6. The hub's session surface (15 names). Each test binds a fake control socket at
+# 6. The hub's session surface (22 names). Each test binds a fake control socket at
 #    `<home>/run/<pid>.sock`, so its home must be short enough for `sun_path`: `/tmp`
 #    is the only writable base that short, and the sandbox denies it (group 1),
 #    while `$TMPDIR` inside the workspace is too long (group 5). The routes these

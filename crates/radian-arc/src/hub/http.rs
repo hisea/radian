@@ -1668,26 +1668,19 @@ fn session_events(
         // The subscription is drained into this buffer while the read is in flight. Left
         // unread, the fan-out's 64-frame ring would drop the oldest changes of a busy session
         // before the snapshot could be sent, and the client would never see them.
-        let mut buffered: VecDeque<Bytes> = VecDeque::new();
-        let snapshot = loop {
-            tokio::select! {
-                result = &mut read => break Some(result),
-                event = events.recv() => match event {
-                    Ok(frame) => buffered.push_back(frame),
-                    // The drain above runs as fast as the session emits, so this cannot hide a
-                    // frame of the read's window the way an unread receiver would.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    // The session was forgotten while the read was in flight: the stream ends,
-                    // exactly as it does when the process goes away under a live stream.
-                    Err(broadcast::error::RecvError::Closed) => break None,
-                },
-            }
-        };
-        let snapshot = match snapshot {
-            Some(Ok(Ok(snapshot))) => snapshot,
+        let (drained, mut buffered) = drain_snapshot(&mut events, &mut read).await;
+        let snapshot = match drained {
+            SnapshotDrain::Read(Ok(Ok(snapshot))) => snapshot,
             // The port went away or refused after the stream opened: end it exactly as a
             // session whose process goes away ends it.
-            Some(Ok(Err(_)) | Err(_)) | None => return,
+            SnapshotDrain::Read(Ok(Err(_)) | Err(_)) => return,
+            // The session was forgotten while the read was in flight: the stream ends too.
+            SnapshotDrain::Closed => return,
+            // The drain fell behind the fan-out's ring, so it never copied some live frames
+            // of the read's window and they are unrecoverable. Ending the stream is how the
+            // client is told: it reconnects and re-reads the transcript, the stream's rule,
+            // rather than following a stream with a silent hole in it.
+            SnapshotDrain::Lagged => return,
         };
         if sender
             .send(Ok(Frame::data(sessions::pending_frame(&snapshot))))
@@ -1717,8 +1710,12 @@ fn session_events(
                             return;
                         }
                     }
-                    // The client fell behind: it re-reads the transcript, which is the rule.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // The fan-out's ring overflowed: this task fell more than 64 frames
+                    // behind (a slow client blocks the send below) and the missed frames are
+                    // unrecoverable. Ending the stream is how the client is told, so it
+                    // reconnects and re-reads the transcript instead of following a stream
+                    // with a silent hole in it.
+                    Err(broadcast::error::RecvError::Lagged(_)) => return,
                     // The session was forgotten: the stream ends.
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
@@ -1740,6 +1737,49 @@ fn session_events(
         .header(CACHE_CONTROL, "no-cache")
         .body(ResponseBody::Stream(receiver))
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "no body"))
+}
+
+/// What the drain found while the session event stream's snapshot read was in flight.
+enum SnapshotDrain<T> {
+    /// The blocking read answered.
+    Read(T),
+    /// The session was forgotten while the read was in flight.
+    Closed,
+    /// The drain fell more than the fan-out's ring behind, so live frames of the read's window
+    /// were dropped before it copied them. They cannot be recovered.
+    Lagged,
+}
+
+/// Drains the session's live fan-out into a buffer until the snapshot `read` answers, the
+/// session closes, or the drain falls behind the fan-out's ring.
+///
+/// The drain outruns the fan-out only while this task is polled. The subscription thread runs
+/// on its own and can emit more than the ring's capacity between a `recv` that returns
+/// `Pending` and this task's next poll, so a `Lagged` answer is reported, never skipped: the
+/// caller ends the stream, and the client re-reads the transcript instead of following a stream
+/// with a silent hole in it.
+async fn drain_snapshot<T, F>(
+    events: &mut broadcast::Receiver<Bytes>,
+    read: &mut F,
+) -> (SnapshotDrain<T>, VecDeque<Bytes>)
+where
+    F: std::future::Future<Output = T> + Unpin,
+{
+    let mut buffered = VecDeque::new();
+    loop {
+        tokio::select! {
+            result = &mut *read => return (SnapshotDrain::Read(result), buffered),
+            event = events.recv() => match event {
+                Ok(frame) => buffered.push_back(frame),
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    return (SnapshotDrain::Lagged, buffered);
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return (SnapshotDrain::Closed, buffered);
+                }
+            },
+        }
+    }
 }
 
 /// `GET /v1/repos/<name>/items/<task>/conversation`: one attempt's `result.jsonl` folded with
@@ -2054,6 +2094,72 @@ mod tests {
             spawned.load(std::sync::atomic::Ordering::SeqCst),
             "the spawned stream task ran"
         );
+    }
+
+    /// The drain copies every live frame the ring still holds, in emission order, before the
+    /// snapshot read's answer.
+    #[test]
+    fn a_drain_within_the_ring_buffers_every_frame_in_order() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let (sender, mut events) = broadcast::channel(64);
+            for n in 0..5 {
+                sender
+                    .send(Bytes::from(format!("frame {n}")))
+                    .expect("the drain's subscription is open");
+            }
+            // The read answers only after the frames above had a chance to be drained.
+            let mut read = Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "snapshot"
+            });
+            let (drained, buffered) = drain_snapshot(&mut events, &mut read).await;
+            assert!(matches!(drained, SnapshotDrain::Read("snapshot")));
+            let frames: Vec<String> = buffered
+                .into_iter()
+                .map(|frame| String::from_utf8_lossy(&frame).into_owned())
+                .collect();
+            assert_eq!(
+                frames,
+                ["frame 0", "frame 1", "frame 2", "frame 3", "frame 4"],
+                "every buffered frame reaches the client, in emission order"
+            );
+        });
+    }
+
+    /// The trigger: the subscription thread emits more frames than the fan-out's ring holds
+    /// before this task is polled again. The drain must report the lag, so the caller ends the
+    /// stream and the client re-reads, rather than returning the frames it still holds as if
+    /// nothing were missing.
+    #[test]
+    fn a_drain_that_falls_behind_the_ring_reports_the_lag() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        runtime.block_on(async {
+            let (sender, mut events) = broadcast::channel(2);
+            for n in 0..5 {
+                sender
+                    .send(Bytes::from(format!("frame {n}")))
+                    .expect("the drain's subscription is open");
+            }
+            // The read answers only after the drain had a chance to copy what the ring still
+            // holds: on the old skip-and-continue behavior the drain returns here, with the
+            // dropped frames silently missing from its buffer.
+            let mut read = Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "snapshot"
+            });
+            let (drained, _buffered) = drain_snapshot(&mut events, &mut read).await;
+            assert!(
+                matches!(drained, SnapshotDrain::Lagged),
+                "a drain that fell behind the ring reports it instead of skipping frames"
+            );
+        });
     }
 
     /// A relative `--config` names the file the hub read, not a file beside the child's

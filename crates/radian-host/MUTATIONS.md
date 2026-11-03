@@ -2255,3 +2255,17 @@ restored from `.radian/config.mod.rs.bak`, which `cmp` found identical.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0315-M1 | `parse_hub` drops the `bind` arm, so `hub.bind` is an unknown key that is skipped (the pre-change behavior) | ✅ 3 failed, 1 timed out | `config::tests::hub_bind_is_an_ip_address`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the hub bound `127.0.0.1`), `hub_http::an_ipv6_loopback_bind_prints_the_bracketed_address` (the same), and `hub_http::a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds` (the hub started and the run timed out) |
+
+## TK0319: the sandbox profile's cause comments count their groups
+
+The `sandbox` profile lists test names in cause groups whose comments state each group's count.
+The mutation (restore the group-6 comment's old count of 15 while the group lists 22 names) was
+applied by hand to `.config/nextest.toml`, run with `cargo nextest run -p radian-host --test
+nextest_profile --locked --profile sandbox -E 'test(the_cause_comments_count_their_groups)'`, and
+restored from `.radian/backup/nextest.toml`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0319-M2 | cause group 6's comment keeps its old count (`(15 names)`) while the group lists 22 exact names | ✅ 1 failed (rc=100) | `the_cause_comments_count_their_groups` (cause group 6's comment says 15 names but it lists 22) |
+
+1/1 caught.

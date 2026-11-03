@@ -26,21 +26,26 @@ fn config() -> toml::Value {
     toml::from_str(&text).unwrap_or_else(|error| panic!("{} is not TOML: {error}", path.display()))
 }
 
-/// Every `test(=name)` leaf in `profile.sandbox.default-filter`.
-fn excluded_names() -> Vec<String> {
-    let doc = config();
-    let filter = doc
+/// `profile.sandbox.default-filter` as its TOML string.
+fn sandbox_filter() -> String {
+    config()
         .get("profile")
         .and_then(|profile| profile.get(PROFILE))
         .and_then(|profile| profile.get("default-filter"))
         .and_then(toml::Value::as_str)
-        .unwrap_or_else(|| panic!("profile.{PROFILE}.default-filter is missing"));
+        .unwrap_or_else(|| panic!("profile.{PROFILE}.default-filter is missing"))
+        .to_owned()
+}
+
+/// Every `test(=name)` leaf in `profile.sandbox.default-filter`.
+fn excluded_names() -> Vec<String> {
+    let filter = sandbox_filter();
     assert!(
         filter.trim_start().starts_with("not ("),
         "profile.{PROFILE}.default-filter must be one `not (...)` expression:\n{filter}"
     );
     let mut names = Vec::new();
-    let mut rest = filter;
+    let mut rest = filter.as_str();
     while let Some(start) = rest.find("test(") {
         let after = &rest[start + "test(".len()..];
         let end = after
@@ -220,6 +225,56 @@ fn every_sandbox_exclusion_names_a_test() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Every cause-group comment's "(N names)" counts that group's selections. The counts are
+/// prose, so without this check a group can grow or shrink and the comment still lies.
+#[test]
+fn the_cause_comments_count_their_groups() {
+    let text = std::fs::read_to_string(workspace_root().join(".config/nextest.toml"))
+        .expect("the nextest profile reads");
+    let groups: Vec<usize> = sandbox_filter()
+        .split("\n\n")
+        .map(|group| group.matches("test(").count())
+        .filter(|count| *count > 0)
+        .collect();
+    let mut comments: Vec<(usize, usize)> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("# ") else {
+            continue;
+        };
+        let Some((ordinal, rest)) = rest.split_once(". ") else {
+            continue;
+        };
+        let Ok(ordinal) = ordinal.trim().parse::<usize>() else {
+            continue;
+        };
+        let Some(at) = rest.find(" names)") else {
+            continue;
+        };
+        let before = &rest[..at];
+        let start = before.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        let Ok(count) = before[start..].parse::<usize>() else {
+            continue;
+        };
+        comments.push((ordinal, count));
+    }
+    assert_eq!(
+        comments.len(),
+        groups.len(),
+        "every cause group has one numbered comment carrying its count"
+    );
+    for (index, ((ordinal, count), group)) in comments.iter().zip(&groups).enumerate() {
+        assert_eq!(
+            *ordinal,
+            index + 1,
+            "the cause comments are numbered in order"
+        );
+        assert_eq!(
+            count, group,
+            "cause group {ordinal}'s comment says {count} names but it lists {group}"
+        );
+    }
 }
 
 /// The default profile still runs every test outside the sandbox (ADR 0048 §7: this is not a
