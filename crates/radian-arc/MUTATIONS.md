@@ -2358,18 +2358,6 @@ sandbox (which denies socket connects), and restored from `.radian/sessions.rs.b
 
 1/1 caught.
 
-## TK0315: `hub.bind` and its non-loopback warning
-
-The hub binds `<[hub] bind>:<[hub] port>` and prints one warning on stderr when the address is
-not loopback. The parse mutation was applied by hand to `crates/radian-host/src/config/mod.rs`
-and the warning mutation to `crates/radian-arc/src/hub/http.rs`; each was run with `cargo
-nextest run` after rebuilding `radian`, and restored from `.radian/config.mod.rs.bak` and
-`.radian/http.rs.bak`, which `cmp` found identical.
-
-| # | Mutation | Caught by | Result |
-|---|---|---|---|
-| TK0315-M1 | `parse_hub` drops the `bind` arm, so `hub.bind` is an unknown key that is skipped (the pre-change behavior) | `config::tests::hub_bind_is_an_ip_address`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the hub bound `127.0.0.1`), `hub_http::an_ipv6_loopback_bind_prints_the_bracketed_address` (the same), and `hub_http::a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds` (the hub started and the run timed out) | ✅ 3 failed, 1 timed out |
-| TK0315-M2 | `bind_warning` always returns `None`, so a non-loopback bind prints no warning | `hub::http::tests::a_non_loopback_bind_has_one_warning_and_loopback_has_none`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the warning never arrived) | ✅ 2 failed |
 ## TK0314: the hub-session review follow-ups (2026-11-02, branch `work/TK0314-hub-sessions-followups`)
 
 Each mutation was applied in place and restored from a copy under `.radian/bak/` that `cmp`
@@ -2383,6 +2371,20 @@ found identical. M5-M7 ran inside the workspace sandbox; M8's strengthened hook 
 | TK0314-M8 | the timeout path kills only the shell (`child.kill()`) instead of the process group (`kill_group(pid)`) | `hub::hooks::tests::a_command_past_its_timeout_is_killed_and_logged` (the background `sleep` child stayed alive) | ✅ 1 failed |
 
 4/4 caught.
+
+## TK0315: `hub.bind` and its non-loopback warning
+
+The hub binds `<[hub] bind>:<[hub] port>` and prints one warning on stderr when the address is
+not loopback. The warning mutation was applied by hand to `crates/radian-arc/src/hub/http.rs`, run
+with `cargo nextest run` after rebuilding `radian`, and restored from `.radian/http.rs.bak`,
+which `cmp` found identical. The parser mutation is in `crates/radian-host/src/config/mod.rs`, so
+its row is in `crates/radian-host/MUTATIONS.md`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0315-M2 | `bind_warning` always returns `None`, so a non-loopback bind prints no warning | `hub::http::tests::a_non_loopback_bind_has_one_warning_and_loopback_has_none`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the warning never arrived) | ✅ 2 failed |
+
+1/1 caught.
 
 ## TK0316: the pairing URL
 
@@ -2403,3 +2405,17 @@ The rework's two mutations (M3, M4) were applied the same way and restored from
 | TK0316-M4 | `is_absolute_http_url` checks only the `http://`/`https://` prefix instead of parsing, so `http://[not-an-ip]/` and `https://example.test/%zz` reach the QR code | `hub::http::tests::a_url_flag_that_is_not_an_absolute_http_url_is_a_usage_error` | ✅ 1 failed |
 
 4/4 caught.
+
+## TK0317: the pairing URL's trailing-slash rule follows the path (2026-11-02, branch `work/TK0317-hub-bind-and-pair-url-followups`)
+
+`--url` drops a `/` at the end of the path, and keeps one that ends a query or a fragment. The
+mutation restores the pre-fix `strip_suffix` and was applied by hand to
+`crates/radian-arc/src/hub/http.rs`, run with `cargo nextest run -p radian-arc --lib --locked
+--profile sandbox -E 'test(<name>)'`, and restored from `.radian/http.rs.tk0317.bak`, which `cmp`
+found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0317-M1 | `pairing_url` strips a trailing `/` whatever follows it (`url.strip_suffix('/')`), so a query or fragment value loses its last slash | `hub::http::tests::a_url_flag_keeps_a_slash_that_ends_a_query_or_fragment` (the `?next=/` value lost its slash) | ✅ 1 failed |
+
+1/1 caught.

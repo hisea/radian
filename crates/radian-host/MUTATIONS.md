@@ -2244,3 +2244,14 @@ which `cmp` found identical.
 | TK0314-M9 | a row that reports no journal is not the holder (`None => false` instead of the id fallback) | ✅ 1 failed (rc=100) | `control::tests::a_row_without_a_journal_is_matched_by_the_session_id` (a row with no `journal` field no longer matched its id) |
 
 1/1 caught.
+
+## TK0315: `hub.bind`'s parser carries an IP address (2026-11-02, branch `work/TK0315-hub-bind-key`)
+
+`[hub] bind` is parsed in `crates/radian-host/src/config/mod.rs`, so the row is here; the hub's
+startup tests that catch the missing key are `crates/radian-arc/tests/hub_http.rs`. The mutation
+was applied by hand to `parse_hub`, the named tests ran after rebuilding `radian`, and the file was
+restored from `.radian/config.mod.rs.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0315-M1 | `parse_hub` drops the `bind` arm, so `hub.bind` is an unknown key that is skipped (the pre-change behavior) | ✅ 3 failed, 1 timed out | `config::tests::hub_bind_is_an_ip_address`; `hub_http::a_wildcard_bind_answers_on_loopback_and_a_local_address_with_one_warning` (the hub bound `127.0.0.1`), `hub_http::an_ipv6_loopback_bind_prints_the_bracketed_address` (the same), and `hub_http::a_bind_that_is_not_an_ip_address_is_a_configuration_error_and_nothing_binds` (the hub started and the run timed out) |
