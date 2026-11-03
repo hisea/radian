@@ -567,7 +567,8 @@ fn interface_addresses() -> Vec<LanCandidate> {
 }
 
 /// Checks a `--url` value (ADR 0048 §16): an absolute `http` or `https` URL with a host,
-/// minus a trailing `/`.
+/// minus a trailing `/` of its path. A `/` that ends a query or a fragment is part of that
+/// value and stays.
 ///
 /// # Errors
 ///
@@ -578,7 +579,13 @@ fn pairing_url(url: &str) -> Result<String, Error> {
             "--url must be an absolute http or https URL with a host: {url:?}"
         )));
     }
-    Ok(url.strip_suffix('/').unwrap_or(url).to_owned())
+    // The WHATWG parser has validated the URL, so a `?` or a `#` in the text starts a query or
+    // a fragment: a `/` at the end there is a value, not the path's spelling.
+    Ok(if url.ends_with('/') && !url.contains(['?', '#']) {
+        url[..url.len() - 1].to_owned()
+    } else {
+        url.to_owned()
+    })
 }
 
 /// Whether `url` parses as an absolute `http` or `https` URL with a host. The `url` crate
@@ -2090,6 +2097,27 @@ mod tests {
             vec!["http://127.0.0.1:7341".to_owned()],
             "a URL that is not loopback lists the other addresses"
         );
+    }
+
+    #[test]
+    fn a_url_flag_keeps_a_slash_that_ends_a_query_or_fragment() {
+        for url in [
+            "https://mac.example.ts.net/?next=/",
+            "https://mac.example.ts.net/#a/",
+            "https://mac.example.ts.net/hub/?x=/",
+            "https://mac.example.ts.net/hub/#/",
+        ] {
+            let chosen = pairing(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341, Some(url), &[]).expect(url);
+            assert_eq!(chosen.url, url, "a query or fragment value keeps its slash");
+        }
+        let path = pairing(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            7341,
+            Some("https://mac.example.ts.net/hub/"),
+            &[],
+        )
+        .expect("an absolute https URL with a host");
+        assert_eq!(path.url, "https://mac.example.ts.net/hub");
     }
 
     #[test]

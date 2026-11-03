@@ -87,7 +87,7 @@ When the URL's host is not a loopback address, one `other: <url>` line follows t
 
 | Flag | Value | Default | What it does |
 |---|---|---|---|
-| `--url` | `URL` | — | The URL the first line and the QR code carry. It must parse as an absolute `http` or `https` URL with a host; anything else, such as a malformed IPv6 literal or an invalid `%` escape, is a usage error that names `--url` (exit `2`). A trailing `/` is dropped. |
+| `--url` | `URL` | — | The URL the first line and the QR code carry. It must parse as an absolute `http` or `https` URL with a host; anything else, such as a malformed IPv6 literal or an invalid `%` escape, is a usage error that names `--url` (exit `2`). A trailing `/` is dropped from the path; a `/` that ends a query or a fragment is kept. |
 | `--no-qr` | a flag | off | Print the text lines without the QR code, even on a terminal. |
 
 `tailscale serve` is the encrypted way to reach a hub from a phone on the tailnet: it serves the hub's loopback port under the machine's HTTPS name, and `--url` puts that name in the QR code.
