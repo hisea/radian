@@ -1629,11 +1629,12 @@ fn session_models(
 }
 
 /// `GET /v1/repos/<name>/sessions/<id>/events`: the session's event stream, fed by the hub's
-/// own long-lived subscription. Like `/v1/events` it never replays: a client that reconnects
-/// first re-reads the transcript.
+/// own long-lived subscription. It opens with one `pending` frame holding the queue's current
+/// state, then follows live changes. Like `/v1/events` it never replays entries: a client that
+/// reconnects first re-reads the transcript.
 fn session_events(
     registry: &Registry,
-    sessions: &SessionHub,
+    sessions: &Arc<SessionHub>,
     name: &str,
     id: &str,
 ) -> Response<ResponseBody> {
@@ -1649,12 +1650,33 @@ fn session_events(
             "session {id:?} is not live: no process hosts it"
         )));
     };
+    // Subscribe before the snapshot read, so a live frame raised during the read is buffered in
+    // this receiver and can be flushed after the snapshot rather than lost or sent first.
     let mut events = source.subscribe();
     let (sender, receiver) = mpsc::channel(EVENT_QUEUE);
     // The stream's producer is an async task: it moves frames from the subscription's fan-out
     // to the connection and writes a keep-alive while nothing happens. It does no blocking IO,
     // so the runtime's threads are free for other requests.
+    let hub = Arc::clone(sessions);
+    let session = id.to_owned();
     tokio::spawn(async move {
+        // The first frame is the queue's current state, so a client that subscribes while an
+        // approval or question waits learns the head without a transcript re-read. The control
+        // port's `pending` verb is blocking socket work, so it runs on a blocking task.
+        let snapshot =
+            match tokio::task::spawn_blocking(move || sessions::pending(&hub, &session)).await {
+                Ok(Ok(snapshot)) => snapshot,
+                // The port went away or refused after the stream opened: end it exactly as a
+                // session whose process goes away ends it.
+                Ok(Err(_)) | Err(_) => return,
+            };
+        if sender
+            .send(Ok(Frame::data(sessions::pending_frame(&snapshot))))
+            .await
+            .is_err()
+        {
+            return;
+        }
         let mut ticker = tokio::time::interval(event_keep_alive_interval());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // `interval` fires once at once; a keep-alive at the start is not what the stream

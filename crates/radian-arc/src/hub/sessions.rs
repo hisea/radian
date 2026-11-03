@@ -26,8 +26,8 @@
 //! **Threads.** The scan, every probe and every subscription is blocking socket and file work on
 //! an OS thread of its own, never on the HTTP runtime's async threads (the rule the scheduling
 //! loops follow, ADR 0048 decision 16). A socket that accepts and never answers therefore
-//! delays no request: only the two routes that name one session's port talk to it, and they run
-//! on `spawn_blocking`.
+//! delays no request: the routes that name one session's port talk to it on `spawn_blocking`,
+//! and the event stream reads the queue snapshot on a blocking task of its own.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1011,6 +1011,32 @@ pub fn models(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
     Ok(json!({
         "models": answer.get("models").cloned().unwrap_or(Value::Array(Vec::new())),
     }))
+}
+
+/// The session event stream's first frame: the control port's `pending` answer reduced to the
+/// queue's current state, `{"head", "length"}`, the same shape a live `pending` frame carries.
+/// It is read after the hub has subscribed to the session's live events, so a change raised
+/// while the read is in flight stays buffered behind the snapshot.
+///
+/// # Errors
+///
+/// [`SessionError::NotLive`] when no process hosts the session, [`SessionError::Port`] when its
+/// port fails, and the route's refusal mapping for an error line.
+pub fn pending(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
+    let Some((socket, _)) = hub.live(id) else {
+        return Err(ended(id));
+    };
+    let answer = call_live(hub, id, &socket, &json!({ "id": 1, "verb": "pending" }))?;
+    Ok(json!({
+        "head": answer.get("head").cloned().unwrap_or(Value::Null),
+        "length": answer.get("length").cloned().unwrap_or_else(|| json!(0)),
+    }))
+}
+
+/// The snapshot frame a session event stream opens with.
+#[must_use]
+pub fn pending_frame(data: &Value) -> Bytes {
+    frame("pending", data)
 }
 
 // ---- the write routes ---------------------------------------------------------------------

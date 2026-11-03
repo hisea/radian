@@ -15,7 +15,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{Repo, radian_bin, write};
@@ -198,6 +198,60 @@ struct FakeInner {
     /// How many of the next `list_sessions` probes wait past the hub's probe timeout before they
     /// answer, the shape of a process too busy to answer in time.
     silent_probes: AtomicUsize,
+    /// The queue state the `pending` verb answers, `{"head", "length"}`, or `{"error": text}`
+    /// to refuse it. Tests change it while a snapshot read is in flight.
+    queue: Mutex<Value>,
+    /// How many `pending` requests the port answered (or held and answered).
+    pending_reads: AtomicUsize,
+    /// Holds the next `pending` answer until the test releases it.
+    gate: PendingGate,
+}
+
+/// Holds one `pending` answer so a test can change the queue while the snapshot read is in
+/// flight. The answer copies the state, marks `started`, then waits for `open`.
+#[derive(Default)]
+struct PendingGate {
+    held: AtomicBool,
+    started: AtomicBool,
+    open: AtomicBool,
+    lock: Mutex<()>,
+    wake: Condvar,
+}
+
+impl PendingGate {
+    /// Holds the next `pending` answer.
+    fn hold(&self) {
+        self.held.store(true, Ordering::SeqCst);
+        self.started.store(false, Ordering::SeqCst);
+        self.open.store(false, Ordering::SeqCst);
+    }
+
+    /// Waits until the held answer has copied the queue state.
+    fn wait_started(&self, deadline: Instant) {
+        while !self.started.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "no held pending read started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Lets the held answer go.
+    fn release(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.wake.notify_all();
+    }
+
+    /// Called by the answer after it copied the state: waits for `release` when held.
+    fn wait_if_held(&self) {
+        if !self.held.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        self.started.store(true, Ordering::SeqCst);
+        let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !self.open.load(Ordering::SeqCst) {
+            guard = self.wake.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 /// A control socket at `<run dir>/<pid>.sock` that speaks the protocol the hub uses.
@@ -264,6 +318,36 @@ impl FakePort {
         self.inner.silent_probes.store(count, Ordering::SeqCst);
     }
 
+    /// Sets the queue state the `pending` verb answers.
+    fn set_queue(&self, head: Value, length: u64) {
+        *self.inner.queue.lock().unwrap_or_else(|e| e.into_inner()) =
+            json!({ "head": head, "length": length });
+    }
+
+    /// Makes the `pending` verb answer an error line.
+    fn set_queue_error(&self, message: &str) {
+        *self.inner.queue.lock().unwrap_or_else(|e| e.into_inner()) = json!({ "error": message });
+    }
+
+    fn pending_reads(&self) -> usize {
+        self.inner.pending_reads.load(Ordering::SeqCst)
+    }
+
+    /// Holds the next `pending` answer until [`FakePort::release_pending`].
+    fn hold_pending(&self) {
+        self.inner.gate.hold();
+    }
+
+    /// Waits until the held answer has copied the queue state.
+    fn wait_for_pending_read(&self, deadline: Instant) {
+        self.inner.gate.wait_started(deadline);
+    }
+
+    /// Lets the held answer go.
+    fn release_pending(&self) {
+        self.inner.gate.release();
+    }
+
     /// Waits for the hub's subscription, so a pushed line is not lost before the hub follows.
     fn wait_for_subscription(&self, deadline: Instant) {
         while self.subscriptions() == 0 {
@@ -323,6 +407,26 @@ fn serve(mut stream: UnixStream, inner: Arc<FakeInner>) {
                 "models": [{ "id": inner.model, "current": true }],
             }],
         })),
+        Some("pending") => {
+            // Copy the queue state first, then (when held) wait, so a test that changes the
+            // queue during the read sees the snapshot keep the old state.
+            let state = inner
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            inner.pending_reads.fetch_add(1, Ordering::SeqCst);
+            inner.gate.wait_if_held();
+            match state.get("error").and_then(Value::as_str) {
+                Some(error) => answer(json!({ "id": 1, "ok": false, "error": error })),
+                None => answer(json!({
+                    "id": 1,
+                    "ok": true,
+                    "head": state.get("head").cloned().unwrap_or(Value::Null),
+                    "length": state.get("length").cloned().unwrap_or_else(|| json!(0)),
+                })),
+            }
+        }
         Some("subscribe") => {
             answer(json!({ "id": 1, "ok": true }));
             let (sender, receiver) = std::sync::mpsc::channel::<String>();
@@ -960,6 +1064,9 @@ fn a_socket_whose_process_died_is_dropped_on_the_next_scan() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1117,6 +1224,9 @@ fn each_repository_lists_only_its_own_live_session() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     let _fake_b = FakePort::bind(
@@ -1133,6 +1243,9 @@ fn each_repository_lists_only_its_own_live_session() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
 
@@ -1207,6 +1320,9 @@ fn a_live_session_in_an_unregistered_workspace_is_not_listed_anywhere() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1256,6 +1372,9 @@ fn a_workspace_spelled_through_a_symlink_matches_its_repository() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1306,6 +1425,9 @@ fn a_message_committed_in_the_session_arrives_as_one_entry_event() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1367,6 +1489,9 @@ fn a_message_committed_while_disconnected_is_in_the_reread_transcript() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1439,6 +1564,9 @@ fn a_dropped_subscription_is_reconnected_and_its_events_still_arrive() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(true),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     // The hub's first subscription is dropped by the fake; only the second one is live.
@@ -1457,6 +1585,176 @@ fn a_dropped_subscription_is_reconnected_and_its_events_still_arrive() {
         .next_named("entry", Duration::from_secs(20))
         .unwrap_or_else(|| panic!("the reconnected subscription carries the event"));
     assert_eq!(event["entry"]["text"], json!("after the reconnect"));
+}
+
+// ---- the stream opens with the queue snapshot ---------------------------------------------
+
+/// A live session with a journal, a fake control port and a hub in a short home. The journal
+/// makes `journal_for` accept the id; the fake port makes the session live.
+fn snapshot_session(label: &str) -> (ShortHome, Repo, Hub, LivePid, FakePort, String) {
+    let repo = Repo::new(label);
+    arc_store(&repo);
+    let short = ShortHome::new(label);
+    let home = short.path().join("home");
+    register(&home, "repo", &repo.canonical_clone());
+    let id = format!("session-{label}");
+    write_journal(
+        &home.join("sessions"),
+        &id,
+        &repo.canonical_clone().to_string_lossy(),
+        &[user_message("first")],
+    );
+    let hub = Hub::in_short_home(short.path(), &repo, &[]);
+    let (pid, fake) = live_session(&home, &repo, &id);
+    (short, repo, hub, pid, fake, id)
+}
+
+#[test]
+fn the_first_frame_is_the_waiting_approvals_snapshot() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-head");
+    fake.set_queue(
+        json!({ "request_id": 3, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+
+    let (event, snapshot) = stream
+        .next(Duration::from_secs(20))
+        .expect("the stream opens with a frame");
+    assert_eq!(event, "pending", "the first frame is the queue snapshot");
+    assert_eq!(snapshot["head"]["request_id"], json!(3));
+    assert_eq!(snapshot["head"]["kind"], json!("approval"));
+    assert_eq!(snapshot["length"], json!(1));
+}
+
+#[test]
+fn an_empty_queue_opens_with_a_null_head_and_zero_length() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-empty");
+    fake.set_queue(Value::Null, 0);
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+
+    let (event, snapshot) = stream
+        .next(Duration::from_secs(20))
+        .expect("an empty queue still opens with a frame");
+    assert_eq!(event, "pending");
+    assert_eq!(snapshot["head"], Value::Null);
+    assert_eq!(snapshot["length"], json!(0));
+}
+
+#[test]
+fn a_live_pending_change_during_the_snapshot_read_follows_it() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-live");
+    fake.set_queue(
+        json!({ "request_id": 4, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.hold_pending();
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+    // The read has copied the queue; the change below happens while it is still in flight.
+    fake.wait_for_pending_read(Instant::now() + Duration::from_secs(30));
+    let newest = json!({ "request_id": 5, "kind": "question", "tool": null });
+    fake.set_queue(newest.clone(), 2);
+    fake.push(pending(newest.clone(), 2));
+    fake.release_pending();
+
+    let (event, snapshot) = stream
+        .next(Duration::from_secs(20))
+        .expect("the snapshot is the first frame");
+    assert_eq!(event, "pending");
+    assert_eq!(
+        snapshot["head"]["request_id"],
+        json!(4),
+        "the snapshot holds the queue as it stood when it was read"
+    );
+    assert_eq!(snapshot["length"], json!(1));
+
+    let live = stream
+        .next_named("pending", Duration::from_secs(20))
+        .expect("the change raised during the read follows the snapshot");
+    assert_eq!(live["head"]["request_id"], json!(5));
+    assert_eq!(
+        live["length"],
+        json!(2),
+        "the last pending frame is the port's newest state"
+    );
+}
+
+#[test]
+fn a_reconnect_opens_with_the_snapshot_again() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-reconnect");
+    fake.set_queue(
+        json!({ "request_id": 1, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let path = format!("/v1/repos/repo/sessions/{id}/events");
+    let mut first = EventStream::open(&hub, &path);
+    let (event, snapshot) = first
+        .next(Duration::from_secs(20))
+        .expect("the first stream opens with the snapshot");
+    assert_eq!(event, "pending");
+    assert_eq!(snapshot["head"]["request_id"], json!(1));
+    drop(first);
+
+    fake.set_queue(
+        json!({ "request_id": 2, "kind": "approval", "tool": "write" }),
+        1,
+    );
+    let mut second = EventStream::open(&hub, &path);
+    let (event, snapshot) = second
+        .next(Duration::from_secs(20))
+        .expect("the reconnected stream opens with the snapshot too");
+    assert_eq!(event, "pending");
+    assert_eq!(
+        snapshot["head"]["request_id"],
+        json!(2),
+        "the snapshot is read again, not replayed from the first stream"
+    );
+}
+
+#[test]
+fn a_refused_pending_read_ends_the_stream_instead_of_hanging() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-refused");
+    fake.set_queue_error("the queue cannot be read");
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+
+    assert!(
+        stream.next(Duration::from_secs(20)).is_none(),
+        "a refused snapshot produces no frame and ends the stream"
+    );
+    assert!(
+        stream.done,
+        "the body ended rather than waiting for a frame that never comes"
+    );
+}
+
+#[test]
+fn two_subscribers_each_get_their_own_snapshot() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-two");
+    fake.set_queue(
+        json!({ "request_id": 8, "kind": "approval", "tool": "shell" }),
+        1,
+    );
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let path = format!("/v1/repos/repo/sessions/{id}/events");
+    let mut first = EventStream::open(&hub, &path);
+    let mut second = EventStream::open(&hub, &path);
+
+    for stream in [&mut first, &mut second] {
+        let (event, snapshot) = stream
+            .next(Duration::from_secs(20))
+            .expect("each stream opens with the snapshot");
+        assert_eq!(event, "pending");
+        assert_eq!(snapshot["head"]["request_id"], json!(8));
+        assert_eq!(snapshot["length"], json!(1));
+    }
+    eventually(Duration::from_secs(20), || {
+        (fake.pending_reads() >= 2).then_some(())
+    });
 }
 
 // ---- a committed ConfigChanged record arrives as one `config` frame -----------------------
@@ -1491,6 +1789,9 @@ fn a_config_change_in_the_session_arrives_as_one_config_frame() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
@@ -1550,6 +1851,9 @@ fn a_slow_socket_delays_no_version_and_no_other_repositorys_listing() {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     // The scanner lives in the hub, so the subscription can only appear once the hub is up.
@@ -1674,6 +1978,9 @@ fn live_session(home: &Path, repo: &Repo, id: &str) -> (LivePid, FakePort) {
             subscriptions: AtomicUsize::new(0),
             drop_next: AtomicBool::new(false),
             silent_probes: AtomicUsize::new(0),
+            queue: Mutex::new(json!({ "head": null, "length": 0 })),
+            pending_reads: AtomicUsize::new(0),
+            gate: PendingGate::default(),
         },
     );
     (pid, fake)
