@@ -360,15 +360,16 @@ An unknown task, or an attempt number the task does not have, is `404`; an `atte
 It needs the bearer token and answers `Content-Type: text/event-stream`.
 A session no process hosts is `409`; an unknown session or repository is `404`.
 
-The stream follows the [event stream](#the-event-stream)'s rules: no event ids, no replay, a `: keep-alive` comment every 15 seconds while nothing happens, and an end when the client disconnects, the session's process goes away or the hub stops.
-**A client that reconnects first re-reads the transcript.**
+The stream follows the [event stream](#the-event-stream)'s rules: no event ids, no replay of entries, a `: keep-alive` comment every 15 seconds while nothing happens, and an end when the client disconnects, the session's process goes away or the hub stops.
+Before any live frame, every stream opens with one `pending` frame holding the queue's current state — the same `head` and `length` a live `pending` frame carries, with `head` `null` and `length` `0` on an empty queue — read from the session's control port. A reconnect gets the snapshot again, so a client can take its first `pending` frame as the truth.
+The no-replay rule is about entries: **a client that reconnects first re-reads the transcript.**
 
 Each event has one of these names, with this `data` object:
 
 | Event | `data` | When |
 |---|---|---|
 | `entry` | `index` (integer), `reset` (boolean), `entry` (one [transcript entry](#transcript-entries)) | An entry was added or changed at `index`. `reset` is `true` on the first frame after the fold was rebuilt, and the client then drops every entry before `index`. |
-| `pending` | `head` (object or `null`) and `length` (integer) | The approval and question queue's head changed. The head carries the request id, the kind (`approval` or `question`) and, for an approval, the tool, the resolved resource and the raw arguments. |
+| `pending` | `head` (object or `null`) and `length` (integer) | The approval and question queue's head changed, or the stream's opening snapshot. The head carries the request id, the kind (`approval` or `question`) and, for an approval, the tool, the resolved resource and the raw arguments. |
 | `config` | `revision` (integer) and `change` (object) | A `ConfigChanged` record was committed: a `/model`, `/thinking`, or hub `config` change applied at a turn boundary. |
 | `state` | `state` (string) | The turn state changed: `idle`, `working` or `blocked`, from the queue's length and the journal's open turn. The process's own facts (a trust modal, background jobs) are on the `sessions` route, which asks the port. |
 

@@ -2419,3 +2419,17 @@ found identical.
 | TK0317-M1 | `pairing_url` strips a trailing `/` whatever follows it (`url.strip_suffix('/')`), so a query or fragment value loses its last slash | `hub::http::tests::a_url_flag_keeps_a_slash_that_ends_a_query_or_fragment` (the `?next=/` value lost its slash) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0318: the session event stream's pending snapshot
+
+The session event stream now opens with one `pending` frame carrying the control port's current
+queue state before any live frame. The mutation (skip the snapshot read and frame) was applied by
+hand to `crates/radian-arc/src/hub/http.rs`, run with `cargo nextest run -p radian-arc --test
+hub_sessions --locked -E '<the six snapshot-test names>'`, and restored from `.radian/http.rs.bak`,
+which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0318-M1 | the stream producer skips the `pending` read and its frame, so a subscriber that opens the stream while a head waits never learns it | `the_first_frame_is_the_waiting_approvals_snapshot`, `an_empty_queue_opens_with_a_null_head_and_zero_length`, `a_live_pending_change_during_the_snapshot_read_follows_it`, `a_reconnect_opens_with_the_snapshot_again`, `a_refused_pending_read_ends_the_stream_instead_of_hanging`, `two_subscribers_each_get_their_own_snapshot` | ✅ 6 failed |
+
+6/6 caught.
