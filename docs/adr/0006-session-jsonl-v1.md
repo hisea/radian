@@ -225,7 +225,7 @@ Replay rules live in one Core place (`TranscriptFold`), per ADR 0019. Uncommitte
 
 ### 5.14 `HostNotice`
 
-`HostNotice { text }`: one host notice the front end commits to the transcript. The full-screen interface writes it when the owner closes the session through the control port, with `text = "session closed remotely"`. It is non-critical audit: it never enters `journal_records()`, `replay` or `repair`, and it is not a model message. A resume renders the text as a transcript notice in file order, so the close survives the process it ended. The reader validates the `text` string; a record without one is corrupt at its line.
+`HostNotice { text }`: one host notice the front end commits to the transcript. The full-screen interface writes it when the owner closes the session through the control port, with `text = "session closed remotely"`. It is non-critical audit: it never enters `journal_records()`, `replay` or `repair`, and it is not a model message. A resume renders the text as a transcript notice after the history it follows, so the close survives the process it ended (the remote close is the session's last event). The reader validates the `text` string; a record without one is corrupt at its line.
 
 ## 6. Unknown content policy
 
