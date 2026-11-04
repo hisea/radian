@@ -3623,3 +3623,24 @@ which `cmp` found identical; the parity test ran inside the workspace sandbox.
 | TK0314-M3 | the live/resume mapping stops keeping the folded image facts (`entry.data.images` assignments removed), so the wrapper's decoded images are the only copy | `attach::the_resume_mapping_keeps_the_folded_image_facts` (entry 0 had `images: []` where the fold had the `ImagePart`) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0321: the `/quit` command and the remote close (2026-11-04, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` takes the second Ctrl-C's own quit action (one function, not a copy); the control port's
+`close` commits one host notice and then takes the same path. Each mutation was applied by hand to
+`crates/radian-tui/src/command.rs` or `crates/radian-tui/src/app/update.rs`, the named test ran
+with `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(<name>)'` or
+`--test quit -E 'test(<name>)'`, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M1 | `/quit` parses with any arguments (`Some("/quit") => Outcome::Quit`, no length check) | `command::theme_tests::quit_parses_with_no_argument_and_completes` (a usage notice was expected, `Outcome::Quit` arrived) | ✅ 1 failed |
+| TK0321-M2 | `quit_now` returns the `Quit` effect but does not set `app.quit`, so the loop never leaves | `quit::slash_quit_quits_an_idle_session` (`/quit` quits) | ✅ 1 failed |
+| TK0321-M3 | the remote-close handler skips `push_notice("session closed remotely")` | `quit::remote_close_commits_the_notice_and_quits` (the close notice) | ✅ 1 failed |
+| TK0321-M4 | the remote-close handler leaves a typed draft in the composer instead of clearing it | `quit::remote_close_while_typing_drops_the_draft_like_ctrl_c` (the composer is cleared) | ✅ 1 failed |
+| TK0321-M5 | the `quit` entry is dropped from the command tree, so the completion menu and `/help` lose it | `command::theme_tests::quit_parses_with_no_argument_and_completes` (`/quit` is in the registry) | ✅ 1 failed |
+
+5/5 caught. The control-port wiring itself (`ControlTarget::closable`, the tokio→UI channel
+forwarder) is covered by `pty::pty_owner_close_commits_the_notice_and_exits`; that test is in the
+sandbox profile's group 8 exclusions because the `workspace` tier denies the Unix-socket connect,
+so it runs in the gate, not here.

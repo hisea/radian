@@ -217,7 +217,8 @@ the port ask its host to close. The host cancels a running turn through the same
 ends the process cleanly; the journal stays, and the next `prompt` through the hub resumes it.
 Subscribers see their stream end as they do on any process exit.
 
-A host that installs no close hook — any embedder but `radian exec`'s hub-held mode — answers
+A host that installs no close hook — any embedder but the full-screen interface and `radian
+exec`'s hub-held mode — answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. The host
 is asked once however many connections crossed, so the process exits once. A client that stops
 reading cannot hold the process open: the wait for the drain is bounded (a quarter second).

@@ -2736,6 +2736,99 @@ async fn pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
+/// `/quit` takes the same clean-exit path as a second Ctrl-C: the process exits 0 and the
+/// terminal is restored (the alternate screen is left, raw mode is off).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_slash_quit_restores_the_terminal_and_exits() {
+    let server = MockServer::start(vec![text_reply("UNUSED")]).await;
+    let dir = TempDir::new("slash-quit");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "slash-quit",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"/quit\r");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "`/quit` did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+    let bytes = pty.raw();
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(raw.contains("\u{1b}[?1049l"), "left alternate screen");
+    assert!(raw.contains("icanon"), "cooked mode came back");
+}
+
+/// The owner's `close` on the TUI's control port: the port answers `ok`, the TUI commits one
+/// `session closed remotely` notice, and the process exits 0 like `/quit`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_owner_close_commits_the_notice_and_exits() {
+    let dir = TempDir::new("owner-close");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let server = MockServer::start(vec![text_reply("UNUSED")]).await;
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_bare(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "owner-close",
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+    // A draft typed when the close arrives: it is dropped like a Ctrl-C quit's.
+    pty.send(b"a draft");
+
+    let answer = control_request(
+        &socket,
+        json!({"id": 1, "verb": "close", "token": "owner-token"}),
+    );
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert!(
+        pty.wait_for_raw("session closed remotely", wait_positive()),
+        "the close notice never reached the screen"
+    );
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the close did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+    assert!(
+        !sessions.join("owner-close.draft").exists(),
+        "the remote close saved the typed draft"
+    );
+}
+
 /// Denying feeds a denial result back to the model and never runs the tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_approval_deny_is_fed_back_to_the_model() {
@@ -16725,6 +16818,8 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
     // The shipped default footer (the `deck` preset carries the `loop` item): the suite's
     // `classic` default has no `loop` row, so `spawn_bare` writes no config file. Fifty
     // rows fit the whole `/help` list, so the `/loop` line cannot scroll off.
+    // The help list grows with the commands; this height keeps the whole `/help`
+    // list on screen so the `/loop` line cannot scroll off.
     let mut pty = Pty::spawn_bare(
         &[
             "--model",
@@ -16737,7 +16832,7 @@ async fn pty_loop_resends_until_times_and_footer_shows_it() {
             "loop",
         ],
         &[],
-        50,
+        54,
         100,
     );
     assert!(

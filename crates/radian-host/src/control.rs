@@ -73,7 +73,7 @@ use crate::session::{DriverEnd, LocalSession, SessionQueue};
 /// request when the owner asks to end this process; the host's loop then does what a signal or
 /// idle exit does — cancel the running turn, abandon pending approvals and questions, end the
 /// driver — and leaves the journal in place. A host that installs none cannot be closed
-/// remotely.
+/// remotely: the full-screen interface and `radian exec`'s hub-held mode install it.
 #[derive(Clone)]
 pub struct CloseHandle {
     request: mpsc::UnboundedSender<()>,
@@ -219,7 +219,8 @@ impl ControlTarget {
     }
 
     /// Give this target a close hook: the owner's `close` verb then asks the host to end the
-    /// process (ADR 0043). `radian exec`'s hub-held mode is the one host that installs it.
+    /// process (ADR 0043). The full-screen interface and `radian exec`'s hub-held mode install
+    /// it.
     #[must_use]
     pub fn closable(mut self, close: CloseHandle) -> Self {
         self.close = Some(close);

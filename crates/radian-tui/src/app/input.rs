@@ -90,6 +90,10 @@ pub enum Input {
         len: usize,
         answered_from_hub: Vec<u64>,
     },
+    /// The owner closed this session through the control port's `close` verb (ADR 0043):
+    /// one host notice, the typed draft dropped as a Ctrl-C quit drops it, then the same
+    /// quit action as a second Ctrl-C.
+    RemoteClose,
     /// One key inside the question form (ADR 0024 Q7).
     Form(FormKey),
     /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).

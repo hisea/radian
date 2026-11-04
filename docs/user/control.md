@@ -260,10 +260,15 @@ way the journal's recovery rules expect — and abandons pending approvals and q
 process exit does. The journal stays, so the next prompt through a hub resumes the session. A
 subscriber's stream ends as it does on any process exit.
 
+The full-screen interface takes the `/quit` path: it commits one `session closed remotely`
+notice to the transcript, restores the terminal, and leaves. A draft typed when the close
+arrives is dropped the way a `ctrl-c` quit drops it.
+
 A host that installs no close hook answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This
-build installs the hook in the hub-held `radian exec` process a hub starts; every other hosting
-process refuses the verb. Two `close` requests crossing at once both answer `ok`, and the host
+build installs the hook in the full-screen interface (`radian`) and in the hub-held
+`radian exec` process a hub starts; every other hosting process refuses the verb. Two `close`
+requests crossing at once both answer `ok`, and the host
 is asked once, so the process exits once. A `close` that meets the hub-held idle window also
 produces one clean exit. A client that stops reading cannot hold the process open: the wait for
 the open connections is bounded.

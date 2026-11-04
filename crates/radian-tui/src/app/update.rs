@@ -142,6 +142,21 @@ impl App {
                 len,
                 answered_from_hub,
             } => self.sync_pending(head, len, &answered_from_hub),
+            // The owner closed this session through the control port (ADR 0043): one host
+            // notice, the typed draft dropped the way an idle Ctrl-C quit drops it (the first
+            // press clears the input into the in-process history), then the same quit action
+            // as the second Ctrl-C.
+            Input::RemoteClose => {
+                self.push_notice("session closed remotely");
+                if !self.input.is_empty() {
+                    let text = std::mem::take(&mut self.input).text();
+                    self.session.history.push(text);
+                    self.session.history_cursor = None;
+                    self.session.history_stash.clear();
+                    self.composer_images.clear();
+                }
+                self.quit_now()
+            }
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
             Input::DroppedLoaded {
@@ -914,10 +929,7 @@ impl App {
             return UpdateResult::dirty();
         }
         match self.quit_pending.take() {
-            Some(deadline) if now <= deadline => {
-                self.quit = true;
-                UpdateResult::quiet(Effect::Quit)
-            }
+            Some(deadline) if now <= deadline => self.quit_now(),
             // The first press, or a second one after the window closed (re-arm, do not
             // double-fire): arm the deadline and redraw the hint.
             _ => {
@@ -925,6 +937,14 @@ impl App {
                 UpdateResult::dirty()
             }
         }
+    }
+
+    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`] and `/quit` share: leave through
+    /// the ordinary clean-exit path. The teardown restores the terminal and stops the driver,
+    /// which cancels a turn that is still running — every quit does that.
+    pub(super) fn quit_now(&mut self) -> UpdateResult {
+        self.quit = true;
+        UpdateResult::quiet(Effect::Quit)
     }
 
     /// Runs one keymap action. The default bindings reproduce the pre-keymap key table.
