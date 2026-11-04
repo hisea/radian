@@ -187,10 +187,14 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         images,
     } = opened;
 
-    // ADR 0043: start accepting control requests for this session.
+    // ADR 0043: start accepting control requests for this session. Only a hub-held process
+    // installs the `close` hook: its owner (the hub) may end the process through the port.
+    let (close, close_requests) = radian_host::CloseHandle::channel();
     if let Some(server) = &control {
         let target = if cli.hub_held {
-            radian_host::ControlTarget::of(&session).held_by_hub()
+            radian_host::ControlTarget::of(&session)
+                .held_by_hub()
+                .closable(close)
         } else {
             radian_host::ControlTarget::of(&session)
         };
@@ -242,6 +246,11 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         ui: Arc::clone(&ui),
         driver_ended,
         signals,
+        close: if cli.hub_held {
+            Some(close_requests)
+        } else {
+            None
+        },
         session: Arc::clone(&session),
         secrets: secrets.clone(),
     };

@@ -142,7 +142,9 @@ pub use contrib::{
     SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
     spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
 };
-pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
+pub use control::{
+    CloseHandle, ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard, close_session,
+};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, budget_exceeded_line, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,

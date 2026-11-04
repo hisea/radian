@@ -154,17 +154,29 @@ enum Answerable {
 
 impl Fixture {
     async fn new(label: &str, base_url: &str) -> Self {
-        Self::build(label, base_url, Answerable::Auto, true).await
+        Self::build(label, base_url, Answerable::Auto, true, None).await
     }
 
     async fn asking(label: &str, base_url: &str) -> Self {
-        Self::build(label, base_url, Answerable::Asking, true).await
+        Self::build(label, base_url, Answerable::Asking, true, None).await
     }
 
     /// A host like `radian exec`: its event sink never folds committed events into the session
     /// projection, so the driver's turn flag is the only live signal `list_sessions` has.
     async fn exec_like(label: &str, base_url: &str) -> Self {
-        Self::build(label, base_url, Answerable::Auto, false).await
+        Self::build(label, base_url, Answerable::Auto, false, None).await
+    }
+
+    /// A fixture whose host installed a close hook (ADR 0043): the port can ask it to end the
+    /// session, and the test holds the receiving end.
+    async fn closable(
+        label: &str,
+        base_url: &str,
+        answerable: Answerable,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<()>) {
+        let (close, close_requests) = radian_host::CloseHandle::channel();
+        let fixture = Self::build(label, base_url, answerable, true, Some(close)).await;
+        (fixture, close_requests)
     }
 
     async fn build(
@@ -172,6 +184,7 @@ impl Fixture {
         base_url: &str,
         answerable: Answerable,
         folds_events: bool,
+        close: Option<radian_host::CloseHandle>,
     ) -> Self {
         let _ = isolated_home();
         let scratch = scratch(label);
@@ -285,10 +298,11 @@ impl Fixture {
         .await
         .expect("open the session");
         let session = Arc::new(session);
-        server.serve(
-            &tokio::runtime::Handle::current(),
-            radian_host::ControlTarget::of(&session),
-        );
+        let target = match close {
+            Some(close) => radian_host::ControlTarget::of(&session).closable(close),
+            None => radian_host::ControlTarget::of(&session),
+        };
+        server.serve(&tokio::runtime::Handle::current(), target);
         Self {
             scratch,
             home,
@@ -1341,7 +1355,7 @@ async fn an_mcp_input_absorbed_into_an_owner_turn_lowers_it_to_mcp() {
 }
 
 // ---------------------------------------------------------------------------
-// The owner verbs (ADR 0043): pending, answer, config, models
+// The owner verbs (ADR 0043): pending, answer, config, models, close
 // ---------------------------------------------------------------------------
 
 fn tool_reply(id: &str, name: &str, arguments: &str) -> Reply {
@@ -1397,6 +1411,36 @@ fn result_text(result: &Value) -> String {
         .filter_map(|part| part["text"]["text"].as_str())
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Waits until the journal has a line matching `want`.
+async fn wait_journal(fixture: &Fixture, want: impl Fn(&Value) -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if fixture.journal().iter().any(&want) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the journal never held the expected line: {:?}",
+            fixture.journal()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The host side of a `close` (ADR 0043): wait for the port's request, then end the session
+/// exactly the way `radian exec`'s hub-held loop does.
+fn spawn_close_host(
+    session: Arc<LocalSession>,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
+        if requests.recv().await.is_none() {
+            return Ok(());
+        }
+        radian_host::close_session(&session).await
+    })
 }
 
 /// Waits until the pending queue holds `want` entries.
@@ -2152,4 +2196,243 @@ async fn models_returns_the_model_list_with_the_current_route_marked() {
         .expect("the current model row");
     assert_eq!(current["current"], true, "{listed}");
     fixture.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// `close` (ADR 0043): the owner ends the process
+// ---------------------------------------------------------------------------
+
+/// `close` is gated exactly like the other owner verbs. No token, a wrong token and an empty
+/// token file each return the owner error, ask the host for nothing, and the process keeps
+/// running.
+#[tokio::test]
+async fn close_without_the_owner_token_changes_nothing_and_keeps_the_process_running() {
+    let server = MockServer::start(vec![text_reply("still here")]).await;
+    let (fixture, mut requests) =
+        Fixture::closable("close-gate", &server.base_url, Answerable::Auto).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    for request in [
+        json!({"id": 1, "verb": "close"}),
+        json!({"id": 2, "verb": "close", "token": "wrong"}),
+    ] {
+        let refused = client.request(request).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains("owner token"),
+            "{refused}"
+        );
+    }
+    // An empty token file matches nothing, not even an empty provided token.
+    let dir = radian_host::hub_dir_for(&fixture.home);
+    std::fs::write(dir.join("token"), "").unwrap();
+    let refused = client
+        .request(json!({"id": 3, "verb": "close", "token": ""}))
+        .await;
+    assert_eq!(refused["ok"], false, "{refused}");
+
+    // No close request reached the host, and the process still opens a turn.
+    assert!(
+        requests.try_recv().is_err(),
+        "a refused close must ask the host for nothing"
+    );
+    let followed = client
+        .request(json!({"id": 4, "verb": "followup", "text": "still here"}))
+        .await;
+    assert_eq!(followed["ok"], true, "{followed}");
+    wait_idle(&fixture).await;
+    fixture.stop().await;
+}
+
+/// A valid `close` answers `ok` first, then asks the host; a second request still answers `ok`
+/// and asks it no second time, so two crossings make one exit.
+#[tokio::test]
+async fn close_answers_ok_before_asking_the_host_and_two_requests_make_one_close() {
+    let server = MockServer::start(Vec::new()).await;
+    let (fixture, mut requests) =
+        Fixture::closable("close-order", &server.base_url, Answerable::Auto).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let answered = client
+        .request(json!({"id": 1, "verb": "close", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    let asked = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("the host was never asked to close");
+    assert_eq!(asked, Some(()), "the close request reaches the host");
+    assert!(requests.try_recv().is_err(), "one close asks the host once");
+
+    let answered = client
+        .request(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    assert!(
+        requests.try_recv().is_err(),
+        "a second close asks no second time"
+    );
+
+    let _ = radian_host::close_session(&fixture.session).await;
+}
+
+/// A host that installs no close hook (any embedder but `radian exec`'s hub-held mode) refuses
+/// the verb and changes nothing.
+#[tokio::test]
+async fn close_without_a_host_hook_is_refused_and_changes_nothing() {
+    let server = MockServer::start(vec![text_reply("still here")]).await;
+    let fixture = Fixture::new("close-no-hook", &server.base_url).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    let refused = client
+        .request(json!({"id": 1, "verb": "close", "token": "owner-token"}))
+        .await;
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(
+        refused["error"], "this process cannot be closed remotely",
+        "{refused}"
+    );
+
+    // The process is unaffected: a turn still runs to its end.
+    let followed = client
+        .request(json!({"id": 2, "verb": "followup", "text": "still here"}))
+        .await;
+    assert_eq!(followed["ok"], true, "{followed}");
+    wait_idle(&fixture).await;
+    fixture.stop().await;
+}
+
+/// Two clients closing at once both get `ok`; the host is asked once and the driver is joined
+/// once.
+#[tokio::test]
+async fn two_close_requests_at_once_both_get_ok_and_the_process_exits_once() {
+    let server = MockServer::start(Vec::new()).await;
+    let (fixture, requests) =
+        Fixture::closable("close-twice", &server.base_url, Answerable::Auto).await;
+    fixture.write_token("owner-token");
+    let host = spawn_close_host(Arc::clone(&fixture.session), requests);
+
+    let mut first = Client::connect(fixture.socket()).await;
+    let mut second = Client::connect(fixture.socket()).await;
+    // Both requests are on the wire before either answer is read: the crossing case.
+    first
+        .send(json!({"id": 1, "verb": "close", "token": "owner-token"}))
+        .await;
+    second
+        .send(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    let first_answer = first.read().await;
+    let second_answer = second.read().await;
+    assert_eq!(first_answer["ok"], true, "{first_answer}");
+    assert_eq!(second_answer["ok"], true, "{second_answer}");
+
+    let joined = tokio::time::timeout(Duration::from_secs(15), host)
+        .await
+        .expect("the close host never finished")
+        .expect("the close host task");
+    assert_eq!(joined, Ok(()), "the driver joined cleanly");
+}
+
+/// A close while a turn runs with an open `ask_user` tool call cancels it through the `cancel`
+/// path: the journal records the cancelled turn and settles the open call as cancelled
+/// (ADR 0002 E5).
+#[tokio::test]
+async fn close_cancels_a_running_turn_and_leaves_the_open_tool_call_interrupted() {
+    let questions = json!({"questions": [
+        {"id": "name", "prompt": "Name?", "kind": "text", "required": true}
+    ]});
+    let server = MockServer::start(ask_replies(&questions)).await;
+    let (fixture, requests) =
+        Fixture::closable("close-running", &server.base_url, Answerable::Asking).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "ask", "token": "owner-token"}))
+        .await;
+    wait_journal(&fixture, |line| {
+        line["event"] == "ToolExecutionStarted" && line["data"]["call_id"] == "call_ask"
+    })
+    .await;
+
+    let host = spawn_close_host(Arc::clone(&fixture.session), requests);
+    let answered = client
+        .request(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    let joined = tokio::time::timeout(Duration::from_secs(15), host)
+        .await
+        .expect("the close host never finished")
+        .expect("the close host task");
+    assert_eq!(joined, Ok(()), "the driver joined cleanly");
+
+    let journal = fixture.journal();
+    assert!(
+        journal
+            .iter()
+            .any(|line| line["event"] == "ToolExecutionStarted"
+                && line["data"]["call_id"] == "call_ask"),
+        "{journal:?}"
+    );
+    assert!(
+        journal
+            .iter()
+            .any(|line| line["event"] == "ToolExecutionSettled"
+                && line["data"]["call_id"] == "call_ask"
+                && line["data"]["result"]["error_code"] == "cancelled"),
+        "the open call is settled as cancelled (ADR 0002 E5): {journal:?}"
+    );
+    assert!(
+        journal
+            .iter()
+            .any(|line| line["event"] == "TurnFinished" && line["data"]["outcome"] == "cancelled"),
+        "the turn is recorded as cancelled: {journal:?}"
+    );
+}
+
+/// A close while an approval waits abandons it: the queue empties, the waiter gets its close
+/// outcome, and a later answer is the existing late-answer error.
+#[tokio::test]
+async fn close_while_an_approval_is_pending_abandons_it_and_a_late_answer_is_late() {
+    let server = MockServer::start(vec![write_reply("call_write"), text_reply("done")]).await;
+    let (fixture, requests) =
+        Fixture::closable("close-pending", &server.base_url, Answerable::Asking).await;
+    fixture.write_token("owner-token");
+    let mut client = Client::connect(fixture.socket()).await;
+
+    client
+        .request(json!({"id": 1, "verb": "followup", "text": "write it", "token": "owner-token"}))
+        .await;
+    wait_queue(&fixture, 1).await;
+    let request_id = fixture.session.queue().head().expect("pending").request_id;
+
+    let host = spawn_close_host(Arc::clone(&fixture.session), requests);
+    let answered = client
+        .request(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    assert_eq!(answered["ok"], true, "{answered}");
+    let joined = tokio::time::timeout(Duration::from_secs(15), host)
+        .await
+        .expect("the close host never finished")
+        .expect("the close host task");
+    assert_eq!(joined, Ok(()), "the driver joined cleanly");
+
+    assert!(
+        fixture.session.queue().is_empty(),
+        "the close abandoned the pending approval"
+    );
+    let late = client
+        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+                        "response": "allow_once", "token": "owner-token"}))
+        .await;
+    assert_eq!(late["ok"], false, "{late}");
+    assert!(
+        late["error"]
+            .as_str()
+            .unwrap()
+            .contains("no longer pending"),
+        "{late}"
+    );
 }

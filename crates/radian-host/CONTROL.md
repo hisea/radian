@@ -82,13 +82,13 @@ A missing, unreadable or empty token file means no token matches. A request with
 with a wrong one, behaves exactly as without this section: source `Scheduler` by default, no
 `via` metadata, and the `source` rules above. The comparison is constant-time.
 
-The same token gates the four owner verbs — `pending`, `answer`, `config` and `models` (below).
-Without the matching token each returns an error line and changes nothing; `subscribe` stays
-token-free but redacts the `pending` event (see below).
+The same token gates the five owner verbs — `pending`, `answer`, `config`, `models` and
+`close` (below). Without the matching token each returns an error line and changes nothing;
+`subscribe` stays token-free but redacts the `pending` event (see below).
 
 ### Owner verbs
 
-All four require `token` equal to `$RADIAN_HOME/hub/token` (trimmed). A missing, empty or wrong
+All five require `token` equal to `$RADIAN_HOME/hub/token` (trimmed). A missing, empty or wrong
 token returns `{"ok": false, "error": "this verb needs the owner token: …"}` and changes
 nothing.
 
@@ -198,6 +198,28 @@ providers (a usable `auth.json` entry) and the current route's provider are cons
 provider with no known model contributes no group. A `config` `model` must name one of these
 entries or the current route.
 
+#### `close`
+
+```json
+{"id": 12, "verb": "close", "token": "…"}
+```
+
+```json
+{"id": 12, "ok": true}
+```
+
+The port writes the `ok` answer first, then asks its host to end the process. The host cancels a
+running turn through the same path as `cancel` (so an interrupted assistant prefix and an open
+tool call are recorded the way ADR 0002/0003 require), abandons pending approvals and questions
+the way a process exit does, and ends the process cleanly; the journal stays, and the next
+`prompt` through the hub resumes it. Subscribers see their stream end as they do on any process
+exit.
+
+A host that installs no close hook — any embedder but `radian exec`'s hub-held mode — answers
+`{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing.
+Two `close` requests crossing at once both answer `ok`; the host is asked once, so the process
+exits once.
+
 ### Attachments
 
 `followup`, `steer` and `inject` also accept optional attachments, with or without a token:
@@ -236,6 +258,7 @@ retry with a smaller request.
 | `answer` | `request_id`, `response`, `token` | completes one pending entry; see *Owner verbs* |
 | `config` | `config`, `token` | queues one turn-boundary change; see *Owner verbs* |
 | `models` | `token` | `models`, grouped by provider; see *Owner verbs* |
+| `close` | `token` | `ok`, then the host ends the process; see *Owner verbs* |
 
 The task verbs (`spawn_task`, `wait_task`, `task_status`) are not part of the port: there is no
 in-process orchestration (ADR 0043 decision 1); the port now serves input, cancellation,

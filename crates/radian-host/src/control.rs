@@ -6,10 +6,10 @@
 //! script or agent drives the session: it can enqueue `followup`/`steer`/`inject` inputs,
 //! `cancel` the running turn, `list_sessions` (the hosting session), and `subscribe` to the
 //! committed event stream. With the owner token it also answers the pending approval/question
-//! queue (`pending`, `answer`), queues a turn-boundary configuration change (`config`), and
-//! lists the routes `/model` offers (`models`). There are no task verbs (`spawn_task`,
-//! `wait_task`, `task_status`) and no separate `radian serve` (ADR 0043): the process that owns
-//! a session owns its socket.
+//! queue (`pending`, `answer`), queues a turn-boundary configuration change (`config`), lists
+//! the routes `/model` offers (`models`), and ends the process (`close`). There are no task
+//! verbs (`spawn_task`, `wait_task`, `task_status`) and no separate `radian serve` (ADR 0043):
+//! the process that owns a session owns its socket.
 //!
 //! **Sources (ADR 0043, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
 //! the port, never by the client's word: it defaults to [`InputSource::Scheduler`], a client
@@ -21,10 +21,12 @@
 //! running keeps its own effective source, which only ever lowers (ADR 0011 L2): a `steer` or
 //! `inject` joins it and can lower it, never raise it, while a `followup` belongs to a later
 //! turn and leaves the running turn alone — the turn it opens applies its own source when the
-//! driver claims it. The owner token also gates the four queue/config verbs: without it they
-//! return an error line and change nothing, and an unknown verb changes nothing. `answer` is a
-//! front end on the pending queue (ADR 0023 U7, ADR 0024 Q9), never a new permission source:
-//! the first answer wins and a late one changes nothing.
+//! driver claims it. The owner token also gates the five queue/config/process verbs: without it
+//! they return an error line and change nothing, and an unknown verb changes nothing. `answer`
+//! is a front end on the pending queue (ADR 0023 U7, ADR 0024 Q9), never a new permission
+//! source: the first answer wins and a late one changes nothing. `close` answers `ok` before it
+//! asks the host to end the process ([`CloseHandle`], [`close_session`]); a host with no close
+//! hook refuses it, so every other embedder keeps control of its own lifetime.
 //!
 //! **Inputs carry attachments.** `followup`/`steer`/`inject` may carry `images` (base64 plus a
 //! MIME) and `files` (a name plus text). They become the message's parts through
@@ -62,7 +64,43 @@ use crate::compose::{Attachment, MAX_FILE_BYTES, MAX_TOTAL_BYTES, user_message};
 use crate::model::SwitchableModel;
 use crate::pending::{Answered, PendingRequest, PendingResponse, PendingView};
 use crate::projection::{SessionProjection, TurnState};
-use crate::session::{LocalSession, SessionQueue};
+use crate::session::{DriverEnd, LocalSession, SessionQueue};
+
+/// A host's close hook for the control port's `close` verb (ADR 0043). The port sends one
+/// request when the owner asks to end this process; the host's loop then does what a signal or
+/// idle exit does — cancel the running turn, abandon pending approvals and questions, end the
+/// driver — and leaves the journal in place. A host that installs none cannot be closed
+/// remotely.
+#[derive(Clone)]
+pub struct CloseHandle {
+    request: mpsc::UnboundedSender<()>,
+    /// `true` after the first close request, so two `close` requests ask the host once and the
+    /// second still answers `ok` without ending anything twice.
+    sent: Arc<AtomicBool>,
+}
+
+impl CloseHandle {
+    /// The handle the port holds and the receiver the host's loop watches.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<()>) {
+        let (request, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                request,
+                sent: Arc::new(AtomicBool::new(false)),
+            },
+            receiver,
+        )
+    }
+
+    /// Asks the host to close, at most once. When the host's receiver is already gone the
+    /// process is already ending, so the request is a no-op.
+    fn request(&self) -> bool {
+        if self.sent.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.request.send(()).is_ok()
+    }
+}
 
 /// What the port needs from the hosting session: its id, its inbox, its permission hooks and
 /// whether a turn is running. Every session handle is **weak**, so serving the socket never
@@ -101,6 +139,10 @@ pub struct ControlTarget {
     /// `true` when a hub started this process in its hub-held mode (ADR 0048 §16), so the
     /// `list_sessions` row names the hub as the holder and the hub reports `live: hub`.
     hub_held: bool,
+    /// The host's close hook (ADR 0043's `close` verb). `None` for a host that does not let
+    /// an owner end its process remotely; the verb then answers
+    /// [`CANNOT_CLOSE`](self::CANNOT_CLOSE).
+    close: Option<CloseHandle>,
 }
 
 impl ControlTarget {
@@ -122,7 +164,26 @@ impl ControlTarget {
             model: Arc::downgrade(&model),
             jobs: session.jobs_registry().map(|jobs| Arc::downgrade(&jobs)),
             hub_held: false,
+            close: None,
         }
+    }
+
+    /// Give this target a close hook: the owner's `close` verb then asks the host to end the
+    /// process (ADR 0043). `radian exec`'s hub-held mode is the one host that installs it.
+    #[must_use]
+    pub fn closable(mut self, close: CloseHandle) -> Self {
+        self.close = Some(close);
+        self
+    }
+
+    /// The close hook, or `None` for a host that cannot be closed remotely.
+    fn close(&self) -> Option<CloseHandle> {
+        self.close.clone()
+    }
+
+    /// Asks the host to close; `false` when it was already asked or is already gone.
+    fn request_close(&self) -> bool {
+        self.close.as_ref().is_some_and(CloseHandle::request)
     }
 
     /// Mark this target as a hub-held process (ADR 0048 §16). The `list_sessions` row then
@@ -239,11 +300,19 @@ pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(unix)]
 const SOCKET_SEND_BUFFER: i32 = 4096;
 
+/// One line waiting for a connection's writer. A `close` answer is the one line that must
+/// reach the socket before its side effect happens: the host is asked to close only once the
+/// `ok` was written and flushed.
+enum Outbound {
+    Line(Value),
+    LineThenClose(Value),
+}
+
 /// One subscribed client's hand-off slot: the connection loop drains `tx`, and the fan-out
 /// only ever `try_send`s, so a slow reader can never block the runtime.
 struct Client {
     id: u64,
-    tx: mpsc::Sender<Value>,
+    tx: mpsc::Sender<Outbound>,
     /// Woken (and removed) when the client falls behind or the connection ends.
     close: Arc<Notify>,
     /// Whether this subscriber carried the owner token when it subscribed: only an owner sees
@@ -398,7 +467,7 @@ impl ControlServer {
 
     /// Registers a subscriber's output channel and returns its id. `owner` decides whether the
     /// `pending` event carries the full head or only the redacted one.
-    fn register(&self, tx: mpsc::Sender<Value>, close: Arc<Notify>, owner: bool) -> u64 {
+    fn register(&self, tx: mpsc::Sender<Outbound>, close: Arc<Notify>, owner: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.clients
             .lock()
@@ -443,7 +512,7 @@ impl ControlServer {
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let mut slow: Vec<u64> = Vec::new();
         for client in clients.iter() {
-            if client.tx.try_send(make(client)).is_err() {
+            if client.tx.try_send(Outbound::Line(make(client))).is_err() {
                 slow.push(client.id);
             }
         }
@@ -470,7 +539,7 @@ impl ControlServer {
         use tokio::io::{AsyncWriteExt, BufReader};
 
         let (read, mut write) = stream.into_split();
-        let (tx, mut rx) = mpsc::channel::<Value>(SUBSCRIBER_BUFFER);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(SUBSCRIBER_BUFFER);
         let close = Arc::new(Notify::new());
         let mut reader = BufReader::new(read);
         let mut client_id: Option<u64> = None;
@@ -483,7 +552,7 @@ impl ControlServer {
                         RequestLine::Line(bytes) => {
                             let Ok(line) = String::from_utf8(bytes) else {
                                 let response = failure(Value::Null, "the request line is not UTF-8");
-                                if tx.send(response).await.is_err() {
+                                if tx.send(Outbound::Line(response)).await.is_err() {
                                     break;
                                 }
                                 continue;
@@ -491,22 +560,36 @@ impl ControlServer {
                             if line.trim().is_empty() {
                                 continue;
                             }
+                            let mut close_after = false;
                             let response = self
-                                .dispatch(&line, &target, &tx, &close, &mut client_id)
+                                .dispatch(&line, &target, &tx, &close, &mut client_id, &mut close_after)
                                 .await;
-                            if tx.send(response).await.is_err() {
+                            let outbound = if close_after {
+                                Outbound::LineThenClose(response)
+                            } else {
+                                Outbound::Line(response)
+                            };
+                            if tx.send(outbound).await.is_err() {
                                 break;
                             }
                         }
                         RequestLine::TooLong => {
-                            if tx.send(failure(Value::Null, over_limit_message())).await.is_err() {
+                            if tx
+                                .send(Outbound::Line(failure(Value::Null, over_limit_message())))
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }
                         RequestLine::Eof | RequestLine::Error => break,
                     }
                 }
-                Some(value) = rx.recv() => {
+                Some(outbound) = rx.recv() => {
+                    let (value, then_close) = match outbound {
+                        Outbound::Line(value) => (value, false),
+                        Outbound::LineThenClose(value) => (value, true),
+                    };
                     let mut encoded = match serde_json::to_vec(&value) {
                         Ok(encoded) => encoded,
                         Err(_) => break,
@@ -516,6 +599,11 @@ impl ControlServer {
                         break;
                     }
                     let _ = write.flush().await;
+                    // The `close` answer was written first; only now may the host be asked to
+                    // end the process (ADR 0043).
+                    if then_close {
+                        target.request_close();
+                    }
                 }
             }
         }
@@ -531,9 +619,10 @@ impl ControlServer {
         &self,
         line: &str,
         target: &ControlTarget,
-        tx: &mpsc::Sender<Value>,
+        tx: &mpsc::Sender<Outbound>,
         close: &Arc<Notify>,
         client_id: &mut Option<u64>,
+        close_after: &mut bool,
     ) -> Value {
         let request: Value = match serde_json::from_str(line) {
             Ok(request) => request,
@@ -560,7 +649,7 @@ impl ControlServer {
             }
             // The owner verbs (ADR 0043): every one of them requires the token, and a refusal
             // changes nothing.
-            "pending" | "answer" | "config" | "models" => {
+            "pending" | "answer" | "config" | "models" | "close" => {
                 if !self.is_owner(&request) {
                     return failure(id, OWNER_REQUIRED);
                 }
@@ -568,7 +657,17 @@ impl ControlServer {
                     "pending" => self.pending(id, target),
                     "answer" => self.answer(id, &request, target),
                     "config" => self.config(id, &request, target),
-                    _ => self.models(id, target),
+                    "models" => self.models(id, target),
+                    _ => {
+                        // `close`: answer `ok` first, ask the host after the answer is written
+                        // (the writer does that). A host with no hook cannot be closed
+                        // remotely, and nothing changes.
+                        if target.close().is_none() {
+                            return failure(id, CANNOT_CLOSE);
+                        }
+                        *close_after = true;
+                        success(id, None)
+                    }
                 }
             }
             other => failure(
@@ -871,6 +970,32 @@ impl ControlServer {
 /// The error every owner verb returns without the matching hub token. It changes nothing.
 const OWNER_REQUIRED: &str =
     "this verb needs the owner token: send `token` equal to the content of $RADIAN_HOME/hub/token";
+
+/// The error `close` returns for a host that installs no close hook (ADR 0043). Nothing
+/// changes.
+const CANNOT_CLOSE: &str = "this process cannot be closed remotely";
+
+/// The host's side of the control port's `close` verb (ADR 0043). The running turn is
+/// cancelled through the same path as `cancel`, so the journal records the cancelled turn and
+/// settles an open tool call as cancelled (ADR 0002 E5); pending approvals and questions lose
+/// their waiter, exactly as a process exit abandons them. Then the inbox closes, the driver is
+/// joined, and the journal stays, so the next `prompt` through the hub resumes it. A host calls
+/// this after the port answered `ok`; `radian exec`'s hub-held loop is the one caller.
+pub async fn close_session(session: &LocalSession) -> Result<(), String> {
+    session.inbox().cancel(CancelCause::Requested);
+    // The same stop path as SIGTERM: cancel the turn in flight (it still journals its
+    // `TurnFinished` and the cancelled tool results), close the inbox so no queued input opens
+    // another turn, and join the driver. `stop()` is not used: it cancels the driver future
+    // mid-turn and would leave the turn without its boundary record.
+    session.inbox().close();
+    match session.join().await {
+        DriverEnd::Ok => Ok(()),
+        DriverEnd::Failed(error) => Err(error),
+        DriverEnd::Panicked(message) => {
+            Err(format!("the driver task ended unexpectedly: {message}"))
+        }
+    }
+}
 
 /// The `pending` event pair: the full payload for an owner subscriber and the redacted one for
 /// every other subscriber (request id, kind and tool name only — no arguments, no question
@@ -1864,6 +1989,7 @@ mod tests {
     #[cfg(unix)]
     use super::row_names_the_holder;
     use super::same_journal;
+    use super::*;
 
     /// The one-holder lookup compares the journal file, not only the user-chosen session id: two
     /// session directories may hold the same id, and only the one a hub holds is refused.
@@ -1914,5 +2040,110 @@ mod tests {
             "journal": "/tmp/sessions/shared.jsonl",
         });
         assert!(row_names_the_holder(&same, "shared", wanted));
+    }
+
+    /// `close` is one of the owner verbs and needs the hook: a missing or wrong token returns
+    /// the owner error and asks the host for nothing; a host with no hook refuses it; a valid
+    /// request answers `ok`, leaves the writer to ask the host once, and a second request asks
+    /// nothing.
+    #[tokio::test]
+    async fn close_is_token_gated_and_refused_without_a_host_hook() {
+        let home =
+            std::env::temp_dir().join(format!("radian-control-close-{}", std::process::id()));
+        let hub = crate::home::hub_dir_for(&home);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("token"), "owner-token").unwrap();
+        let server = Arc::new(ControlServer {
+            home: home.clone(),
+            path: home.join("run/1.sock"),
+            #[cfg(unix)]
+            listener: Mutex::new(None),
+            clients: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(0),
+        });
+
+        let no_hook = close_target(None);
+        let (response, close_after) =
+            dispatch_close(&server, &no_hook, r#"{"id":1,"verb":"close"}"#).await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(!close_after);
+
+        let (response, close_after) = dispatch_close(
+            &server,
+            &no_hook,
+            r#"{"id":2,"verb":"close","token":"wrong"}"#,
+        )
+        .await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(!close_after);
+
+        let (response, close_after) = dispatch_close(
+            &server,
+            &no_hook,
+            r#"{"id":3,"verb":"close","token":"owner-token"}"#,
+        )
+        .await;
+        assert_eq!(response["error"], CANNOT_CLOSE, "{response}");
+        assert!(!close_after);
+
+        let (handle, mut requests) = CloseHandle::channel();
+        let hooked = close_target(Some(handle));
+        let (response, close_after) = dispatch_close(
+            &server,
+            &hooked,
+            r#"{"id":4,"verb":"close","token":"owner-token"}"#,
+        )
+        .await;
+        assert_eq!(response["ok"], true, "{response}");
+        assert!(close_after, "the writer must ask the host after the answer");
+        assert!(hooked.request_close(), "the first close asks the host");
+        assert_eq!(requests.try_recv(), Ok(()));
+        assert!(!hooked.request_close(), "a second close asks nothing");
+        assert!(requests.try_recv().is_err());
+
+        // An empty token file matches nothing, not even an empty provided token.
+        std::fs::write(hub.join("token"), "").unwrap();
+        let (response, close_after) =
+            dispatch_close(&server, &hooked, r#"{"id":5,"verb":"close","token":""}"#).await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(!close_after);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A target with no session handles: `close` only reads the token and the hook, so the
+    /// weak session fields are never upgraded.
+    fn close_target(close: Option<CloseHandle>) -> ControlTarget {
+        ControlTarget {
+            session_id: "unit".into(),
+            workspace: std::path::PathBuf::from("/w"),
+            journal: std::path::PathBuf::from("/w/unit.jsonl"),
+            initial_route: ModelRoute::new("p", "m"),
+            inbox: Weak::new(),
+            hooks: Weak::new(),
+            turn_running: Weak::new(),
+            queue: Weak::new(),
+            config_queue: Weak::new(),
+            projection: Weak::new(),
+            model: Weak::new(),
+            jobs: None,
+            hub_held: false,
+            close,
+        }
+    }
+
+    async fn dispatch_close(
+        server: &ControlServer,
+        target: &ControlTarget,
+        line: &str,
+    ) -> (Value, bool) {
+        let (tx, _rx) = mpsc::channel::<Outbound>(SUBSCRIBER_BUFFER);
+        let close = Arc::new(Notify::new());
+        let mut client_id = None;
+        let mut close_after = false;
+        let response = server
+            .dispatch(line, target, &tx, &close, &mut client_id, &mut close_after)
+            .await;
+        (response, close_after)
     }
 }

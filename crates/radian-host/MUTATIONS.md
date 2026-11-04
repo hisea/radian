@@ -2269,3 +2269,24 @@ restored from `.radian/backup/nextest.toml`, which `cmp` found identical.
 | TK0319-M2 | cause group 6's comment keeps its old count (`(15 names)`) while the group lists 22 exact names | ✅ 1 failed (rc=100) | `the_cause_comments_count_their_groups` (cause group 6's comment says 15 names but it lists 22) |
 
 1/1 caught.
+
+## TK0320: the control port's owner `close` verb (2026-11-04, branch `work/TK0320-control-close-verb`)
+
+The `close` verb and its host action live in `crates/radian-host/src/control.rs`. M1–M4 break
+the dispatch path and run in the workspace sandbox as the unit test
+`control::tests::close_is_token_gated_and_refused_without_a_host_hook`; M5–M6 break
+`close_session` and run in the sandbox as
+`close_session::close_session_cancels_a_running_turn_and_settles_the_open_call_as_cancelled`
+(no control socket is opened, so the sandbox permits it). Each mutation was applied in place and
+restored from `.radian/control.rs.src.bak`, which `cmp` found identical.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0320-M1 | `close` is dropped from the owner-verb match arm, so it falls through to the unknown-verb error | ✅ 1 failed (rc=100) | `control::tests::close_is_token_gated_and_refused_without_a_host_hook` (`unknown verb \`close\`: the control port has no such verb` with the owner token) |
+| TK0320-M2 | the no-hook check is removed, so a host without a close hook answers `ok` and asks it to close | ✅ 1 failed (rc=100) | `control::tests::close_is_token_gated_and_refused_without_a_host_hook` (`{"id":3,"ok":true}` instead of `this process cannot be closed remotely`) |
+| TK0320-M3 | `close_after` is never set, so the port answers `ok` and never asks the host | ✅ 1 failed (rc=100) | `control::tests::close_is_token_gated_and_refused_without_a_host_hook` (`the writer must ask the host after the answer`) |
+| TK0320-M4 | `CloseHandle::request` sends every time instead of once | ✅ 1 failed (rc=100) | `control::tests::close_is_token_gated_and_refused_without_a_host_hook` (`a second close asks nothing`) |
+| TK0320-M5 | `close_session` drops `inbox.cancel`, so the turn in flight is not cancelled | ✅ 1 failed (rc=100, 15 s timeout) | `close_session_cancels_a_running_turn_and_settles_the_open_call_as_cancelled` (`the close joined the driver: Elapsed(())`: the `ask_user` call never ends) |
+| TK0320-M6 | `close_session` drops `inbox.close`, so the driver has no stop signal after the turn | ✅ 1 failed (rc=100, 15 s timeout) | `close_session_cancels_a_running_turn_and_settles_the_open_call_as_cancelled` (`the close joined the driver: Elapsed(())`) |
+
+6/6 caught.

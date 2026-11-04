@@ -55,6 +55,9 @@ pub(crate) struct Run {
     pub(crate) ui: Arc<Ui>,
     pub(crate) driver_ended: Arc<Notify>,
     pub(crate) signals: mpsc::UnboundedReceiver<i32>,
+    /// The close hook's receiving end (ADR 0043): `Some` only in the hub-held mode, whose
+    /// owner may ask the process to end through its control port.
+    pub(crate) close: Option<mpsc::UnboundedReceiver<()>>,
     /// The session facade (ADR 0023 U5): its driver handle, its journal and its projection.
     pub(crate) session: Arc<radian_host::LocalSession>,
     pub(crate) secrets: Vec<String>,
@@ -546,17 +549,40 @@ async fn hub_held_busy(run: &Run) -> bool {
 }
 
 /// The hub-held loop (ADR 0048 §16): no terminal, no prompt loop. The driver opens turns from
-/// the inputs the control port enqueues; this loop only watches for a stop signal, the driver
-/// ending, and the idle window passing. When the session has had no running turn, nothing
-/// pending and no background job for `idle`, it closes the session through the ordinary
-/// shutdown path (so queued work still runs and the journal is complete) and exits `0`; the
-/// journal stays, and the hub resumes it on the next prompt. SIGTERM/SIGINT takes the same
-/// termination path the line loop takes.
+/// the inputs the control port enqueues; this loop only watches for a close request, a stop
+/// signal, the driver ending, and the idle window passing. When the session has had no running
+/// turn, nothing pending and no background job for `idle`, it closes the session through the
+/// ordinary shutdown path (so queued work still runs and the journal is complete) and exits
+/// `0`; the journal stays, and the hub resumes it on the next prompt. A close request from the
+/// owner's control port takes the signal path instead: the turn in flight is cancelled (it
+/// still journals its boundary), pending approvals and questions are abandoned, and the process
+/// exits `0`. SIGTERM/SIGINT takes the same termination path the line loop takes.
 pub(crate) async fn hub_held_loop(run: &mut Run, idle: Duration) -> LoopDone {
     let mut idle_since: Option<Instant> = None;
+    // The port's close hook (ADR 0043). Hub-held mode is the one mode that installs it.
+    let mut close = run
+        .close
+        .take()
+        .expect("hub-held mode always installs the close hook");
     loop {
         tokio::select! {
             biased;
+            Some(()) = close.recv() => {
+                // The owner asked the port to close this process. End it the way the idle
+                // window does: the running turn is cancelled through `cancel`'s path, pending
+                // approvals and questions are abandoned, the driver is joined, and the journal
+                // stays for the next prompt (ADR 0043).
+                let code = report_error(
+                    &radian_host::close_session(&run.session).await,
+                    &run.secrets,
+                )
+                .unwrap_or(0);
+                let end = match run.ui.last_status() {
+                    Some(status) => ExecEnd::Status(Some(status)),
+                    None => ExecEnd::NoTurns,
+                };
+                return LoopDone { code, end };
+            }
             Some(signal) = run.signals.recv() => {
                 let code = terminate(&run.inbox, &run.session, &run.secrets, signal).await;
                 return LoopDone {
