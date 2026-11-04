@@ -559,9 +559,9 @@ with `[tui.colors]`.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (the two-press Ctrl-C quit, `/quit`, a remote close, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (the two-press Ctrl-C quit, `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a remote close clears the input the same way, so it saves no draft; a signal exit
 saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
