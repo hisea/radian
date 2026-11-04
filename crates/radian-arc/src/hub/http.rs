@@ -72,9 +72,9 @@ pub const KEEP_ALIVE_SECS: u64 = 15;
 
 /// The API version `GET /v1/version` reports. It names the route set and its behavior; the
 /// plan and task file shape is `schema_version` (ADR 0048 decision 5) and changes on its own.
-/// Version `2` adds the session surface; version `1`'s routes and their behavior are
-/// unchanged.
-pub const API_VERSION: u32 = 2;
+/// Version `3` adds the session `close` route; version `2` added the session surface, and
+/// version `1`'s routes and their behavior are unchanged.
+pub const API_VERSION: u32 = 3;
 
 /// The most diff text `GET …/diff/<path>` returns, in bytes.
 pub const DIFF_TEXT_LIMIT: usize = 256 * 1024;
@@ -731,6 +731,7 @@ enum Route {
     SessionCancel(String, String),
     SessionAnswer(String, String),
     SessionConfig(String, String),
+    SessionClose(String, String),
     Events,
     Action(String, String, OwnerAction),
     Unknown,
@@ -814,13 +815,16 @@ fn route(path: &str) -> Route {
         ["v1", "repos", name, "sessions", id, "config"] => {
             Route::SessionConfig(decode(name), decode(id))
         }
+        ["v1", "repos", name, "sessions", id, "close"] => {
+            Route::SessionClose(decode(name), decode(id))
+        }
         _ => Route::Unknown,
     }
 }
 
 /// Whether `route` takes `method`. `/v1/repos/<name>/sessions` takes both: a `GET` lists the
 /// repository's sessions and a `POST` starts one. Every other session route is `GET` except
-/// the four that forward a control verb, which are `POST`, like an owner action.
+/// the five that forward a control verb, which are `POST`, like an owner action.
 fn accepts(route: &Route, method: &Method) -> bool {
     match route {
         Route::Sessions(_) => method == Method::GET || method == Method::POST,
@@ -828,7 +832,8 @@ fn accepts(route: &Route, method: &Method) -> bool {
         | Route::SessionPrompt(..)
         | Route::SessionCancel(..)
         | Route::SessionAnswer(..)
-        | Route::SessionConfig(..) => *method == Method::POST,
+        | Route::SessionConfig(..)
+        | Route::SessionClose(..) => *method == Method::POST,
         Route::Unknown => false,
         _ => *method == Method::GET,
     }
@@ -848,7 +853,8 @@ fn body_limit(route: &Route, method: &Method) -> Option<usize> {
         | Route::SessionPrompt(..)
         | Route::SessionCancel(..)
         | Route::SessionAnswer(..)
-        | Route::SessionConfig(..) => Some(sessions::SESSION_BODY_LIMIT),
+        | Route::SessionConfig(..)
+        | Route::SessionClose(..) => Some(sessions::SESSION_BODY_LIMIT),
         _ => None,
     }
 }
@@ -903,6 +909,9 @@ fn handle(
         Route::SessionConfig(name, id) => {
             return session_config(registry, sessions, name, id, body);
         }
+        Route::SessionClose(name, id) => {
+            return session_close(registry, sessions, name, id);
+        }
         Route::Sessions(name) if method == Method::POST => {
             return session_create(registry, sessions, name, body);
         }
@@ -937,6 +946,7 @@ fn handle(
         | Route::SessionCancel(..)
         | Route::SessionAnswer(..)
         | Route::SessionConfig(..)
+        | Route::SessionClose(..)
         | Route::Unknown => {
             unreachable!("a write or unknown route returned above")
         }
@@ -1588,6 +1598,25 @@ fn session_config(
         Err(error) => return not_found(error),
     };
     match sessions::config(sessions, &path, id, body) {
+        Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(error) => session_failure(error),
+    }
+}
+
+/// `POST …/sessions/<id>/close`: the control port's `close` (ADR 0043), which ends the process
+/// after answering. A hub-held process leaves its journal for the next prompt; a TUI-hosted one
+/// refuses with its own text, carried as `502`.
+fn session_close(
+    registry: &Registry,
+    sessions: &SessionHub,
+    name: &str,
+    id: &str,
+) -> Response<ResponseBody> {
+    let path = match repo_path(registry, name) {
+        Ok(path) => path,
+        Err(error) => return not_found(error),
+    };
+    match sessions::close(sessions, &path, id) {
         Ok(()) => json_response(StatusCode::OK, json!({ "ok": true })),
         Err(error) => session_failure(error),
     }

@@ -608,10 +608,10 @@ fn the_list_and_show_routes_are_the_cli_json_bytes() {
 
     let version = hub.authorized("GET", "/v1/version");
     assert_eq!(version.status, 200);
-    // Version 2 adds the session surface; every route this test read keeps its bytes.
+    // Version 3 adds the session close route; every route this test read keeps its bytes.
     assert_eq!(
         version.json(),
-        serde_json::json!({ "api_version": 2, "schema_version": 1 })
+        serde_json::json!({ "api_version": 3, "schema_version": 1 })
     );
 }
 

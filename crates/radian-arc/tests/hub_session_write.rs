@@ -437,6 +437,13 @@ impl Fixture {
         )
     }
 
+    fn close(&self, id: &str) -> Response {
+        self.hub.post(
+            &format!("/v1/repos/{}/sessions/{id}/close", self.name),
+            &json!({}),
+        )
+    }
+
     fn journal(&self, id: &str) -> PathBuf {
         self.home.journal(id)
     }
@@ -1701,4 +1708,331 @@ fn a_config_route_queues_the_next_turns_route() {
         &json!({"config": {"nonsense": true}}),
     );
     assert_eq!(bad.status, 422, "{:?}", bad.body);
+}
+
+// ---- close: the owner's process verb (ADR 0043, ADR 0048 §16) ---------------------------
+
+/// The owner's `close` on an idle hub-held session ends the process, and the next `prompt`
+/// starts a new hub-held process on the same journal.
+#[test]
+fn closing_an_idle_hub_held_session_lets_the_next_prompt_resume_its_journal() {
+    let fixture = Fixture::new(
+        "close-idle",
+        vec![text_reply("first answer"), text_reply("second answer")],
+        "",
+        Some(60),
+    );
+    let id = fixture.create(json!({"text": "first question"}));
+    fixture.wait_journal(&id, "the first turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    wait_until("the session is live and hub-held", || {
+        fixture.hub.sessions(fixture.name).iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(id.as_str())
+                && row.get("live").and_then(Value::as_str) == Some("hub")
+        })
+    });
+
+    let response = fixture.close(&id);
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    assert_eq!(response.json().get("ok"), Some(&json!(true)));
+    fixture.wait_no_socket();
+    // The process leaves the live list at the next scan; the ended session keeps its row.
+    wait_until("the closed session leaves the live list", || {
+        fixture.hub.sessions(fixture.name).iter().all(|row| {
+            row.get("id").and_then(Value::as_str) != Some(id.as_str())
+                || row.get("live").and_then(Value::as_str) == Some("none")
+        })
+    });
+
+    let response = fixture.prompt(&id, json!({"text": "second question"}));
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    fixture.wait_journal(&id, "the resumed turn takes the second message", |event| {
+        event.pointer("/data/message/user/content/0/text/text") == Some(&json!("second question"))
+    });
+    fixture.wait_journal(&id, "the resumed turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    assert_eq!(
+        journal_events(&fixture.journal(&id))
+            .iter()
+            .filter(|event| event.get("event").and_then(Value::as_str) == Some("SessionCreated"))
+            .count(),
+        1,
+        "the prompt resumed the same journal"
+    );
+}
+
+/// `close` with a turn in flight cancels it through the `cancel` path before the process exits:
+/// the journal records the turn as cancelled.
+#[test]
+fn closing_a_session_with_a_running_turn_cancels_it_first() {
+    let fixture = Fixture::new(
+        "close-running",
+        vec![Reply::SseThenHang { pieces: Vec::new() }],
+        "",
+        Some(60),
+    );
+    let id = fixture.create(json!({"text": "start a turn"}));
+    let socket = wait_socket(&fixture.home.run());
+    let token = fixture.hub.token();
+    wait_until("the session reports a running turn", || {
+        control(&socket, &token, json!({"id": 1, "verb": "list_sessions"}))
+            .pointer("/sessions/0/state")
+            == Some(&json!("working"))
+    });
+
+    let response = fixture.close(&id);
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    fixture.wait_no_socket();
+
+    let journal = journal_events(&fixture.journal(&id));
+    assert!(
+        journal.iter().any(|event| {
+            event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+                && event.pointer("/data/outcome") == Some(&json!("cancelled"))
+        }),
+        "the running turn is cancelled first: {journal:?}"
+    );
+}
+
+/// A second `close`, after the first process is gone, is the ended-session `409`, with the same
+/// body `cancel` answers.
+#[test]
+fn a_second_close_after_the_process_is_gone_is_conflict() {
+    let fixture = Fixture::new("close-twice", vec![text_reply("done")], "", Some(60));
+    let id = fixture.create(json!({"text": "hello"}));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+
+    let first = fixture.close(&id);
+    assert_eq!(first.status, 200, "{:?}", first.body);
+    fixture.wait_no_socket();
+
+    let second = fixture.close(&id);
+    assert_eq!(second.status, 409, "{:?}", second.body);
+    let ended = fixture.hub.post(
+        &format!("/v1/repos/{}/sessions/{id}/cancel", fixture.name),
+        &json!({}),
+    );
+    assert_eq!(ended.status, 409, "{:?}", ended.body);
+    assert_eq!(
+        second.error(),
+        ended.error(),
+        "the same ended-session body as cancel"
+    );
+}
+
+/// A TUI-hosted session (the holder `tui`) installs no close hook: the route reaches its port
+/// and carries the refusal as `502`, and the process is unchanged.
+#[test]
+fn closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal() {
+    let fixture = Fixture::new("close-tui", Vec::new(), "", Some(60));
+    let id = "tui-hosted-close";
+    let stderr = fs::File::create(fixture.home.path().join("tui.log"))
+        .expect("the TUI-hosted log is creatable");
+    let mut child = Command::new(radian_bin())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", fixture.home.path())
+        .env("RADIAN_HOME", fixture.home.path())
+        .env("RADIAN_SESSION_DIR", fixture.home.sessions())
+        .env("RADIAN_CATALOG_URL", fast_catalog_url())
+        .current_dir(&fixture.repo.clone)
+        .args([
+            "exec",
+            "--workspace",
+            fixture
+                .repo
+                .canonical_clone()
+                .to_str()
+                .expect("a UTF-8 path"),
+            "--session-id",
+            id,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .expect("the TUI-hosted session starts");
+    let socket = fixture.home.run().join(format!("{}.sock", child.id()));
+    wait_until("the TUI-hosted session's socket answers", || {
+        fixture.journal(id).is_file() && UnixStream::connect(&socket).is_ok()
+    });
+    wait_until(
+        "the sessions route reports the session as a live tui",
+        || {
+            fixture.hub.sessions(fixture.name).iter().any(|row| {
+                row.get("id").and_then(Value::as_str) == Some(id)
+                    && row.get("live").and_then(Value::as_str) == Some("tui")
+            })
+        },
+    );
+
+    let response = fixture.close(id);
+    assert_eq!(response.status, 502, "{:?}", response.body);
+    assert_eq!(response.error(), "this process cannot be closed remotely");
+    let listed = control(
+        &socket,
+        &fixture.hub.token(),
+        json!({"id": 1, "verb": "list_sessions"}),
+    );
+    assert_eq!(listed.get("ok"), Some(&json!(true)), "{listed}");
+
+    let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    let _ = child.wait();
+}
+
+/// A control port that answers `list_sessions` but accepts `close` and never answers it, so only
+/// the hub's per-request timeout can end the route call.
+struct HangingClosePort {
+    path: PathBuf,
+    child: Child,
+}
+
+impl HangingClosePort {
+    fn bind(run: &Path, id: &str, workspace: &str) -> Self {
+        // A live pid names the socket: the hub's scan skips a file whose pid is gone.
+        let child = Command::new("sleep")
+            .arg("300")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a pid to name the fake socket");
+        let path = run.join(format!("{}.sock", child.id()));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("the fake control socket binds");
+        listener
+            .set_nonblocking(true)
+            .expect("the fake listener is non-blocking");
+        let id = id.to_owned();
+        let workspace = workspace.to_owned();
+        std::thread::spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let id = id.clone();
+                        let workspace = workspace.clone();
+                        std::thread::spawn(move || serve_hanging(stream, &id, &workspace));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Self { path, child }
+    }
+}
+
+impl Drop for HangingClosePort {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// One connection to [`HangingClosePort`]: `list_sessions` answers, `close` never does.
+fn serve_hanging(mut stream: UnixStream, id: &str, workspace: &str) {
+    // A non-blocking listen socket can hand out non-blocking connections on some platforms;
+    // the close branch must block on its read, so make the connection blocking first.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let mut reader = BufReader::new(stream.try_clone().expect("the fake connection clones"));
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    let request: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
+    let mut answer = |value: Value| {
+        let mut bytes = value.to_string().into_bytes();
+        bytes.push(b'\n');
+        let _ = stream.write_all(&bytes);
+        let _ = stream.flush();
+    };
+    match request.get("verb").and_then(Value::as_str) {
+        Some("list_sessions") => answer(json!({
+            "id": 1,
+            "ok": true,
+            "sessions": [{
+                "id": id,
+                "kind": "main",
+                "workspace": workspace,
+                "model": { "provider": "p", "model": "m" },
+                "state": "idle",
+                "pending": 0,
+                "holder": "tui",
+            }],
+        })),
+        Some("close") => {
+            // Accept and never answer: the hub's read timeout is the only end. The read returns
+            // when the timed-out hub connection closes.
+            let mut sink = Vec::new();
+            let _ = reader.read_to_end(&mut sink);
+        }
+        _ => answer(json!({ "id": 1, "ok": false, "error": "unknown verb" })),
+    }
+}
+
+/// A port that accepts `close` and never answers: the hub's per-request timeout answers `502`,
+/// and another request is served while that call waits on its blocking thread.
+#[test]
+fn a_close_whose_port_never_answers_times_out_without_blocking_other_requests() {
+    let fixture = Fixture::new("close-timeout", vec![text_reply("done")], "", Some(60));
+    let id = fixture.create(json!({"text": "hello"}));
+    fixture.wait_journal(&id, "the turn finishes", |event| {
+        event.get("event").and_then(Value::as_str) == Some("TurnFinished")
+    });
+    fixture.stop_sessions();
+    // Let the scanner forget the real socket before the fake takes the id, so the close finds
+    // the fake row rather than the stale one.
+    wait_until("the ended session leaves the live list", || {
+        fixture.hub.sessions(fixture.name).iter().all(|row| {
+            row.get("id").and_then(Value::as_str) != Some(id.as_str())
+                || row.get("live").and_then(Value::as_str) == Some("none")
+        })
+    });
+    let workspace = fixture
+        .repo
+        .canonical_clone()
+        .to_string_lossy()
+        .into_owned();
+    let fake = HangingClosePort::bind(&fixture.home.run(), &id, &workspace);
+    wait_until("the fake port accepts a connection", || {
+        UnixStream::connect(&fake.path).is_ok()
+    });
+
+    let endpoint = format!("/v1/repos/{}/sessions/{id}/close", fixture.name);
+    let port = fixture.hub.port;
+    let token = fixture.hub.token();
+    let started = Instant::now();
+    let close = std::thread::spawn(move || raw_request(port, &token, &endpoint, "{}"));
+    // Let the close request reach the fake and start its read timeout.
+    std::thread::sleep(Duration::from_millis(400));
+    let version_started = Instant::now();
+    let version = fixture.hub.get("/v1/version");
+    assert_eq!(version.status, 200);
+    assert!(
+        version_started.elapsed() < Duration::from_secs(2),
+        "another request answered while the close waited: {:?}",
+        version_started.elapsed()
+    );
+    let response = close.join().expect("the close thread returns");
+    assert_eq!(response.status, 502, "{:?}", response.body);
+    assert!(
+        response.error().contains("cannot read from")
+            || response.error().contains(&fake.path.display().to_string()),
+        "the timeout names the port: {:?}",
+        response.body
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "the per-request timeout applied: {:?} ({})",
+        started.elapsed(),
+        response.error()
+    );
 }

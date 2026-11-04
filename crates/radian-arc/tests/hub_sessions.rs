@@ -1104,7 +1104,7 @@ fn a_socket_whose_process_died_is_dropped_on_the_next_scan() {
 // ---- edge 9: a version 1 client still reads every version 1 route the same way -------------
 
 #[test]
-fn every_version_one_route_still_answers_and_the_version_is_two() {
+fn every_version_one_route_still_answers_and_the_version_is_three() {
     let repo = Repo::new("hub-sessions-v1");
     let store = arc_store(&repo);
     register(&repo.home, "repo", &repo.canonical_clone());
@@ -1128,7 +1128,7 @@ fn every_version_one_route_still_answers_and_the_version_is_two() {
     assert_eq!(version.status, 200);
     assert_eq!(
         version.json(),
-        json!({ "api_version": 2, "schema_version": 1 })
+        json!({ "api_version": 3, "schema_version": 1 })
     );
 
     // The version 1 read routes answer exactly what they answered before the session surface
@@ -1925,7 +1925,7 @@ fn a_slow_socket_delays_no_version_and_no_other_repositorys_listing() {
     let started = Instant::now();
     let version = hub.get("/v1/version");
     assert_eq!(version.status, 200);
-    assert_eq!(version.json()["api_version"], json!(2));
+    assert_eq!(version.json()["api_version"], json!(3));
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(2),
