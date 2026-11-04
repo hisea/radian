@@ -155,7 +155,18 @@ impl App {
                     self.session.history_stash.clear();
                     self.composer_images.clear();
                 }
-                self.quit_now()
+                // The notice is a durable transcript fact (ADR 0006 §5.14), so the journal
+                // append runs before the quit effect. `quit_now` is the ordinary clean exit;
+                // the result is dirty because the notice must reach the screen first.
+                let mut result = self.quit_now();
+                result.dirty = true;
+                result.effects.insert(
+                    0,
+                    Effect::HostNotice {
+                        text: "session closed remotely".into(),
+                    },
+                );
+                result
             }
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),

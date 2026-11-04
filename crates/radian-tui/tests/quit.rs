@@ -272,15 +272,42 @@ fn slash_quit_with_an_argument_is_an_error_line_and_does_not_quit() {
 }
 
 /// The control port's close hook: one host notice in the transcript, then the `/quit` path.
+/// The notice is also journaled before the quit effect runs (ADR 0006 §5.14), so a resume
+/// still shows it.
 #[test]
 fn remote_close_commits_the_notice_and_quits() {
     let mut app = App::new("m", "s");
     let result = app.update(Input::RemoteClose);
     assert!(app.quit, "a remote close quits");
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(
+        result.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::HostNotice { text } if text == "session closed remotely"
+        )),
+        "the close journals its notice first: {:?}",
+        result.effects
+    );
+    assert!(
+        matches!(result.effects.first(), Some(Effect::HostNotice { .. })),
+        "the journal append runs before the quit effect: {:?}",
+        result.effects
+    );
     let last = app.session.entries.last().expect("the close notice");
     assert_eq!(last.kind, EntryKind::Notice);
     assert_eq!(last.text, "session closed remotely");
+}
+
+/// The closing frame: an idle remote close sets no other state, so the update itself must
+/// mark the frame dirty or the loop exits before drawing the notice.
+#[test]
+fn remote_close_marks_the_frame_dirty() {
+    let mut app = App::new("m", "s");
+    let result = app.update(Input::RemoteClose);
+    assert!(
+        result.dirty,
+        "the notice was pushed but the loop would not draw it"
+    );
 }
 
 /// A remote close while the user types drops the draft the way an idle Ctrl-C quit does: the

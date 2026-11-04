@@ -306,6 +306,21 @@ pub async fn open_session(
             }
         }
     }
+    // ADR 0006 §5.14: the durable host notices a resume renders. The parse is already here
+    // (resume-perf B), so this reads no second time.
+    let host_notices: Vec<String> = parsed
+        .as_ref()
+        .map(|parsed| {
+            parsed
+                .events()
+                .iter()
+                .filter_map(|event| match &event.data {
+                    radian_session::EventData::HostNotice { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let subtree_context = Arc::new(crate::context::SubtreeContext::new(
         &workspace,
         loaded_context,
@@ -880,6 +895,7 @@ pub async fn open_session(
         facts,
         config_snapshot,
         history: recovered_history,
+        host_notices,
     })
 }
 

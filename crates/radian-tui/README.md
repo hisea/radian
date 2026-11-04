@@ -1155,7 +1155,8 @@ throwaway terminal, not your working one.
     `icanon`), a running turn is cancelled first; `/quit extra` is a usage notice and never
     quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
     exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
-    next `--resume`). *Look*: is the notice visible above the restored prompt, and does the
+    next `--resume`). *Look*: is the notice visible above the restored prompt, does a
+    `--resume owner-close` show the same notice again (it is journaled), and does the
     close under a popup still exit (the popup is abandoned, not answered)? *Fail*: record the
     verb's answer, the screen's last frame, and whether `icanon` came back.
 

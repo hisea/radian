@@ -116,6 +116,10 @@ pub enum Effect {
     CancelSideQuestion,
     /// Leave the app.
     Quit,
+    /// Journal one durable host notice before leaving (ADR 0006 §5.14). The remote close
+    /// commits `session closed remotely`; the TUI shows it live too, but this is the record
+    /// a resume reads.
+    HostNotice { text: String },
     /// The TUI's idle timer fired (ADR 0045 §6): run the session's `Notification` hooks with
     /// `idle_prompt`. It observes only and never opens a turn.
     NotifyIdle,
@@ -325,6 +329,7 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (Quit, Quit) => true,
+            (HostNotice { text: a }, HostNotice { text: b }) => a == b,
             (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (SetMemory { off: a }, SetMemory { off: b }) => a == b,

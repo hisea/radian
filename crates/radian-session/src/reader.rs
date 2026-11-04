@@ -30,7 +30,7 @@ pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The v1 events known to a schema-v1 reader (ADR 0006 §4). Anything else is unknown and
 /// handled by the `critical` policy.
-pub(crate) const KNOWN_EVENTS: [&str; 37] = [
+pub(crate) const KNOWN_EVENTS: [&str; 38] = [
     "SessionCreated",
     "InboxEnqueued",
     "InputClaimed",
@@ -44,6 +44,7 @@ pub(crate) const KNOWN_EVENTS: [&str; 37] = [
     "TranscriptReplacementAborted",
     "TurnFinished",
     "TurnFailed",
+    "HostNotice",
     "ConfigChanged",
     "ContextCompacted",
     "CompactionUsageRecorded",
@@ -184,6 +185,12 @@ pub enum EventData {
     TurnFailed {
         turn_id: String,
         message: String,
+    },
+    /// A host notice committed to the transcript by the session's front end (ADR 0006 §5.14).
+    /// Typed for an exact round trip; audit only, never a transcript record. The full-screen
+    /// interface writes `session closed remotely` when the owner closes it remotely.
+    HostNotice {
+        text: String,
     },
     ConfigChanged {
         revision: u64,
@@ -924,6 +931,10 @@ impl LineScanner {
                     message: d.message,
                 }
             }
+            "HostNotice" => {
+                let d: HostNoticeData = data_of(raw, self.lineno, path)?;
+                EventData::HostNotice { text: d.text }
+            }
             "ConfigChanged" => {
                 let d: ConfigChangedData = data_of(raw, self.lineno, path)?;
                 EventData::ConfigChanged {
@@ -1221,6 +1232,7 @@ fn record_from_event(event: &SessionEvent) -> Option<JournalRecord> {
         | EventData::TurnStarted { .. }
         | EventData::TurnFinished { .. }
         | EventData::TurnFailed { .. }
+        | EventData::HostNotice { .. }
         | EventData::ConfigChanged { .. }
         | EventData::ContextBudgetReached { .. }
         | EventData::PermissionResolved { .. }
@@ -1416,6 +1428,11 @@ struct TurnFinishedData {
 struct TurnFailedData {
     turn_id: String,
     message: String,
+}
+
+#[derive(Deserialize)]
+struct HostNoticeData {
+    text: String,
 }
 
 #[derive(Deserialize)]

@@ -241,6 +241,17 @@ impl LoopContext<'_> {
                 self.command(radian_host::SessionCommand::Cancel)
             }
             Effect::Quit => Ok(()),
+            // The remote close's durable notice (ADR 0006 §5.14). The live transcript entry is
+            // already pushed; this is the record a resume reads. Best effort like the audit
+            // sink: a broken journal must not stop the process from closing.
+            Effect::HostNotice { text } => {
+                let _ = self.runtime.block_on(
+                    self.host
+                        .journal
+                        .append_runtime_event(radian_session::RuntimeEvent::HostNotice { text }),
+                );
+                Ok(())
+            }
             // ADR 0045 §6: the TUI's idle timer fired. The hooks observe only and start in
             // the background, so this never holds the loop.
             Effect::NotifyIdle => {

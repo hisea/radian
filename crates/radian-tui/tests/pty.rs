@@ -2827,6 +2827,39 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
         !sessions.join("owner-close.draft").exists(),
         "the remote close saved the typed draft"
     );
+    // The notice is a durable transcript fact, not only a screen line: a resume reads it.
+    let journal = std::fs::read_to_string(sessions.join("owner-close.jsonl")).unwrap();
+    assert!(
+        journal.contains("\"event\":\"HostNotice\""),
+        "the close notice is not in the journal:\n{journal}"
+    );
+    assert!(
+        journal.contains("session closed remotely"),
+        "the journaled notice lost its text:\n{journal}"
+    );
+
+    // A resume reads the journaled notice back into the transcript.
+    let mut resumed = Pty::spawn_bare(
+        &[
+            "--resume",
+            "owner-close",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        30,
+        120,
+    );
+    assert!(
+        resumed.wait_for_screen("session closed remotely", wait_positive()),
+        "the resumed transcript lost the close notice:\n{}",
+        resumed.screen()
+    );
+    resumed.quit();
 }
 
 /// Denying feeds a denial result back to the model and never runs the tool.

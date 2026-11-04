@@ -3644,3 +3644,19 @@ with `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(
 forwarder) is covered by `pty::pty_owner_close_commits_the_notice_and_exits`; that test is in the
 sandbox profile's group 8 exclusions because the `workspace` tier denies the Unix-socket connect,
 so it runs in the gate, not here.
+
+## TK0321 rework 2: the closing frame and the journaled notice (2026-11-04, branch `work/TK0321-tui-quit-and-remote-close`)
+
+The remote close now marks its frame dirty and returns a `HostNotice` journal effect before the
+quit effect. Each mutation was applied by hand to `crates/radian-tui/src/app/update.rs`, the named
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test quit -E
+'test(<name>)'`, and the file was restored from `.radian/bak/update.rs` (cmp identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M6 | the remote-close result stays `quit_now`'s quiet result (the `result.dirty = true` line is dropped), so the loop exits without drawing the notice | `quit::remote_close_marks_the_frame_dirty` | ✅ 1 failed |
+| TK0321-M7 | the remote-close result keeps the quit effect but inserts no `HostNotice` effect, so nothing reaches the journal | `quit::remote_close_commits_the_notice_and_quits` (effects were `[Quit]`) | ✅ 1 failed |
+
+2/2 caught. The journal round trip and the resumed transcript are covered by
+`pty::pty_owner_close_commits_the_notice_and_exits` (excluded from the sandbox profile for the
+Unix-socket reason above, so it runs in the gate).

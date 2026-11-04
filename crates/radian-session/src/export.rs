@@ -551,6 +551,7 @@ fn event_data_value(
         EventData::GoalDropped {} => json!({}),
         EventData::GoalWait { secs } => json!({"secs": secs}),
         EventData::GoalBudgetExhausted { kind } => json!({"kind": kind}),
+        EventData::HostNotice { text } => json!({"text": text}),
         EventData::Other(value) => value.clone(),
     };
     Ok(value)

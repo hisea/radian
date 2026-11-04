@@ -346,3 +346,15 @@ the source restored from the backup.
 |---|---|---|---|
 | TK0286-M1 | `optional_non_empty_string` accepts an empty string and a present `null` again (the pre-fix `Option<String>` shape) | ✅ 1 failed (rc=100) | `tests/read_fixtures.rs::an_empty_or_null_stop_reason_refuses_the_file` (`unwrap_err` on an `Ok` session carrying `stop_reason: ""`) |
 | TK0286-M2 | the JSON export serializes the enum instead of the stored wire text (`serde_json::to_value(stop_reason)`) | ✅ 1 failed (rc=100) | `tests/export.rs::an_unknown_stop_reason_exports_its_original_text` (`"unknown"` instead of `"some_future_reason"`) |
+
+## TK0321: the HostNotice session event (2026-11-04, branch `work/TK0321-tui-quit-and-remote-close`)
+
+A TUI remote close writes one non-critical `HostNotice { text }` record; a resume reads the text
+back. Each mutation was applied by hand to `crates/radian-session/src/runtime.rs` or `reader.rs`,
+the named test ran with `cargo nextest run -p radian-session --locked --profile sandbox --test
+runtime_events -E 'test(<name>)'`, and the file was restored from `.radian/bak/` (cmp identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0321-M8 | `HostNotice::critical()` returns `true` instead of `false` | ✅ 1 failed (rc=100) | `tests/runtime_events.rs::a_host_notice_round_trips_and_is_not_a_transcript_record` (`a host notice is audit, not state`) |
+| TK0321-M9 | `HostNotice` is missing from `KNOWN_EVENTS`, so a v1 reader skips the line as an unknown non-critical event | ✅ 1 failed (rc=100) | `tests/runtime_events.rs::a_host_notice_round_trips_and_is_not_a_transcript_record` (`the event round-trips`: no accepted event) |

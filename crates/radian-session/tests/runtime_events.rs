@@ -506,3 +506,38 @@ async fn concurrent_runtime_and_core_appends_keep_seq_in_file_order() {
         assert_eq!(journal.next_seq(), 1 + 8 * 25, "round {round}");
     }
 }
+
+/// ADR 0006 §5.14: `HostNotice` is a durable, non-critical transcript notice. A resume reads
+/// the text back, it never becomes a `JournalRecord`, and the exports carry it.
+#[tokio::test]
+async fn a_host_notice_round_trips_and_is_not_a_transcript_record() {
+    let dir = TempDir::new("host-notice");
+    let path = dir.file("s.jsonl");
+    let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    journal
+        .append_runtime_event(RuntimeEvent::HostNotice {
+            text: "session closed remotely".into(),
+        })
+        .await
+        .unwrap();
+
+    let session = Session::open(&path).unwrap();
+    let notice = session
+        .events()
+        .iter()
+        .find(|event| event.event == "HostNotice")
+        .expect("the event round-trips");
+    assert!(!notice.critical, "a host notice is audit, not state");
+    match &notice.data {
+        EventData::HostNotice { text } => assert_eq!(text, "session closed remotely"),
+        other => panic!("expected HostNotice, got {other:?}"),
+    }
+    // Audit only: never a transcript record and never a model message.
+    assert!(session.journal_records().is_empty());
+    assert!(session.history().unwrap().is_empty());
+
+    let opts = ExportOptions::default();
+    let json = radian_session::export_json(&session, &opts).unwrap();
+    assert!(json.contains("\"event\": \"HostNotice\""), "{json}");
+    assert!(json.contains("session closed remotely"), "{json}");
+}
