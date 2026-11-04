@@ -52,6 +52,8 @@ The control port's `subscribe` stream follows the same split (ADR 0043): it carr
 
 `SessionCreated`, `InboxEnqueued`/`InputClaimed`/`InputAdmitted`, `TurnStarted`/`TurnFinished`/`TurnFailed`, `HostNotice`, `ConfigChanged`, `PermissionResolved`, `ApprovalPolicyChanged`, `MemoryInjected`, `ContextFileAppended`, `SessionForked`, `ProjectTrustChanged`, `UserBash`, `BackgroundJobStarted`/`BackgroundJobSettled`. Audit-type (non-critical) events take no part in state rebuild. `replay`/`repair` ignore them.
 
+`HostNotice` is the one host-written record in that list: the TUI's close path appends it through the session journal (ADR 0006 §5.14), and a resume renders it as a transcript notice.
+
 `ContextFileAppended { path, bytes, truncated }` is the audit record that a subtree context file was appended to the transcript (ADR 0036). The message itself is a durable `Message` record and carries the content; the event carries only the workspace-relative path and the loaded size, and a resume reads it so the same file is not appended twice.
 
 `McpServerLifecycle` is not in v1.
