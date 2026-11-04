@@ -50,7 +50,7 @@ The control port's `subscribe` stream follows the same split (ADR 0043): it carr
 
 ### K4: Events that runtime itself writes to JSONL
 
-`SessionCreated`, `InboxEnqueued`/`InputClaimed`/`InputAdmitted`, `TurnStarted`/`TurnFinished`/`TurnFailed`, `ConfigChanged`, `PermissionResolved`, `ApprovalPolicyChanged`, `MemoryInjected`, `ContextFileAppended`, `SessionForked`, `ProjectTrustChanged`, `UserBash`, `BackgroundJobStarted`/`BackgroundJobSettled`. Audit-type (non-critical) events take no part in state rebuild. `replay`/`repair` ignore them.
+`SessionCreated`, `InboxEnqueued`/`InputClaimed`/`InputAdmitted`, `TurnStarted`/`TurnFinished`/`TurnFailed`, `HostNotice`, `ConfigChanged`, `PermissionResolved`, `ApprovalPolicyChanged`, `MemoryInjected`, `ContextFileAppended`, `SessionForked`, `ProjectTrustChanged`, `UserBash`, `BackgroundJobStarted`/`BackgroundJobSettled`. Audit-type (non-critical) events take no part in state rebuild. `replay`/`repair` ignore them.
 
 `ContextFileAppended { path, bytes, truncated }` is the audit record that a subtree context file was appended to the transcript (ADR 0036). The message itself is a durable `Message` record and carries the content; the event carries only the workspace-relative path and the loaded size, and a resume reads it so the same file is not appended twice.
 
