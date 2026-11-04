@@ -338,6 +338,7 @@ An unknown session, or one whose workspace is another repository's, is `404`; `c
 A socket that has gone while the hub's last scan still listed the session is the ended-session case, not a port failure: a live-only route answers `409` (the same body as for an ended session) and a `prompt` resumes the journal, and the stale entry is dropped.
 
 A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
+The owner token's [`close`](../control.md#close) verb ends it the same way at once: the turn in flight is cancelled, pending approvals and questions are abandoned, and the journal stays.
 Only hub-started processes are reclaimed; a TUI decides its own session's life.
 A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period).
 

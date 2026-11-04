@@ -7,8 +7,8 @@ description: The local process control port: its socket, the owner token, every 
 Every running radian process that hosts a session — the full-screen interface (`radian`) and
 `radian exec` — opens one Unix socket and serves a JSON-lines protocol on it. A local script,
 `radian attach`, or a hub uses it to send input, cancel a turn, read the session, follow its
-committed events, and (with the owner token) answer the pending approval or question and change
-the model route. It is a local IPC surface, never a remote protocol.
+committed events, and (with the owner token) answer the pending approval or question, change
+the model route and close the process. It is a local IPC surface, never a remote protocol.
 
 ## Where the socket is
 
@@ -83,11 +83,11 @@ request), the request is the owner's:
 - The message records `{"via": "hub"}` in its `origin` metadata, so the transcript can tell a
   phone-sent message from a typed one: the TUI appends a weak ` · hub` to that message's last
   row (a keyboard message has none).
-- The four owner verbs below are available.
+- The five owner verbs below are available.
 
 A missing, unreadable or empty token file means no token matches. A request without `token`,
 or with a wrong one, behaves exactly as without this section: source `Scheduler` by default, no
-`via` metadata, the `source` rules above, and the four owner verbs return an error line and
+`via` metadata, the `source` rules above, and the five owner verbs return an error line and
 change nothing. The comparison is constant-time.
 
 ## The verbs
@@ -104,6 +104,7 @@ change nothing. The comparison is constant-time.
 | `answer` | `request_id`, `response`, `token` | completes one pending entry |
 | `config` | `config`, `token` | queues one turn-boundary change |
 | `models` | `token` | the `/model` list, grouped by provider |
+| `close` | `token` | `{"ok": true}`, then the process ends; the journal stays |
 
 The task verbs (`spawn_task`, `wait_task`, `task_status`) do not exist. An unknown verb
 (including `"approve"`) returns an error and changes nothing.
@@ -239,6 +240,29 @@ entry marked `current: true`. Groups follow `/model`'s order: the current provid
 providers and models by name. Only logged-in providers (a usable `auth.json` entry) and the
 current route's provider are considered; a provider with no known model contributes no group.
 A `config` `model` must name one of these entries or the current route.
+
+## `close`
+
+```json
+{"id": 12, "verb": "close", "token": "…"}
+```
+
+```json
+{"id": 12, "ok": true}
+```
+
+The answer is written first, then the host ends the process. It cancels a running turn through
+the same path as [`cancel`](#the-verbs) — an interrupted assistant prefix and an open tool call
+are recorded the way the journal's recovery rules expect — and abandons pending approvals and
+questions the way a process exit does. The journal stays, so the next prompt through a hub
+resumes the session. A subscriber's stream ends as it does on any process exit.
+
+A host that installs no close hook answers
+`{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This
+build installs the hook in the hub-held `radian exec` process a hub starts; every other hosting
+process refuses the verb. Two `close` requests crossing at once both answer `ok`, and the host
+is asked once, so the process exits once. A `close` that meets the hub-held idle window also
+produces one clean exit.
 
 ## `list_sessions`
 

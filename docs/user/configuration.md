@@ -253,7 +253,7 @@ sessions_index_max_lines = 1000
 | `control.enabled` | boolean | `true` | Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`. `false` turns the port off for the process. A non-boolean is refused. |
 
 Every hosting process on that socket serves the JSON-lines protocol on
-[`control`](control.md): the input verbs, the owner token and its four verbs, the event stream,
+[`control`](control.md): the input verbs, the owner token and its five verbs, the event stream,
 attachments, and the line limit. This key only turns the port on or off.
 
 ## `[hub]`
