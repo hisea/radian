@@ -2471,3 +2471,24 @@ run with `cargo nextest run -p radian-arc --lib --locked --profile sandbox -E
 | TK0319-M3 | the drain accepts the read's answer without probing the receiver, so a lag already in the ring is hidden by the snapshot | `hub::http::tests::a_finished_read_does_not_hide_a_lag_that_already_happened` (round 0 answered `Read` with the ring three frames past its capacity) | ✅ 1 failed |
 
 2/2 caught.
+
+## TK0322: the hub forwards the owner's close verb
+
+The hub gained `POST /v1/repos/<name>/sessions/<id>/close`, which forwards the control port's
+`close` with the hub token. A successful close answers `{"ok": true}`; a port that answers with an
+error is `502` carrying its text; a gone socket is the ended-session `409`. The mutations below
+were applied by hand to `crates/radian-arc/src/hub/sessions.rs` and
+`crates/radian-arc/src/hub/http.rs`, the `radian` binary rebuilt, and the five `hub_session_write`
+close tests run with `cargo nextest run -p radian-arc --test hub_session_write --locked
+--no-fail-fast -E '<the five close test names>'` outside the workspace sandbox (the suite binds
+and connects control sockets). Each file was restored from `.radian/sessions.rs.tk0322.bak` or
+`.radian/http.rs.tk0322.bak`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0322-M1 | `close` forwards `{"verb":"cancel"}` instead of `{"verb":"close"}`, so the route answers `ok` without ending anything | `closing_an_idle_hub_held_session_lets_the_next_prompt_resume_its_journal`, `closing_a_session_with_a_running_turn_cancels_it_first`, `a_second_close_after_the_process_is_gone_is_conflict`, `closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal`, `a_close_whose_port_never_answers_times_out_without_blocking_other_requests` | ✅ 5 failed |
+| TK0322-M2 | a control port's error answer maps to `SessionError::Invalid` (`422`) instead of `Port` (`502`), so the host's `this process cannot be closed remotely` looks like a client error | `closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal` (422, not 502) | ✅ 1 failed |
+| TK0322-M3 | the close route is dropped from the POST method table (`accepts`), so every close request is `405` before its body is read | all five close tests (405) | ✅ 5 failed |
+| TK0322-M4 | the close route arm is removed from `route()`, exactly the pre-change router: the path falls to `Route::Unknown` and answers `404` before any handler | all five close tests (404) | ✅ 5 failed |
+
+4/4 caught.

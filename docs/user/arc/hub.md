@@ -132,11 +132,12 @@ A running hub stat()s the file once per request and re-reads it when its modific
 
 The API has two version numbers.
 
-- `api_version` names the route set and its behavior. This build's is `2`, and every route starts with `/v1/`.
+- `api_version` names the route set and its behavior. This build's is `3`, and every route starts with `/v1/`.
 - `schema_version` names the plan and task file shape (see [the file fields](files.md)). This build's is `1`.
 
-They change on their own: a route can be added without touching a plan or task file, and a field can be added to a file while `api_version` stays `2`.
-Version `2` adds [the session routes](#sessions); every version `1` route and its behavior is unchanged, so a client written for `1` keeps working.
+They change on their own: a route can be added without touching a plan or task file, and a field can be added to a file while `api_version` stays `3`.
+Version `3` adds [the session `close` route](#starting-and-driving-a-session); every version `2` route and its behavior is unchanged, so a client written for `2` keeps working.
+Version `2` added [the session routes](#sessions); every version `1` route and its behavior is unchanged, so a client written for `1` keeps working.
 `GET /v1/version` returns both.
 
 ## Routes
@@ -173,6 +174,7 @@ A write route's failure body and status codes are in [Owner actions](#owner-acti
 | `/v1/repos/<name>/sessions/<id>/cancel` | `POST` | The control port's `cancel`: `ok` (boolean, `true`). | `200`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/sessions/<id>/answer` | `POST` | The control port's `answer`, with the hub token: `ok` (boolean). A late answer is `409`. | `200`, `400`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/sessions/<id>/config` | `POST` | The control port's `config`, applied at the next turn boundary: `ok` (boolean). | `200`, `400`, `401`, `404`, `409`, `422`, `500`, `502` |
+| `/v1/repos/<name>/sessions/<id>/close` | `POST` | The control port's `close`, with the hub token: `ok` (boolean, `true`). | `200`, `401`, `404`, `409`, `500`, `502` |
 | `/v1/repos/<name>/items/<task>/conversation` | `GET` | `task` (string), `attempt` (integer or `null`) and `entries` (array): one attempt's `result.jsonl` folded with the ACP fold. `?attempt=<n>` picks an attempt by number. | `200`, `400`, `401`, `404`, `500` |
 | `/v1/repos/<name>/items/<id>/<action>` | `POST` | An owner action; see [Owner actions](#owner-actions). | `200`, `400`, `401`, `404`, `405`, `409`, `413`, `422`, `500` |
 
@@ -313,7 +315,7 @@ A session no process hosts is `409`; a port that fails mid-request is `502`; an 
 
 ### Starting and driving a session
 
-The write routes start a session and carry the phone's messages, approvals and model changes into it. `POST /v1/repos/<name>/sessions` starts a **hub-held process** and sends its first message; `POST …/sessions/<id>/prompt` sends a later one, resuming an ended session first; `…/cancel`, `…/answer` and `…/config` forward the control port's own verbs.
+The write routes start a session and carry the phone's messages, approvals, model changes and the owner's `close` into it. `POST /v1/repos/<name>/sessions` starts a **hub-held process** and sends its first message; `POST …/sessions/<id>/prompt` sends a later one, resuming an ended session first; `…/cancel`, `…/answer`, `…/config` and `…/close` forward the control port's own verbs.
 A hub-held process is `radian exec` in its internal hub-held mode: it opens the session (new, or `--resume`), runs no turn by itself, takes every input from its control port, and sends approvals and questions to the session's pending queue, answered through `answer`, never a terminal.
 It always binds its control port, whatever [`control.enabled`](../configuration.md#control) says: that port is its only input.
 It is an ordinary session: its workspace is the repository's path, its configuration is the one the hub itself was started with (an explicit `--config` is passed on to the process), and its model is the request's `model` or the configuration's route.
@@ -325,6 +327,7 @@ It is an ordinary session: its workspace is the repository's path, its configura
 | `POST /v1/repos/<name>/sessions/<id>/cancel` | No field; an empty body is the same as `{}`. |
 | `POST /v1/repos/<name>/sessions/<id>/answer` | `request_id` (integer, required) and `response`, the control port's own answer value. |
 | `POST /v1/repos/<name>/sessions/<id>/config` | `config` (object, required), the control port's own change: `model` (`{provider, model}`) and/or `thinking`. |
+| `POST /v1/repos/<name>/sessions/<id>/close` | No field; an empty body is the same as `{}`. |
 
 `model` is exactly `{"provider": string, "model": string}`; any other key, a missing or empty value, or a value that is not an object is `400`.
 `images` and `files` are the control port's own attachment shapes and limits ([attachments](../control.md#attachments)): a bad image, an over-limit file or an unknown MIME is `422` naming the item. A present `null` is a wrong-typed field, not an absent one.
@@ -334,11 +337,12 @@ A session write route reads at most 16 MiB (16,777,216 bytes) minus 1 KiB of bod
 
 A session a process already hosts — a TUI's or the hub's own — is never started twice: the prompt goes through that process's socket.
 An ended session is resumed by a new hub-held process on the same journal.
-An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer` and `config` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`.
+An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer`, `config` and `close` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`. A port that refuses `close` (a TUI-hosted process has no close hook) is `502` carrying its text, `this process cannot be closed remotely`.
 A socket that has gone while the hub's last scan still listed the session is the ended-session case, not a port failure: a live-only route answers `409` (the same body as for an ended session) and a `prompt` resumes the journal, and the stale entry is dropped.
 
 A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
 The owner token's [`close`](../control.md#close) verb ends it the same way at once: the turn in flight is cancelled, pending approvals and questions are abandoned, and the journal stays.
+The hub's `close` route forwards that verb: a hub-held process ends and the next `prompt` resumes the journal; a TUI-hosted process installs no close hook and the route answers `502` with its text.
 Only hub-started processes are reclaimed; a TUI decides its own session's life.
 A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period).
 

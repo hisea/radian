@@ -1326,6 +1326,40 @@ pub fn config(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<()
     Ok(())
 }
 
+/// `POST …/sessions/<id>/close`: forward the port's `close` (ADR 0043), which answers `ok` before
+/// its host cancels the running turn, abandons the queue and exits. A hub-held process installs
+/// the hook, so the journal stays and the next `prompt` resumes it; a TUI-hosted process refuses
+/// the verb and the route carries that text.
+///
+/// # Errors
+///
+/// As [`cancel`], except that a port that answers with an error is [`SessionError::Port`]
+/// (`502`) with the port's own text: `close` is not a client value the route can refuse with
+/// `422`, and "this process cannot be closed remotely" is the host's answer, not the client's.
+pub fn close(hub: &SessionHub, repo: &Path, id: &str) -> Result<(), SessionError> {
+    let (socket, _) = live_session(hub, repo, id)?;
+    let token = hub.token();
+    match self::request(
+        &socket,
+        &json!({ "id": 1, "verb": "close" }),
+        REQUEST_TIMEOUT,
+        token.as_deref(),
+    ) {
+        Ok(_) => Ok(()),
+        // A socket gone under the last scan is the ended session, and the stale row goes, the
+        // same as [`cancel`].
+        Err(CallError::Gone(_)) => {
+            hub.forget_session(id);
+            Err(ended(id))
+        }
+        // Every error the port answers, and every failure of the call, is the port failing:
+        // the route carries the text as `502`.
+        Err(CallError::Failed(message) | CallError::Refused(message)) => {
+            Err(SessionError::Port(message))
+        }
+    }
+}
+
 /// The live socket of a session this repository owns, or the route's error.
 fn live_session(
     hub: &SessionHub,
