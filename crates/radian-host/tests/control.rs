@@ -385,6 +385,22 @@ impl Client {
         serde_json::from_str(line.trim_end()).expect("a JSON line")
     }
 
+    /// The next line, or `None` at end of file.
+    async fn next(&mut self) -> Option<Value> {
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line).await.expect("read");
+        (n > 0).then(|| serde_json::from_str(line.trim_end()).expect("a JSON line"))
+    }
+
+    /// A request that tolerates a socket the process has closed: `None` when nothing answers.
+    async fn try_request(&mut self, value: Value) -> Option<Value> {
+        let mut line = serde_json::to_vec(&value).unwrap();
+        line.push(b'\n');
+        self.writer.write_all(&line).await.ok()?;
+        self.writer.flush().await.ok()?;
+        self.next().await
+    }
+
     /// Reads until EOF, returning whether the server closed the connection within `limit`.
     async fn drain_until_closed(&mut self, limit: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + limit;
@@ -2245,8 +2261,8 @@ async fn close_without_the_owner_token_changes_nothing_and_keeps_the_process_run
     fixture.stop().await;
 }
 
-/// A valid `close` answers `ok` first, then asks the host; a second request still answers `ok`
-/// and asks it no second time, so two crossings make one exit.
+/// A valid `close` answers `ok` first, then asks the host; two `close` requests already on the
+/// wire both answer `ok` and ask it once, so two crossings make one exit.
 #[tokio::test]
 async fn close_answers_ok_before_asking_the_host_and_two_requests_make_one_close() {
     let server = MockServer::start(Vec::new()).await;
@@ -2255,24 +2271,24 @@ async fn close_answers_ok_before_asking_the_host_and_two_requests_make_one_close
     fixture.write_token("owner-token");
     let mut client = Client::connect(fixture.socket()).await;
 
-    let answered = client
-        .request(json!({"id": 1, "verb": "close", "token": "owner-token"}))
+    // Both requests are on the wire before the first answer: the crossing case the process
+    // exit must not cut short.
+    client
+        .send(json!({"id": 1, "verb": "close", "token": "owner-token"}))
         .await;
+    client
+        .send(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    let answered = client.read().await;
     assert_eq!(answered["ok"], true, "{answered}");
+    let second = client.read().await;
+    assert_eq!(second["ok"], true, "{second}");
+
     let asked = tokio::time::timeout(Duration::from_secs(5), requests.recv())
         .await
         .expect("the host was never asked to close");
     assert_eq!(asked, Some(()), "the close request reaches the host");
     assert!(requests.try_recv().is_err(), "one close asks the host once");
-
-    let answered = client
-        .request(json!({"id": 2, "verb": "close", "token": "owner-token"}))
-        .await;
-    assert_eq!(answered["ok"], true, "{answered}");
-    assert!(
-        requests.try_recv().is_err(),
-        "a second close asks no second time"
-    );
 
     let _ = radian_host::close_session(&fixture.session).await;
 }
@@ -2316,6 +2332,14 @@ async fn two_close_requests_at_once_both_get_ok_and_the_process_exits_once() {
 
     let mut first = Client::connect(fixture.socket()).await;
     let mut second = Client::connect(fixture.socket()).await;
+    // Both connections are served before the close: the accept loop stops on the drain, so a
+    // connection still in the backlog could not be answered.
+    for client in [&mut first, &mut second] {
+        let listed = client
+            .request(json!({"id": 0, "verb": "list_sessions"}))
+            .await;
+        assert_eq!(listed["ok"], true, "{listed}");
+    }
     // Both requests are on the wire before either answer is read: the crossing case.
     first
         .send(json!({"id": 1, "verb": "close", "token": "owner-token"}))
@@ -2327,6 +2351,66 @@ async fn two_close_requests_at_once_both_get_ok_and_the_process_exits_once() {
     let second_answer = second.read().await;
     assert_eq!(first_answer["ok"], true, "{first_answer}");
     assert_eq!(second_answer["ok"], true, "{second_answer}");
+
+    let joined = tokio::time::timeout(Duration::from_secs(15), host)
+        .await
+        .expect("the close host never finished")
+        .expect("the close host task");
+    assert_eq!(joined, Ok(()), "the driver joined cleanly");
+}
+
+/// The host is asked only after every open connection has its answer: a `close` that crosses
+/// another one cannot lose its `ok` to the process exit (ADR 0043). The second client reads its
+/// answer only after the host was asked, and then sees EOF — the server finished the connection
+/// before it asked.
+#[tokio::test]
+async fn a_crossing_close_is_answered_before_the_host_is_asked() {
+    let server = MockServer::start(Vec::new()).await;
+    let (fixture, mut requests) =
+        Fixture::closable("close-crossing", &server.base_url, Answerable::Auto).await;
+    fixture.write_token("owner-token");
+    let (asked, asked_rx) = tokio::sync::oneshot::channel();
+    let session = Arc::clone(&fixture.session);
+    let host = tokio::spawn(async move {
+        if requests.recv().await.is_none() {
+            return Ok(());
+        }
+        let _ = asked.send(());
+        radian_host::close_session(&session).await
+    });
+
+    let mut first = Client::connect(fixture.socket()).await;
+    let mut second = Client::connect(fixture.socket()).await;
+    // Both connections are served before the close: the accept loop stops on the drain, so a
+    // connection still in the backlog could not be answered.
+    for client in [&mut first, &mut second] {
+        let listed = client
+            .request(json!({"id": 0, "verb": "list_sessions"}))
+            .await;
+        assert_eq!(listed["ok"], true, "{listed}");
+    }
+    // Both requests are on the wire before either answer is read: the crossing case.
+    first
+        .send(json!({"id": 1, "verb": "close", "token": "owner-token"}))
+        .await;
+    second
+        .send(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    let first_answer = first.read().await;
+    assert_eq!(first_answer["ok"], true, "{first_answer}");
+
+    // The host is asked only once every open connection has its answer: the second client reads
+    // after the ask and must still find its `ok`, then EOF.
+    tokio::time::timeout(Duration::from_secs(15), asked_rx)
+        .await
+        .expect("the host was never asked to close")
+        .expect("the asked signal");
+    let second_answer = second.read().await;
+    assert_eq!(second_answer["ok"], true, "{second_answer}");
+    let eof = tokio::time::timeout(Duration::from_secs(15), second.next())
+        .await
+        .expect("the closing connection stayed open");
+    assert!(eof.is_none(), "the connection closes after its answer");
 
     let joined = tokio::time::timeout(Duration::from_secs(15), host)
         .await
@@ -2424,15 +2508,19 @@ async fn close_while_an_approval_is_pending_abandons_it_and_a_late_answer_is_lat
         "the close abandoned the pending approval"
     );
     let late = client
-        .request(json!({"id": 3, "verb": "answer", "request_id": request_id,
+        .try_request(json!({"id": 3, "verb": "answer", "request_id": request_id,
                         "response": "allow_once", "token": "owner-token"}))
         .await;
-    assert_eq!(late["ok"], false, "{late}");
-    assert!(
-        late["error"]
-            .as_str()
-            .unwrap()
-            .contains("no longer pending"),
-        "{late}"
-    );
+    // The close may already have finished this connection; if it still answers, the answer is
+    // the existing late-answer error.
+    if let Some(late) = late {
+        assert_eq!(late["ok"], false, "{late}");
+        assert!(
+            late["error"]
+                .as_str()
+                .unwrap()
+                .contains("no longer pending"),
+            "{late}"
+        );
+    }
 }

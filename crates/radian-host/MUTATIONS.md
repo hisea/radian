@@ -2290,3 +2290,19 @@ restored from `.radian/control.rs.src.bak`, which `cmp` found identical.
 | TK0320-M6 | `close_session` drops `inbox.close`, so the driver has no stop signal after the turn | ✅ 1 failed (rc=100, 15 s timeout) | `close_session_cancels_a_running_turn_and_settles_the_open_call_as_cancelled` (`the close joined the driver: Elapsed(())`) |
 
 6/6 caught.
+
+## TK0320 rework 1: a crossing `close` answers before the process ends (2026-11-04, same branch)
+
+The drain that lets two crossing `close` requests both answer `ok` lives in
+`crates/radian-host/src/control.rs`: `begin_close` waits for the accept loop and every open
+connection (bounded by `CLOSE_DRAIN`), and `finish_connection` answers the request lines already
+on the wire. Each mutation was applied in place and restored from `.radian/control.rs.bak`,
+which `cmp` found identical; both caught tests run inside the sandbox (a socket pair, no
+connect).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0320-M7 | `begin_close` asks the host at once instead of waiting for the open connections to end | ✅ 1 failed (rc=100) | `control::tests::the_host_is_asked_only_after_every_open_connection_ends` (`the host was asked while connections were still open`) |
+| TK0320-M8 | `finish_connection` answers no request line already on the wire (`CLOSE_DRAIN_LINES` becomes `0`) | ✅ 1 failed (rc=100) | `control::tests::the_drain_answers_a_request_that_was_already_on_the_wire` (the client read no answer line) |
+
+2/2 caught.

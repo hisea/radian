@@ -251,18 +251,22 @@ A `config` `model` must name one of these entries or the current route.
 {"id": 12, "ok": true}
 ```
 
-The answer is written first, then the host ends the process. It cancels a running turn through
-the same path as [`cancel`](#the-verbs) — an interrupted assistant prefix and an open tool call
-are recorded the way the journal's recovery rules expect — and abandons pending approvals and
-questions the way a process exit does. The journal stays, so the next prompt through a hub
-resumes the session. A subscriber's stream ends as it does on any process exit.
+The answer is written first; the port then stops accepting new connections, lets every open
+connection finish the answers it owes, and only then ends the process. A connection whose `close`
+crossed another one therefore still receives its `{"ok": true}`, and each connection ends after
+its answer. The process's end cancels a running turn through the same path as
+[`cancel`](#the-verbs) — an interrupted assistant prefix and an open tool call are recorded the
+way the journal's recovery rules expect — and abandons pending approvals and questions the way a
+process exit does. The journal stays, so the next prompt through a hub resumes the session. A
+subscriber's stream ends as it does on any process exit.
 
 A host that installs no close hook answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This
 build installs the hook in the hub-held `radian exec` process a hub starts; every other hosting
 process refuses the verb. Two `close` requests crossing at once both answer `ok`, and the host
 is asked once, so the process exits once. A `close` that meets the hub-held idle window also
-produces one clean exit.
+produces one clean exit. A client that stops reading cannot hold the process open: the wait for
+the open connections is bounded.
 
 ## `list_sessions`
 

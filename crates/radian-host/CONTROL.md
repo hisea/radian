@@ -208,17 +208,19 @@ entries or the current route.
 {"id": 12, "ok": true}
 ```
 
-The port writes the `ok` answer first, then asks its host to end the process. The host cancels a
-running turn through the same path as `cancel` (so an interrupted assistant prefix and an open
-tool call are recorded the way ADR 0002/0003 require), abandons pending approvals and questions
-the way a process exit does, and ends the process cleanly; the journal stays, and the next
-`prompt` through the hub resumes it. Subscribers see their stream end as they do on any process
-exit.
+The port writes the `ok` answer first, then ends the process. It stops accepting new
+connections and lets every connection that is already open finish the answers it owes, so two
+`close` requests crossing at once both see `ok`; each connection then ends. Only after that does
+the port ask its host to close. The host cancels a running turn through the same path as
+`cancel` (so an interrupted assistant prefix and an open tool call are recorded the way ADR
+0002/0003 require), abandons pending approvals and questions the way a process exit does, and
+ends the process cleanly; the journal stays, and the next `prompt` through the hub resumes it.
+Subscribers see their stream end as they do on any process exit.
 
 A host that installs no close hook — any embedder but `radian exec`'s hub-held mode — answers
-`{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing.
-Two `close` requests crossing at once both answer `ok`; the host is asked once, so the process
-exits once.
+`{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. The host
+is asked once however many connections crossed, so the process exits once. A client that stops
+reading cannot hold the process open: the wait for the drain is bounded (a quarter second).
 
 ### Attachments
 

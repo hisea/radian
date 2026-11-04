@@ -324,6 +324,14 @@ async fn two_close_requests_at_once_both_get_ok_and_the_process_exits_once() {
     let mut session = HubHeld::start("twice", &server.base_url, 60).await;
     let mut first = Client::connect(&session.socket).await;
     let mut second = Client::connect(&session.socket).await;
+    // Both connections are served before the close: the accept loop stops on the drain, so a
+    // connection still in the backlog could not be answered.
+    for client in [&mut first, &mut second] {
+        let listed = client
+            .request(json!({"id": 0, "verb": "list_sessions"}))
+            .await;
+        assert_eq!(listed["ok"], true, "{listed}");
+    }
 
     first.send(close_request(1)).await;
     second.send(close_request(2)).await;
@@ -351,14 +359,15 @@ async fn close_and_the_idle_window_race_to_one_clean_exit() {
         .wait_journal(|line| line["event"] == "TurnFinished")
         .await;
 
-    // Keep closing across the idle boundary. Once the socket is gone the connect fails, which
-    // is the ended-session case, not a failure.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    // Most of the idle window has passed before the first attempt: the closes straddle the
+    // moment the loop would exit on idleness, so the two paths really race.
+    tokio::time::sleep(Duration::from_millis(4_800)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
     while tokio::time::Instant::now() < deadline {
         if try_close(&session.socket).await.is_none() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
     let (code, stderr) = session.finish().await;
