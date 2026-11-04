@@ -15,6 +15,7 @@ KNOWN_EVENTS = {
     "TurnStarted", "MessageAppended", "ToolExecutionStarted", "ToolExecutionSettled",
     "TranscriptReplaced", "TranscriptReplacementCommitted", "TranscriptReplacementAborted",
     "TurnFinished", "ConfigChanged", "ContextCompacted",
+    "HostNotice",
     "Rewound", "ContextBudgetReached", "PermissionResolved", "ApprovalPolicyChanged",
     "MemoryInjected", "ModelUsageRecorded", "CompactionUsageRecorded", "SessionForked",
     "ProjectTrustChanged", "UserBash", "ContextFileAppended",
