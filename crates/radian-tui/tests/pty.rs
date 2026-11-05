@@ -2779,11 +2779,15 @@ async fn pty_slash_quit_restores_the_terminal_and_exits() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_owner_close_commits_the_notice_and_exits() {
     let dir = TempDir::new("owner-close");
+    // Both processes run from the same directory: a session's workspace is the directory it was
+    // created in, and a resume from another directory is refused.
+    let ws = dir.path().join("ws");
     let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&sessions).unwrap();
     let server = MockServer::start(vec![text_reply("UNUSED")]).await;
     let home = short_radian_home();
-    let mut pty = Pty::spawn_bare(
+    let mut pty = Pty::spawn_in(
         &[
             "--model",
             "mock",
@@ -2795,6 +2799,7 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
             "owner-close",
         ],
         &[("RADIAN_HOME", home.to_str().unwrap())],
+        &ws,
         30,
         120,
     );
@@ -2805,8 +2810,14 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
     );
     let socket = wait_for_control_socket(&home, &app_pid(&pty));
     write_hub_token(&home, "owner-token");
-    // A draft typed when the close arrives: it is dropped like a Ctrl-C quit's.
+    // A draft typed when the close arrives: it is dropped like a Ctrl-C quit's. Wait until
+    // the composer shows it, or the close can win the race and the draft is still in flight.
     pty.send(b"a draft");
+    assert!(
+        pty.wait_for_screen("a draft", wait_positive()),
+        "the draft is not in the input box:\n{}",
+        pty.screen()
+    );
 
     let answer = control_request(
         &socket,
@@ -2839,7 +2850,7 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
     );
 
     // A resume reads the journaled notice back into the transcript.
-    let mut resumed = Pty::spawn_bare(
+    let mut resumed = Pty::spawn_in(
         &[
             "--resume",
             "owner-close",
@@ -2851,6 +2862,7 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
             &server.base_url,
         ],
         &[("RADIAN_HOME", home.to_str().unwrap())],
+        &ws,
         30,
         120,
     );
