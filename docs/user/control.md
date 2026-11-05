@@ -252,9 +252,10 @@ A `config` `model` must name one of these entries or the current route.
 ```
 
 The answer is written first; the port then stops accepting new connections, lets every open
-connection finish the answers it owes, and only then ends the process. A connection whose `close`
-crossed another one therefore still receives its `{"ok": true}`, and each connection ends after
-its answer. The process's end cancels a running turn through the same path as
+connection finish the answers it owes (a connection with no complete request yet waits a brief
+moment for one the client is still writing), and only then ends the process. A connection whose
+`close` crossed another one therefore still receives its `{"ok": true}`, and each connection
+ends after its answer. The process's end cancels a running turn through the same path as
 [`cancel`](#the-verbs) — an interrupted assistant prefix and an open tool call are recorded the
 way the journal's recovery rules expect — and abandons pending approvals and questions the way a
 process exit does. The journal stays, so the next prompt through a hub resumes the session. A
@@ -262,9 +263,10 @@ subscriber's stream ends as it does on any process exit.
 
 The full-screen interface takes the `/quit` path: it commits one `session closed remotely`
 notice to the transcript, restores the terminal, and leaves. The notice is journaled, so a
-resume of the session shows it. A draft typed when the close arrives is dropped the way a
-`ctrl-c` quit drops it. Like `/quit`, the close stops the queue first: a followup still waiting
-opens no turn (its journal entry stays, so a resume restores it as a pending input).
+resume of the session shows it, in its journal position. A draft typed when the close arrives
+is dropped the way a `ctrl-c` quit drops it. Like `/quit`, the close stops the queue first: a
+followup still waiting opens no turn; its journal entry stays, so the next `--resume` claims it
+and sends it as the resumed session's first turn.
 
 A host that installs no close hook answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This

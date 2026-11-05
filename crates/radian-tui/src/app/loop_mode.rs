@@ -689,6 +689,50 @@ mod tests {
         );
     }
 
+    /// A `/quit` that met a running turn abandons an armed `/loop`: the completed boundary of
+    /// the turn it waited on must not send the next iteration (`InboxEnqueued` before the
+    /// inbox closes, a turn the teardown would drop) and must not release the quit. Only the
+    /// cancelled boundary does.
+    #[test]
+    fn a_deferred_quit_skips_the_loop_resend_on_a_completed_boundary() {
+        let mut app = App::new("m", "s");
+        app.session.projection.set_turn(TurnState::Running);
+        app.session.loop_state.active = true;
+        app.session.loop_state.prompt = Some("go".to_owned());
+        app.session.loop_state.inflight = false;
+        let quit = submit(&mut app, "/quit");
+        assert!(
+            quit.iter().any(|effect| matches!(effect, Effect::Cancel)),
+            "the running turn is cancelled first: {quit:?}"
+        );
+        assert!(
+            app.quit_after_turn.is_some(),
+            "the quit waits for a boundary"
+        );
+
+        let result = finished(&mut app, "t-1", TurnOutcome::Completed);
+        assert!(
+            !app.quit,
+            "a completed boundary does not release the deferred quit"
+        );
+        assert!(
+            !result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::SendFollowup(_))),
+            "the quit abandons the loop's next iteration: {:?}",
+            result.effects
+        );
+        assert!(
+            result
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Cancel)),
+            "the in-flight turn is cancelled again: {:?}",
+            result.effects
+        );
+    }
+
     /// `loop_active` mirrors the mode for the host: off until `/loop` starts it, on
     /// while armed or iterating, off again when it stops. The host's intent-stop
     /// validator reads it through the loop's sync.

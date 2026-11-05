@@ -446,7 +446,7 @@ not (
   | test(=closing_an_idle_hub_held_session_lets_the_next_prompt_resume_its_journal)
   | test(=closing_a_session_with_a_running_turn_cancels_it_first)
   | test(=a_second_close_after_the_process_is_gone_is_conflict)
-  | test(=closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal)
+  | test(=closing_a_host_without_a_close_hook_is_bad_gateway_with_its_refusal)
   | test(=a_close_whose_port_never_answers_times_out_without_blocking_other_requests)
 
   | test(=pty_a_hub_followup_is_marked_and_a_plain_one_is_not)

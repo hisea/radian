@@ -7,6 +7,15 @@ use super::*;
 
 impl App {
     pub(super) fn update_inner(&mut self, input: Input) -> UpdateResult {
+        // A close or quit is in flight: the composer is frozen, so a key that was already queued
+        // behind the close in the same frame cannot refill it (and be saved as a draft), and
+        // no late edit can change what the closing frame shows. The turn boundary the quit waits
+        // for still arrives through `Runtime`, and the deadline still fires.
+        if (self.quit || self.quit_after_turn.is_some())
+            && !matches!(input, Input::Runtime(_) | Input::QuitAfterTurnDeadline)
+        {
+            return UpdateResult::none();
+        }
         // A pending quit is disarmed by user input only: a resize,
         // a stream/runtime fact or an asynchronous result is not the user changing their mind,
         // and letting one disarm the window made the second Ctrl-C look like it did nothing.
@@ -159,13 +168,7 @@ impl App {
             // cancels "through the same path as `cancel`").
             Input::RemoteClose => {
                 self.push_notice("session closed remotely");
-                if !self.input.is_empty() {
-                    let text = std::mem::take(&mut self.input).text();
-                    self.session.history.push(text);
-                    self.session.history_cursor = None;
-                    self.session.history_stash.clear();
-                    self.composer_images.clear();
-                }
+                self.clear_input_into_history();
                 // The notice is a durable transcript fact (ADR 0006 §5.14). It journals with
                 // the quit, so it stays the last record before the process leaves.
                 self.pending_close_notice = Some("session closed remotely".into());
@@ -925,6 +928,21 @@ impl App {
         self.session.projection.read().turn()
     }
 
+    /// Clears the composer into the in-process history the way an idle Ctrl-C and an `Esc`
+    /// clearing do: the text joins the browsable history, the cursor and the stash reset, and
+    /// the composer images go. One function, so the remote close and the Ctrl-C path cannot
+    /// drift apart.
+    fn clear_input_into_history(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.input).text();
+        self.session.history.push(text);
+        self.session.history_cursor = None;
+        self.session.history_stash.clear();
+        self.composer_images.clear();
+    }
+
     /// Ctrl-C (the `cancel` action), the one action whose meaning depends on the clock
     /// - a turn is running: cancel it (unchanged);
     /// - idle, the input has text: clear it into the history (the same clearing `Esc` does,
@@ -937,11 +955,7 @@ impl App {
             return UpdateResult::quiet(Effect::Cancel);
         }
         if !self.input.is_empty() {
-            let text = std::mem::take(&mut self.input).text();
-            self.session.history.push(text);
-            self.session.history_cursor = None;
-            self.session.history_stash.clear();
-            self.composer_images.clear();
+            self.clear_input_into_history();
             self.quit_pending = None;
             return UpdateResult::dirty();
         }

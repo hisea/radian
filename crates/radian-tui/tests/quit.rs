@@ -10,7 +10,6 @@ use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
 use radian_session::{RuntimeEvent, TurnOutcome, TurnReason};
 use radian_tui::app::{App, Effect, EntryKind, Input, QUIT_WINDOW};
-use radian_tui::keys::Action;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 
@@ -300,16 +299,38 @@ fn the_quit_wait_ends_at_its_deadline() {
     assert!(app.quit_after_turn.is_none(), "the wait is over");
 }
 
-/// A pending approval modal is a layer; the command path itself still quits (the key route
-/// blocks typing while the modal is up, so the submission is the one the test feeds).
+/// A pending approval modal swallows the send key, so a user cannot submit `/quit` while the
+/// popup is up (the reachable modal close is `remote_close_during_a_modal_quits`, which does
+/// not go through the key route).
 #[test]
-fn slash_quit_with_a_pending_approval_modal_quits() {
+fn a_pending_approval_modal_swallows_slash_quit() {
     let mut app = App::new("m", "s");
     prompt_approval(&mut app);
     app.input = "/quit".into();
-    let result = app.update(Input::Action(Action::Send));
-    assert!(app.quit, "`/quit` quits under the modal");
-    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(
+        result.effects.is_empty(),
+        "the modal swallows the send key: {:?}",
+        result.effects
+    );
+    assert!(!app.quit, "the swallowed key sends no command");
+}
+
+/// Keys queued behind a remote close in the same frame are dropped: the composer is frozen
+/// once the close is in flight, so no late key refills it (and is saved as a draft).
+#[test]
+fn keys_queued_behind_a_remote_close_do_not_refill_the_composer() {
+    let mut app = App::new("m", "s");
+    app.input = "draft".into();
+    app.update(Input::RemoteClose);
+    assert!(app.input.is_empty(), "the close cleared the draft");
+    app.update(Input::Char('x'));
+    app.update(Input::Paste("yz".into()));
+    assert!(
+        app.input.is_empty(),
+        "a key queued behind the close must not refill the composer: {:?}",
+        app.input
+    );
 }
 
 /// An argument is a usage line like every other no-argument command, and never quits.

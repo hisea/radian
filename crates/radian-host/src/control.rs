@@ -108,8 +108,9 @@ impl CloseHandle {
 /// The state behind an orderly remote close (ADR 0043). The `ok` answer must reach every client
 /// that already sent a `close` before the host ends the process: the first answer starts a
 /// drain in which the accept loop stops and each open connection flushes its outbound and answers
-/// the request lines already on its wire, and the host is asked only after all of them are done.
-/// The wait is bounded ([`CLOSE_DRAIN`]) so a client that stops reading cannot keep the process
+/// the request lines on its wire (or written while it waits a short moment), and the host is
+/// asked only after all of them are done. The wait is bounded ([`CLOSE_DRAIN`]) so a client
+/// that stops reading cannot keep the process
 /// alive.
 struct CloseDrain {
     /// `true` once the process is closing: every connection watches it and finishes.
@@ -146,6 +147,13 @@ impl CloseDrain {
 /// (ADR 0043). A connection that already has a `close` request on the wire finishes in
 /// microseconds; the bound only keeps a stuck client from holding the process open.
 const CLOSE_DRAIN: Duration = Duration::from_millis(250);
+
+/// How long a draining connection keeps reading for a request after its queued answers are out
+/// and no complete line is buffered yet. A second `close` written just after the first answer
+/// (its bytes not yet in the socket when the drain starts) is still answered; the wait is well
+/// under [`CLOSE_DRAIN`], so an idle or stuck client cannot hold the process past its bound.
+#[cfg(unix)]
+const CLOSE_LINGER: Duration = Duration::from_millis(100);
 
 /// The most request lines one connection answers in the closing drain. A client that keeps
 /// writing must not hold the process open; a crossing second `close` is one line.
@@ -409,6 +417,15 @@ impl ControlServer {
         &self.path
     }
 
+    /// The tasks the close drain still counts: the accept loop until it stops plus every open
+    /// connection. A test seam for the drain's ordering (ADR 0043): the host is asked only when
+    /// this is zero.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn live_connections(&self) -> usize {
+        self.close.live.load(Ordering::SeqCst)
+    }
+
     /// A guard that removes this server's socket file when it drops. The host holds it as a
     /// local, so the file goes on the normal return path **and** on a panic unwind even when
     /// an in-flight connection still holds a reference to the server (ADR 0043).
@@ -614,6 +631,10 @@ impl ControlServer {
         let mut reader = BufReader::new(read);
         let mut client_id: Option<u64> = None;
         let mut closing = drain.closing.subscribe();
+        // The bytes of a line the reader has consumed so far. It lives outside the select's
+        // read future, so cancelling that future when the closing watch wins never loses a
+        // partially written request: the drain finishes the line from here.
+        let mut read = RequestRead::default();
         // A connection accepted after the drain began is closing from its first byte.
         let mut finishing = *closing.borrow();
         while !finishing {
@@ -621,7 +642,7 @@ impl ControlServer {
                 biased;
                 _ = close.notified() => break,
                 _ = closing.changed() => finishing = *closing.borrow(),
-                line = read_request_line(&mut reader) => {
+                line = read_request_line(&mut reader, &mut read) => {
                     match line {
                         RequestLine::Line(bytes) => {
                             let Ok(line) = String::from_utf8(bytes) else {
@@ -684,6 +705,7 @@ impl ControlServer {
                 &close,
                 &target,
                 &mut client_id,
+                &mut read,
             )
             .await;
         }
@@ -698,9 +720,10 @@ impl ControlServer {
     }
 
     /// The first `close` answer starts the process's orderly end (ADR 0043). Asking the host
-    /// now would let it drop the server while another connection's `close` request is still on
-    /// the wire, so the port instead stops accepting, waits (bounded) for every open connection
-    /// to finish its answers, and only then asks. A later `close` answer joins the same drain.
+    /// now would let it drop the server while another connection's `close` request is still
+    /// being written, so the port instead stops accepting, waits (bounded) for every open
+    /// connection to finish its answers and its short linger, and only then asks. A later
+    /// `close` answer joins the same drain.
     fn begin_close(&self, target: &ControlTarget) {
         if self.close.started.swap(true, Ordering::SeqCst) {
             return;
@@ -726,9 +749,9 @@ impl ControlServer {
     }
 
     /// What an open connection does once the process is closing (ADR 0043): write the answers it
-    /// still owes, then answer the request lines already readable on its wire. A whole line in
-    /// the socket now cannot block; a partial one means the client is still writing, and the
-    /// process is ending regardless.
+    /// still owes, then answer the request lines already readable on its wire, waiting a short
+    /// while ([`CLOSE_LINGER`]) for a line the client is still writing. A partial line read
+    /// before the drain started is kept in `read` and completed here, never dispatched alone.
     #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     async fn finish_connection(
@@ -740,6 +763,7 @@ impl ControlServer {
         close: &Arc<Notify>,
         target: &ControlTarget,
         client_id: &mut Option<u64>,
+        read: &mut RequestRead,
     ) {
         while let Ok(outbound) = rx.try_recv() {
             let (value, then_close) = match outbound {
@@ -754,7 +778,7 @@ impl ControlServer {
             }
         }
         for _ in 0..CLOSE_DRAIN_LINES {
-            let Some(line) = ready_request_line(reader).await else {
+            let Some(line) = ready_request_line(reader, read, CLOSE_LINGER).await else {
                 return;
             };
             let mut close_after = false;
@@ -1363,35 +1387,43 @@ async fn write_response(write: &mut tokio::net::unix::OwnedWriteHalf, value: &Va
     true
 }
 
-/// One request line that is already on the wire, or `None` when nothing complete is readable.
-/// `fill_buf` is polled once with a zero timeout: buffered bytes or one non-blocking read, never
-/// a wait. A partial line (no newline yet) also ends the drain, because the client is still
-/// writing and the process is closing.
+/// The bytes of one line a connection has read but not yet completed. It lives across the
+/// `select!` that can cancel the read when the process starts closing, so those bytes are never
+/// lost: `finish_connection` completes the line instead of dispatching the remainder alone.
+#[cfg(unix)]
+#[derive(Default)]
+struct RequestRead {
+    line: Vec<u8>,
+    over: bool,
+}
+
+/// One request line that is on the wire, or `None` when nothing complete arrived within `wait`.
+/// A partial line is consumed into `read` and preserved; it never returns as a standalone line.
+/// A zero `wait` polls the socket once without blocking.
 #[cfg(unix)]
 async fn ready_request_line(
     reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    read: &mut RequestRead,
+    wait: Duration,
 ) -> Option<RequestLine> {
-    use tokio::io::AsyncBufReadExt;
-
-    let ready = tokio::time::timeout(Duration::ZERO, reader.fill_buf()).await;
-    let has_line = matches!(ready, Ok(Ok(buffer)) if buffer.contains(&b'\n'));
-    if !has_line {
-        return None;
-    }
-    Some(read_request_line(reader).await)
+    tokio::time::timeout(wait, read_request_line(reader, read))
+        .await
+        .ok()
 }
 
 /// Reads one newline-terminated request line without ever holding more than [`MAX_REQUEST_BYTES`]
-/// bytes of it. An over-limit line is still consumed through its newline (so the next read
+/// bytes of it. Bytes consumed before a newline arrives stay in `read` (so a cancelled read
+/// loses nothing); an over-limit line is still consumed through its newline (so the next read
 /// starts at a line boundary) and reported as [`RequestLine::TooLong`]; the caller answers it and
 /// keeps the connection. A `\r` before the newline is not part of the line, as `BufRead::lines`
 /// treated it.
 #[cfg(unix)]
-async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> RequestLine {
+async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    read: &mut RequestRead,
+) -> RequestLine {
     use tokio::io::AsyncBufReadExt;
 
-    let mut line: Vec<u8> = Vec::new();
-    let mut over = false;
     loop {
         let (take, found, chunk) = {
             let available = match reader.fill_buf().await {
@@ -1399,12 +1431,12 @@ async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -
                 Err(_) => return RequestLine::Error,
             };
             if available.is_empty() {
-                return if over {
+                return if read.over {
                     RequestLine::TooLong
-                } else if line.is_empty() {
+                } else if read.line.is_empty() {
                     RequestLine::Eof
                 } else {
-                    RequestLine::Line(line)
+                    RequestLine::Line(std::mem::take(&mut read.line))
                 };
             }
             match available.iter().position(|&byte| byte == b'\n') {
@@ -1413,8 +1445,9 @@ async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -
             }
         };
         reader.consume(take);
-        if over {
+        if read.over {
             if found {
+                read.over = false;
                 return RequestLine::TooLong;
             }
             continue;
@@ -1423,25 +1456,27 @@ async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -
             let content = &chunk[..chunk.len() - 1];
             // One extra byte is allowed for a `\r` that sits exactly at the limit before the
             // newline.
-            if line.len() + content.len() > MAX_REQUEST_BYTES + 1 {
+            if read.line.len() + content.len() > MAX_REQUEST_BYTES + 1 {
+                read.line.clear();
                 return RequestLine::TooLong;
             }
-            line.extend_from_slice(content);
-            if line.last() == Some(&b'\r') {
-                line.pop();
+            read.line.extend_from_slice(content);
+            if read.line.last() == Some(&b'\r') {
+                read.line.pop();
             }
-            if line.len() > MAX_REQUEST_BYTES {
+            if read.line.len() > MAX_REQUEST_BYTES {
+                read.line.clear();
                 return RequestLine::TooLong;
             }
-            return RequestLine::Line(line);
+            return RequestLine::Line(std::mem::take(&mut read.line));
         }
         // One extra byte is allowed for a `\r` that may sit exactly at the limit before the
         // newline arrives in the next chunk.
-        if line.len() + chunk.len() > MAX_REQUEST_BYTES + 1 {
-            over = true;
-            line = Vec::new();
+        if read.line.len() + chunk.len() > MAX_REQUEST_BYTES + 1 {
+            read.over = true;
+            read.line.clear();
         } else {
-            line.extend_from_slice(&chunk);
+            read.line.extend_from_slice(&chunk);
         }
     }
 }
@@ -2490,6 +2525,7 @@ mod tests {
                 &close,
                 &target,
                 &mut client_id,
+                &mut RequestRead::default(),
             )
             .await;
         drop(write);
@@ -2499,6 +2535,217 @@ mod tests {
         let answer: Value = serde_json::from_str(answer.trim_end()).expect("one answer line");
         assert_eq!(answer["ok"], true, "{answer}");
         assert_eq!(answer["id"], 2, "{answer}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A request split across two writes is not lost when the closing watch wins while the read
+    /// is waiting for the rest: the bytes already consumed stay in the connection's reader, and
+    /// the drain completes the line instead of answering the remainder as its own request.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_drain_keeps_a_partially_read_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home =
+            std::env::temp_dir().join(format!("radian-control-partial-{}", std::process::id()));
+        let hub = crate::home::hub_dir_for(&home);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("token"), "owner-token").unwrap();
+        let server = Arc::new(ControlServer {
+            home: home.clone(),
+            path: home.join("run/1.sock"),
+            listener: Mutex::new(None),
+            clients: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(0),
+            close: CloseDrain::new(),
+        });
+        let (handle, _requests) = CloseHandle::channel();
+        let target = close_target(Some(handle));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().unwrap();
+        let (read, mut write) = server_side.into_split();
+        let mut reader = BufReader::new(read);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(SUBSCRIBER_BUFFER);
+        let close = Arc::new(Notify::new());
+        let mut client_id = None;
+        let mut read_state = RequestRead::default();
+
+        let (client_read, mut client_write) = client_side.into_split();
+        // The first half is on the wire before the read starts; the read consumes it and waits
+        // for the newline.
+        client_write
+            .write_all(b"{\"id\":3,\"verb\":\"clos")
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+
+        // The closing watch wins while the read waits: cancelling the read future must keep the
+        // bytes it already consumed in the connection's state.
+        let first = tokio::time::timeout(
+            Duration::from_millis(50),
+            read_request_line(&mut reader, &mut read_state),
+        )
+        .await;
+        assert!(first.is_err(), "the read waits for the newline");
+        assert_eq!(
+            read_state.line, b"{\"id\":3,\"verb\":\"clos",
+            "the consumed half stayed in the connection's reader"
+        );
+
+        // The drain completes the line from the preserved prefix, never dispatching only the
+        // remainder.
+        client_write
+            .write_all(b"e\",\"token\":\"owner-token\"}\n")
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+
+        server
+            .finish_connection(
+                &mut reader,
+                &mut write,
+                &tx,
+                &mut rx,
+                &close,
+                &target,
+                &mut client_id,
+                &mut read_state,
+            )
+            .await;
+        drop(write);
+        let mut reader = BufReader::new(client_read);
+        let mut answer = String::new();
+        reader.read_line(&mut answer).await.unwrap();
+        let answer: Value = serde_json::from_str(answer.trim_end()).expect("one answer line");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["id"], 3, "{answer}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A close written just after the first answer (its bytes not yet in the socket when the
+    /// drain starts) still gets `ok`: the draining connection lingers briefly for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_drain_waits_for_a_close_written_after_the_answer() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = std::env::temp_dir().join(format!("radian-control-late-{}", std::process::id()));
+        let hub = crate::home::hub_dir_for(&home);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("token"), "owner-token").unwrap();
+        let server = Arc::new(ControlServer {
+            home: home.clone(),
+            path: home.join("run/1.sock"),
+            listener: Mutex::new(None),
+            clients: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(0),
+            close: CloseDrain::new(),
+        });
+        let (handle, _requests) = CloseHandle::channel();
+        let target = close_target(Some(handle));
+        let (server_side, client_side) = tokio::net::UnixStream::pair().unwrap();
+        let (client_read, mut client_write) = client_side.into_split();
+        let serving = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                let (read, mut write) = server_side.into_split();
+                let mut reader = BufReader::new(read);
+                let (tx, mut rx) = mpsc::channel::<Outbound>(SUBSCRIBER_BUFFER);
+                let close = Arc::new(Notify::new());
+                let mut client_id = None;
+                let mut read_state = RequestRead::default();
+                server
+                    .finish_connection(
+                        &mut reader,
+                        &mut write,
+                        &tx,
+                        &mut rx,
+                        &close,
+                        &target,
+                        &mut client_id,
+                        &mut read_state,
+                    )
+                    .await;
+            }
+        });
+        // Nothing is buffered yet: without the linger the connection would end here.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        client_write
+            .write_all(b"{\"id\":4,\"verb\":\"close\",\"token\":\"owner-token\"}\n")
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+        serving.await.unwrap();
+
+        let mut reader = BufReader::new(client_read);
+        let mut answer = String::new();
+        reader.read_line(&mut answer).await.unwrap();
+        let answer: Value = serde_json::from_str(answer.trim_end()).expect("one answer line");
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["id"], 4, "{answer}");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The connection itself keeps a half-read request when the closing watch wins in its
+    /// `select!`: the drain finishes that line, never answering the remainder alone. This drives
+    /// `serve_connection`, so dropping the connection's reader state fails here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_partial_request_survives_the_closing_watch_in_a_connection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = std::env::temp_dir().join(format!("radian-control-conn-{}", std::process::id()));
+        let hub = crate::home::hub_dir_for(&home);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("token"), "owner-token").unwrap();
+        let server = Arc::new(ControlServer {
+            home: home.clone(),
+            path: home.join("run/1.sock"),
+            listener: Mutex::new(None),
+            clients: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(0),
+            close: CloseDrain::new(),
+        });
+        let (handle, _requests) = CloseHandle::channel();
+        let target = close_target(Some(handle));
+        let drain = Arc::clone(&server.close);
+        // `serve_connection` is driven alone; count the connection (the accept loop's slot stays).
+        drain.live.fetch_add(1, Ordering::SeqCst);
+        let (server_side, client_side) = tokio::net::UnixStream::pair().unwrap();
+        let serving = Arc::clone(&server);
+        let connection = tokio::spawn(async move {
+            serving.serve_connection(server_side, target, drain).await;
+        });
+
+        let (read, mut write) = client_side.into_split();
+        let mut reader = BufReader::new(read);
+        // A half line is consumed by the connection's read, which then waits for the rest.
+        write.write_all(b"{\"id\":5,\"verb\":\"clos").await.unwrap();
+        write.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // The closing watch wins while the read waits: the consumed half must survive.
+        server.close.closing.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        write
+            .write_all(b"e\",\"token\":\"owner-token\"}\n")
+            .await
+            .unwrap();
+        write.flush().await.unwrap();
+
+        let mut answer = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut answer))
+            .await
+            .expect("the drain answered the completed line")
+            .unwrap();
+        let answer: Value = serde_json::from_str(answer.trim_end()).expect("one answer line");
+        assert_eq!(
+            answer["id"], 5,
+            "the whole line, not its remainder: {answer}"
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        connection.await.unwrap();
 
         let _ = std::fs::remove_dir_all(&home);
     }

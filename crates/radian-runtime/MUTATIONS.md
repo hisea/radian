@@ -230,3 +230,15 @@ pending_wake`. Unmutated, the binary passed 5/5.
 | # | Mutation | Result | Test that caught it |
 |---|---|---|---|
 | TK0236-M1 | the driver no longer calls `on_stop_failure` on a model error | ✅ 1 failed (rc=100) | `provider_failure::stop_failure_fires_only_for_a_model_error_turn` (no kind reached the sink) |
+
+## TK0323: a closed inbox refuses a racing claim (2026-11-05, branch `work/TK0323-session-close-followups`)
+
+`claim_next_turn` checks the closed flag under the queue lock, so a prompt that crosses a host's
+close cannot open a turn the teardown would drop. The mutation was applied in place to
+`crates/radian-runtime/src/inbox.rs` and restored from `.radian/bak/inbox.rs` (`cmp` identical).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0323-M1 | `claim_next_turn` no longer checks the closed flag | ✅ 1 failed (rc=100) | `inbox::tests::a_closed_inbox_never_claims_a_turn` (a waiting entry was claimed after the close) |
+
+1/1 caught.

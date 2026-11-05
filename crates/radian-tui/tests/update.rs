@@ -288,6 +288,11 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     assert_eq!(cancel.effects, vec![Effect::Cancel]);
     assert!(!cancel.dirty, "cancelling does not repaint");
     app.session.projection.set_turn(TurnState::Idle);
+    // Typing does.
+    assert!(app.on_key(key(KeyCode::Char('a'))).dirty);
+    // Clear it again, so the idle Ctrl-C below arms the quit window instead of clearing
+    // the composer (a non-empty input makes that press the `Esc` clearing).
+    app.input.clear();
     // An idle Ctrl-C now arms the 2 s quit window: that *does* repaint
     // (the hint appears), and the second press quits without repainting.
     let arm = app.on_key(ctrl(KeyCode::Char('c')));
@@ -296,8 +301,16 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     let quit = app.on_key(ctrl(KeyCode::Char('c')));
     assert_eq!(quit.effects, vec![Effect::CloseInbox, Effect::Quit]);
     assert!(!quit.dirty, "quitting does not repaint");
-    // Typing does.
-    assert!(app.on_key(key(KeyCode::Char('a'))).dirty);
+    // Once the quit is in flight the composer is frozen: a key that lands behind the quit
+    // in the same frame (the loop's `try_recv` drain) changes nothing, cannot refill the
+    // input, and so cannot be saved as a draft by the teardown.
+    let after = app.on_key(key(KeyCode::Char('b')));
+    assert!(!after.dirty, "a key after the quit does not repaint");
+    assert!(after.effects.is_empty(), "{:?}", after.effects);
+    assert!(
+        app.input.is_empty(),
+        "a key after the quit does not refill the composer"
+    );
 }
 
 /// ADR 0023 U5: a command the session's facade refuses (an undeclared capability) becomes a

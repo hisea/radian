@@ -145,6 +145,27 @@ impl App {
             // ADR 0045 §6: a turn ended; the idle clock starts now. Any later input restarts
             // it, and `/loop` or a goal keeps it from arming at all.
             self.idle_turn_finished();
+            // A `/quit` or a remote close met this turn while it ran: only the cancelled turn's
+            // boundary releases the quit. Any other boundary can be a turn the driver claimed
+            // in the gap before the inbox closed; leaving there would drop it mid-flight.
+            // Nothing else runs at this boundary either (no `/fork`, `/loop` or goal resend):
+            // the quit is abandoning the queue, not extending it.
+            if self.quit_after_turn.is_some() {
+                if *outcome == TurnOutcome::Cancelled {
+                    self.quit_after_turn = None;
+                    let mut result = self.leave();
+                    result.dirty = true;
+                    return result;
+                }
+                // The turn ended before the cancel took effect (or a different turn ran):
+                // cancel again and keep waiting. The inbox is already closed, so no later
+                // claim can open a turn; the deadline ends the wait if no cancelled boundary
+                // ever arrives.
+                return UpdateResult {
+                    dirty: true,
+                    effects: vec![Effect::Cancel],
+                };
+            }
             let mut result = match self.session.pending_fork.take() {
                 Some(_) => UpdateResult::effect(Effect::Session(command::SessionOutcome::Fork)),
                 None => UpdateResult::none(),
@@ -159,16 +180,6 @@ impl App {
             let goal_result = self.goal_turn_finished(*outcome);
             result.dirty |= goal_result.dirty;
             result.effects.extend(goal_result.effects);
-            // A `/quit` or a remote close met this turn while it ran and cancelled it: the
-            // cancelled boundary is in the journal now, so the process can leave (its
-            // remote-close notice journals first). `session.stop()` would otherwise drop a
-            // live turn and the journal would read as a crash.
-            if self.quit_after_turn.take().is_some() {
-                let leave = self.leave();
-                result.dirty = true;
-                result.effects.extend(leave.effects);
-                return result;
-            }
             // A completed or failed turn rings the bell in every mode but `off`: the user
             // may be looking at another window. A cancel needs no ring — the user pressed
             // the key themselves.

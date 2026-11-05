@@ -2306,3 +2306,18 @@ connect).
 | TK0320-M8 | `finish_connection` answers no request line already on the wire (`CLOSE_DRAIN_LINES` becomes `0`) | ✅ 1 failed (rc=100) | `control::tests::the_drain_answers_a_request_that_was_already_on_the_wire` (the client read no answer line) |
 
 2/2 caught.
+
+## TK0323: the close drain keeps a late or half-written request (2026-11-05, branch `work/TK0323-session-close-followups`)
+
+`finish_connection` lingers for a line the client is still writing, and the connection keeps its
+partially read line in `RequestRead` across a cancelled read. Each mutation was applied in place
+to `crates/radian-host/src/control.rs` and restored from `.radian/bak/control.rs`, which `cmp`
+found identical; the named test ran with `cargo nextest run -p radian-host --locked --profile
+sandbox --lib -E 'test(<name>)'`, and both run in the sandbox (socket pairs, no connect).
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| TK0323-M1 | the drain polls with `Duration::ZERO` instead of `CLOSE_LINGER`, so a close written just after the answer is not read | ✅ 1 failed (rc=100) | `control::tests::the_drain_waits_for_a_close_written_after_the_answer` (the client read no answer line) |
+| TK0323-M2 | `serve_connection` hands the drain a fresh reader state, dropping a half-read request | ✅ 1 failed (rc=100) | `control::tests::a_partial_request_survives_the_closing_watch_in_a_connection` (the remainder was answered alone) |
+
+2/2 caught.

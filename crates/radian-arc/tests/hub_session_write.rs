@@ -1824,14 +1824,15 @@ fn a_second_close_after_the_process_is_gone_is_conflict() {
     );
 }
 
-/// A TUI-hosted session (the holder `tui`) installs no close hook: the route reaches its port
-/// and carries the refusal as `502`, and the process is unchanged.
+/// A host that installs no close hook refuses: the route reaches its port and carries the
+/// refusal as `502`, and the process is unchanged. An interactive `radian exec` is such a host
+/// (holder `tui`); the full-screen `radian` and the hub-held `radian exec` install the hook.
 #[test]
-fn closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal() {
+fn closing_a_host_without_a_close_hook_is_bad_gateway_with_its_refusal() {
     let fixture = Fixture::new("close-tui", Vec::new(), "", Some(60));
     let id = "tui-hosted-close";
-    let stderr = fs::File::create(fixture.home.path().join("tui.log"))
-        .expect("the TUI-hosted log is creatable");
+    let stderr = fs::File::create(fixture.home.path().join("exec.log"))
+        .expect("the hookless host's log is creatable");
     let mut child = Command::new(radian_bin())
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -1855,9 +1856,9 @@ fn closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal() {
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr))
         .spawn()
-        .expect("the TUI-hosted session starts");
+        .expect("the hookless host starts");
     let socket = fixture.home.run().join(format!("{}.sock", child.id()));
-    wait_until("the TUI-hosted session's socket answers", || {
+    wait_until("the hookless host's socket answers", || {
         fixture.journal(id).is_file() && UnixStream::connect(&socket).is_ok()
     });
     wait_until(
@@ -1889,6 +1890,10 @@ fn closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal() {
 struct HangingClosePort {
     path: PathBuf,
     child: Child,
+    /// Set on drop so the detached listener thread stops instead of waking every 5 ms until the
+    /// whole test binary exits (removing the socket pathname does not close the listener).
+    stop: Arc<AtomicBool>,
+    listener: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HangingClosePort {
@@ -1909,8 +1914,10 @@ impl HangingClosePort {
             .expect("the fake listener is non-blocking");
         let id = id.to_owned();
         let workspace = workspace.to_owned();
-        std::thread::spawn(move || {
-            loop {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let listener = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let id = id.clone();
@@ -1924,12 +1931,21 @@ impl HangingClosePort {
                 }
             }
         });
-        Self { path, child }
+        Self {
+            path,
+            child,
+            stop,
+            listener: Some(listener),
+        }
     }
 }
 
 impl Drop for HangingClosePort {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(listener) = self.listener.take() {
+            let _ = listener.join();
+        }
         let _ = fs::remove_file(&self.path);
         let _ = self.child.kill();
         let _ = self.child.wait();

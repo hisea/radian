@@ -65,14 +65,7 @@ pub(super) fn build_startup_screen(
     // ADR 0047: the TUI shares the host's folded goal (a resume parks an active goal as
     // paused); the `goal` tool and the prompt hook advance the same state.
     app.set_goal(session.goal());
-    for message in history {
-        app.push_message(message);
-    }
-    // ADR 0006 §5.14: the durable host notices belong to the resumed transcript. They come
-    // after the history they followed; the remote close is the session's last event.
-    for notice in session.host_notices() {
-        app.push_notice(notice.clone());
-    }
+    push_resumed(app, history, session.host_notices());
     mark("entries-built");
     app.prefill_history(history);
     mark("prefill");
@@ -496,5 +489,69 @@ fn carry_from(app: &App, session: &radian_host::LocalSession, session_id: &str) 
         tier,
         auto: app.session.auto,
         old_session_id: session_id.to_owned(),
+    }
+}
+
+/// Renders the resumed transcript in journal order: each durable host notice (ADR 0006 §5.14)
+/// goes after exactly the history it followed, not after the whole recovered history. A notice
+/// whose position is past the history is drawn last (the common case: a remote close is the
+/// session's last event).
+fn push_resumed(app: &mut App, history: &[radian_core::Message], notices: &[(usize, String)]) {
+    let mut notices = notices.iter().peekable();
+    for (index, message) in history.iter().enumerate() {
+        while notices.peek().is_some_and(|(after, _)| *after <= index) {
+            if let Some((_, text)) = notices.next() {
+                app.push_notice(text.clone());
+            }
+        }
+        app.push_message(message);
+    }
+    for (_, text) in notices {
+        app.push_notice(text.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host notice followed by later messages is not moved to the bottom of the resumed
+    /// transcript: it is drawn after the history it followed (ADR 0006 §5.14).
+    #[test]
+    fn a_resumed_notice_is_drawn_after_the_history_it_followed() {
+        let mut app = App::new("m", "s");
+        let history = vec![
+            radian_core::Message::user("first"),
+            radian_core::Message::user("second"),
+        ];
+        let notices = vec![(1usize, "session closed remotely".to_owned())];
+        push_resumed(&mut app, &history, &notices);
+        let texts: Vec<String> = app
+            .session
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["first", "session closed remotely", "second"],
+            "the notice stays where it was journaled"
+        );
+    }
+
+    /// A notice that followed the whole history is drawn last.
+    #[test]
+    fn a_trailing_resumed_notice_is_drawn_last() {
+        let mut app = App::new("m", "s");
+        let history = vec![radian_core::Message::user("only")];
+        let notices = vec![(10usize, "session closed remotely".to_owned())];
+        push_resumed(&mut app, &history, &notices);
+        let texts: Vec<String> = app
+            .session
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect();
+        assert_eq!(texts, vec!["only", "session closed remotely"]);
     }
 }
