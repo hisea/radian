@@ -198,7 +198,7 @@ fn ctrl_c_cancels_a_running_turn_and_quits_when_idle_after_a_second_press() {
             &mut app,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
         ),
-        vec![Effect::Quit]
+        vec![Effect::CloseInbox, Effect::Quit]
     );
     assert!(app.quit);
 }

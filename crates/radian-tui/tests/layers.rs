@@ -181,7 +181,7 @@ fn the_default_stack_routes_like_the_old_hand_written_order() {
     );
     assert_eq!(
         app.on_key(ctrl(KeyCode::Char('c'))).effects,
-        vec![Effect::Quit]
+        vec![Effect::CloseInbox, Effect::Quit]
     );
     assert!(app.quit);
 }

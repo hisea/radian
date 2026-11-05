@@ -3688,11 +3688,12 @@ leaves), so the driver ends at the cancelled turn's boundary instead of claiming
 queued behind it. The mutation was applied by hand to `crates/radian-tui/src/app/update.rs`:
 both `quit_now` and the running arm of `quit_cancelling_first` lost their `Effect::CloseInbox`.
 Each test ran with `cargo nextest run -p radian-tui --locked --test pty -E 'test(<name>)'`
-(the owner-close one outside the workspace tier, for the Unix-socket reason above); the file
+(the owner-close one outside the workspace tier, for the Unix-socket reason above) or, for the
+idle unit test, `--profile sandbox --test quit`; the file
 was restored from `.radian/bak/update.rs`, which `cmp` found identical.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0321-M12 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
+| TK0321-M12 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `quit::slash_quit_quits_an_idle_session` (effects were `[Quit]`), `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
 
 1/1 caught.
