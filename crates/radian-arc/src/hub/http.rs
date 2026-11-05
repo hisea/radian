@@ -1886,8 +1886,11 @@ fn attempt_parameter(query: Option<&str>) -> Result<Option<u32>, String> {
 
 // ---- the event stream --------------------------------------------------------------------
 
-/// `GET /v1/events`: one `event: transition` per state change since the previous read, and a
-/// `: keep-alive` comment while nothing changes. The stream is not durable: it starts with
+/// `GET /v1/events`: one `: open` comment line before the first poll, then one
+/// `event: transition` per state change since the previous read, and a `: keep-alive` comment
+/// while nothing changes. The open comment makes the first body byte arrive at once, so a
+/// client that waits for it (`URLSession.bytes(for:)` does) does not wait for the first
+/// keep-alive; every SSE client ignores a comment. The stream is not durable: it starts with
 /// the current lists as its baseline, so a client that reconnects re-reads them instead of
 /// asking for a replay.
 ///
@@ -1932,10 +1935,21 @@ fn event_frame(repo: &str, transition: &Transition) -> Bytes {
     Bytes::from(format!("event: transition\ndata: {data}\n\n"))
 }
 
-/// The event stream's producer: poll every [`event_poll_interval`], write every transition,
-/// and write a keep-alive comment after [`event_keep_alive_interval`] with nothing sent. A
-/// closed receiver is the client going away, so the thread ends there.
+/// The event stream's producer: write the `: open` comment at once, then poll every
+/// [`event_poll_interval`], write every transition, and write a keep-alive comment after
+/// [`event_keep_alive_interval`] with nothing sent. A closed receiver is the client going
+/// away, so the thread ends there.
 fn stream_events(registry: Registry, sender: mpsc::Sender<Result<Frame<Bytes>, Infallible>>) {
+    // The first body bytes are one comment line, sent before the first poll. A client that
+    // treats the first byte as the stream's open sees it at once instead of at the first
+    // keep-alive, and every SSE client ignores a comment. A client that went away between the
+    // headers and this line closes the receiver, so the send fails and the thread ends.
+    if sender
+        .blocking_send(Ok(Frame::data(Bytes::from_static(b": open\n\n"))))
+        .is_err()
+    {
+        return;
+    }
     let poll = event_poll_interval();
     let keep_alive = event_keep_alive_interval();
     let mut poller = Poller::new();

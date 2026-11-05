@@ -1771,15 +1771,16 @@ impl EventStream {
         self.keep_alives(1);
     }
 
-    /// Reads until `count` keep-alive comments arrive, failing on any event in between.
+    /// Reads until `count` keep-alive comments arrive, failing on any event in between. The
+    /// stream's `: open` comment is skipped like any other comment.
     fn keep_alives(&mut self, count: usize) {
         let mut seen = 0;
         while seen < count {
             let line = self.line().expect("the stream keeps itself alive");
             if line == ": keep-alive" {
                 seen += 1;
-            } else if line.is_empty() {
-                // The blank line that ends the previous event or keep-alive frame.
+            } else if line.is_empty() || line.starts_with(':') {
+                // The blank line that ends the previous frame, or the `: open` comment.
             } else {
                 panic!("expected a keep-alive comment, got {line:?}");
             }
@@ -2031,6 +2032,85 @@ fn an_idle_stream_sends_a_keep_alive_comment() {
     let mut stream = EventStream::open(&hub);
 
     stream.keep_alive();
+}
+
+// ---- the stream's first body bytes --------------------------------------------------------
+
+/// `GET /v1/events` writes its `: open` comment at once. The keep-alive here is a minute away,
+/// so a first byte within a second proves it is the open comment and not a keep-alive; a client
+/// such as `URLSession.bytes(for:)`, which returns only at the first body byte, no longer waits.
+#[test]
+fn an_event_stream_opens_with_a_comment_line_at_once() {
+    let a = Repo::new("hub-events-open");
+    let store = arc_store(&a);
+    let _task = task_in_review(&store, "open");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start_with(&home, &[("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS", "60")]);
+
+    let started = Instant::now();
+    let mut stream = EventStream::open(&hub);
+    assert_eq!(stream.line().as_deref(), Some(": open"));
+    assert_eq!(stream.line().as_deref(), Some(""));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the open comment is the first body byte, not the first keep-alive: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A transition that lands as the stream opens is still preceded by `: open`: the first body
+/// bytes never depend on what the poller has to send.
+#[test]
+fn the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens() {
+    let a = Repo::new("hub-events-open-event");
+    let store = arc_store(&a);
+    let task = task_in_review(&store, "open-event");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = Hub::start_with(
+        &home,
+        &[
+            ("RADIAN_HUB_EVENTS_POLL_SECS", "1"),
+            ("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS", "60"),
+        ],
+    );
+    let mut stream = EventStream::open(&hub);
+    assert_eq!(stream.line().as_deref(), Some(": open"));
+
+    // The stream's first poll is its baseline; waiting for it makes the transition below a
+    // real event rather than a state the baseline already knows.
+    std::thread::sleep(Duration::from_millis(100));
+    reject(&a, &task);
+    assert_eq!(
+        stream.event(),
+        task_event("a", &task, "review.awaiting_human", "review.rework_pending")
+    );
+}
+
+/// A client that reads the headers and then goes away leaves the hub serving: the dead stream's
+/// writer ends, and the transition after it still reaches a live subscriber.
+#[test]
+fn a_client_that_disconnects_right_after_the_headers_leaves_the_hub_serving() {
+    let a = Repo::new("hub-events-disconnect");
+    let store = arc_store(&a);
+    let task = task_in_review(&store, "disconnect");
+    let home = hub_home(&a);
+    register(&home, "a", &a);
+    let hub = fast_hub(&home);
+
+    // Opening reads exactly the status and headers; dropping the connection then closes it
+    // around the `: open` line, before anything is read from the body.
+    drop(EventStream::open(&hub));
+
+    let mut stream = EventStream::open(&hub);
+    assert_eq!(stream.line().as_deref(), Some(": open"));
+    stream.keep_alive();
+    reject(&a, &task);
+    assert_eq!(
+        stream.event(),
+        task_event("a", &task, "review.awaiting_human", "review.rework_pending")
+    );
 }
 
 // ---- edge case 7 -------------------------------------------------------------------------

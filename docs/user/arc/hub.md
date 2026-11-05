@@ -246,7 +246,8 @@ A task event's `previous` and `value` are `<state>.<phase>`; `previous` is `new`
 A plan event carries the same `field`, `previous` and `value` the MCP channel sends.
 The changes are the closed list [the MCP channel](mcp.md#the-claude-experimental-flag) sends: every other change sends nothing.
 
-While nothing happens the stream carries one `: keep-alive` comment line every 15 seconds.
+The stream opens with one `: open` comment line before its first poll, so the first body byte arrives at once and a client that waits for it (`URLSession.bytes(for:)` does) does not wait for the first keep-alive; every client ignores a comment.
+While nothing happens it then carries one `: keep-alive` comment line every 15 seconds.
 An event has no id, and the stream does not replay: a client that reconnects first reads the routes above again, then follows the stream.
 The stream ends when the client disconnects or the hub stops.
 
@@ -366,7 +367,7 @@ It needs the bearer token and answers `Content-Type: text/event-stream`.
 A session no process hosts is `409`; an unknown session or repository is `404`.
 
 The stream follows the [event stream](#the-event-stream)'s rules: no event ids, no replay of entries, a `: keep-alive` comment every 15 seconds while nothing happens, and an end when the client disconnects, the session's process goes away, the hub stops, or the hub's own drain falls more than the fan-out's 64-frame ring behind — the client then reconnects and re-reads, so a stream never carries a silent gap.
-Before any live frame, every stream opens with one `pending` frame holding the queue's current state — the same `head` and `length` a live `pending` frame carries, with `head` `null` and `length` `0` on an empty queue — read from the session's control port. A reconnect gets the snapshot again, so a client can take its first `pending` frame as the truth.
+Before any live frame, every stream opens with one `pending` frame holding the queue's current state — the same `head` and `length` a live `pending` frame carries, with `head` `null` and `length` `0` on an empty queue — read from the session's control port. That frame is written at once, so this stream does not need the event stream's `: open` comment. A reconnect gets the snapshot again, so a client can take its first `pending` frame as the truth.
 The no-replay rule is about entries: **a client that reconnects first re-reads the transcript.**
 
 Each event has one of these names, with this `data` object:
