@@ -956,35 +956,47 @@ impl App {
         }
     }
 
-    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`] and an idle `/quit` share: leave
-    /// through the ordinary clean-exit path. The teardown restores the terminal and stops the
-    /// driver. A running turn is cancelled before this runs ([`App::quit_cancelling_first`]).
+    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`], an idle `/quit` and an idle
+    /// remote close share: close the inbox, then leave through the ordinary clean-exit path.
+    /// The close runs first, so a followup that arrives between the quit and the teardown's
+    /// `session.stop()` is refused instead of opening a turn the stop would drop mid-flight;
+    /// the teardown restores the terminal and stops the driver. A running turn is cancelled
+    /// before this runs ([`App::quit_cancelling_first`]).
     pub(super) fn quit_now(&mut self) -> UpdateResult {
         self.quit = true;
-        UpdateResult::quiet(Effect::Quit)
+        UpdateResult {
+            dirty: false,
+            effects: vec![Effect::CloseInbox, Effect::Quit],
+        }
     }
 
-    /// `/quit` and a remote close: leave at once when no turn runs; otherwise cancel the turn
-    /// through the session's own path and let [`Input::Runtime`]'s `TurnFinished` run the quit
-    /// ([`App::leave`]). Leaving at once would let `session.stop()` drop the live turn, and the
-    /// journal would read `TurnStarted` with no end (ADR 0043: a close cancels "through the
-    /// same path as `cancel`").
+    /// `/quit` and a remote close: leave at once when no turn runs; otherwise close the
+    /// inbox and cancel the turn through the session's own path, and let [`Input::Runtime`]'s
+    /// `TurnFinished` run the quit ([`App::leave`]). Leaving at once would let
+    /// `session.stop()` drop the live turn, and the journal would read `TurnStarted` with no
+    /// end (ADR 0043: a close cancels "through the same path as `cancel`"). The close comes
+    /// before the cancel so the driver cannot claim a followup queued behind the cancelled
+    /// turn: a turn it started there would be the one the stop drops.
     pub(super) fn quit_cancelling_first(&mut self) -> UpdateResult {
         if self.turn() == TurnState::Running {
             self.quit_after_turn = Some(self.now + QUIT_CANCEL_WAIT);
-            return UpdateResult::quiet(Effect::Cancel);
+            return UpdateResult {
+                dirty: false,
+                effects: vec![Effect::CloseInbox, Effect::Cancel],
+            };
         }
         self.leave()
     }
 
-    /// The last step of every `/quit` and remote close: journal the close's `HostNotice`, if
-    /// any, then leave. The notice's effect runs before the quit effect, and the journal
-    /// append is synchronous, so a resume reads it.
+    /// The last step of every `/quit` and remote close: close the inbox, journal the close's
+    /// `HostNotice`, if any, then leave. The notice's effect runs before the quit effect, and
+    /// the journal append is synchronous, so a resume reads it.
     pub(super) fn leave(&mut self) -> UpdateResult {
         let mut result = self.quit_now();
         result.dirty = true;
         if let Some(text) = self.pending_close_notice.take() {
-            result.effects.insert(0, Effect::HostNotice { text });
+            // After the inbox close, before the quit effect.
+            result.effects.insert(1, Effect::HostNotice { text });
         }
         result
     }

@@ -122,6 +122,11 @@ pub enum Effect {
     CancelSideQuestion,
     /// Leave the app.
     Quit,
+    /// Close the session's inbox before leaving (ADR 0043: cancel what runs, abandon what
+    /// waits). The driver then leaves at the cancelled turn's boundary instead of claiming a
+    /// followup that is already queued, and a followup that arrives between the quit and
+    /// `session.stop()` is refused, not started. Idempotent.
+    CloseInbox,
     /// Journal one durable host notice before leaving (ADR 0006 §5.14). The remote close
     /// commits `session closed remotely`; the TUI shows it live too, but this is the record
     /// a resume reads.
@@ -334,7 +339,7 @@ impl PartialEq for Effect {
         use Effect::*;
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
-            (Cancel, Cancel) | (Quit, Quit) => true,
+            (Cancel, Cancel) | (CloseInbox, CloseInbox) | (Quit, Quit) => true,
             (HostNotice { text: a }, HostNotice { text: b }) => a == b,
             (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
@@ -784,8 +789,9 @@ pub struct App {
     pub quit_pending: Option<Instant>,
     /// A `/quit` or a remote close that met a running turn: the deadline it waits for the
     /// cancelled turn's journaled boundary before leaving anyway. `None` when no quit waits.
-    /// The quit itself runs on that boundary ([`Input::Runtime`]'s `TurnFinished`), so
-    /// `session.stop()` never drops a live turn.
+    /// The quit closes the inbox and cancels the turn, then runs on that boundary
+    /// ([`Input::Runtime`]'s `TurnFinished`): the driver leaves after the turn instead of
+    /// claiming a queued followup, so `session.stop()` never drops a live turn.
     pub quit_after_turn: Option<Instant>,
     /// The `HostNotice` a deferred remote close still has to journal: kept from the close
     /// until the quit runs, so the notice is the last durable fact before the process leaves.

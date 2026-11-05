@@ -263,7 +263,8 @@ subscriber's stream ends as it does on any process exit.
 The full-screen interface takes the `/quit` path: it commits one `session closed remotely`
 notice to the transcript, restores the terminal, and leaves. The notice is journaled, so a
 resume of the session shows it. A draft typed when the close arrives is dropped the way a
-`ctrl-c` quit drops it.
+`ctrl-c` quit drops it. Like `/quit`, the close stops the queue first: a followup still waiting
+opens no turn (its journal entry stays, so a resume restores it as a pending input).
 
 A host that installs no close hook answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This

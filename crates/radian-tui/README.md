@@ -1148,12 +1148,15 @@ throwaway terminal, not your working one.
     resumes the same journal). *Fail*: record which front end missed the update, the hub's
     version, and the session id.
 15. **`/quit` and a remote close** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit`
-    while a turn runs; `/quit` with a draft typed; `/quit extra`; then, with the owner token
+    while a turn runs; `/quit` while a turn runs and `/queue` left a followup waiting;
+    `/quit` with a draft typed; `/quit extra`; then, with the owner token
     written to `~/.radian/hub/token`, send `{"id":1,"verb":"close","token":"…"}` on the
     session's `~/.radian/run/<pid>.sock` while typing a draft and again under an approval
     popup. *Expect*: `/quit` on an idle session leaves at once and restores the shell prompt
     (`stty -a` shows `icanon`); `/quit` during a turn cancels it first, so a `--resume` shows a
-    cancelled turn, then exits; `/quit extra` is a usage notice and never
+    cancelled turn, then exits; a followup still in the queue at that moment opens no second
+    turn (the journal has one `TurnStarted` and one cancelled `TurnFinished`, and a `--resume`
+    restores the followup as one pending input); `/quit extra` is a usage notice and never
     quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
     exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
     next `--resume`). *Look*: is the notice visible above the restored prompt, does a

@@ -3680,3 +3680,19 @@ test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test
 on the pre-fix code the journal ends at `TurnStarted` with no `TurnFinished`; the test is in the
 sandbox profile's exclusions (the `workspace` tier denies the mock server's sockets), so it runs
 in the gate.
+
+## TK0321 rework 6: the inbox closes before the quit (2026-11-05, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` and a remote close now close the inbox before they cancel (and an idle quit before it
+leaves), so the driver ends at the cancelled turn's boundary instead of claiming a followup
+queued behind it. The mutation was applied by hand to `crates/radian-tui/src/app/update.rs`:
+both `quit_now` and the running arm of `quit_cancelling_first` lost their `Effect::CloseInbox`.
+Each test ran with `cargo nextest run -p radian-tui --locked --test pty -E 'test(<name>)'`
+(the owner-close one outside the workspace tier, for the Unix-socket reason above); the file
+was restored from `.radian/bak/update.rs`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M12 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
+
+1/1 caught.

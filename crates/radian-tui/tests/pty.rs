@@ -2874,6 +2874,141 @@ async fn pty_owner_close_commits_the_notice_and_exits() {
     resumed.quit();
 }
 
+/// The owner's `close` while a turn streams and a followup waits in `next_turn`: the close
+/// closes the inbox before it cancels, so the driver leaves at the cancelled turn's boundary
+/// instead of claiming the queued followup (a second turn there would be dropped mid-flight by
+/// `session.stop()`). One cancelled turn, one model request, one `HostNotice`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_owner_close_abandons_a_queued_followup() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("close-queue");
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let home = short_radian_home();
+    let mut pty = Pty::spawn_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "close-queue",
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    let socket = wait_for_control_socket(&home, &app_pid(&pty));
+    write_hub_token(&home, "owner-token");
+    pty.send(b"hello\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/queue queued-followup\r");
+    wait_for_journal(&sessions.join("close-queue.jsonl"), "queued-followup");
+
+    let answer = control_request(
+        &socket,
+        json!({"id": 1, "verb": "close", "token": "owner-token"}),
+    );
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "the close did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the abandoned followup opened a second turn"
+    );
+    let journal = std::fs::read_to_string(sessions.join("close-queue.jsonl")).unwrap();
+    assert_eq!(
+        journal.matches("\"event\":\"TurnStarted\"").count(),
+        1,
+        "one turn started:\n{journal}"
+    );
+    assert_eq!(
+        journal.matches("\"event\":\"TurnFinished\"").count(),
+        1,
+        "the cancelled turn has its one boundary:\n{journal}"
+    );
+    assert!(
+        journal.contains("\"outcome\":\"cancelled\""),
+        "the turn was not recorded as cancelled:\n{journal}"
+    );
+    assert!(
+        journal.contains("\"event\":\"HostNotice\"") && journal.contains("session closed remotely"),
+        "the close notice is not in the journal:\n{journal}"
+    );
+
+    // A resume reads the cancelled turn and the close notice; the followup's entry was never
+    // claimed, so recovery restores it as one pending input (ADR 0011 L3) — not as a turn the
+    // quit left half-written.
+    let mut resumed = Pty::spawn_in(
+        &[
+            "--resume",
+            "close-queue",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+        ],
+        &[("RADIAN_HOME", home.to_str().unwrap())],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        resumed.wait_for_screen("session closed remotely", wait_positive()),
+        "the resumed transcript lost the close notice:\n{}",
+        resumed.screen()
+    );
+    assert!(
+        resumed.screen().contains("hello"),
+        "the resumed transcript lost the turn that ran:\n{}",
+        resumed.screen()
+    );
+    assert_eq!(
+        resumed.screen().matches("queued-followup").count(),
+        1,
+        "the recovered followup is duplicated in the transcript:\n{}",
+        resumed.screen()
+    );
+    resumed.quit();
+    // No half turn anywhere in the file, the resumed turn included: every `TurnStarted` has
+    // its `TurnFinished`.
+    let journal = std::fs::read_to_string(sessions.join("close-queue.jsonl")).unwrap();
+    let (started, finished) = turn_boundaries(&journal);
+    assert_eq!(started, finished, "a turn has no boundary:\n{journal}");
+    assert_eq!(
+        started.len(),
+        2,
+        "the recovered followup is the resumed session's one turn:\n{journal}"
+    );
+}
+
 /// Denying feeds a denial result back to the model and never runs the tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_approval_deny_is_fed_back_to_the_model() {
@@ -3139,6 +3274,166 @@ async fn pty_slash_quit_cancels_a_running_turn_first() {
     assert!(
         journal.contains("\"outcome\":\"cancelled\""),
         "the turn was not recorded as cancelled:\n{journal}"
+    );
+}
+
+/// Waits until the session's journal contains `needle` (an enqueue is journaled before the
+/// effect returns, so this proves the followup is already in `next_turn`).
+fn wait_for_journal(path: &Path, needle: &str) {
+    let deadline = Instant::now() + wait_positive();
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the journal never held {needle:?}:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The `TurnStarted` and `TurnFinished` turn ids of a journal, sorted.
+fn turn_boundaries(journal: &str) -> (Vec<String>, Vec<String>) {
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    for line in journal.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(turn_id) = value["data"]["turn_id"].as_str() else {
+            continue;
+        };
+        match value["event"].as_str() {
+            Some("TurnStarted") => started.push(turn_id.to_owned()),
+            Some("TurnFinished") => finished.push(turn_id.to_owned()),
+            _ => {}
+        }
+    }
+    started.sort();
+    finished.sort();
+    (started, finished)
+}
+
+/// `/quit` while a turn streams and a followup waits in `next_turn`: the quit closes the inbox
+/// before it cancels, so the driver leaves at the cancelled turn's boundary instead of claiming
+/// the queued followup. A second turn there would be dropped mid-flight by `session.stop()`: a
+/// `TurnStarted` with no `TurnFinished`, and one extra model request. The resume reads one
+/// cancelled turn and no abandoned followup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_slash_quit_abandons_a_queued_followup() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("quit-queue");
+    // Both processes run from the same directory: a session's workspace is the directory it
+    // was created in, and a resume from another directory is refused.
+    let ws = dir.path().join("ws");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut pty = Pty::spawn_in(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session-id",
+            "quit-queue",
+        ],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    // `/queue` is a followup even mid-turn: the driver would claim it the moment the cancelled
+    // turn ended, and the quit's `session.stop()` would then drop that second turn.
+    pty.send(b"/queue queued-followup\r");
+    wait_for_journal(&sessions.join("quit-queue.jsonl"), "queued-followup");
+    pty.send(b"/quit\r");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "`/quit` did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the abandoned followup opened a second turn"
+    );
+    let journal = std::fs::read_to_string(sessions.join("quit-queue.jsonl")).unwrap();
+    assert_eq!(
+        journal.matches("\"event\":\"TurnStarted\"").count(),
+        1,
+        "one turn started:\n{journal}"
+    );
+    assert_eq!(
+        journal.matches("\"event\":\"TurnFinished\"").count(),
+        1,
+        "the cancelled turn has its one boundary:\n{journal}"
+    );
+    assert!(
+        journal.contains("\"outcome\":\"cancelled\""),
+        "the turn was not recorded as cancelled:\n{journal}"
+    );
+
+    // A resume reads the cancelled turn; the followup's entry was never claimed, so recovery
+    // restores it as one pending input (ADR 0011 L3) — not as a turn the quit left
+    // half-written. After the resumed quit, every turn in the file has its boundary.
+    let mut resumed = Pty::spawn_in(
+        &[
+            "--resume",
+            "quit-queue",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+        ],
+        &[],
+        &ws,
+        24,
+        100,
+    );
+    assert!(
+        resumed.wait_for_screen("hello", wait_positive()),
+        "the resumed transcript lost the turn that ran:\n{}",
+        resumed.screen()
+    );
+    assert_eq!(
+        resumed.screen().matches("queued-followup").count(),
+        1,
+        "the recovered followup is duplicated in the transcript:\n{}",
+        resumed.screen()
+    );
+    resumed.quit();
+    let journal = std::fs::read_to_string(sessions.join("quit-queue.jsonl")).unwrap();
+    let (started, finished) = turn_boundaries(&journal);
+    assert_eq!(started, finished, "a turn has no boundary:\n{journal}");
+    assert_eq!(
+        started.len(),
+        2,
+        "the recovered followup is the resumed session's one turn:\n{journal}"
     );
 }
 

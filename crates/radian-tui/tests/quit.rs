@@ -221,7 +221,10 @@ fn prompt_approval(app: &mut App) {
     assert!(app.pending_approval().is_some(), "the modal is open");
 }
 
-/// `/quit` is the second Ctrl-C's own action: the same quit flag and `Quit` effect.
+/// `/quit` is the second Ctrl-C's own action: the same quit flag and `Quit` effect. An idle
+/// quit closes the inbox first, so a followup that arrives between the quit and
+/// `session.stop()` is refused instead of starting a turn the stop would drop (ADR 0043:
+/// abandon what waits).
 #[test]
 fn slash_quit_quits_an_idle_session() {
     let mut app = App::new("m", "s");
@@ -229,6 +232,11 @@ fn slash_quit_quits_an_idle_session() {
     let result = app.on_key(key(KeyCode::Enter));
     assert!(app.quit, "`/quit` quits");
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Quit],
+        "the inbox closes before the quit effect"
+    );
 }
 
 /// A cancelled turn's journaled boundary, as the driver reports it.
@@ -241,10 +249,11 @@ fn cancelled_turn() -> RuntimeEvent {
     }
 }
 
-/// `/quit` while a turn runs cancels it through the session's own path and waits for the
-/// journaled boundary before leaving. Leaving at once would let `session.stop()` drop the
-/// live turn, and a resume would read `TurnStarted` with no end (ADR 0043's close contract:
-/// the turn is cancelled "through the same path as `cancel`").
+/// `/quit` while a turn runs closes the inbox and cancels the turn through the session's
+/// own path, then waits for the journaled boundary before leaving. Leaving at once would let
+/// `session.stop()` drop the live turn, and a resume would read `TurnStarted` with no end
+/// (ADR 0043's close contract: the turn is cancelled "through the same path as `cancel`",
+/// and queued input is abandoned, not started).
 #[test]
 fn slash_quit_during_a_turn_cancels_it_before_the_quit() {
     let mut app = App::new("m", "s");
@@ -255,9 +264,10 @@ fn slash_quit_during_a_turn_cancels_it_before_the_quit() {
         !app.quit,
         "the process must wait for the cancelled turn's boundary"
     );
-    assert!(
-        matches!(result.effects.as_slice(), [Effect::Cancel]),
-        "the turn is cancelled first: {:?}",
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
+        "the inbox closes before the turn is cancelled: {:?}",
         result.effects
     );
     assert!(
@@ -268,6 +278,11 @@ fn slash_quit_during_a_turn_cancels_it_before_the_quit() {
     let result = app.update(Input::Runtime(cancelled_turn()));
     assert!(app.quit, "the boundary arrived: the quit runs");
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(
+        matches!(result.effects.first(), Some(Effect::CloseInbox)),
+        "the boundary's quit closes the inbox before it leaves: {:?}",
+        result.effects
+    );
 }
 
 /// A turn that never reports its boundary (a driver stuck past the cancel) still lets the
@@ -314,8 +329,9 @@ fn slash_quit_with_an_argument_is_an_error_line_and_does_not_quit() {
     );
 }
 
-/// A remote close during a turn cancels it first and journals the notice only when the quit
-/// finally runs: the notice is the last durable fact before the process leaves.
+/// A remote close during a turn closes the inbox and cancels the turn first, and journals
+/// the notice only when the quit finally runs: the notice is the last durable fact before the
+/// process leaves.
 #[test]
 fn remote_close_during_a_turn_cancels_it_before_the_quit() {
     let mut app = App::new("m", "s");
@@ -325,9 +341,10 @@ fn remote_close_during_a_turn_cancels_it_before_the_quit() {
         !app.quit,
         "the close waits for the cancelled turn's boundary"
     );
-    assert!(
-        matches!(result.effects.as_slice(), [Effect::Cancel]),
-        "the turn is cancelled first: {:?}",
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
+        "the inbox closes before the turn is cancelled: {:?}",
         result.effects
     );
     assert!(
@@ -340,11 +357,10 @@ fn remote_close_during_a_turn_cancels_it_before_the_quit() {
     let result = app.update(Input::Runtime(cancelled_turn()));
     assert!(app.quit, "the boundary arrived: the close quits");
     assert!(
-        matches!(result.effects.first(), Some(Effect::HostNotice { text }) if text == "session closed remotely"),
-        "the notice journals before the quit effect: {:?}",
+        matches!(result.effects.as_slice(), [Effect::CloseInbox, Effect::HostNotice { text }, Effect::Quit] if text == "session closed remotely"),
+        "the inbox closes first and the notice journals before the quit effect: {:?}",
         result.effects
     );
-    assert!(quit_asked(&result.effects), "{:?}", result.effects);
 }
 
 /// The same close under a completion menu: the overlay never swallows the host's close.
@@ -355,8 +371,9 @@ fn remote_close_during_a_turn_under_a_completion_menu_quits_after_the_cancel() {
     app.update(Input::Char('/'));
     let result = app.update(Input::RemoteClose);
     assert!(!app.quit);
-    assert!(
-        matches!(result.effects.as_slice(), [Effect::Cancel]),
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
         "{:?}",
         result.effects
     );
@@ -365,8 +382,8 @@ fn remote_close_during_a_turn_under_a_completion_menu_quits_after_the_cancel() {
 }
 
 /// The control port's close hook on an idle session: one host notice in the transcript, then
-/// the `/quit` path. The notice is journaled before the quit effect runs (ADR 0006 §5.14), so
-/// a resume still shows it.
+/// the `/quit` path. The inbox closes first and the notice is journaled before the quit effect
+/// runs (ADR 0006 §5.14), so a resume still shows it.
 #[test]
 fn remote_close_commits_the_notice_and_quits() {
     let mut app = App::new("m", "s");
@@ -381,9 +398,16 @@ fn remote_close_commits_the_notice_and_quits() {
         "the close journals its notice first: {:?}",
         result.effects
     );
-    assert!(
-        matches!(result.effects.first(), Some(Effect::HostNotice { .. })),
-        "the journal append runs before the quit effect: {:?}",
+    assert_eq!(
+        result.effects,
+        vec![
+            Effect::CloseInbox,
+            Effect::HostNotice {
+                text: "session closed remotely".into()
+            },
+            Effect::Quit,
+        ],
+        "the inbox closes first and the journal append runs before the quit effect: {:?}",
         result.effects
     );
     let last = app.session.entries.last().expect("the close notice");

@@ -82,9 +82,10 @@ test-group = "pty"
 #    these tests exercise without a socket (a session write route's body validation)
 #    runs in the sandbox.
 #
-# 8. The TUI's hub-side tests (6 names). They drive a real `radian` under a pty and
+# 8. The TUI's hub-side tests (7 names). They drive a real `radian` under a pty and
 #    talk to its control socket (the marker, the popup the hub answers, the late
-#    answer, the owner's `close`, and `--resume` of a hub-held session): the same short-home and
+#    answer, the owner's `close`, the owner's `close` with a followup queued, and
+#    `--resume` of a hub-held session): the same short-home and
 #    Unix-socket-connect limits as groups 6 and 7, and the app cannot enter the
 #    alternate screen inside the sandbox either.
 
@@ -452,6 +453,7 @@ not (
   | test(=pty_a_local_answer_first_makes_the_port_answer_late)
   | test(=pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn)
   | test(=pty_owner_close_commits_the_notice_and_exits)
+  | test(=pty_owner_close_abandons_a_queued_followup)
   | test(=resume_refuses_a_session_a_hub_held_process_hosts)
 )
 """

@@ -216,8 +216,9 @@ the port ask its host to close. The host cancels a running turn through the same
 0002/0003 require), abandons pending approvals and questions the way a process exit does, and
 ends the process cleanly; the journal stays, and the next `prompt` through the hub resumes it.
 Subscribers see their stream end as they do on any process exit. The full-screen interface
-also journals one `HostNotice` (`session closed remotely`, ADR 0006 §5.14) before it leaves,
-and a resume renders it as a transcript notice.
+closes the queue before it cancels, so a followup waiting behind the running turn opens no
+turn; it also journals one `HostNotice` (`session closed remotely`, ADR 0006 §5.14) before it
+leaves, and a resume renders it as a transcript notice.
 
 A host that installs no close hook — any embedder but the full-screen interface and `radian
 exec`'s hub-held mode — answers

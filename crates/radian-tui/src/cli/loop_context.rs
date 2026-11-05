@@ -252,6 +252,13 @@ impl LoopContext<'_> {
                 );
                 Ok(())
             }
+            // ADR 0043: a quitting session closes its inbox before it cancels, so the driver
+            // leaves at the cancelled turn's boundary instead of claiming a followup queued
+            // behind it (a turn `session.stop()` would then drop mid-flight).
+            Effect::CloseInbox => {
+                self.session.close_inbox();
+                Ok(())
+            }
             // ADR 0045 §6: the TUI's idle timer fired. The hooks observe only and start in
             // the background, so this never holds the loop.
             Effect::NotifyIdle => {
@@ -1227,6 +1234,9 @@ mod tests {
             todo!()
         }
         fn pending(&self) -> &radian_host::SessionQueue {
+            todo!()
+        }
+        fn close_inbox(&self) {
             todo!()
         }
         fn answer(

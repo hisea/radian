@@ -688,6 +688,10 @@ impl SessionFacade for LocalSession {
         &self.queue
     }
 
+    fn close_inbox(&self) {
+        self.inbox.close();
+    }
+
     fn queue_config(&self, change: serde_json::Value) {
         self.config_queue.push(change);
     }
