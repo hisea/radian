@@ -2486,8 +2486,8 @@ and connects control sockets). Each file was restored from `.radian/sessions.rs.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0322-M1 | `close` forwards `{"verb":"cancel"}` instead of `{"verb":"close"}`, so the route answers `ok` without ending anything | `closing_an_idle_hub_held_session_lets_the_next_prompt_resume_its_journal`, `closing_a_session_with_a_running_turn_cancels_it_first`, `a_second_close_after_the_process_is_gone_is_conflict`, `closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal`, `a_close_whose_port_never_answers_times_out_without_blocking_other_requests` | ✅ 5 failed |
-| TK0322-M2 | a control port's error answer maps to `SessionError::Invalid` (`422`) instead of `Port` (`502`), so the host's `this process cannot be closed remotely` looks like a client error | `closing_a_tui_hosted_session_is_bad_gateway_with_its_refusal` (422, not 502) | ✅ 1 failed |
+| TK0322-M1 | `close` forwards `{"verb":"cancel"}` instead of `{"verb":"close"}`, so the route answers `ok` without ending anything | `closing_an_idle_hub_held_session_lets_the_next_prompt_resume_its_journal`, `closing_a_session_with_a_running_turn_cancels_it_first`, `a_second_close_after_the_process_is_gone_is_conflict`, `closing_a_host_without_a_close_hook_is_bad_gateway_with_its_refusal`, `a_close_whose_port_never_answers_times_out_without_blocking_other_requests` | ✅ 5 failed |
+| TK0322-M2 | a control port's error answer maps to `SessionError::Invalid` (`422`) instead of `Port` (`502`), so the host's `this process cannot be closed remotely` looks like a client error | `closing_a_host_without_a_close_hook_is_bad_gateway_with_its_refusal` (422, not 502) | ✅ 1 failed |
 | TK0322-M3 | the close route is dropped from the POST method table (`accepts`), so every close request is `405` before its body is read | all five close tests (405) | ✅ 5 failed |
 | TK0322-M4 | the close route arm is removed from `route()`, exactly the pre-change router: the path falls to `Route::Unknown` and answers `404` before any handler | all five close tests (404) | ✅ 5 failed |
 
