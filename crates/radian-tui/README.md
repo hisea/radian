@@ -1149,20 +1149,21 @@ throwaway terminal, not your working one.
     version, and the session id.
 15. **`/quit` and a remote close** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit`
     while a turn runs; `/quit` while a turn runs and `/queue` left a followup waiting;
-    `/quit` with a draft typed; `/quit extra`; then, with the owner token
-    written to `~/.radian/hub/token`, send `{"id":1,"verb":"close","token":"…"}` on the
-    session's `~/.radian/run/<pid>.sock` while typing a draft and again under an approval
-    popup. *Expect*: `/quit` on an idle session leaves at once and restores the shell prompt
-    (`stty -a` shows `icanon`); `/quit` during a turn cancels it first, so a `--resume` shows a
-    cancelled turn, then exits; a followup still in the queue at that moment opens no second
-    turn (the journal has one `TurnStarted` and one cancelled `TurnFinished`, and a `--resume`
-    restores the followup as one pending input); `/quit extra` is a usage notice and never
-    quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
+    `/quit extra`; then, with the owner token written to `~/.radian/hub/token`, send
+    `{"id":1,"verb":"close","token":"…"}` on the session's `~/.radian/run/<pid>.sock` while
+    typing a draft and again under an approval popup. *Expect*: `/quit` on an idle session leaves
+    at once and restores the shell prompt (`stty -a` shows `icanon`); `/quit` during a turn
+    cancels it first, so a `--resume` shows a cancelled turn, then exits; a followup still in the
+    queue at that moment opens no second turn (the journal has one `TurnStarted` and one
+    cancelled `TurnFinished`), and a `--resume` claims that journaled followup and sends it as
+    the resumed session's first turn, with no keypress; `/quit extra` is a usage notice and
+    never quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
     exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
-    next `--resume`). *Look*: is the notice visible above the restored prompt, does a
-    `--resume owner-close` show the same notice again (it is journaled), and does the
-    close under a popup still exit (the popup is abandoned, not answered)? *Fail*: record the
-    verb's answer, the screen's last frame, and whether `icanon` came back.
+    next `--resume`). *Look*: after the process has left, the shell prompt is back and the
+    alternate screen is gone; the notice is a transcript fact, so look for it on the next
+    `--resume owner-close`, not on the restored shell screen. Does the close under a popup still
+    exit (the popup is abandoned, not answered)? *Fail*: record the verb's answer, the screen's
+    last frame, and whether `icanon` came back.
 
 ### Hand test: passed
 

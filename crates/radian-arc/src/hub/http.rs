@@ -1604,8 +1604,9 @@ fn session_config(
 }
 
 /// `POST …/sessions/<id>/close`: the control port's `close` (ADR 0043), which ends the process
-/// after answering. A hub-held process leaves its journal for the next prompt; a TUI-hosted one
-/// refuses with its own text, carried as `502`.
+/// after answering. A hub-held process and the full-screen interface both install the hook and
+/// leave their journals for the next prompt; any other host refuses with its own text, carried
+/// as `502`.
 fn session_close(
     registry: &Registry,
     sessions: &SessionHub,

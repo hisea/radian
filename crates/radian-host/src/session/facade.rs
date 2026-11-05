@@ -25,10 +25,11 @@ pub trait SessionFacade: Send + Sync {
 
     /// Closes the inbox (ADR 0043's close contract: cancel what runs, abandon what waits).
     /// Future input is refused and the driver leaves its loop at the next turn boundary
-    /// instead of claiming a followup that is already queued. The TUI's `/quit` and the
-    /// remote close call it before their cancel, and before `session.stop()` on an idle quit,
-    /// so a queued followup can never open a turn the stop would drop mid-flight. Idempotent;
-    /// the driver's own shutdown close is the same call.
+    /// instead of claiming a followup that is already queued; `claim_next_turn` checks the
+    /// closed flag under the queue lock, so a prompt that crosses the close cannot be claimed
+    /// either. The TUI's `/quit` and the remote close call it before their cancel, and before
+    /// `session.stop()` on an idle quit, so no queued followup can open a turn the stop would
+    /// drop mid-flight. Idempotent; the driver's own shutdown close is the same call.
     fn close_inbox(&self);
 
     /// Answer a pending request by its queue id (ADR 0023 U5's `AnswerRequest`). A late answer

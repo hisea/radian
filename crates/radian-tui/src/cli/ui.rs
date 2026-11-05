@@ -156,6 +156,51 @@ fn run_effect_rounds<T>(
     Ok(rounds)
 }
 
+/// The nearest time-driven wake the loop must service, or `None` when nothing is armed: the
+/// Ctrl-C quit window, a `/fork` waiting for the turn boundary, a quit waiting for a cancelled
+/// turn's boundary, a `/loop` wait, a goal `wait` and the idle timer.
+fn next_wait(app: &App, now: std::time::Instant) -> Option<std::time::Duration> {
+    let quit_remaining = app
+        .quit_pending
+        .map(|deadline| deadline.saturating_duration_since(now));
+    let fork_remaining = app
+        .session
+        .pending_fork
+        .map(|deadline| deadline.saturating_duration_since(now));
+    let quit_after_remaining = app
+        .quit_after_turn
+        .map(|deadline| deadline.saturating_duration_since(now));
+    let loop_remaining = app
+        .loop_deadline()
+        .map(|deadline| deadline.saturating_duration_since(now));
+    let goal_remaining = app
+        .goal_deadline()
+        .map(|deadline| deadline.saturating_duration_since(now));
+    let idle_remaining = app
+        .idle_deadline()
+        .map(|deadline| deadline.saturating_duration_since(now));
+    [
+        quit_remaining,
+        quit_after_remaining,
+        fork_remaining,
+        loop_remaining,
+        goal_remaining,
+        idle_remaining,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
+/// Services a quit whose wait for the cancelled turn's boundary ran out. The caller extends
+/// its effect worklist with the result, so the quit's inbox close and notice are not dropped
+/// on the way out. `None` when no deferred quit is due.
+fn quit_after_deadline(app: &mut App) -> Option<radian_tui::app::UpdateResult> {
+    app.quit_after_turn
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        .then(|| app.update(AppInput::QuitAfterTurnDeadline))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -245,6 +290,13 @@ pub(super) fn ui_loop(
         if let Some(ctx) = ctx.as_mut() {
             ctx.bell_rang = false;
         }
+        // A quit waiting for the cancelled turn's boundary ran out: leave as a process stop
+        // would. Handled before the wait and the effect rounds run afterwards, so the quit's
+        // inbox close and the remote close's notice are not dropped on the way out.
+        if let Some(update) = quit_after_deadline(app) {
+            dirty |= update.dirty;
+            effects.extend(update.effects);
+        }
         // A carried batch runs first, without a blocking wait: the effects must not wait for a
         // new event. Otherwise block until there is something to do. No display in this build
         // changes with time (the
@@ -258,42 +310,7 @@ pub(super) fn ui_loop(
         // wakes at its deadline to drop the hint.
         if effects.is_empty() {
             let now = std::time::Instant::now();
-            let quit_remaining = app
-                .quit_pending
-                .map(|deadline| deadline.saturating_duration_since(now));
-            // A `/fork` waiting for the turn boundary has its own deadline (FORK_COMMIT_WAIT).
-            let fork_remaining = app
-                .session
-                .pending_fork
-                .map(|deadline| deadline.saturating_duration_since(now));
-            // A quit waiting for a cancelled turn's journaled boundary has its own deadline
-            // (QUIT_CANCEL_WAIT).
-            let quit_after_remaining = app
-                .quit_after_turn
-                .map(|deadline| deadline.saturating_duration_since(now));
-            // A `/loop --every` wait ends at the next iteration's due time (the turn-end
-            // decision still re-checks; the deadline only wakes an idle loop). A goal
-            // `wait` arms the same wake through `goal_deadline`.
-            let loop_remaining = app
-                .loop_deadline()
-                .map(|deadline| deadline.saturating_duration_since(now));
-            let goal_remaining = app
-                .goal_deadline()
-                .map(|deadline| deadline.saturating_duration_since(now));
-            let idle_remaining = app
-                .idle_deadline()
-                .map(|deadline| deadline.saturating_duration_since(now));
-            let wait_remaining = [
-                quit_remaining,
-                quit_after_remaining,
-                fork_remaining,
-                loop_remaining,
-                goal_remaining,
-                idle_remaining,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+            let wait_remaining = next_wait(app, now);
             let first = if app.is_selecting() || wait_remaining.is_some() {
                 // The nearer of the deadlines; `AUTO_SCROLL_TICK` is the drag's own tick.
                 let timeout = match (app.is_selecting(), wait_remaining) {
@@ -369,16 +386,14 @@ pub(super) fn ui_loop(
                             app.quit = true;
                             break;
                         }
-                        // A quit waiting for a cancelled turn's boundary ran out: leave
-                        // anyway, as a process stop would.
+                        // A quit waiting for a cancelled turn's boundary ran out: the next
+                        // iteration leaves (handled at the top of the loop, so its effects
+                        // still run). No other deadline fired here.
                         if app
                             .quit_after_turn
                             .is_some_and(|d| std::time::Instant::now() >= d)
-                            && app.update(AppInput::QuitAfterTurnDeadline).dirty
-                            && !draw_frame(terminal, app)?
                         {
-                            app.quit = true;
-                            break;
+                            continue;
                         }
                         if app.is_selecting()
                             && app.mouse_autoscroll()
@@ -562,6 +577,35 @@ mod tests {
             executed,
             (0..20).rev().collect::<Vec<_>>(),
             "every effect ran, in order"
+        );
+    }
+
+    /// The loop's wake must include a deferred quit's deadline: without it, a quit whose cancel
+    /// never reaches a boundary is never serviced and the process hangs.
+    #[test]
+    fn the_deferred_quit_arms_the_loop_wake() {
+        let mut app = App::new("m", "s");
+        let now = std::time::Instant::now();
+        app.quit_after_turn = Some(now + std::time::Duration::from_secs(5));
+        assert_eq!(
+            next_wait(&app, now),
+            Some(std::time::Duration::from_secs(5)),
+            "the deferred quit is a wake the loop waits for"
+        );
+    }
+
+    /// The deadline branch returns the quit's whole effect list (inbox close, the remote
+    /// close's notice, the quit) so the loop runs them instead of dropping them.
+    #[test]
+    fn an_expired_deferred_quit_returns_its_effects() {
+        let mut app = App::new("m", "s");
+        app.quit_after_turn = Some(std::time::Instant::now());
+        let update = quit_after_deadline(&mut app).expect("the deadline is due");
+        assert!(app.quit, "the deadline leaves");
+        assert_eq!(
+            update.effects,
+            vec![Effect::CloseInbox, Effect::Quit],
+            "the inbox closes before the quit effect"
         );
     }
 }

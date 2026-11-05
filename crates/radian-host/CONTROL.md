@@ -209,9 +209,10 @@ entries or the current route.
 ```
 
 The port writes the `ok` answer first, then ends the process. It stops accepting new
-connections and lets every connection that is already open finish the answers it owes, so two
-`close` requests crossing at once both see `ok`; each connection then ends. Only after that does
-the port ask its host to close. The host cancels a running turn through the same path as
+connections and lets every connection that is already open finish the answers it owes; a
+connection with no complete line yet waits a brief moment (100 ms) for one the client is still
+writing, so two `close` requests crossing at once both see `ok`; each connection then ends.
+Only after that does the port ask its host to close. The host cancels a running turn through the same path as
 `cancel` (so an interrupted assistant prefix and an open tool call are recorded the way ADR
 0002/0003 require), abandons pending approvals and questions the way a process exit does, and
 ends the process cleanly; the journal stays, and the next `prompt` through the hub resumes it.

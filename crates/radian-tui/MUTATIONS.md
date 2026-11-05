@@ -3671,15 +3671,16 @@ test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0321-M8 | `quit_cancelling_first` loses its running-turn branch and always leaves at once (no `Cancel` effect, no wait) | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the process left before the boundary) | ✅ 1 failed |
-| TK0321-M9 | `leave` journals no `HostNotice`, so a deferred remote close never reaches the journal | `quit::remote_close_during_a_turn_cancels_it_before_the_quit` (effects were `[Quit]`) | ✅ 1 failed |
-| TK0321-M10 | the `TurnFinished` arm ignores `quit_after_turn`, so the deferred quit never runs | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the boundary arrived but the app stayed) | ✅ 1 failed |
-| TK0321-M11 | `Input::QuitAfterTurnDeadline` is a no-op, so a driver that never reports the boundary holds the quit forever | `quit::the_quit_wait_ends_at_its_deadline` | ✅ 1 failed |
+| TK0321-M10 | `quit_cancelling_first` loses its running-turn branch and always leaves at once (no `Cancel` effect, no wait) | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the process left before the boundary) | ✅ 1 failed |
+| TK0321-M11 | `leave` journals no `HostNotice`, so a deferred remote close never reaches the journal | `quit::remote_close_during_a_turn_cancels_it_before_the_quit` (effects were `[Quit]`) | ✅ 1 failed |
+| TK0321-M12 | the `TurnFinished` arm ignores `quit_after_turn`, so the deferred quit never runs | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the boundary arrived but the app stayed) | ✅ 1 failed |
+| TK0321-M13 | `Input::QuitAfterTurnDeadline` is a no-op, so a driver that never reports the boundary holds the quit forever | `quit::the_quit_wait_ends_at_its_deadline` | ✅ 1 failed |
 
 4/4 caught. The journal itself is checked by `pty::pty_slash_quit_cancels_a_running_turn_first`:
-on the pre-fix code the journal ends at `TurnStarted` with no `TurnFinished`; the test is in the
-sandbox profile's exclusions (the `workspace` tier denies the mock server's sockets), so it runs
-in the gate.
+on the pre-fix code the journal ends at `TurnStarted` with no `TurnFinished`; the test runs in
+the sandbox profile too (the `workspace` tier keeps the network on and allows loopback TCP, so
+the mock server is reachable; only Unix-socket connects are denied). The two owner-close pty
+tests are the ones the sandbox profile excludes, for their Unix-socket connect.
 
 ## TK0321 rework 6: the inbox closes before the quit (2026-11-05, branch `work/TK0321-tui-quit-and-remote-close`)
 
@@ -3694,6 +3695,22 @@ was restored from `.radian/bak/update.rs`, which `cmp` found identical.
 
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
-| TK0321-M12 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `quit::slash_quit_quits_an_idle_session` (effects were `[Quit]`), `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
+| TK0321-M14 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `quit::slash_quit_quits_an_idle_session` (effects were `[Quit]`), `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0323: session-close follow-ups (2026-11-05, branch `work/TK0323-session-close-followups`)
+
+The deferred quit keeps its wake and its effects, releases only on the cancelled boundary and
+skips the turn-end decisions; a resumed host notice is drawn where it was journaled; and the
+composer is frozen once a close is in flight. Each mutation was applied in place to the named
+file and restored from `.radian/bak/`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0323-M1 | `next_wait` drops the deferred quit's deadline from the loop's wake | `cli::ui::tests::the_deferred_quit_arms_the_loop_wake` | ✅ 1 failed |
+| TK0323-M2 | the deferred quit leaves on any turn outcome instead of only the cancelled boundary | `app::loop_mode::tests::a_deferred_quit_skips_the_loop_resend_on_a_completed_boundary` | ✅ 1 failed |
+| TK0323-M3 | `push_resumed` pushes every host notice after the whole history | `cli::run_finish::tests::a_resumed_notice_is_drawn_after_the_history_it_followed` | ✅ 1 failed |
+| TK0323-M4 | the composer is not frozen once a close is in flight | `quit::keys_queued_behind_a_remote_close_do_not_refill_the_composer` | ✅ 1 failed |
+
+4/4 caught.

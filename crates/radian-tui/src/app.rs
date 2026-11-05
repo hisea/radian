@@ -789,9 +789,12 @@ pub struct App {
     pub quit_pending: Option<Instant>,
     /// A `/quit` or a remote close that met a running turn: the deadline it waits for the
     /// cancelled turn's journaled boundary before leaving anyway. `None` when no quit waits.
-    /// The quit closes the inbox and cancels the turn, then runs on that boundary
+    /// The quit closes the inbox and cancels the turn, then runs on that **cancelled** boundary
     /// ([`Input::Runtime`]'s `TurnFinished`): the driver leaves after the turn instead of
-    /// claiming a queued followup, so `session.stop()` never drops a live turn.
+    /// claiming a queued followup. If no cancelled boundary arrives within `QUIT_CANCEL_WAIT`
+    /// (a driver that ignores the cancel), the deadline leaves anyway and `session.stop()`
+    /// stops the still-running turn, exactly as a process stop would; that is the one case the
+    /// stop drops a live turn.
     pub quit_after_turn: Option<Instant>,
     /// The `HostNotice` a deferred remote close still has to journal: kept from the close
     /// until the quit runs, so the notice is the last durable fact before the process leaves.

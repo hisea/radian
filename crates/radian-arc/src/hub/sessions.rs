@@ -1328,8 +1328,8 @@ pub fn config(hub: &SessionHub, repo: &Path, id: &str, body: &[u8]) -> Result<()
 
 /// `POST …/sessions/<id>/close`: forward the port's `close` (ADR 0043), which answers `ok` before
 /// its host cancels the running turn, abandons the queue and exits. A hub-held process installs
-/// the hook, so the journal stays and the next `prompt` resumes it; a TUI-hosted process refuses
-/// the verb and the route carries that text.
+/// the hook, and so does the full-screen interface: either leaves its journal for the next
+/// `prompt`. A host that installs no hook refuses the verb and the route carries that text.
 ///
 /// # Errors
 ///

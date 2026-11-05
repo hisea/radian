@@ -2962,8 +2962,8 @@ async fn pty_owner_close_abandons_a_queued_followup() {
     );
 
     // A resume reads the cancelled turn and the close notice; the followup's entry was never
-    // claimed, so recovery restores it as one pending input (ADR 0011 L3) — not as a turn the
-    // quit left half-written.
+    // claimed, so recovery requeues it and the resumed driver claims it at once as that
+    // session's first turn (ADR 0011 L3) — not as a turn the quit left half-written.
     let mut resumed = Pty::spawn_in(
         &[
             "--resume",
@@ -2988,6 +2988,14 @@ async fn pty_owner_close_abandons_a_queued_followup() {
     assert!(
         resumed.screen().contains("hello"),
         "the resumed transcript lost the turn that ran:\n{}",
+        resumed.screen()
+    );
+    // The recovered followup is claimed by the resumed driver, so it reaches the transcript
+    // only after that turn starts: wait for it before counting (a loaded gate's first frame
+    // can precede the claim's journal write).
+    assert!(
+        resumed.wait_for_screen("queued-followup", wait_positive()),
+        "the resumed session never claimed the followup:\n{}",
         resumed.screen()
     );
     assert_eq!(
@@ -3397,8 +3405,9 @@ async fn pty_slash_quit_abandons_a_queued_followup() {
     );
 
     // A resume reads the cancelled turn; the followup's entry was never claimed, so recovery
-    // restores it as one pending input (ADR 0011 L3) — not as a turn the quit left
-    // half-written. After the resumed quit, every turn in the file has its boundary.
+    // requeues it and the resumed driver claims it at once as that session's first turn
+    // (ADR 0011 L3) — not as a turn the quit left half-written. After the resumed quit, every
+    // turn in the file has its boundary.
     let mut resumed = Pty::spawn_in(
         &[
             "--resume",
@@ -3418,6 +3427,13 @@ async fn pty_slash_quit_abandons_a_queued_followup() {
     assert!(
         resumed.wait_for_screen("hello", wait_positive()),
         "the resumed transcript lost the turn that ran:\n{}",
+        resumed.screen()
+    );
+    // The recovered followup is claimed by the resumed driver, so it reaches the transcript
+    // only after that turn starts: wait for it before counting.
+    assert!(
+        resumed.wait_for_screen("queued-followup", wait_positive()),
+        "the resumed session never claimed the followup:\n{}",
         resumed.screen()
     );
     assert_eq!(

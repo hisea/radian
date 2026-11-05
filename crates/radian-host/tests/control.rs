@@ -2293,8 +2293,8 @@ async fn close_answers_ok_before_asking_the_host_and_two_requests_make_one_close
     let _ = radian_host::close_session(&fixture.session).await;
 }
 
-/// A host that installs no close hook (any embedder but `radian exec`'s hub-held mode) refuses
-/// the verb and changes nothing.
+/// A host that installs no close hook (any embedder but the full-screen interface and `radian
+/// exec`'s hub-held mode) refuses the verb and changes nothing.
 #[tokio::test]
 async fn close_without_a_host_hook_is_refused_and_changes_nothing() {
     let server = MockServer::start(vec![text_reply("still here")]).await;
@@ -2360,9 +2360,9 @@ async fn two_close_requests_at_once_both_get_ok_and_the_process_exits_once() {
 }
 
 /// The host is asked only after every open connection has its answer: a `close` that crosses
-/// another one cannot lose its `ok` to the process exit (ADR 0043). The second client reads its
-/// answer only after the host was asked, and then sees EOF — the server finished the connection
-/// before it asked.
+/// another one cannot lose its `ok` to the process exit (ADR 0043). The second client writes its
+/// `close` after the first answer (a late write the drain keeps the connection open for), reads
+/// its answer, and the ask sees zero open connections.
 #[tokio::test]
 async fn a_crossing_close_is_answered_before_the_host_is_asked() {
     let server = MockServer::start(Vec::new()).await;
@@ -2371,11 +2371,14 @@ async fn a_crossing_close_is_answered_before_the_host_is_asked() {
     fixture.write_token("owner-token");
     let (asked, asked_rx) = tokio::sync::oneshot::channel();
     let session = Arc::clone(&fixture.session);
+    let control = Arc::clone(&fixture.server);
     let host = tokio::spawn(async move {
         if requests.recv().await.is_none() {
             return Ok(());
         }
-        let _ = asked.send(());
+        // Read the drain's count at the moment the host is asked: it must be zero, so every
+        // open connection has already written its answer and left.
+        let _ = asked.send(control.live_connections());
         radian_host::close_session(&session).await
     });
 
@@ -2389,24 +2392,28 @@ async fn a_crossing_close_is_answered_before_the_host_is_asked() {
             .await;
         assert_eq!(listed["ok"], true, "{listed}");
     }
-    // Both requests are on the wire before either answer is read: the crossing case.
+    // The first close is answered before the second is even written: the drain must keep the
+    // second connection open for a line that is not on the wire yet.
     first
         .send(json!({"id": 1, "verb": "close", "token": "owner-token"}))
-        .await;
-    second
-        .send(json!({"id": 2, "verb": "close", "token": "owner-token"}))
         .await;
     let first_answer = first.read().await;
     assert_eq!(first_answer["ok"], true, "{first_answer}");
 
-    // The host is asked only once every open connection has its answer: the second client reads
-    // after the ask and must still find its `ok`, then EOF.
-    tokio::time::timeout(Duration::from_secs(15), asked_rx)
+    second
+        .send(json!({"id": 2, "verb": "close", "token": "owner-token"}))
+        .await;
+    let second_answer = second.read().await;
+    assert_eq!(second_answer["ok"], true, "{second_answer}");
+
+    let live_at_ask = tokio::time::timeout(Duration::from_secs(15), asked_rx)
         .await
         .expect("the host was never asked to close")
         .expect("the asked signal");
-    let second_answer = second.read().await;
-    assert_eq!(second_answer["ok"], true, "{second_answer}");
+    assert_eq!(
+        live_at_ask, 0,
+        "the host was asked while a connection was still open"
+    );
     let eof = tokio::time::timeout(Duration::from_secs(15), second.next())
         .await
         .expect("the closing connection stayed open");

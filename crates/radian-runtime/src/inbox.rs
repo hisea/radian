@@ -635,6 +635,11 @@ impl Inbox {
     pub async fn claim_next_turn(&self) -> Option<InboxEntry> {
         let (entry, queued) = {
             let mut state = self.state.lock().await;
+            // A close that raced the loop's `is_closed` check must still refuse: once the
+            // inbox is closed no queued input may open a turn the closing host would drop.
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
             let entry = if let Some(entry) = state.next_turn.pop_front() {
                 self.version.fetch_add(1, Ordering::SeqCst);
                 self.inflight.fetch_add(1, Ordering::SeqCst);
@@ -839,6 +844,17 @@ mod tests {
             seqs,
             (0..32).collect::<Vec<_>>(),
             "enqueue order must be the queue order"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_inbox_never_claims_a_turn() {
+        let inbox = Inbox::new(4);
+        inbox.followup("waiting", InputSource::User).await.unwrap();
+        inbox.close();
+        assert!(
+            inbox.claim_next_turn().await.is_none(),
+            "a racing prompt must not open a turn after the close"
         );
     }
 
