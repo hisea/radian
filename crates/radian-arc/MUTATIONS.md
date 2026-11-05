@@ -2492,3 +2492,18 @@ and connects control sockets). Each file was restored from `.radian/sessions.rs.
 | TK0322-M4 | the close route arm is removed from `route()`, exactly the pre-change router: the path falls to `Route::Unknown` and answers `404` before any handler | all five close tests (404) | ✅ 5 failed |
 
 4/4 caught.
+
+## TK0324: the event stream's `: open` comment (2026-11-04, branch `work/TK0324-hub-stream-open-comment`)
+
+`GET /v1/events` writes one `: open` comment line before its first poll, so a client that waits
+for the first body byte (`URLSession.bytes(for:)`) no longer waits for the first keep-alive. The
+mutation (drop the comment send) was applied by hand to `crates/radian-arc/src/hub/http.rs`, run
+with `cargo nextest run -p radian-arc --test hub_http --locked --profile sandbox --no-fail-fast
+-E 'test(an_event_stream_opens_with_a_comment_line_at_once) or
+test(the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens) or
+test(a_client_that_disconnects_right_after_the_headers_leaves_the_hub_serving)'`, and restored
+from `.radian/http.rs.tk0324.bak`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0324-M1 | `stream_events` omits the `: open` comment, so the first body byte is the first event or a keep-alive | `an_event_stream_opens_with_a_comment_line_at_once` and `the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens` (no body byte within the 30 s read timeout), `a_client_that_disconnects_right_after_the_headers_leaves_the_hub_serving` (first line `: keep-alive`, not `: open`) | ✅ 3 failed |
