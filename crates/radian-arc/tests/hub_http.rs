@@ -2060,7 +2060,9 @@ fn an_event_stream_opens_with_a_comment_line_at_once() {
 }
 
 /// A transition that lands as the stream opens is still preceded by `: open`: the first body
-/// bytes never depend on what the poller has to send.
+/// bytes never depend on what the first poll has to read. The first poll is held back by a
+/// test-only delay, so an `: open` written after it would arrive late; a transition raised
+/// during that wait belongs to the first poll's baseline and produces no event at all.
 #[test]
 fn the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens() {
     let a = Repo::new("hub-events-open-event");
@@ -2072,19 +2074,31 @@ fn the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens() {
         &home,
         &[
             ("RADIAN_HUB_EVENTS_POLL_SECS", "1"),
-            ("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS", "60"),
+            ("RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS", "1"),
+            ("RADIAN_HUB_EVENTS_FIRST_POLL_DELAY_MS", "2000"),
         ],
     );
+    // The stream's first poll is still two seconds away: `: open` is the first body bytes
+    // anyway, so a first byte written after that poll cannot pass this deadline.
     let mut stream = EventStream::open(&hub);
+    let started = Instant::now();
     assert_eq!(stream.line().as_deref(), Some(": open"));
+    assert_eq!(stream.line().as_deref(), Some(""));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the open comment precedes the held first poll: {:?}",
+        started.elapsed()
+    );
 
-    // The stream's first poll is its baseline; waiting for it makes the transition below a
-    // real event rather than a state the baseline already knows.
-    std::thread::sleep(Duration::from_millis(100));
+    // This transition lands while the first poll is still held, so that poll takes it as its
+    // baseline and sends nothing for it; the keep-alive proves the poll has run.
     reject(&a, &task);
+    stream.keep_alive();
+
+    cancel(&a, &task);
     assert_eq!(
         stream.event(),
-        task_event("a", &task, "review.awaiting_human", "review.rework_pending")
+        task_event("a", &task, "review.rework_pending", "failed.cancelled")
     );
 }
 

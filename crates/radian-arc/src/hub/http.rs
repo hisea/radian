@@ -1659,9 +1659,9 @@ fn session_models(
 }
 
 /// `GET /v1/repos/<name>/sessions/<id>/events`: the session's event stream, fed by the hub's
-/// own long-lived subscription. It opens with one `pending` frame holding the queue's current
-/// state, then follows live changes. Like `/v1/events` it never replays entries: a client that
-/// reconnects first re-reads the transcript.
+/// own long-lived subscription. It opens with one `: open` comment, then one `pending` frame
+/// holding the queue's current state, then follows live changes. Like `/v1/events` it never
+/// replays entries: a client that reconnects first re-reads the transcript.
 fn session_events(
     registry: &Registry,
     sessions: &Arc<SessionHub>,
@@ -1690,6 +1690,18 @@ fn session_events(
     let hub = Arc::clone(sessions);
     let session = id.to_owned();
     tokio::spawn(async move {
+        // The first body bytes are one comment line, written before the snapshot read below. A
+        // client that treats the first byte as the stream's open sees it at once, even while
+        // the control port's `pending` answer is in flight, and every SSE client ignores a
+        // comment. A client that went away between the headers and this line closes the
+        // receiver, so the send fails and the task ends.
+        if sender
+            .send(Ok(Frame::data(Bytes::from_static(b": open\n\n"))))
+            .await
+            .is_err()
+        {
+            return;
+        }
         // The first frame is the queue's current state, so a client that subscribes while an
         // approval or question waits learns the head without a transcript re-read. The control
         // port's `pending` verb is blocking socket work, so it runs on a blocking task.
@@ -1951,6 +1963,12 @@ fn stream_events(registry: Registry, sender: mpsc::Sender<Result<Frame<Bytes>, I
     }
     let poll = event_poll_interval();
     let keep_alive = event_keep_alive_interval();
+    // Test-only: hold the first poll back, so a test proves the open comment above does not
+    // wait for it. A user never sets this.
+    let first_poll_delay = event_first_poll_delay();
+    if !first_poll_delay.is_zero() {
+        std::thread::sleep(first_poll_delay);
+    }
     let mut poller = Poller::new();
     let mut next_poll = Instant::now();
     let mut last_sent = Instant::now();
@@ -2026,8 +2044,19 @@ fn event_keep_alive_interval() -> Duration {
     )
 }
 
-/// `value` as seconds, when it holds a positive integer; `default` otherwise. The two readers
-/// above are the only callers, and both variables exist only for tests.
+/// The delay before the event stream's first poll. Test-only:
+/// `RADIAN_HUB_EVENTS_FIRST_POLL_DELAY_MS` holds that poll back, so a test can prove the open
+/// comment is written before it and does not wait for it; no user sets it.
+fn event_first_poll_delay() -> Duration {
+    std::env::var("RADIAN_HUB_EVENTS_FIRST_POLL_DELAY_MS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_default()
+}
+
+/// `value` as seconds, when it holds a positive integer; `default` otherwise. The readers
+/// above are the only callers, and every variable they read exists only for tests.
 fn test_interval(value: Option<String>, default: u64) -> Duration {
     let secs = value
         .and_then(|text| text.parse::<u64>().ok())

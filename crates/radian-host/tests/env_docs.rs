@@ -248,6 +248,10 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS",
         "read in radian-arc/src/hub/http.rs: seconds between keep-alive comments on an event stream with nothing to send, so a test does not wait fifteen seconds",
     ),
+    (
+        "RADIAN_HUB_EVENTS_FIRST_POLL_DELAY_MS",
+        "read in radian-arc/src/hub/http.rs: milliseconds the event stream's first poll is held back, so a test proves the `: open` comment is written before it and does not wait for it",
+    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

@@ -367,7 +367,8 @@ It needs the bearer token and answers `Content-Type: text/event-stream`.
 A session no process hosts is `409`; an unknown session or repository is `404`.
 
 The stream follows the [event stream](#the-event-stream)'s rules: no event ids, no replay of entries, a `: keep-alive` comment every 15 seconds while nothing happens, and an end when the client disconnects, the session's process goes away, the hub stops, or the hub's own drain falls more than the fan-out's 64-frame ring behind — the client then reconnects and re-reads, so a stream never carries a silent gap.
-Before any live frame, every stream opens with one `pending` frame holding the queue's current state — the same `head` and `length` a live `pending` frame carries, with `head` `null` and `length` `0` on an empty queue — read from the session's control port. That frame is written at once, so this stream does not need the event stream's `: open` comment. A reconnect gets the snapshot again, so a client can take its first `pending` frame as the truth.
+The stream opens with one `: open` comment line at once, written before it asks the session's control port for the queue, so the first body byte arrives without waiting for that answer; every client ignores a comment.
+After that comment and before any live frame, every stream sends one `pending` frame holding the queue's current state — the same `head` and `length` a live `pending` frame carries, with `head` `null` and `length` `0` on an empty queue — read from the session's control port. A reconnect gets the snapshot again, so a client can take its first `pending` frame as the truth.
 The no-replay rule is about entries: **a client that reconnects first re-reads the transcript.**
 
 Each event has one of these names, with this `data` object:

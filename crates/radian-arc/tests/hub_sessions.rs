@@ -792,6 +792,12 @@ impl EventStream {
         }
     }
 
+    /// The next body line, or `None` when nothing arrives within `within`.
+    fn line_within(&mut self, within: Duration) -> Option<String> {
+        let _ = self.reader.get_ref().set_read_timeout(Some(within));
+        self.line()
+    }
+
     /// The next event's name and data, skipping `: keep-alive` comments; `None` when nothing
     /// arrives within `within`.
     fn next(&mut self, within: Duration) -> Option<(String, Value)> {
@@ -1614,6 +1620,40 @@ fn snapshot_session(label: &str) -> (ShortHome, Repo, Hub, LivePid, FakePort, St
     let hub = Hub::in_short_home(short.path(), &repo, &[]);
     let (pid, fake) = live_session(&home, &repo, &id);
     (short, repo, hub, pid, fake, id)
+}
+
+/// The stream's first body bytes are `: open`, written before the control port's `pending`
+/// answer is read: a port that holds its answer cannot leave the body empty, so a client that
+/// waits for the first body byte (`URLSession.bytes(for:)` does) returns at once.
+#[test]
+fn a_session_stream_opens_with_a_comment_line_at_once() {
+    let (_short, _repo, hub, _pid, fake, id) = snapshot_session("snapshot-open");
+    fake.set_queue(Value::Null, 0);
+    fake.hold_pending();
+    fake.wait_for_subscription(Instant::now() + Duration::from_secs(30));
+    let mut stream = EventStream::open(&hub, &format!("/v1/repos/repo/sessions/{id}/events"));
+    // The snapshot read is in flight and unanswered; the comment is still the first bytes.
+    fake.wait_for_pending_read(Instant::now() + Duration::from_secs(30));
+    let started = Instant::now();
+    assert_eq!(
+        stream.line_within(Duration::from_secs(2)).as_deref(),
+        Some(": open")
+    );
+    assert_eq!(stream.line().as_deref(), Some(""));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the open comment does not wait for the held snapshot: {:?}",
+        started.elapsed()
+    );
+
+    // The snapshot follows the comment once the port answers, and it is still the first frame.
+    fake.release_pending();
+    let (event, snapshot) = stream
+        .next(Duration::from_secs(20))
+        .expect("the snapshot follows the open comment");
+    assert_eq!(event, "pending");
+    assert_eq!(snapshot["head"], Value::Null);
+    assert_eq!(snapshot["length"], json!(0));
 }
 
 #[test]

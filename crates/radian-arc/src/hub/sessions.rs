@@ -1013,7 +1013,7 @@ pub fn models(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
     }))
 }
 
-/// The session event stream's first frame: the control port's `pending` answer reduced to the
+/// The session event stream's snapshot: the control port's `pending` answer reduced to the
 /// queue's current state, `{"head", "length"}`, the same shape a live `pending` frame carries.
 /// It is read after the hub has subscribed to the session's live events, so a change raised
 /// while the read is in flight stays buffered behind the snapshot.
@@ -1033,7 +1033,7 @@ pub fn pending(hub: &SessionHub, id: &str) -> Result<Value, SessionError> {
     }))
 }
 
-/// The snapshot frame a session event stream opens with.
+/// The snapshot frame a session event stream sends after its `: open` comment.
 #[must_use]
 pub fn pending_frame(data: &Value) -> Bytes {
     frame("pending", data)

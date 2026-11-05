@@ -2507,3 +2507,22 @@ from `.radian/http.rs.tk0324.bak`, which `cmp` found identical.
 | # | Mutation | Caught by | Result |
 |---|---|---|---|
 | TK0324-M1 | `stream_events` omits the `: open` comment, so the first body byte is the first event or a keep-alive | `an_event_stream_opens_with_a_comment_line_at_once` and `the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens` (no body byte within the 30 s read timeout), `a_client_that_disconnects_right_after_the_headers_leaves_the_hub_serving` (first line `: keep-alive`, not `: open`) | ✅ 3 failed |
+
+## TK0325: the streams' first byte followups (2026-11-05, branch `work/TK0325-hub-stream-first-byte-followups`)
+
+The session event stream now writes the same `: open` comment before it reads the control port's
+`pending` answer, and the event stream's first poll can be held back (test-only) so the open
+comment's ordering is provable instead of timed. The mutations were applied by hand to
+`crates/radian-arc/src/hub/http.rs` and restored from `.radian/http.rs.tk0325.bak`, which `cmp`
+found identical. M2 ran with `cargo nextest run -p radian-arc --test hub_http --locked --profile
+sandbox --no-fail-fast -E 'test(the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens)'`;
+M1 and M3 ran outside the workspace sandbox with `cargo nextest run -p radian-arc --test
+hub_sessions --locked --profile default --no-fail-fast -E
+'test(a_session_stream_opens_with_a_comment_line_at_once)'`, because that binary binds a Unix
+socket under `/tmp` (the `sandbox` profile excludes it).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0325-M1 | the session event stream omits its `: open` comment, so the body stays empty until the control port answers `pending` | `a_session_stream_opens_with_a_comment_line_at_once` (no line within its 2 s read) | ✅ 1 failed |
+| TK0325-M2 | `stream_events` writes `: open` after the first `read_transitions` instead of before it, so a held first poll holds the open comment too | `the_open_comment_precedes_a_transition_that_lands_as_the_stream_opens` (first line after 2 s) | ✅ 1 failed |
+| TK0325-M3 | the session stream writes `: open` after the `pending` frame instead of before it, so a held snapshot read leaves the body empty | `a_session_stream_opens_with_a_comment_line_at_once` (no line within its 2 s read) | ✅ 1 failed |

@@ -277,10 +277,11 @@ directory as its `workspace` (`radian_host::sessions::same_directory`, the one r
 `--export` and `--resume` use). Each live session gets one long-lived `subscribe` connection,
 carrying the hub token, on a thread of its own; it folds the journal with
 `radian_host::transcript::AttachFold` and fans the frames — `entry`, `pending`, `config`,
-`state` — out to the session's event streams. Each stream opens with one `pending` frame, the
-port's `pending` answer read on a blocking task after the client subscribes, so a queue change
-raised during the read is buffered and follows the snapshot; a drain that falls more than the
-fan-out's ring behind ends the stream, so the client re-reads rather than follow a silent gap.
+`state` — out to the session's event streams. Each stream opens with one `: open` comment and
+then one `pending` frame, the port's `pending` answer read on a blocking task after the client
+subscribes, so a queue change raised during the read is buffered and follows the snapshot; a
+drain that falls more than the fan-out's ring behind ends the stream, so the client re-reads
+rather than follow a silent gap.
 The same connection is the `[hub.hooks]
 after_pending` point: a `pending` event with a `request_id` the hub has not seen for that
 socket's session starts the configured commands through `hub::hooks` on a thread of their own,
