@@ -3623,3 +3623,77 @@ which `cmp` found identical; the parity test ran inside the workspace sandbox.
 | TK0314-M3 | the live/resume mapping stops keeping the folded image facts (`entry.data.images` assignments removed), so the wrapper's decoded images are the only copy | `attach::the_resume_mapping_keeps_the_folded_image_facts` (entry 0 had `images: []` where the fold had the `ImagePart`) | ✅ 1 failed |
 
 1/1 caught.
+
+## TK0321: the `/quit` command and the remote close (2026-11-04, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` takes the second Ctrl-C's own quit action (one function, not a copy); the control port's
+`close` commits one host notice and then takes the same path. Each mutation was applied by hand to
+`crates/radian-tui/src/command.rs` or `crates/radian-tui/src/app/update.rs`, the named test ran
+with `cargo nextest run -p radian-tui --locked --profile sandbox --lib -E 'test(<name>)'` or
+`--test quit -E 'test(<name>)'`, and the file was restored from a copy under `.radian/`.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M1 | `/quit` parses with any arguments (`Some("/quit") => Outcome::Quit`, no length check) | `command::theme_tests::quit_parses_with_no_argument_and_completes` (a usage notice was expected, `Outcome::Quit` arrived) | ✅ 1 failed |
+| TK0321-M2 | `quit_now` returns the `Quit` effect but does not set `app.quit`, so the loop never leaves | `quit::slash_quit_quits_an_idle_session` (`/quit` quits) | ✅ 1 failed |
+| TK0321-M3 | the remote-close handler skips `push_notice("session closed remotely")` | `quit::remote_close_commits_the_notice_and_quits` (the close notice) | ✅ 1 failed |
+| TK0321-M4 | the remote-close handler leaves a typed draft in the composer instead of clearing it | `quit::remote_close_while_typing_drops_the_draft_like_ctrl_c` (the composer is cleared) | ✅ 1 failed |
+| TK0321-M5 | the `quit` entry is dropped from the command tree, so the completion menu and `/help` lose it | `command::theme_tests::quit_parses_with_no_argument_and_completes` (`/quit` is in the registry) | ✅ 1 failed |
+
+5/5 caught. The control-port wiring itself (`ControlTarget::closable`, the tokio→UI channel
+forwarder) is covered by `pty::pty_owner_close_commits_the_notice_and_exits`; that test is in the
+sandbox profile's group 8 exclusions because the `workspace` tier denies the Unix-socket connect,
+so it runs in the gate, not here.
+
+## TK0321 rework 2: the closing frame and the journaled notice (2026-11-04, branch `work/TK0321-tui-quit-and-remote-close`)
+
+The remote close now marks its frame dirty and returns a `HostNotice` journal effect before the
+quit effect. Each mutation was applied by hand to `crates/radian-tui/src/app/update.rs`, the named
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test quit -E
+'test(<name>)'`, and the file was restored from `.radian/bak/update.rs` (cmp identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M6 | the remote-close result stays `quit_now`'s quiet result (the `result.dirty = true` line is dropped), so the loop exits without drawing the notice | `quit::remote_close_marks_the_frame_dirty` | ✅ 1 failed |
+| TK0321-M7 | the remote-close result keeps the quit effect but inserts no `HostNotice` effect, so nothing reaches the journal | `quit::remote_close_commits_the_notice_and_quits` (effects were `[Quit]`) | ✅ 1 failed |
+
+2/2 caught. The journal round trip and the resumed transcript are covered by
+`pty::pty_owner_close_commits_the_notice_and_exits` (excluded from the sandbox profile for the
+Unix-socket reason above, so it runs in the gate).
+
+## TK0321 rework 5: the turn is cancelled before the quit (2026-11-05, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` and a remote close now cancel a running turn through the session's own path and leave
+only on its journaled boundary (`TurnFinished`), or at `QUIT_CANCEL_WAIT`. Each mutation was
+applied by hand to `crates/radian-tui/src/app/update.rs` or `src/app/transcript.rs`, the named
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test quit -E
+'test(<name>)'`, and the file was restored from `.radian/bak/` (cmp identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M8 | `quit_cancelling_first` loses its running-turn branch and always leaves at once (no `Cancel` effect, no wait) | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the process left before the boundary) | ✅ 1 failed |
+| TK0321-M9 | `leave` journals no `HostNotice`, so a deferred remote close never reaches the journal | `quit::remote_close_during_a_turn_cancels_it_before_the_quit` (effects were `[Quit]`) | ✅ 1 failed |
+| TK0321-M10 | the `TurnFinished` arm ignores `quit_after_turn`, so the deferred quit never runs | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the boundary arrived but the app stayed) | ✅ 1 failed |
+| TK0321-M11 | `Input::QuitAfterTurnDeadline` is a no-op, so a driver that never reports the boundary holds the quit forever | `quit::the_quit_wait_ends_at_its_deadline` | ✅ 1 failed |
+
+4/4 caught. The journal itself is checked by `pty::pty_slash_quit_cancels_a_running_turn_first`:
+on the pre-fix code the journal ends at `TurnStarted` with no `TurnFinished`; the test is in the
+sandbox profile's exclusions (the `workspace` tier denies the mock server's sockets), so it runs
+in the gate.
+
+## TK0321 rework 6: the inbox closes before the quit (2026-11-05, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` and a remote close now close the inbox before they cancel (and an idle quit before it
+leaves), so the driver ends at the cancelled turn's boundary instead of claiming a followup
+queued behind it. The mutation was applied by hand to `crates/radian-tui/src/app/update.rs`:
+both `quit_now` and the running arm of `quit_cancelling_first` lost their `Effect::CloseInbox`.
+Each test ran with `cargo nextest run -p radian-tui --locked --test pty -E 'test(<name>)'`
+(the owner-close one outside the workspace tier, for the Unix-socket reason above) or, for the
+idle unit test, `--profile sandbox --test quit`; the file
+was restored from `.radian/bak/update.rs`, which `cmp` found identical.
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M12 | `quit_now` and `quit_cancelling_first` emit no `Effect::CloseInbox`, so the driver claims the queued followup after the cancelled turn and `session.stop()` drops that second turn | `quit::slash_quit_quits_an_idle_session` (effects were `[Quit]`), `pty::pty_slash_quit_abandons_a_queued_followup` (the journal held two `TurnStarted`, the second with no `TurnFinished`, 3/3 runs) and `pty::pty_owner_close_abandons_a_queued_followup` (same, 3/3 runs) | ✅ 1 failed |
+
+1/1 caught.

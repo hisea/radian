@@ -23,6 +23,14 @@ pub trait SessionFacade: Send + Sync {
     /// The pending requests (ADR 0023 U7): the UI shows the head and counts the queue.
     fn pending(&self) -> &SessionQueue;
 
+    /// Closes the inbox (ADR 0043's close contract: cancel what runs, abandon what waits).
+    /// Future input is refused and the driver leaves its loop at the next turn boundary
+    /// instead of claiming a followup that is already queued. The TUI's `/quit` and the
+    /// remote close call it before their cancel, and before `session.stop()` on an idle quit,
+    /// so a queued followup can never open a turn the stop would drop mid-flight. Idempotent;
+    /// the driver's own shutdown close is the same call.
+    fn close_inbox(&self);
+
     /// Answer a pending request by its queue id (ADR 0023 U5's `AnswerRequest`). A late answer
     /// is silently ignored (ADR 0024 Q4): the request is already gone, and re-completing it is
     /// worse than dropping the answer.

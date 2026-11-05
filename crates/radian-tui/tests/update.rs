@@ -294,7 +294,7 @@ fn an_input_that_changes_nothing_is_not_dirty() {
     assert!(arm.effects.is_empty(), "the first press only arms");
     assert!(arm.dirty, "the hint must be drawn");
     let quit = app.on_key(ctrl(KeyCode::Char('c')));
-    assert_eq!(quit.effects, vec![Effect::Quit]);
+    assert_eq!(quit.effects, vec![Effect::CloseInbox, Effect::Quit]);
     assert!(!quit.dirty, "quitting does not repaint");
     // Typing does.
     assert!(app.on_key(key(KeyCode::Char('a'))).dirty);

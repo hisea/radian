@@ -160,6 +160,7 @@ impl App {
                 self.quit = true;
                 UpdateResult::dirty()
             }
+            command::Outcome::Quit => self.quit_cancelling_first(),
             command::Outcome::Theme(name) => {
                 // ADR 0008: the loop loads the theme (I/O) and writes `tui.theme`
                 // back to the config file; the notice says which of those happened.

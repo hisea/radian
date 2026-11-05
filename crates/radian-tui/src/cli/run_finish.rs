@@ -68,6 +68,11 @@ pub(super) fn build_startup_screen(
     for message in history {
         app.push_message(message);
     }
+    // ADR 0006 §5.14: the durable host notices belong to the resumed transcript. They come
+    // after the history they followed; the remote close is the session's last event.
+    for notice in session.host_notices() {
+        app.push_notice(notice.clone());
+    }
     mark("entries-built");
     app.prefill_history(history);
     mark("prefill");

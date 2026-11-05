@@ -6,8 +6,13 @@
 use std::time::{Duration, Instant};
 
 use radian_host::projection::TurnState;
-use radian_tui::app::{App, Effect, Input, QUIT_WINDOW};
+use radian_host::{PendingRequest, PendingView};
+use radian_permissions::ApprovalRequest;
+use radian_session::{RuntimeEvent, TurnOutcome, TurnReason};
+use radian_tui::app::{App, Effect, EntryKind, Input, QUIT_WINDOW};
+use radian_tui::keys::Action;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::json;
 
 fn ctrl_c() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
@@ -178,4 +183,299 @@ fn user_input_still_disarms_the_quit_window() {
     assert!(!app.quit, "the press after a disarm only re-arms");
     assert!(!quit_asked(&result.effects), "{:?}", result.effects);
     assert!(app.quit_pending.is_some());
+}
+
+fn notices(app: &App) -> Vec<String> {
+    app.session
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Notice)
+        .map(|entry| entry.text.clone())
+        .collect()
+}
+
+/// The approval popup's queue view, the same shape the loop hands the app.
+fn pending_approval() -> PendingView<PendingRequest> {
+    let request = ApprovalRequest::new(
+        "perm-1",
+        "call-1",
+        "write",
+        "out.txt",
+        "/ws/out.txt",
+        json!({"path": "out.txt", "content": "hello"}),
+        None,
+    );
+    PendingView {
+        request_id: 1,
+        origin: "session".into(),
+        request: PendingRequest::Approval(request),
+    }
+}
+
+fn prompt_approval(app: &mut App) {
+    app.update(Input::Pending {
+        head: Some(Box::new(pending_approval())),
+        len: 1,
+        answered_from_hub: Vec::new(),
+    });
+    assert!(app.pending_approval().is_some(), "the modal is open");
+}
+
+/// `/quit` is the second Ctrl-C's own action: the same quit flag and `Quit` effect. An idle
+/// quit closes the inbox first, so a followup that arrives between the quit and
+/// `session.stop()` is refused instead of starting a turn the stop would drop (ADR 0043:
+/// abandon what waits).
+#[test]
+fn slash_quit_quits_an_idle_session() {
+    let mut app = App::new("m", "s");
+    app.input = "/quit".into();
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(app.quit, "`/quit` quits");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Quit],
+        "the inbox closes before the quit effect"
+    );
+}
+
+/// A cancelled turn's journaled boundary, as the driver reports it.
+fn cancelled_turn() -> RuntimeEvent {
+    RuntimeEvent::TurnFinished {
+        turn_id: "t1".into(),
+        outcome: TurnOutcome::Cancelled,
+        reason: Some(TurnReason::Requested),
+        stop_reason: None,
+    }
+}
+
+/// `/quit` while a turn runs closes the inbox and cancels the turn through the session's
+/// own path, then waits for the journaled boundary before leaving. Leaving at once would let
+/// `session.stop()` drop the live turn, and a resume would read `TurnStarted` with no end
+/// (ADR 0043's close contract: the turn is cancelled "through the same path as `cancel`",
+/// and queued input is abandoned, not started).
+#[test]
+fn slash_quit_during_a_turn_cancels_it_before_the_quit() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    app.input = "/quit".into();
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(
+        !app.quit,
+        "the process must wait for the cancelled turn's boundary"
+    );
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
+        "the inbox closes before the turn is cancelled: {:?}",
+        result.effects
+    );
+    assert!(
+        app.quit_after_turn.is_some(),
+        "the quit waits for the boundary"
+    );
+
+    let result = app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit, "the boundary arrived: the quit runs");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(
+        matches!(result.effects.first(), Some(Effect::CloseInbox)),
+        "the boundary's quit closes the inbox before it leaves: {:?}",
+        result.effects
+    );
+}
+
+/// A turn that never reports its boundary (a driver stuck past the cancel) still lets the
+/// process leave at the deadline, the way a process stop would.
+#[test]
+fn the_quit_wait_ends_at_its_deadline() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    app.input = "/quit".into();
+    app.on_key(key(KeyCode::Enter));
+    assert!(!app.quit);
+    let result = app.update(Input::QuitAfterTurnDeadline);
+    assert!(app.quit, "the deadline leaves anyway");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(app.quit_after_turn.is_none(), "the wait is over");
+}
+
+/// A pending approval modal is a layer; the command path itself still quits (the key route
+/// blocks typing while the modal is up, so the submission is the one the test feeds).
+#[test]
+fn slash_quit_with_a_pending_approval_modal_quits() {
+    let mut app = App::new("m", "s");
+    prompt_approval(&mut app);
+    app.input = "/quit".into();
+    let result = app.update(Input::Action(Action::Send));
+    assert!(app.quit, "`/quit` quits under the modal");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+}
+
+/// An argument is a usage line like every other no-argument command, and never quits.
+#[test]
+fn slash_quit_with_an_argument_is_an_error_line_and_does_not_quit() {
+    let mut app = App::new("m", "s");
+    app.input = "/quit extra".into();
+    let result = app.on_key(key(KeyCode::Enter));
+    assert!(!app.quit, "a usage error must not quit");
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice == "usage: /quit (no arguments)"),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// A remote close during a turn closes the inbox and cancels the turn first, and journals
+/// the notice only when the quit finally runs: the notice is the last durable fact before the
+/// process leaves.
+#[test]
+fn remote_close_during_a_turn_cancels_it_before_the_quit() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    let result = app.update(Input::RemoteClose);
+    assert!(
+        !app.quit,
+        "the close waits for the cancelled turn's boundary"
+    );
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
+        "the inbox closes before the turn is cancelled: {:?}",
+        result.effects
+    );
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice == "session closed remotely"),
+        "the live notice is on screen at once"
+    );
+
+    let result = app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit, "the boundary arrived: the close quits");
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::CloseInbox, Effect::HostNotice { text }, Effect::Quit] if text == "session closed remotely"),
+        "the inbox closes first and the notice journals before the quit effect: {:?}",
+        result.effects
+    );
+}
+
+/// The same close under a completion menu: the overlay never swallows the host's close.
+#[test]
+fn remote_close_during_a_turn_under_a_completion_menu_quits_after_the_cancel() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    app.update(Input::Char('/'));
+    let result = app.update(Input::RemoteClose);
+    assert!(!app.quit);
+    assert_eq!(
+        result.effects,
+        vec![Effect::CloseInbox, Effect::Cancel],
+        "{:?}",
+        result.effects
+    );
+    app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit);
+}
+
+/// The control port's close hook on an idle session: one host notice in the transcript, then
+/// the `/quit` path. The inbox closes first and the notice is journaled before the quit effect
+/// runs (ADR 0006 §5.14), so a resume still shows it.
+#[test]
+fn remote_close_commits_the_notice_and_quits() {
+    let mut app = App::new("m", "s");
+    let result = app.update(Input::RemoteClose);
+    assert!(app.quit, "a remote close quits");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(
+        result.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::HostNotice { text } if text == "session closed remotely"
+        )),
+        "the close journals its notice first: {:?}",
+        result.effects
+    );
+    assert_eq!(
+        result.effects,
+        vec![
+            Effect::CloseInbox,
+            Effect::HostNotice {
+                text: "session closed remotely".into()
+            },
+            Effect::Quit,
+        ],
+        "the inbox closes first and the journal append runs before the quit effect: {:?}",
+        result.effects
+    );
+    let last = app.session.entries.last().expect("the close notice");
+    assert_eq!(last.kind, EntryKind::Notice);
+    assert_eq!(last.text, "session closed remotely");
+}
+
+/// The closing frame: an idle remote close sets no other state, so the update itself must
+/// mark the frame dirty or the loop exits before drawing the notice.
+#[test]
+fn remote_close_marks_the_frame_dirty() {
+    let mut app = App::new("m", "s");
+    let result = app.update(Input::RemoteClose);
+    assert!(
+        result.dirty,
+        "the notice was pushed but the loop would not draw it"
+    );
+}
+
+/// A remote close while the user types drops the draft the way an idle Ctrl-C quit does: the
+/// text goes into the in-process history and the composer clears, so the draft file written on
+/// the way out is empty.
+#[test]
+fn remote_close_while_typing_drops_the_draft_like_ctrl_c() {
+    let mut app = App::new("m", "s");
+    app.input = "a draft".into();
+    app.update(Input::RemoteClose);
+    assert!(app.quit);
+    assert!(app.input.is_empty(), "the composer is cleared");
+    assert_eq!(
+        app.session.history.last().map(String::as_str),
+        Some("a draft"),
+        "the text is kept in the in-process history only"
+    );
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice == "session closed remotely"),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// A remote close during a fullscreen overlay (a modal here) still quits and commits the
+/// notice: the close is a host fact, not a key the overlay can swallow.
+#[test]
+fn remote_close_during_a_modal_quits() {
+    let mut app = App::new("m", "s");
+    prompt_approval(&mut app);
+    let result = app.update(Input::RemoteClose);
+    assert!(app.quit);
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice == "session closed remotely"),
+        "{:?}",
+        notices(&app)
+    );
+}
+
+/// The same under a completion menu: a fullscreen overlay that owns the keys.
+#[test]
+fn remote_close_during_a_completion_menu_quits() {
+    let mut app = App::new("m", "s");
+    app.update(Input::Char('/'));
+    assert!(app.slash_completion.is_some(), "the menu is open");
+    let result = app.update(Input::RemoteClose);
+    assert!(app.quit);
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
 }

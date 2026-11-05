@@ -159,6 +159,16 @@ impl App {
             let goal_result = self.goal_turn_finished(*outcome);
             result.dirty |= goal_result.dirty;
             result.effects.extend(goal_result.effects);
+            // A `/quit` or a remote close met this turn while it ran and cancelled it: the
+            // cancelled boundary is in the journal now, so the process can leave (its
+            // remote-close notice journals first). `session.stop()` would otherwise drop a
+            // live turn and the journal would read as a crash.
+            if self.quit_after_turn.take().is_some() {
+                let leave = self.leave();
+                result.dirty = true;
+                result.effects.extend(leave.effects);
+                return result;
+            }
             // A completed or failed turn rings the bell in every mode but `off`: the user
             // may be looking at another window. A cancel needs no ring — the user pressed
             // the key themselves.

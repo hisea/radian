@@ -33,6 +33,9 @@ pub enum Input {
     /// The armed quit window closed: disarm and redraw, so the hint goes away. Sent by the
     /// loop on its `recv_timeout` (ADR 0023 U2: a time-driven display takes the timeout).
     QuitDeadline,
+    /// The deadline of a quit waiting for a cancelled turn's journaled boundary (a driver
+    /// that never reports it). Sent by the loop on its `recv_timeout`.
+    QuitAfterTurnDeadline,
     /// The deadline of a `/fork` waiting for the turn boundary to reach the journal.
     ForkDeadline,
     /// The deadline of a `/loop --every` wait: the next iteration is due while idle.
@@ -90,6 +93,10 @@ pub enum Input {
         len: usize,
         answered_from_hub: Vec<u64>,
     },
+    /// The owner closed this session through the control port's `close` verb (ADR 0043):
+    /// one host notice, the typed draft dropped as a Ctrl-C quit drops it, then the same
+    /// quit action as a second Ctrl-C.
+    RemoteClose,
     /// One key inside the question form (ADR 0024 Q7).
     Form(FormKey),
     /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).

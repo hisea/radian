@@ -212,6 +212,11 @@ pub enum RuntimeEvent {
     /// only place the host learns *why* a `TurnFinished { outcome: failed }` happened without
     /// reading the live event stream. A reader that skips it still sees the terminal record.
     TurnFailed { turn_id: String, message: String },
+    /// A host notice committed to the session transcript (ADR 0006 §5.14). Audit only:
+    /// `critical = false`, never a transcript record. The full-screen interface writes it
+    /// when the owner closes the session remotely (`session closed remotely`), so a resume
+    /// still shows the line; the live entry on the closing screen is the same text.
+    HostNotice { text: String },
     /// A configuration change was applied (ADR 0006 §5.7). `change` stays opaque here; the
     /// registry and the slots own its meaning. The optional `profile_ref` sibling of §5.7 is
     /// not exposed yet (no producer in this phase).
@@ -352,6 +357,7 @@ impl RuntimeEvent {
             RuntimeEvent::TurnStarted { .. } => "TurnStarted",
             RuntimeEvent::TurnFinished { .. } => "TurnFinished",
             RuntimeEvent::TurnFailed { .. } => "TurnFailed",
+            RuntimeEvent::HostNotice { .. } => "HostNotice",
             RuntimeEvent::ConfigChanged { .. } => "ConfigChanged",
             RuntimeEvent::ContextBudgetReached { .. } => "ContextBudgetReached",
             RuntimeEvent::PermissionResolved { .. } => "PermissionResolved",
@@ -388,6 +394,7 @@ impl RuntimeEvent {
             | RuntimeEvent::TurnFinished { .. }
             | RuntimeEvent::ConfigChanged { .. } => true,
             RuntimeEvent::TurnFailed { .. }
+            | RuntimeEvent::HostNotice { .. }
             | RuntimeEvent::ContextBudgetReached { .. }
             | RuntimeEvent::PermissionResolved { .. }
             | RuntimeEvent::ApprovalPolicyChanged { .. }
@@ -490,6 +497,11 @@ pub(crate) struct TurnFinishedData<'a> {
 pub(crate) struct TurnFailedData<'a> {
     pub turn_id: &'a str,
     pub message: &'a str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HostNoticeData<'a> {
+    pub text: &'a str,
 }
 
 #[derive(Serialize)]
@@ -628,6 +640,7 @@ pub(crate) enum RuntimeData<'a> {
     TurnStarted(TurnStartedData<'a>),
     TurnFinished(TurnFinishedData<'a>),
     TurnFailed(TurnFailedData<'a>),
+    HostNotice(HostNoticeData<'a>),
     ConfigChanged(ConfigChangedData<'a>),
     ContextBudgetReached(ContextBudgetReachedData<'a>),
     PermissionResolved(PermissionResolvedData<'a>),
@@ -658,6 +671,7 @@ impl Serialize for RuntimeData<'_> {
             RuntimeData::TurnStarted(d) => d.serialize(serializer),
             RuntimeData::TurnFinished(d) => d.serialize(serializer),
             RuntimeData::TurnFailed(d) => d.serialize(serializer),
+            RuntimeData::HostNotice(d) => d.serialize(serializer),
             RuntimeData::ConfigChanged(d) => d.serialize(serializer),
             RuntimeData::ContextBudgetReached(d) => d.serialize(serializer),
             RuntimeData::PermissionResolved(d) => d.serialize(serializer),
@@ -733,6 +747,7 @@ pub(crate) fn runtime_data(event: &RuntimeEvent) -> RuntimeData<'_> {
         RuntimeEvent::TurnFailed { turn_id, message } => {
             RuntimeData::TurnFailed(TurnFailedData { turn_id, message })
         }
+        RuntimeEvent::HostNotice { text } => RuntimeData::HostNotice(HostNoticeData { text }),
         RuntimeEvent::ConfigChanged { revision, change } => {
             RuntimeData::ConfigChanged(ConfigChangedData {
                 revision: *revision,

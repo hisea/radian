@@ -337,13 +337,13 @@ A session write route reads at most 16 MiB (16,777,216 bytes) minus 1 KiB of bod
 
 A session a process already hosts — a TUI's or the hub's own — is never started twice: the prompt goes through that process's socket.
 An ended session is resumed by a new hub-held process on the same journal.
-An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer`, `config` and `close` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`. A port that refuses `close` (a TUI-hosted process has no close hook) is `502` carrying its text, `this process cannot be closed remotely`.
+An unknown session, or one whose workspace is another repository's, is `404`; `cancel`, `answer`, `config` and `close` on a session no process hosts are `409`; an answer that arrives after the queue entry was completed or abandoned is `409` (`the request is no longer pending: a late answer changes nothing`) and changes nothing; an unknown `request_id` is `404`; a port that fails mid-request is `502`. A port that refuses `close` (a host that installs no close hook) is `502` carrying its text, `this process cannot be closed remotely`.
 A socket that has gone while the hub's last scan still listed the session is the ended-session case, not a port failure: a live-only route answers `409` (the same body as for an ended session) and a `prompt` resumes the journal, and the stale entry is dropped.
 
 A hub-held process with no running turn, no pending approval or question and no running background job for longer than [`hub.session_idle_secs`](#the-hub-configuration) exits cleanly: the journal stays and the next prompt resumes it.
 The owner token's [`close`](../control.md#close) verb ends it the same way at once: the turn in flight is cancelled, pending approvals and questions are abandoned, and the journal stays.
-The hub's `close` route forwards that verb: a hub-held process ends and the next `prompt` resumes the journal; a TUI-hosted process installs no close hook and the route answers `502` with its text.
-Only hub-started processes are reclaimed; a TUI decides its own session's life.
+The hub's `close` route forwards that verb: a hub-held process ends and the next `prompt` resumes the journal; a TUI-hosted process ends the same way, after journaling one `session closed remotely` notice that a resume shows, and the next `prompt` resumes the journal.
+Only hub-started processes are reclaimed by the hub itself; a TUI-hosted session ends on its owner's `close`, its own `/quit`, or its terminal going away.
 A hub that stops stops the hub-held processes it still has cleanly (SIGTERM, then a grace period).
 
 ### `GET /v1/repos/<name>/items/<task>/conversation`

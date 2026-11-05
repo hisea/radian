@@ -65,6 +65,7 @@ Safe append (the write-back side, including the ADR 0002 E9 repair write-back):
 | `TranscriptReplacementAborted` | true | Core/writer | Drop the pending segment. |
 | `TurnFinished` | true | runtime | Turn end state. |
 | `TurnFailed` | false | runtime | Error text for a model or hook error that ends the turn. Audit use. |
+| `HostNotice` | false | TUI host | A host notice committed to the transcript (§5.14), such as the remote close's `session closed remotely`. |
 | `ConfigChanged` | true | runtime | Configuration effective reference. |
 | `Rewound` | true | no current producer | The reader knows the name as a compatible event and keeps the body as opaque `EventData::Other`. It has no typed body contract and no producer or writer path. |
 | `ContextBudgetReached` | false | runtime (typed compatible) | Typed audit record. A caller-provided `RuntimeEvent::ContextBudgetReached` can serialize through `append_runtime_event`. The current driver and host have no production path. |
@@ -221,6 +222,10 @@ Replay rules live in one Core place (`TranscriptFold`), per ADR 0019. Uncommitte
 
 - `BackgroundJobStarted { job_id, command, output }`: `command` is the first-line summary. `output` is the `job` prompt (the output file lives in the session directory, and the model cannot read it).
 - `BackgroundJobSettled { job_id, state, duration_ms }`: `state` uses the `[status: …]` spelling (`exited 0`, `signal 9`, `killed`, `timed out`).
+
+### 5.14 `HostNotice`
+
+`HostNotice { text }`: one host notice the front end commits to the transcript. The full-screen interface writes it when the owner closes the session through the control port, with `text = "session closed remotely"`. It is non-critical audit: it never enters `journal_records()`, `replay` or `repair`, and it is not a model message. A resume renders the text as a transcript notice after the history it follows, so the close survives the process it ended (the remote close is the session's last event). The reader validates the `text` string; a record without one is corrupt at its line.
 
 ## 6. Unknown content policy
 

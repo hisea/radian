@@ -20,6 +20,10 @@ pub(super) struct SessionInputs {
     pub(super) profile: radian_permissions::Profile,
     pub(super) projection: std::sync::Arc<radian_host::SessionProjection>,
     pub(super) control: Option<std::sync::Arc<radian_host::ControlServer>>,
+    /// The control port's close hook (ADR 0043). The TUI installs it for every session it
+    /// serves: the owner's `close` verb then ends the process like `/quit`. `None` when the
+    /// port is off.
+    pub(super) close: Option<radian_host::CloseHandle>,
     pub(super) live: std::sync::Arc<dyn EventSink>,
     pub(super) approvals: radian_host::ApprovalRouting,
     pub(super) audit:
@@ -218,6 +222,21 @@ pub(super) fn build_session_inputs(
     // Held for the whole session: the socket is removed on the normal return and on the panic
     // unwind, even while the driver task still holds a reference to the server (ADR 0043).
     let control_guard = control.as_ref().map(|server| server.guard());
+    // ADR 0043: the TUI installs the close hook, so the owner may end the process through the
+    // port. The request arrives on a tokio channel; forward it to the UI's one channel as a
+    // host fact. Tagged with this session, so a `/new` iteration never lets the old port's
+    // close end the new session.
+    let close = control.as_ref().map(|_| {
+        let (close, mut requests) = radian_host::CloseHandle::channel();
+        let close_tx = tx.clone();
+        let session_id = session_id.to_owned();
+        runtime.spawn(async move {
+            if requests.recv().await.is_some() {
+                let _ = close_tx.send(UiEvent::ControlClose { session_id });
+            }
+        });
+        close
+    });
     let live_inner: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
     let live: Arc<dyn EventSink> = match &control {
@@ -390,6 +409,7 @@ pub(super) fn build_session_inputs(
             profile,
             projection,
             control,
+            close,
             live,
             approvals,
             audit,
@@ -436,6 +456,7 @@ pub(super) fn open_session_and_refresh(
         profile,
         projection,
         control,
+        close,
         live,
         approvals,
         audit,
@@ -558,9 +579,15 @@ pub(super) fn open_session_and_refresh(
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");
-    // ADR 0043: start accepting control requests for this session.
+    // ADR 0043: start accepting control requests for this session. The TUI installs the
+    // close hook, so the owner's `close` ends this process like `/quit`.
     if let Some(server) = &control {
-        server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
+        let target = radian_host::ControlTarget::of(&session);
+        let target = match close {
+            Some(close) => target.closable(close),
+            None => target,
+        };
+        server.serve(runtime.handle(), target);
     }
     // ADR 0026 D0/D10: every provider `/model` would offer refreshes in the background, each
     // from its own base URL (a named provider's declaration or its `auth.json` entry's env; a

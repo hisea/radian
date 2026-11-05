@@ -31,6 +31,10 @@ pub enum UiEvent {
     /// requests the control port answered since the last wake; a popup showing one of them is
     /// explained by one weak line after it closes (ADR 0035).
     Pending { answered_from_hub: Vec<u64> },
+    /// The owner closed this session through the control port's `close` verb (ADR 0043).
+    /// Tagged with the session it belongs to: `/new` replaces the session and the old port's
+    /// close must not end the new one.
+    ControlClose { session_id: String },
     /// The result of an effect, as the input it becomes (ADR 0023 U3).
     Command(AppInput),
     /// The projection changed. At most one is in flight per session.

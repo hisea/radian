@@ -196,7 +196,7 @@ bare arrow keys belong to the composer.
 | PageUp / PageDown | scroll the transcript a page |
 | Shift-Up / Shift-Down | scroll the transcript one line |
 | Ctrl-Home / Ctrl-End | scroll the transcript to its top / bottom |
-| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with two Ctrl-Cs) |
+| Esc | (`escape` in the transcript, `find_close` in the find box) close the find box or a completion menu if one is up (the input is kept); otherwise clear a non-empty input first (the line stays in the history, so `Up` finds it); with an empty input, cancel the running `!` command or the running turn; otherwise do nothing — **Esc never quits a session** (quit with `/quit` or two Ctrl-Cs) |
 | Ctrl-C | cancel the running turn; idle with a non-empty input, clear it (into the history); idle with an empty input, arm "press Ctrl-C again to quit" for 2 s (any other key, or the window closing, disarms it; the status bar shows `Press Ctrl-C again to quit`) |
 | Ctrl-P (`toggle_startup`) | fold or unfold the startup information block |
 | Ctrl-N (`menu_next`) | while a completion menu is up, move its highlight down (Ctrl-P is taken, so Ctrl-N is the menu's other key) |
@@ -559,9 +559,9 @@ with `[tui.colors]`.
 The history is this session's submitted lines (messages and `/…` commands). A resume rebuilds
 it from the journal's user messages. It is not persisted on its own.
 
-The **draft** is: on a clean exit (the two-press Ctrl-C quit, SIGTERM/SIGHUP) a non-empty input is written to
+The **draft** is: on a clean exit (the two-press Ctrl-C quit, `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a remote close clears the input the same way, so it saves no draft; a signal exit
 saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
@@ -1147,6 +1147,22 @@ throwaway terminal, not your working one.
     that was idle for longer than `hub.session_idle_secs` has exited, and the next prompt
     resumes the same journal). *Fail*: record which front end missed the update, the hub's
     version, and the session id.
+15. **`/quit` and a remote close** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit`
+    while a turn runs; `/quit` while a turn runs and `/queue` left a followup waiting;
+    `/quit` with a draft typed; `/quit extra`; then, with the owner token
+    written to `~/.radian/hub/token`, send `{"id":1,"verb":"close","token":"…"}` on the
+    session's `~/.radian/run/<pid>.sock` while typing a draft and again under an approval
+    popup. *Expect*: `/quit` on an idle session leaves at once and restores the shell prompt
+    (`stty -a` shows `icanon`); `/quit` during a turn cancels it first, so a `--resume` shows a
+    cancelled turn, then exits; a followup still in the queue at that moment opens no second
+    turn (the journal has one `TurnStarted` and one cancelled `TurnFinished`, and a `--resume`
+    restores the followup as one pending input); `/quit extra` is a usage notice and never
+    quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
+    exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
+    next `--resume`). *Look*: is the notice visible above the restored prompt, does a
+    `--resume owner-close` show the same notice again (it is journaled), and does the
+    close under a popup still exit (the popup is abandoned, not answered)? *Fail*: record the
+    verb's answer, the screen's last frame, and whether `icanon` came back.
 
 ### Hand test: passed
 
@@ -1237,7 +1253,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
-| clean quit (Ctrl-C twice / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
+| clean quit (Ctrl-C twice / `/quit` / a remote close / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
 | startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 2 | `radian: <the error>` (terminal never entered) |
 | driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
 | driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |

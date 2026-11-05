@@ -224,6 +224,6 @@ the composer, so you can keep typing while it streams.
 
 ### Quit
 
-There is no quit command. Press `ctrl-c` twice (`ctrl-c ctrl-c`) within 2 seconds on an empty
+`/quit` quits. Press `ctrl-c` twice (`ctrl-c ctrl-c`) within 2 seconds on an empty
 input to quit. Any other key, or the window closing, disarms the second
 press. The status line shows `Press Ctrl-C again to quit`.

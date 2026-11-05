@@ -28,6 +28,7 @@ pub const HELP: &str = "\
 /sessions [query]     list this workspace's recent sessions, or search their text
 /fork                 fork this session at its last turn boundary
 /new                  start a new session here; the old session stays resumable
+/quit                 quit; a running turn is cancelled first
 /theme <name>         switch the color theme and write it back to the config file
 /model <provider>/<model>
                       switch the model at the next turn boundary
@@ -182,6 +183,10 @@ pub enum Outcome {
     /// same workspace, then the loop runs again. No host work happens here (unlike
     /// `/fork`), so there is no `SessionOutcome`: setting the flag IS the execution.
     New,
+    /// `/quit`: leave through the ordinary clean-exit path, the same action as a second
+    /// Ctrl-C inside [`QUIT_WINDOW`](crate::app::QUIT_WINDOW). A running turn is cancelled by
+    /// the session stop on the way out.
+    Quit,
     /// `/theme <name>` (ADR 0008): switch the theme now and write `tui.theme` back
     /// to the config file. The loop loads the theme (I/O) and does the write-back.
     Theme(String),
@@ -370,6 +375,11 @@ pub fn tree() -> &'static [Command] {
         Command {
             name: "new",
             description: "start a new session here; the old session stays resumable",
+            levels: &[],
+        },
+        Command {
+            name: "quit",
+            description: "quit; a running turn is cancelled first",
             levels: &[],
         },
         Command {
@@ -1158,6 +1168,8 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/fork") => Outcome::Fork,
         Some("/new") if tokens.len() == 1 => Outcome::New,
         Some("/new") => Outcome::Notices(vec!["usage: /new (no arguments)".to_owned()]),
+        Some("/quit") if tokens.len() == 1 => Outcome::Quit,
+        Some("/quit") => Outcome::Notices(vec!["usage: /quit (no arguments)".to_owned()]),
         Some("/theme") => theme_name(&tokens[1..]),
         Some("/thinking") => match tokens[1..].first() {
             Some(level) => Outcome::Thinking(level.clone()),
@@ -2621,5 +2633,30 @@ mod theme_tests {
             HELP.contains("/trust [status|on|off|forget]"),
             "/help lists /trust"
         );
+    }
+
+    /// `/quit` is a no-argument command: it parses to the quit outcome, an argument is a usage
+    /// notice, and it is in the registry, the completion menu and `/help`.
+    #[test]
+    fn quit_parses_with_no_argument_and_completes() {
+        assert!(matches!(parse("/quit", false), Outcome::Quit));
+        match parse("/quit extra", false) {
+            Outcome::Notices(notices) => {
+                assert_eq!(notices, ["usage: /quit (no arguments)"]);
+            }
+            other => panic!("expected a usage notice, got {other:?}"),
+        }
+        assert!(
+            tree().iter().any(|command| command.name == "quit"),
+            "/quit is in the registry"
+        );
+        let completion = complete_in(tree(), "/qui", 4).expect("a completion");
+        match completion.level_result {
+            Level::Ready(candidates) => {
+                assert_eq!(candidates[0].insert, "/quit", "{candidates:?}");
+            }
+            other => panic!("expected the command candidate, got {other:?}"),
+        }
+        assert!(HELP.contains("/quit"), "/help lists /quit");
     }
 }

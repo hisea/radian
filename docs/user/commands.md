@@ -33,6 +33,7 @@ else waits or is refused. See "While a turn runs" below.
 | `/sessions` | `/sessions [query]` | Open the session picker overlay for this workspace. With a query, filter first. Selecting shows a copyable `--resume <id>` line; it never switches sessions in place. Applies at once. |
 | `/fork` | `/fork` (no arguments) | Fork this session at its last turn boundary into a child session. Only idle sessions fork. It does not switch to the child; the notice names it. Applies at once. |
 | `/new` | `/new` (no arguments) | End this session and open a fresh one in the same workspace. The old session stays resumable. Refused while a turn runs, while jobs run, or after the session ended. Applies at once. |
+| `/quit` | `/quit` (no arguments) | Quit. A running turn is cancelled first and a followup still waiting in the queue opens no turn (its journal entry stays, so a resume restores it as a pending input); the terminal is restored the way a local quit restores it. The owner can also close the session remotely through the hub's [starting and driving a session](arc/hub.md#starting-and-driving-a-session) route; that close adds one `session closed remotely` notice, which a resume of the session shows, and exits like `/quit`. A draft typed when the close arrives is lost, the way a `ctrl-c` quit loses it. Applies at once. |
 | `/export` | `/export [md\|markdown\|json] [path] [--force]` | Export this session. `markdown` is an alias of `md`. The default format is `md`; the default path is `<workspace>/radian-<id>.<ext>`. A relative path resolves against the workspace; an absolute path may point anywhere. Refuses to overwrite without `--force`. Applies at once. Example: `/export md notes.md --force`. Related: `/sessions`. |
 | `/login` | `/login [provider]` | Open the credential wizard. With a provider id or `custom`, skip the provider choice. `custom` names a new endpoint (name, protocol, base URL, key); the protocol is `openai-compatible`, `anthropic` or `openai-responses`. On an entry that already has a key it asks the current question, replace the current key or add another: `r` replaces, `a` then asks the new key's name (empty allowed). Applies at once. |
 | `/logout` | `/logout <provider> [name]` | Remove a stored credential. With one key it asks first: `y` removes, `n` or `esc` cancels. With several keys it lists them as `1 first (sk-…irst)  2 team (sk-…cond)` and asks which one, or `all`; `a` removes every key and `esc` keeps them. A second name removes that key without asking; an unknown name is refused naming the known ones. Removing the first key promotes the next to `key`. Applies at once. |
@@ -42,7 +43,8 @@ history is this session's submitted lines only; it is not persisted on its
 own. A non-empty input survives a clean exit in
 `<session-dir>/<session-id>.draft`: `--resume` restores it once and deletes
 it. A signal exit saves what was typed. An idle `ctrl-c` clears the input
-first, so a `ctrl-c` exit saves the cleared line. A panic writes nothing.
+first, so a `ctrl-c` exit saves the cleared line. A remote close from the
+owner also clears the input first, so it saves no draft. A panic writes nothing.
 
 ## Model
 
@@ -259,8 +261,13 @@ the waiting count.
 
 `esc` closes a menu or clears the input first; with an empty input it cancels
 the running turn. `ctrl-c` cancels the running turn. A second `ctrl-c`
-within 2 seconds on an empty input quits; any other key disarms it. There is
-no quit command. A side question (`/btw`) and a read command (`/context`,
+within 2 seconds on an empty input quits; any other key disarms it. `/quit`
+quits too, cancelling a running turn first and leaving a queued followup
+unstarted (see `/quit` above). A remote close from the owner (the
+hub) takes the same `/quit` path after one `session closed remotely` notice;
+the notice is journaled, so a resume shows it. A draft typed at that moment is
+lost the way a `ctrl-c` quit loses it. A side
+question (`/btw`) and a read command (`/context`,
 `/usage`, `/memory list`, `/memory show`, `/memory stale`, `/memory open`, `/memory project`) run while a turn
 runs without interrupting it. Writes take effect at the next turn boundary:
 `/model`, `/thinking`, `/access`, `/compact`, `/memory` writes.

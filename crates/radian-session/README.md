@@ -35,9 +35,11 @@ same lock, `seq` counter and sync-point decision (ADR 0040); `next_seq()`, `sess
 - `critical` is a property of the event type, never a caller argument.
 
 `RuntimeEvent` is the typed runtime write path: `InboxEnqueued`, `InputClaimed`,
-`InputAdmitted`, `TurnStarted`, `TurnFinished`, `ConfigChanged`, `ContextBudgetReached`,
-`PermissionResolved`, plus `RuntimeEvent::name()`, `critical()` and `permission_resolved()`.
-`PermissionResolved` is `critical: false` (audit). The old `MemoryInjected` records shape has
+`InputAdmitted`, `TurnStarted`, `TurnFinished`, `TurnFailed`, `HostNotice`, `ConfigChanged`,
+`ContextBudgetReached`, `PermissionResolved`, plus `RuntimeEvent::name()`, `critical()` and
+`permission_resolved()`. `PermissionResolved` and `HostNotice` are `critical: false` (audit);
+so is `TurnFailed`. The full-screen interface writes `HostNotice` when the owner closes the
+session remotely, and a resume renders its text as a transcript notice (ADR 0006 §5.14). The old `MemoryInjected` records shape has
 no runtime variant: this build writes a `MemoryInjected` line only through
 `SessionJournal::append_memory_injected_indexes`, as the file store's
 `{ scope, path, sha256, lines, bytes }` indexes — never the index text (ADR 0021 D6). The
