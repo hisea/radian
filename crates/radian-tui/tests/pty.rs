@@ -3086,6 +3086,62 @@ async fn pty_escape_cancels_a_running_turn() {
     );
 }
 
+/// `/quit` while a turn streams cancels the turn through the session's own path and waits
+/// for its journaled boundary, so a resume reads a cancelled turn. Leaving at once would let
+/// the teardown stop the driver mid-turn: the journal would keep `TurnStarted` with no
+/// `TurnFinished` (ADR 0043: a close cancels "through the same path as `cancel`").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pty_slash_quit_cancels_a_running_turn_first() {
+    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
+    let dir = TempDir::new("quit-cancel");
+    let mut pty = Pty::spawn(
+        &[
+            "--model",
+            "mock",
+            "--base-url",
+            &server.base_url,
+            "--session-dir",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "quit-cancel",
+        ],
+        24,
+        100,
+    );
+    assert!(
+        pty.wait_for_screen("message", wait_positive()),
+        "{}",
+        pty.screen()
+    );
+    pty.send(b"hello\r");
+    // Wait until the request reached the mock: the turn is running now.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while server.requests().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !server.requests().is_empty(),
+        "the turn never started:\n{}",
+        pty.screen()
+    );
+    pty.send(b"/quit\r");
+    assert!(
+        pty.wait_for_exit(wait_positive()).is_some(),
+        "`/quit` did not exit:\n{}",
+        pty.screen()
+    );
+    assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
+    let journal = std::fs::read_to_string(dir.path().join("quit-cancel.jsonl")).unwrap();
+    assert!(
+        journal.contains("\"event\":\"TurnFinished\""),
+        "the cancelled turn has no journaled end:\n{journal}"
+    );
+    assert!(
+        journal.contains("\"outcome\":\"cancelled\""),
+        "the turn was not recorded as cancelled:\n{journal}"
+    );
+}
+
 /// Ctrl-C while the prompt is up cancels the turn: the prompt goes away, the tool never runs,
 /// and the app is still usable (a second Ctrl-C quits).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

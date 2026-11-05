@@ -1151,8 +1151,9 @@ throwaway terminal, not your working one.
     while a turn runs; `/quit` with a draft typed; `/quit extra`; then, with the owner token
     written to `~/.radian/hub/token`, send `{"id":1,"verb":"close","token":"…"}` on the
     session's `~/.radian/run/<pid>.sock` while typing a draft and again under an approval
-    popup. *Expect*: `/quit` leaves at once and restores the shell prompt (`stty -a` shows
-    `icanon`), a running turn is cancelled first; `/quit extra` is a usage notice and never
+    popup. *Expect*: `/quit` on an idle session leaves at once and restores the shell prompt
+    (`stty -a` shows `icanon`); `/quit` during a turn cancels it first, so a `--resume` shows a
+    cancelled turn, then exits; `/quit extra` is a usage notice and never
     quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
     exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
     next `--resume`). *Look*: is the notice visible above the restored prompt, does a

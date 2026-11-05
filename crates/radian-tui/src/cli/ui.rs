@@ -266,6 +266,11 @@ pub(super) fn ui_loop(
                 .session
                 .pending_fork
                 .map(|deadline| deadline.saturating_duration_since(now));
+            // A quit waiting for a cancelled turn's journaled boundary has its own deadline
+            // (QUIT_CANCEL_WAIT).
+            let quit_after_remaining = app
+                .quit_after_turn
+                .map(|deadline| deadline.saturating_duration_since(now));
             // A `/loop --every` wait ends at the next iteration's due time (the turn-end
             // decision still re-checks; the deadline only wakes an idle loop). A goal
             // `wait` arms the same wake through `goal_deadline`.
@@ -280,6 +285,7 @@ pub(super) fn ui_loop(
                 .map(|deadline| deadline.saturating_duration_since(now));
             let wait_remaining = [
                 quit_remaining,
+                quit_after_remaining,
                 fork_remaining,
                 loop_remaining,
                 goal_remaining,
@@ -358,6 +364,17 @@ pub(super) fn ui_loop(
                             .quit_pending
                             .is_some_and(|d| std::time::Instant::now() >= d)
                             && app.update(AppInput::QuitDeadline).dirty
+                            && !draw_frame(terminal, app)?
+                        {
+                            app.quit = true;
+                            break;
+                        }
+                        // A quit waiting for a cancelled turn's boundary ran out: leave
+                        // anyway, as a process stop would.
+                        if app
+                            .quit_after_turn
+                            .is_some_and(|d| std::time::Instant::now() >= d)
+                            && app.update(AppInput::QuitAfterTurnDeadline).dirty
                             && !draw_frame(terminal, app)?
                         {
                             app.quit = true;

@@ -3660,3 +3660,23 @@ test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test
 2/2 caught. The journal round trip and the resumed transcript are covered by
 `pty::pty_owner_close_commits_the_notice_and_exits` (excluded from the sandbox profile for the
 Unix-socket reason above, so it runs in the gate).
+
+## TK0321 rework 5: the turn is cancelled before the quit (2026-11-05, branch `work/TK0321-tui-quit-and-remote-close`)
+
+`/quit` and a remote close now cancel a running turn through the session's own path and leave
+only on its journaled boundary (`TurnFinished`), or at `QUIT_CANCEL_WAIT`. Each mutation was
+applied by hand to `crates/radian-tui/src/app/update.rs` or `src/app/transcript.rs`, the named
+test ran with `cargo nextest run -p radian-tui --locked --profile sandbox --test quit -E
+'test(<name>)'`, and the file was restored from `.radian/bak/` (cmp identical).
+
+| # | Mutation | Caught by | Result |
+|---|---|---|---|
+| TK0321-M8 | `quit_cancelling_first` loses its running-turn branch and always leaves at once (no `Cancel` effect, no wait) | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the process left before the boundary) | ✅ 1 failed |
+| TK0321-M9 | `leave` journals no `HostNotice`, so a deferred remote close never reaches the journal | `quit::remote_close_during_a_turn_cancels_it_before_the_quit` (effects were `[Quit]`) | ✅ 1 failed |
+| TK0321-M10 | the `TurnFinished` arm ignores `quit_after_turn`, so the deferred quit never runs | `quit::slash_quit_during_a_turn_cancels_it_before_the_quit` (the boundary arrived but the app stayed) | ✅ 1 failed |
+| TK0321-M11 | `Input::QuitAfterTurnDeadline` is a no-op, so a driver that never reports the boundary holds the quit forever | `quit::the_quit_wait_ends_at_its_deadline` | ✅ 1 failed |
+
+4/4 caught. The journal itself is checked by `pty::pty_slash_quit_cancels_a_running_turn_first`:
+on the pre-fix code the journal ends at `TurnStarted` with no `TurnFinished`; the test is in the
+sandbox profile's exclusions (the `workspace` tier denies the mock server's sockets), so it runs
+in the gate.

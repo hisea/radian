@@ -33,6 +33,16 @@ impl App {
                 self.quit_pending = None;
                 UpdateResult::dirty()
             }
+            // A quit waiting for a cancelled turn's boundary ran out (a driver that never
+            // reports it): leave anyway, as a process stop would. The remote close's notice
+            // still journals first.
+            Input::QuitAfterTurnDeadline => {
+                if self.quit_after_turn.take().is_some() {
+                    self.leave()
+                } else {
+                    UpdateResult::none()
+                }
+            }
             Input::IdleDeadline => self.idle_deadline_fired(),
             Input::ForkDeadline => {
                 // The wait for the turn boundary ran out: say so and drop the fork, so no
@@ -145,7 +155,8 @@ impl App {
             // The owner closed this session through the control port (ADR 0043): one host
             // notice, the typed draft dropped the way an idle Ctrl-C quit drops it (the first
             // press clears the input into the in-process history), then the same quit action
-            // as the second Ctrl-C.
+            // as the second Ctrl-C — after a running turn is cancelled (ADR 0043: a close
+            // cancels "through the same path as `cancel`").
             Input::RemoteClose => {
                 self.push_notice("session closed remotely");
                 if !self.input.is_empty() {
@@ -155,17 +166,12 @@ impl App {
                     self.session.history_stash.clear();
                     self.composer_images.clear();
                 }
-                // The notice is a durable transcript fact (ADR 0006 §5.14), so the journal
-                // append runs before the quit effect. `quit_now` is the ordinary clean exit;
-                // the result is dirty because the notice must reach the screen first.
-                let mut result = self.quit_now();
+                // The notice is a durable transcript fact (ADR 0006 §5.14). It journals with
+                // the quit, so it stays the last record before the process leaves.
+                self.pending_close_notice = Some("session closed remotely".into());
+                // The notice must reach the screen even when the close sets no other state.
+                let mut result = self.quit_cancelling_first();
                 result.dirty = true;
-                result.effects.insert(
-                    0,
-                    Effect::HostNotice {
-                        text: "session closed remotely".into(),
-                    },
-                );
                 result
             }
             Input::Form(key) => self.form_key(key),
@@ -950,12 +956,37 @@ impl App {
         }
     }
 
-    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`] and `/quit` share: leave through
-    /// the ordinary clean-exit path. The teardown restores the terminal and stops the driver,
-    /// which cancels a turn that is still running — every quit does that.
+    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`] and an idle `/quit` share: leave
+    /// through the ordinary clean-exit path. The teardown restores the terminal and stops the
+    /// driver. A running turn is cancelled before this runs ([`App::quit_cancelling_first`]).
     pub(super) fn quit_now(&mut self) -> UpdateResult {
         self.quit = true;
         UpdateResult::quiet(Effect::Quit)
+    }
+
+    /// `/quit` and a remote close: leave at once when no turn runs; otherwise cancel the turn
+    /// through the session's own path and let [`Input::Runtime`]'s `TurnFinished` run the quit
+    /// ([`App::leave`]). Leaving at once would let `session.stop()` drop the live turn, and the
+    /// journal would read `TurnStarted` with no end (ADR 0043: a close cancels "through the
+    /// same path as `cancel`").
+    pub(super) fn quit_cancelling_first(&mut self) -> UpdateResult {
+        if self.turn() == TurnState::Running {
+            self.quit_after_turn = Some(self.now + QUIT_CANCEL_WAIT);
+            return UpdateResult::quiet(Effect::Cancel);
+        }
+        self.leave()
+    }
+
+    /// The last step of every `/quit` and remote close: journal the close's `HostNotice`, if
+    /// any, then leave. The notice's effect runs before the quit effect, and the journal
+    /// append is synchronous, so a resume reads it.
+    pub(super) fn leave(&mut self) -> UpdateResult {
+        let mut result = self.quit_now();
+        result.dirty = true;
+        if let Some(text) = self.pending_close_notice.take() {
+            result.effects.insert(0, Effect::HostNotice { text });
+        }
+        result
     }
 
     /// Runs one keymap action. The default bindings reproduce the pre-keymap key table.

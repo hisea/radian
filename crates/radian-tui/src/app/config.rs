@@ -31,6 +31,8 @@ impl App {
             new_session: false,
             pending: 0,
             quit_pending: None,
+            quit_after_turn: None,
+            pending_close_notice: None,
             idle_since: None,
             idle_notified: false,
             last_answered: None,

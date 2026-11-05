@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use radian_host::projection::TurnState;
 use radian_host::{PendingRequest, PendingView};
 use radian_permissions::ApprovalRequest;
+use radian_session::{RuntimeEvent, TurnOutcome, TurnReason};
 use radian_tui::app::{App, Effect, EntryKind, Input, QUIT_WINDOW};
 use radian_tui::keys::Action;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -230,16 +231,58 @@ fn slash_quit_quits_an_idle_session() {
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
 }
 
-/// `/quit` while a turn runs quits too; the teardown's session stop cancels the turn, the
-/// same way every quit does.
+/// A cancelled turn's journaled boundary, as the driver reports it.
+fn cancelled_turn() -> RuntimeEvent {
+    RuntimeEvent::TurnFinished {
+        turn_id: "t1".into(),
+        outcome: TurnOutcome::Cancelled,
+        reason: Some(TurnReason::Requested),
+        stop_reason: None,
+    }
+}
+
+/// `/quit` while a turn runs cancels it through the session's own path and waits for the
+/// journaled boundary before leaving. Leaving at once would let `session.stop()` drop the
+/// live turn, and a resume would read `TurnStarted` with no end (ADR 0043's close contract:
+/// the turn is cancelled "through the same path as `cancel`").
 #[test]
-fn slash_quit_during_a_turn_quits() {
+fn slash_quit_during_a_turn_cancels_it_before_the_quit() {
     let mut app = App::new("m", "s");
     app.session.projection.set_turn(TurnState::Running);
     app.input = "/quit".into();
     let result = app.on_key(key(KeyCode::Enter));
-    assert!(app.quit, "`/quit` quits mid-turn");
+    assert!(
+        !app.quit,
+        "the process must wait for the cancelled turn's boundary"
+    );
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::Cancel]),
+        "the turn is cancelled first: {:?}",
+        result.effects
+    );
+    assert!(
+        app.quit_after_turn.is_some(),
+        "the quit waits for the boundary"
+    );
+
+    let result = app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit, "the boundary arrived: the quit runs");
     assert!(quit_asked(&result.effects), "{:?}", result.effects);
+}
+
+/// A turn that never reports its boundary (a driver stuck past the cancel) still lets the
+/// process leave at the deadline, the way a process stop would.
+#[test]
+fn the_quit_wait_ends_at_its_deadline() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    app.input = "/quit".into();
+    app.on_key(key(KeyCode::Enter));
+    assert!(!app.quit);
+    let result = app.update(Input::QuitAfterTurnDeadline);
+    assert!(app.quit, "the deadline leaves anyway");
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+    assert!(app.quit_after_turn.is_none(), "the wait is over");
 }
 
 /// A pending approval modal is a layer; the command path itself still quits (the key route
@@ -271,9 +314,59 @@ fn slash_quit_with_an_argument_is_an_error_line_and_does_not_quit() {
     );
 }
 
-/// The control port's close hook: one host notice in the transcript, then the `/quit` path.
-/// The notice is also journaled before the quit effect runs (ADR 0006 §5.14), so a resume
-/// still shows it.
+/// A remote close during a turn cancels it first and journals the notice only when the quit
+/// finally runs: the notice is the last durable fact before the process leaves.
+#[test]
+fn remote_close_during_a_turn_cancels_it_before_the_quit() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    let result = app.update(Input::RemoteClose);
+    assert!(
+        !app.quit,
+        "the close waits for the cancelled turn's boundary"
+    );
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::Cancel]),
+        "the turn is cancelled first: {:?}",
+        result.effects
+    );
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|notice| notice == "session closed remotely"),
+        "the live notice is on screen at once"
+    );
+
+    let result = app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit, "the boundary arrived: the close quits");
+    assert!(
+        matches!(result.effects.first(), Some(Effect::HostNotice { text }) if text == "session closed remotely"),
+        "the notice journals before the quit effect: {:?}",
+        result.effects
+    );
+    assert!(quit_asked(&result.effects), "{:?}", result.effects);
+}
+
+/// The same close under a completion menu: the overlay never swallows the host's close.
+#[test]
+fn remote_close_during_a_turn_under_a_completion_menu_quits_after_the_cancel() {
+    let mut app = App::new("m", "s");
+    app.session.projection.set_turn(TurnState::Running);
+    app.update(Input::Char('/'));
+    let result = app.update(Input::RemoteClose);
+    assert!(!app.quit);
+    assert!(
+        matches!(result.effects.as_slice(), [Effect::Cancel]),
+        "{:?}",
+        result.effects
+    );
+    app.update(Input::Runtime(cancelled_turn()));
+    assert!(app.quit);
+}
+
+/// The control port's close hook on an idle session: one host notice in the transcript, then
+/// the `/quit` path. The notice is journaled before the quit effect runs (ADR 0006 §5.14), so
+/// a resume still shows it.
 #[test]
 fn remote_close_commits_the_notice_and_quits() {
     let mut app = App::new("m", "s");

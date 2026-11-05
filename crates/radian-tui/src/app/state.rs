@@ -277,6 +277,7 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::MouseDrag { .. }
         | Input::MouseUp { .. } => true,
         Input::QuitDeadline
+        | Input::QuitAfterTurnDeadline
         | Input::ForkDeadline
         | Input::LoopDeadline
         | Input::IdleDeadline

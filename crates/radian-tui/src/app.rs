@@ -92,6 +92,12 @@ pub use loop_mode::{loop_iteration, loop_message};
 /// key, disarms it and the hint disappears.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long `/quit` or a remote close waits for a cancelled turn to reach its journaled
+/// boundary (`TurnFinished`) before it leaves anyway. Cancelling the turn is the driver's,
+/// so this only bounds a driver that never reports the end (ADR 0043: a close cancels
+/// "through the same path as `cancel`", so the journal records a cancelled turn, not a crash).
+pub const QUIT_CANCEL_WAIT: Duration = Duration::from_secs(5);
+
 /// How long a TUI turn may sit idle before the `Notification` `idle_prompt` observers fire
 /// (ADR 0045 §6): a fixed constant, no config key. Input restarts the timer.
 pub const IDLE_PROMPT_DELAY: Duration = Duration::from_secs(radian_host::config::IDLE_PROMPT_SECS);
@@ -776,6 +782,14 @@ pub struct App {
     /// deadline a second Ctrl-C must beat. `None` means not armed. Pure state; the wall clock
     /// arrives on [`Input::Cancel`], so `update` never reads the clock.
     pub quit_pending: Option<Instant>,
+    /// A `/quit` or a remote close that met a running turn: the deadline it waits for the
+    /// cancelled turn's journaled boundary before leaving anyway. `None` when no quit waits.
+    /// The quit itself runs on that boundary ([`Input::Runtime`]'s `TurnFinished`), so
+    /// `session.stop()` never drops a live turn.
+    pub quit_after_turn: Option<Instant>,
+    /// The `HostNotice` a deferred remote close still has to journal: kept from the close
+    /// until the quit runs, so the notice is the last durable fact before the process leaves.
+    pending_close_notice: Option<String>,
     /// When the current idle stretch began: a turn end, or the last input. `None` before the
     /// first turn. The `idle_prompt` timer reads it (ADR 0045 §6).
     pub idle_since: Option<Instant>,
