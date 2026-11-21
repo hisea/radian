@@ -1,6 +1,8 @@
 # ADR 0048: arc, the Plan and Task Orchestrator
 
-Status: accepted
+Status: superseded
+
+Superseded: arc is removed from radian. Planning and task orchestration moved to operad, which runs `radian exec` workers (ADR 0032). The text below is kept as history. Do not build on it.
 
 ## Background
 
