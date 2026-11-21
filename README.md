@@ -17,8 +17,9 @@
 # radian
 
 radian is a fast, efficient coding agent in one Rust binary.
+Planning, task orchestration, gates and review live in [operad](https://operad.io), which drives radian through `radian exec`.
 
-[radian](#radian-the-coding-agent) · [Install](#install) · [Docs](#docs)
+[radian](#radian-the-coding-agent) · [operad](#operad-planning-and-orchestration) · [Install](#install) · [Docs](#docs)
 
 ## radian: the coding agent
 
@@ -48,6 +49,12 @@ radian exec -p "summarize Cargo.toml" # one task, headless
 A project can save `workspace` for itself, and a project setting can only narrow access.
 `full` does not defend against prompt injection from an unfamiliar repository: for a boundary use `workspace`, a container, or a dedicated OS user.
 Details: [`docs/user/permissions.md`](docs/user/permissions.md).
+
+## operad: planning and orchestration
+
+Planning, task orchestration, gates and review now live in [operad](https://operad.io), a separate program.
+operad drives radian through `radian exec`: it starts one headless worker for each task, runs the gate, and merges only what passes.
+radian itself stays a coding agent: the terminal interface, `radian exec`, and the tools around them.
 
 ## Install
 

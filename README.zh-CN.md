@@ -17,8 +17,9 @@
 # radian
 
 radian 是一个快速、高效的编码 agent，只有一个 Rust 二进制。
+计划、任务编排、门禁和评审现在放在 [operad](https://operad.io) 里，它通过 `radian exec` 驱动 radian。
 
-[radian](#radian编码-agent) · [安装](#安装) · [文档](#文档)
+[radian](#radian编码-agent) · [operad](#operad计划与编排) · [安装](#安装) · [文档](#文档)
 
 ## radian：编码 agent
 
@@ -48,6 +49,12 @@ radian exec -p "summarize Cargo.toml" # 无头，跑一个任务
 项目可以为自己保存 `workspace`，而且项目的设置只能收窄权限。
 `full` 不防御来自陌生仓库的提示注入：要边界就用 `workspace`、容器或专用的系统用户。
 详见 [`docs/user/permissions.md`](docs/user/permissions.md)。
+
+## operad：计划与编排
+
+计划、任务编排、门禁和评审现在放在 [operad](https://operad.io) 里，它是一个单独的程序。
+operad 通过 `radian exec` 驱动 radian：每个任务启动一个无头 worker，跑门禁，只合并通过的结果。
+radian 本身仍是编码 agent：终端界面、`radian exec` 和它们用到的工具。
 
 ## 安装
 

@@ -698,7 +698,7 @@ fn the_split_pages_point_at_each_other() {
 }
 
 /// Every site-absolute URL a split page uses is a file under `site/`, a generated docs
-/// page, or one of the four hand-written pages.
+/// page, or one of the two hand-written pages.
 #[test]
 fn the_split_pages_name_files_the_site_serves() {
     let root = repo_root();
@@ -774,6 +774,9 @@ fn a_source_without_its_chinese_title_fails_the_build() {
     let no_toggle = source("index.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
     let error = split_page(&no_toggle, "index.html", Lang::En).unwrap_err();
     assert!(error.to_string().contains("language toggle"), "{error}");
+    let open =
+        source("index.html").replacen("</span><span class=\"zh\">", "<span class=\"zh\">", 1);
+    assert!(split_page(&open, "index.html", Lang::Zh).is_err());
 }
 
 /// `sitemap.xml` lists the hand-written pages and every manual page exactly once.

@@ -19,7 +19,7 @@
 //! file, each under its own URL) and `sitemap.xml` (every page's URL). Every page names its
 //! own absolute URL in a `canonical` link.
 //!
-//! The hand-written page (`site/index.html`) hold English and Chinese in
+//! The hand-written page (`site/index.html`) holds English and Chinese in
 //! one source; `split_page` writes the English page and the Chinese page (`/zh/`) from each.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
