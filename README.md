@@ -17,7 +17,7 @@
 # radian
 
 radian is a fast, efficient coding agent in one Rust binary.
-Planning, task orchestration, gates and review live in [operad](https://github.com/operad-io/operad), which drives radian through `radian exec`.
+Planning, task orchestration, gates and review live in [operad](https://operad.io), which drives radian through `radian exec`.
 
 [radian](#radian-the-coding-agent) · [operad](#operad-planning-and-orchestration) · [Install](#install) · [Docs](#docs)
 
@@ -52,7 +52,7 @@ Details: [`docs/user/permissions.md`](docs/user/permissions.md).
 
 ## operad: planning and orchestration
 
-Planning, task orchestration, gates and review now live in [operad](https://github.com/operad-io/operad), a separate program.
+Planning, task orchestration, gates and review now live in [operad](https://operad.io), a separate program.
 operad drives radian through `radian exec`: it starts one headless worker for each task, runs the gate, and merges only what passes.
 radian itself stays a coding agent: the terminal interface, `radian exec`, and the tools around them.
 
