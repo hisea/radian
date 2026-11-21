@@ -208,50 +208,6 @@ const TEST_ONLY: &[(&str, &str)] = &[
         "RADIAN_TRACE_PHASES",
         "read in radian-session/src/trace.rs: prints a startup phase trace with timings, for development",
     ),
-    (
-        "RADIAN_ARC_GATE_TEST_EXIT_WITHOUT_RECORD",
-        "read in radian-arc/src/gate/background.rs: makes the background gate exit before it writes any record, to exercise the no-record guard",
-    ),
-    (
-        "RADIAN_ARC_GATE_TEST_DIE_AFTER_RUNNING",
-        "read in radian-arc/src/gate/background.rs: makes the background gate exit right after it wrote `running`, to exercise the death count and `died`",
-    ),
-    (
-        "RADIAN_ARC_GATE_TEST_SLOW_START_MS",
-        "read in radian-arc/src/gate/background.rs: milliseconds the background gate waits before its `running` record, so a test can stop it while only the pass's `started` record exists",
-    ),
-    (
-        "RADIAN_ARC_GATE_TEST_SLOW_PID_MS",
-        "read in radian-arc/src/gate/background.rs: milliseconds a pass waits between reading the gate's `started` record and naming the process in it, so a test can hold the gate's own `running` write inside that window",
-    ),
-    (
-        "RADIAN_ARC_GATE_TEST_REVIEW_PROGRAM",
-        "read in radian-arc/src/gate/background.rs: runs this program instead of `radian exec` for the review stage, so a test drives the background gate's `commands`/`review` pair without a model",
-    ),
-    (
-        "RADIAN_ARC_PANIC_ACTION",
-        "read in radian-tui/src/cli/arc.rs: makes the arc TUI's owner-action worker panic, so the pty suite checks that a panicked worker still replies and leaves the TUI responsive",
-    ),
-    (
-        "RADIAN_HUB_INTERVAL_SECS",
-        "read in radian-arc/src/hub/loop.rs: a hub test's interval below the documented five-second minimum, so one repository's slow pass can be shown not to gate another",
-    ),
-    (
-        "RADIAN_HUB_SESSION_IDLE_SECS",
-        "read in radian-arc/src/hub/http.rs: a hub test's reclaim window below the documented sixty-second minimum, so a hub-held process can be shown to exit and the next prompt to resume it",
-    ),
-    (
-        "RADIAN_HUB_EVENTS_POLL_SECS",
-        "read in radian-arc/src/hub/http.rs: seconds between two reads of the hub's event stream, so a test does not wait the channel's five seconds per transition; unset uses the channel's interval",
-    ),
-    (
-        "RADIAN_HUB_EVENTS_KEEP_ALIVE_SECS",
-        "read in radian-arc/src/hub/http.rs: seconds between keep-alive comments on an event stream with nothing to send, so a test does not wait fifteen seconds",
-    ),
-    (
-        "RADIAN_HUB_EVENTS_FIRST_POLL_DELAY_MS",
-        "read in radian-arc/src/hub/http.rs: milliseconds the event stream's first poll is held back, so a test proves the `: open` comment is written before it and does not wait for it",
-    ),
 ];
 
 /// The headings whose tables list environment variables. Each heading is an anchor: a row

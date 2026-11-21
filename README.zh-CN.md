@@ -17,9 +17,8 @@
 # radian
 
 radian 是一个快速、高效的编码 agent，只有一个 Rust 二进制。
-同一个二进制里还内置了 **arc**：它把一个需求拆成任务，每个任务交给一个独立的 radian worker 去做，只合并通过固定门禁的结果。
 
-[radian](#radian编码-agent) · [arc](#arc编排器) · [安装](#安装) · [文档](#文档)
+[radian](#radian编码-agent) · [安装](#安装) · [文档](#文档)
 
 ## radian：编码 agent
 
@@ -49,51 +48,6 @@ radian exec -p "summarize Cargo.toml" # 无头，跑一个任务
 项目可以为自己保存 `workspace`，而且项目的设置只能收窄权限。
 `full` 不防御来自陌生仓库的提示注入：要边界就用 `workspace`、容器或专用的系统用户。
 详见 [`docs/user/permissions.md`](docs/user/permissions.md)。
-
-## arc：编排器
-
-arc（`radian arc`）是计划和任务的编排器。
-它把计划和任务存成你仓库里的文件，每个任务启动一个无头的 `radian` worker，只合并通过门禁的结果。
-arc 是一个程序，不是模型：计划由一个 lead 会话来写，跑什么、合并什么由你决定。
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-zh.gif">
-    <img src=".github/readme/arc-zh.gif" alt="arc TUI：计划页，一个任务的 worker 对话、简报、diff 和尝试记录，然后是看板" width="820">
-  </picture>
-  <br><sub>arc TUI 跑在这个仓库自己的待办上：计划列表，一个任务的对话、简报、diff 和尝试记录，然后是看板。</sub>
-</p>
-
-一个需求是这样走完的：
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-zh-dark.png">
-    <img src=".github/readme/arc-flow-zh-light.png" alt="arc：一个任务从需求到合并" width="820">
-  </picture>
-  <br><sub>一个任务从需求到合并，按这个仓库自己的跑法：图里的门禁（fmt、clippy、测试）是本仓库自己的。</sub>
-</p>
-
-
-1. lead（Claude Code 或 radian TUI）通过 arc 的 MCP 服务器 `radian arc mcp` 写计划和任务。lead 不能确认、启动或合并任何东西。
-2. 你确认计划。计划的 `auto` 级别是 `off` 时，每个任务由你自己启动；是 `run` 时，arc 会在任务所等的任务合并之后自己启动它。
-3. 每个任务是一个独立的无头 `radian exec` worker，有自己的 git worktree、自己的分支和自己的会话日志。
-4. 门禁检查推上来的提交：你配置的命令、可选的只读 review 会话，以及你的批准。某个阶段失败，任务就退回去返工。
-5. 通过的任务由 `radian arc merge` 合并进远端 main；计划的 `auto` 级别是 `merge` 时由 arc 自己合并。门禁之后分支又动过的话，批准作废，任务重新验证。
-
-每个任务和计划都记录自己的花费，也都可以设花费和耗时的预算。
-TUI 里能看到计划列表、按“下一步由谁来做”分组的看板（待办、进行中、验证中、需要你处理）、每个任务的对话、简报、diff 和尝试记录，以及合并页。
-
-```sh
-radian arc init                        # 在你的仓库里：建好目录，并做四项检查
-claude mcp add arc -- radian arc mcp   # 把 arc 注册给 lead（这里是 Claude Code）
-radian arc                             # 打开 arc TUI
-```
-
-arc 需要一个 git 工作区，并且有一个你能往 main 分支推送的 `origin` 远端。
-`radian arc init` 会检查凭据、远端、一次试推送和沙箱，哪一项失败就给一行警告。
-门禁要跑的命令写在 `.radian/arc/config.toml` 里。
-命令、门禁、集成候选的构建与推送，以及 arc 保存的文件见 [`docs/user/arc/index.md`](docs/user/arc/index.md)、[`arc/integration.md`](docs/user/arc/integration.md)、[`arc/gate.md`](docs/user/arc/gate.md)、[`arc/files.md`](docs/user/arc/files.md)、[`arc/mcp.md`](docs/user/arc/mcp.md) 和 [`arc/tui.md`](docs/user/arc/tui.md)（用户手册是英文）。
 
 ## 安装
 

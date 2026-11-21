@@ -51,7 +51,6 @@ EXPECT = {
     "sandbox-allow-env.toml": dict(outcome="accept"),
     "integrations-herdr.toml": dict(outcome="accept"),
     "control.toml": dict(outcome="accept"),
-    "hub.toml": dict(outcome="accept"),
     "context-subtree-files.toml": dict(outcome="accept"),
     "hooks.toml": dict(outcome="accept"),
     "api-key-removed.toml": dict(outcome="reject"),

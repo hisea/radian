@@ -19,6 +19,10 @@ use super::turn::{LoopDone, Run, hub_held_loop, interactive_loop, one_shot};
 use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
 
+/// How long a `--hub-held` process may sit idle before it exits cleanly, when `--hub-idle-secs`
+/// is absent.
+const HUB_HELD_DEFAULT_IDLE_SECS: u64 = 3600;
+
 /// The exec host's runtime-event sink. It prints a failed turn's masked message as before and
 /// keeps the structured `ModelError` of the latest turn that started, for the `Result` record
 /// (ADR 0044 §2b). A `TurnStarted` clears it, so only the run's final turn can contribute;
@@ -264,7 +268,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     }));
     let done: LoopDone = if cli.hub_held {
         let idle = cli.hub_idle_secs.map_or(
-            std::time::Duration::from_secs(radian_host::config::DEFAULT_HUB_SESSION_IDLE_SECS),
+            std::time::Duration::from_secs(HUB_HELD_DEFAULT_IDLE_SECS),
             std::time::Duration::from_secs,
         );
         hub_held_loop(&mut run, idle).await

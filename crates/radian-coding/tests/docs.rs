@@ -15,7 +15,7 @@ fn page_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// The docs root lists every page in directory shape, the arc pages under `arc/`.
+/// The docs root lists every page.
 #[tokio::test]
 async fn the_docs_root_lists_every_page() {
     let dir = TempDir::new("docs-root");
@@ -28,51 +28,11 @@ async fn the_docs_root_lists_every_page() {
         for name in page_names() {
             assert!(body.contains(name), "{root} lists {name}:\n{body}");
         }
-        assert!(
-            body.contains("arc/tui.md"),
-            "{root} lists an arc page under its directory:\n{body}"
-        );
         let info = structured(&output);
         assert_eq!(
             info.get("total_entries").and_then(|v| v.as_u64()),
             Some(page_names().len() as u64),
             "{info:?}"
-        );
-    }
-}
-
-/// A bundled-manual directory opens its `index.md`; a page under it reads by its path.
-#[tokio::test]
-async fn a_docs_directory_opens_its_index() {
-    let dir = TempDir::new("docs-dir");
-    let tools = tools(dir.path());
-    let page = call(&tools, "read", json!({"path": "radian://docs/arc/mcp.md"}))
-        .await
-        .expect("a nested docs page reads");
-    let page_text = text(&page);
-    let embedded = radian_coding::docs::find("arc/mcp.md").expect("arc/mcp.md exists");
-    assert!(
-        embedded
-            .lines()
-            .next()
-            .is_some_and(|line| page_text.contains(line)),
-        "the nested page's first line is in the read:\n{page_text}"
-    );
-    let index = radian_coding::docs::find("arc/index.md").expect("arc/index.md exists");
-    for path in ["radian://docs/arc/", "radian://docs/arc"] {
-        let output = call(&tools, "read", json!({"path": path}))
-            .await
-            .expect("a docs directory opens its index");
-        let body = text(&output);
-        assert!(
-            body.contains("# arc"),
-            "{path} returns arc/index.md:\n{body}"
-        );
-        assert!(
-            index
-                .lines()
-                .any(|line| line.starts_with("# arc") && body.contains(line)),
-            "{path} returns the index page"
         );
     }
 }
@@ -255,9 +215,8 @@ async fn writers_refuse_virtual_paths() {
     }
 }
 
-/// Each manual's own index maps that manual: `index.md` lists the radian pages, and
-/// `arc/index.md` lists the arc pages (`- \`arc/<stem>\`:`). A page left off its own manual's
-/// index fails here, naming the page.
+/// The manual's index lists every page of it. A page left off the index fails here, naming
+/// the page.
 #[test]
 fn each_index_lists_every_page_of_its_manual() {
     for manual in radian_coding::docs::Manual::ALL {
@@ -273,71 +232,9 @@ fn each_index_lists_every_page_of_its_manual() {
     }
 }
 
-/// The radian manual's index reaches the arc manual exactly once, through `arc/index`; the
-/// arc index maps the arc pages themselves.
-#[test]
-fn the_radian_index_links_the_arc_manual_once() {
-    let index = radian_coding::docs::find("index.md").expect("index.md exists");
-    let arc_lines: Vec<&str> = index
-        .lines()
-        .filter(|line| line.contains("`arc/"))
-        .collect();
-    assert_eq!(
-        arc_lines.len(),
-        1,
-        "index.md has one arc reference: {arc_lines:?}"
-    );
-    assert!(
-        arc_lines[0].contains("`arc/index`"),
-        "index.md's one arc reference is `arc/index`: {:?}",
-        arc_lines[0]
-    );
-}
-
-/// `cli.md`'s `radian arc` pointer names the pages that hold the flag tables, not only the
-/// overview: `arc/index` has the subcommand list and the exit codes, while the arguments and
-/// flags are on `arc/planning`, `arc/running`, `arc/owner` and `arc/hooks`. A reader who
-/// follows the pointer must reach all four.
-#[test]
-fn the_cli_arc_pointer_names_the_arc_flag_pages() {
-    let cli = radian_coding::docs::find("cli.md").expect("cli.md exists");
-    let section: String = cli
-        .lines()
-        .skip_while(|line| *line != "## `radian arc`")
-        .skip(1)
-        .take_while(|line| !line.starts_with("## "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        !section.is_empty(),
-        "cli.md has a `## `radian arc`` section"
-    );
-    for page in ["arc/planning", "arc/running", "arc/owner", "arc/hooks"] {
-        assert!(
-            section.contains(&format!("]({page}.md)")),
-            "cli.md's `radian arc` section links `{page}.md`, which holds its flag tables: {section}"
-        );
-    }
-}
-
-/// A page a manual's index leaves off is named by the check, for both manuals.
+/// A page the manual's index leaves off is named by the check.
 #[test]
 fn an_unlisted_page_fails_naming_it() {
-    let arc_index = radian_coding::docs::find("arc/index.md").expect("arc/index.md exists");
-    let without_worker: String = arc_index
-        .lines()
-        .filter(|line| !line.starts_with("- `arc/worker`:"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        radian_coding::docs::pages_missing_from_index(
-            radian_coding::docs::Manual::Arc,
-            &without_worker
-        ),
-        vec!["arc/worker.md"],
-        "the arc index check names the page it left off"
-    );
-
     let radian_index = radian_coding::docs::find("index.md").expect("index.md exists");
     let without_cli: String = radian_index
         .lines()
@@ -354,68 +251,7 @@ fn an_unlisted_page_fails_naming_it() {
     );
 }
 
-/// The pages the arc split introduced: each was carved out of a page at the 56 KiB cap, so each
-/// starts with room below a 32 KiB target. A page that grows past it fails here, naming the page
-/// and its size, before it nears the cap that would stop it reading whole.
-const SPLIT_ARC_PAGES: &[&str] = &[
-    "arc/config.md",
-    "arc/gate-failures.md",
-    "arc/gate-review.md",
-    "arc/hooks.md",
-    "arc/owner.md",
-    "arc/planning.md",
-    "arc/running.md",
-];
-
-/// Every page the arc split introduced is at most 32 KiB (32,768 bytes).
-#[test]
-fn the_split_arc_pages_stay_under_32_kib() {
-    const TARGET: usize = 32 * 1024;
-    for name in SPLIT_ARC_PAGES {
-        let text = radian_coding::docs::find(name)
-            .unwrap_or_else(|| panic!("docs/user/{name} is in the table"));
-        assert!(
-            text.len() <= TARGET,
-            "docs/user/{name} is {} bytes, over the {TARGET}-byte split target",
-            text.len()
-        );
-    }
-}
-
-/// Every page the arc split introduced reads through the virtual root by its path, the same
-/// door `radian docs arc/<stem>` uses: the page is embedded, is not empty, and the read returns
-/// its bytes whole.
-#[tokio::test]
-async fn every_split_arc_page_reads_by_its_path() {
-    let dir = TempDir::new("docs-split");
-    let tools = tools(dir.path());
-    for name in SPLIT_ARC_PAGES {
-        let embedded = radian_coding::docs::find(name)
-            .unwrap_or_else(|| panic!("docs/user/{name} is embedded"));
-        assert!(!embedded.is_empty(), "docs/user/{name} is not empty");
-        let output = call(
-            &tools,
-            "read",
-            json!({"path": format!("radian://docs/{name}")}),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("radian://docs/{name} reads: {error:?}"));
-        let body = text(&output);
-        let mut stripped = String::new();
-        for line in body.lines() {
-            if let Some((_, rest)) = line.split_once(": ") {
-                stripped.push_str(rest);
-                stripped.push('\n');
-            }
-        }
-        let got = stripped.strip_suffix('\n').unwrap_or(&stripped);
-        let expected = embedded.strip_suffix('\n').unwrap_or(embedded);
-        assert_eq!(got, expected, "radian://docs/{name} returns the page whole");
-    }
-}
-
-/// Every page still reads through the one virtual root by its unchanged path, arc pages
-/// under `arc/` included.
+/// Every page still reads through the one virtual root by its unchanged path,.
 #[tokio::test]
 async fn every_page_reads_at_its_unchanged_path() {
     let dir = TempDir::new("docs-paths");
@@ -450,8 +286,7 @@ fn each_manual_has_its_own_size_cap() {
     assert!(!radian_coding::docs::DOCS.is_empty(), "at least one page");
 }
 
-/// The caps are separate: 520 KiB of radian pages fails the radian manual while arc's
-/// 100 KiB still fits, and 520 KiB of arc pages fails only the arc manual.
+/// 520 KiB of pages fails the manual, naming it and the size; 100 KiB fits.
 #[test]
 fn a_manual_over_its_cap_fails_alone() {
     const KIB: usize = 1024;
@@ -462,14 +297,6 @@ fn a_manual_over_its_cap_fails_alone() {
         radian.contains("532480"),
         "the message names the size: {radian}"
     );
-    assert!(
-        radian_coding::docs::cap_failure(radian_coding::docs::Manual::Arc, 100 * KIB).is_none(),
-        "arc's 100 KiB still fits"
-    );
-    let arc = radian_coding::docs::cap_failure(radian_coding::docs::Manual::Arc, 520 * KIB)
-        .expect("arc is over its cap");
-    assert!(arc.contains("arc manual"), "{arc}");
-    assert!(arc.contains("532480"), "the message names the size: {arc}");
     assert!(
         radian_coding::docs::cap_failure(radian_coding::docs::Manual::Radian, 100 * KIB).is_none(),
         "radian's 100 KiB still fits"
@@ -838,9 +665,7 @@ fn the_table_matches_docs_user_on_disk() {
 }
 
 /// Every relative link in a manual page names a file that exists, resolved from the page
-/// that carries it: `themes.md` means `docs/user/arc/themes.md` on an arc page and
-/// `docs/user/themes.md` on a top-level one, so an arc page reaches the theme page as
-/// `../themes.md`. A target with no `.md` is not a page link: the manual shows the footer's
+/// that carries it: `themes.md` means `docs/user/themes.md`. A target with no `.md` is not a page link: the manual shows the footer's
 /// inline-format syntax `[text](style)`.
 #[test]
 fn every_relative_link_in_the_manual_resolves() {

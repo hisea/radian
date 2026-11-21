@@ -11,9 +11,8 @@ use std::collections::HashSet;
 /// The hand-written source pages and the canonical URL each must name (`None` for the
 /// 404 page, which is `noindex` instead). The two bilingual sources name the English URL;
 /// the split pages hold the rest.
-const SOURCE_PAGES: [(&str, Option<&str>); 3] = [
+const SOURCE_PAGES: [(&str, Option<&str>); 2] = [
     ("index.html", Some("https://getrad.dev/")),
-    ("arc.html", Some("https://getrad.dev/arc.html")),
     ("404.html", None),
 ];
 
@@ -356,42 +355,6 @@ fn a_link_to_a_missing_page_fails_the_build() {
     );
 }
 
-/// An arc page renders at `arc/<page>.html` and reaches the site root's assets from its own
-/// directory.
-#[test]
-fn an_arc_page_renders_in_its_subdirectory() {
-    let site = site();
-    let index = site
-        .pages
-        .iter()
-        .position(|page| page.stem == "arc/gate")
-        .expect("arc/gate renders");
-    assert_eq!(
-        radian_tui::site_docs::output_path(&site.pages[index].stem),
-        "arc/gate.html"
-    );
-    let html = radian_tui::site_docs::page_html(&site, index);
-    assert!(
-        html.contains("<link rel=\"stylesheet\" href=\"../../docs.css\">"),
-        "an arc page's stylesheet link resolves from arc/: {html}"
-    );
-    assert!(
-        html.contains("href=\"../../favicon.svg\""),
-        "an arc page's icon link resolves from arc/: {html}"
-    );
-    // The root pages still reach the same assets one level up.
-    let root = site
-        .pages
-        .iter()
-        .position(|page| page.stem == "index")
-        .expect("index renders");
-    let root_html = radian_tui::site_docs::page_html(&site, root);
-    assert!(
-        root_html.contains("<link rel=\"stylesheet\" href=\"../docs.css\">"),
-        "a root page's asset link: {root_html}"
-    );
-}
-
 /// Page links are written relative to their source page, as GitHub renders them, and resolve
 /// in both directions across the `arc/` boundary.
 #[test]
@@ -636,10 +599,7 @@ fn the_hand_written_pages_name_their_canonical_url() {
 #[test]
 fn each_split_page_holds_one_language() {
     // (file, a sentence only the English spans hold, its Chinese twin)
-    let samples = [
-        ("index.html", "Headless, observable.", "无头，可观测。"),
-        ("arc.html", "Not installed yet?", "还没装？"),
-    ];
+    let samples = [("index.html", "Headless, observable.", "无头，可观测。")];
     for (page, html) in split_pages() {
         let who = format!("{} ({})", page.file, page.lang.code());
         for banned in [
@@ -811,11 +771,9 @@ fn a_source_without_its_chinese_title_fails_the_build() {
             "{text}"
         );
     }
-    let no_toggle = source("arc.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
-    let error = split_page(&no_toggle, "arc.html", Lang::En).unwrap_err();
+    let no_toggle = source("index.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
+    let error = split_page(&no_toggle, "index.html", Lang::En).unwrap_err();
     assert!(error.to_string().contains("language toggle"), "{error}");
-    let open = source("arc.html").replace("</video>", "");
-    assert!(split_page(&open, "arc.html", Lang::Zh).is_err());
 }
 
 /// `sitemap.xml` lists the hand-written pages and every manual page exactly once.
@@ -834,7 +792,7 @@ fn the_sitemap_lists_every_page_once() {
         .iter()
         .map(|p| format!("https://getrad.dev{}", p.path))
         .collect();
-    assert_eq!(expected.len(), 4, "English and Chinese home and arc pages");
+    assert_eq!(expected.len(), 2, "English and Chinese home pages");
     expected.extend(
         site.pages
             .iter()

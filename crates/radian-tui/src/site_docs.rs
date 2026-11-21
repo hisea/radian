@@ -5,7 +5,7 @@
 //! web manual and `radian docs` can never drift apart. Markdown becomes HTML with
 //! `pulldown-cmark` (tables, strikethrough, heading attributes); raw HTML in a page is
 //! escaped, never passed through. A page's output path is its name under `docs/user/`
-//! (`arc/loop.md` -> `arc/loop.html`), and its asset and page links resolve from that
+//! (`dir/page.md` -> `dir/page.html`), and its asset and page links resolve from that
 //! page's own directory. Links between pages (`foo.md`, `../foo.md`, `foo.md#bar`)
 //! resolve from the source page's directory, as GitHub renders them, and fail the build
 //! when the target page or heading does not exist; relative links out of the manual become
@@ -19,7 +19,7 @@
 //! file, each under its own URL) and `sitemap.xml` (every page's URL). Every page names its
 //! own absolute URL in a `canonical` link.
 //!
-//! The two hand-written pages (`site/index.html`, `site/arc.html`) hold English and Chinese in
+//! The hand-written page (`site/index.html`) hold English and Chinese in
 //! one source; `split_page` writes the English page and the Chinese page (`/zh/`) from each.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
@@ -89,7 +89,7 @@ pub struct HandPage {
 /// The site's hand-written pages: each bilingual source file gives one page per language.
 /// `splitter`, `llms.txt` and `sitemap.xml` all read this table. The home page is
 /// `index.html`, served at `/` and `/zh/`.
-pub const HAND_WRITTEN_PAGES: [HandPage; 4] = [
+pub const HAND_WRITTEN_PAGES: [HandPage; 2] = [
     HandPage {
         file: "index.html",
         lang: Lang::En,
@@ -98,25 +98,11 @@ pub const HAND_WRITTEN_PAGES: [HandPage; 4] = [
         description: "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks, skills and memory.",
     },
     HandPage {
-        file: "arc.html",
-        lang: Lang::En,
-        path: "/arc.html",
-        title: "arc",
-        description: "The plan and task orchestrator built into the radian binary: it runs each task as its own headless radian worker and merges only what passes a fixed gate.",
-    },
-    HandPage {
         file: "index.html",
         lang: Lang::Zh,
         path: "/zh/",
         title: "radian（中文）",
         description: "radian 是一个快速、高效的 Rust 单文件编码 agent：全屏终端界面、无头的 `radian exec` 命令、可回放的会话文件、沙箱工具、MCP、hooks、skills 和记忆。",
-    },
-    HandPage {
-        file: "arc.html",
-        lang: Lang::Zh,
-        path: "/zh/arc.html",
-        title: "arc（中文）",
-        description: "内置在 radian 二进制里的计划与任务编排器：每个任务交给独立的无头 radian worker 运行，只合并通过固定检查关卡的结果。",
     },
 ];
 
@@ -150,9 +136,9 @@ pub struct DocHeading {
 /// One rendered page.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
-    /// The file name in `DOCS` (`commands.md`, `arc/loop.md`).
+    /// The file name in `DOCS` (`commands.md`).
     pub name: String,
-    /// The stem (`commands`, `arc/loop`); `index` for the landing page.
+    /// The stem (`commands`); `index` for the landing page.
     pub stem: String,
     /// The first `# ` heading's plain text.
     pub title: String,
@@ -368,7 +354,7 @@ fn toc_into(page: &RenderedPage, out: &mut String) {
 }
 
 /// The output file for a page stem: `index.html` for the landing page, `<stem>.html` for
-/// every other page (`arc/loop` -> `arc/loop.html`, `arc/index` -> `arc/index.html`).
+/// every other page (`dir/page` -> `dir/page.html`).
 pub fn output_path(stem: &str) -> String {
     if stem == "index" {
         "index.html".to_owned()
@@ -1244,7 +1230,7 @@ pub fn hand_page_url(file: &str, lang: Lang) -> Result<String, SiteError> {
     Ok(format!("{SITE_URL}{}", hand_page(file, lang)?.path))
 }
 
-/// Splits one bilingual source page (`site/index.html`, `site/arc.html`) into the page for
+/// Splits one bilingual source page (`site/index.html`) into the page for
 /// `lang`: the other language's elements are removed, the language toggle becomes two links
 /// to the two pages, the inline language script goes, and the head carries this page's
 /// title, description, canonical, `hreflang` alternates and JSON-LD. A missing marker
@@ -1288,10 +1274,8 @@ pub fn split_page(source: &str, file: &str, lang: Lang) -> Result<String, SiteEr
         for (from, to) in [
             ("href=\"favicon.svg\"", "href=\"/favicon.svg\""),
             ("=\"media/", "=\"/media/"),
-            ("href=\"/arc.html\"", "href=\"/zh/arc.html\""),
             ("href=\"/#", "href=\"/zh/#"),
             ("href=\"/\"", "href=\"/zh/\""),
-            ("media/arc-en.jpg\">", "media/arc-zh.jpg\">"),
         ] {
             html = html.replace(from, to);
         }

@@ -5,12 +5,10 @@
 //! is written at startup and nothing is read from `~/.radian/`: the pages come from
 //! memory only.
 //!
-//! The pages make up two manuals with separate size budgets: the radian manual (every page
-//! outside `arc/`) and the arc manual (every page under `arc/`). [`Manual`] is the one place
-//! that decides membership; `radian://docs/` still carries both, so no virtual path changes
-//! and every page still reads by its topic.
+//! The pages make up the radian manual, with its own size budget. [`Manual`] is the one place
+//! that decides membership.
 //!
-//! A page name is its path under `docs/user/` (`commands.md`, `arc/loop.md`). The virtual
+//! A page name is its path under `docs/user/` (`commands.md`). The virtual
 //! root is `radian://docs/`. `read` opens `radian://docs/<page>.md`, lists `radian://docs/`,
 //! and opens a directory's `index.md` for `radian://docs/<dir>` or `radian://docs/<dir>/`.
 //! Every other file tool refuses the prefix.
@@ -24,65 +22,6 @@ pub const VIRTUAL_PREFIX: &str = "radian://";
 /// included.
 pub const DOCS: &[(&str, &str)] = &[
     ("acp.md", include_str!("../../../docs/user/acp.md")),
-    (
-        "arc/config.md",
-        include_str!("../../../docs/user/arc/config.md"),
-    ),
-    (
-        "arc/files.md",
-        include_str!("../../../docs/user/arc/files.md"),
-    ),
-    (
-        "arc/flows.md",
-        include_str!("../../../docs/user/arc/flows.md"),
-    ),
-    (
-        "arc/gate-failures.md",
-        include_str!("../../../docs/user/arc/gate-failures.md"),
-    ),
-    (
-        "arc/gate-review.md",
-        include_str!("../../../docs/user/arc/gate-review.md"),
-    ),
-    (
-        "arc/gate.md",
-        include_str!("../../../docs/user/arc/gate.md"),
-    ),
-    (
-        "arc/hooks.md",
-        include_str!("../../../docs/user/arc/hooks.md"),
-    ),
-    ("arc/hub.md", include_str!("../../../docs/user/arc/hub.md")),
-    (
-        "arc/index.md",
-        include_str!("../../../docs/user/arc/index.md"),
-    ),
-    (
-        "arc/integration.md",
-        include_str!("../../../docs/user/arc/integration.md"),
-    ),
-    (
-        "arc/loop.md",
-        include_str!("../../../docs/user/arc/loop.md"),
-    ),
-    ("arc/mcp.md", include_str!("../../../docs/user/arc/mcp.md")),
-    (
-        "arc/owner.md",
-        include_str!("../../../docs/user/arc/owner.md"),
-    ),
-    (
-        "arc/planning.md",
-        include_str!("../../../docs/user/arc/planning.md"),
-    ),
-    (
-        "arc/running.md",
-        include_str!("../../../docs/user/arc/running.md"),
-    ),
-    ("arc/tui.md", include_str!("../../../docs/user/arc/tui.md")),
-    (
-        "arc/worker.md",
-        include_str!("../../../docs/user/arc/worker.md"),
-    ),
     ("cli.md", include_str!("../../../docs/user/cli.md")),
     (
         "commands.md",
@@ -147,25 +86,21 @@ pub const DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The two manuals the binary carries. Pages under `arc/` are the arc manual; every other
-/// page is the radian manual.
+/// The manuals the binary carries: the radian manual.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Manual {
-    /// Every page outside `arc/`, mapped by `index.md`.
+    /// Every page, mapped by `index.md`.
     Radian,
-    /// Every page under `arc/`, mapped by `arc/index.md`.
-    Arc,
 }
 
 impl Manual {
-    /// Both manuals, radian first.
-    pub const ALL: [Manual; 2] = [Manual::Radian, Manual::Arc];
+    /// Every manual.
+    pub const ALL: [Manual; 1] = [Manual::Radian];
 
     /// The name a failure or a listing uses.
     pub fn name(self) -> &'static str {
         match self {
             Manual::Radian => "radian manual",
-            Manual::Arc => "arc manual",
         }
     }
 
@@ -173,19 +108,13 @@ impl Manual {
     pub fn index(self) -> &'static str {
         match self {
             Manual::Radian => "index.md",
-            Manual::Arc => "arc/index.md",
         }
     }
 }
 
-/// The manual a page belongs to. This is the one place membership is decided: a page under
-/// `arc/` is the arc manual, every other page the radian manual.
-pub fn manual_of(name: &str) -> Manual {
-    if name.starts_with("arc/") {
-        Manual::Arc
-    } else {
-        Manual::Radian
-    }
+/// The manual a page belongs to. This is the one place membership is decided.
+pub fn manual_of(_name: &str) -> Manual {
+    Manual::Radian
 }
 
 /// Every page of one manual, in table order.
@@ -199,8 +128,7 @@ pub fn size_of(manual: Manual) -> usize {
     pages_of(manual).map(|(_, text)| text.len()).sum()
 }
 
-/// The size cap one manual may reach (512 KiB). Each manual has its own budget, so arc's
-/// growth never spends the radian manual's.
+/// The size cap one manual may reach (512 KiB). Each manual has its own budget.
 pub const MANUAL_SIZE_CAP: usize = 512 * 1024;
 
 /// The failure message when one manual is over its cap, or `None` when it fits. The message
@@ -256,13 +184,13 @@ pub fn is_root(user: &str) -> bool {
 
 /// The page name for a `radian://docs/<path>`, or `None` when `user` is not under the root.
 /// A path that does not end in `.md` names a directory, whose page is its `index.md`
-/// (`radian://docs/arc` and `radian://docs/arc/` both name `arc/index.md`).
+/// (`radian://docs/dir` and `radian://docs/dir/` both name `dir/index.md`).
 pub fn page_name(user: &str) -> Option<String> {
     let rest = user.strip_prefix(DOCS_PREFIX)?;
     Some(directory_page(rest).unwrap_or_else(|| rest.to_owned()))
 }
 
-/// The page a bundled-manual directory names (`radian://docs/arc/` -> `arc/index.md`),
+/// The page a bundled-manual directory names (`radian://docs/dir/` -> `dir/index.md`),
 /// or `None` when `user` is not a bundled-manual directory.
 pub fn dir_page(user: &str) -> Option<String> {
     let rest = user.strip_prefix(DOCS_PREFIX)?;
@@ -306,7 +234,7 @@ pub fn description(text: &str) -> &str {
 }
 
 /// Looks up a `radian docs` topic: `commands` or `commands.md` both find the page, and a
-/// topic that names a directory opens its `index.md` (`arc` -> `arc/index.md`).
+/// topic that names a directory opens its `index.md` (`dir` -> `dir/index.md`).
 pub fn lookup_topic(topic: &str) -> Option<(&'static str, &'static str)> {
     let name = if topic.ends_with(".md") {
         topic.to_owned()

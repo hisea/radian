@@ -28,9 +28,6 @@ path = "src/rad.rs"
 # The `radian exec` subcommand and the top-level management commands (ADR 0032 slice 1): the
 # `agent` command as a library, so both entries run the same parser and dispatch.
 radian-exec = { version = "0.2.0", path = "../radian-exec" }
-# `radian arc`: the plan and task orchestrator's control plane (ADR 0048): the store, the
-# gate, and `radian arc work`, the internal worker wrapper.
-radian-arc = { version = "0.2.0", path = "../radian-arc" }
 radian-core = { version = "0.2.0", path = "../radian-core" }
 agent-extensions = { version = "0.2.0", path = "../agent-extensions" }
 agent-provider-openai-compatible = { version = "0.2.0", path = "../agent-provider-openai-compatible" }
@@ -109,13 +106,6 @@ libc = "0.2"
 radian-coding = { path = "../radian-coding", features = ["testing"] }
 radian-core = { path = "../radian-core" }
 radian-memory = { path = "../radian-memory" }
-# The `radian arc mcp` tests drive the real server through a real MCP client over the
-# server's own stdio, as `agent-extensions` drives a server. Pinned to the version the
-# server side uses.
-rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-async-rw"] }
-# The `radian arc` lock test holds `state.lock` from the test process, the same flock the
-# store takes.
-fs2 = "0.4"
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 radian-session = { path = "../radian-session" }

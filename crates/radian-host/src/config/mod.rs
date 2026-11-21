@@ -37,7 +37,6 @@ mod model;
 mod sandbox;
 mod tui;
 
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
@@ -198,70 +197,6 @@ impl Default for ControlConfig {
     }
 }
 
-/// The `[hub] bind` default: the API listens on loopback unless the owner names another
-/// address (ADR 0048 §16).
-pub const DEFAULT_HUB_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-/// The `[hub]` default port (ADR 0048): the HTTP API listens on `hub.port`.
-pub const DEFAULT_HUB_PORT: u16 = 7341;
-/// The `[hub]` default concurrency: tasks in `doing` across every registered repository.
-pub const DEFAULT_HUB_CONCURRENCY: u64 = 4;
-/// The `[hub]` default wait between scheduling passes, the same default `radian arc serve`
-/// used.
-pub const DEFAULT_HUB_INTERVAL_SECS: u64 = 30;
-/// The low end of the closed `[hub] port` range.
-pub const MIN_HUB_PORT: u16 = 1;
-/// The high end of the closed `[hub] port` range.
-pub const MAX_HUB_PORT: u16 = 65535;
-/// The low end of the closed `[hub] interval_secs` range.
-pub const MIN_HUB_INTERVAL_SECS: u64 = 5;
-/// The high end of the closed `[hub] interval_secs` range.
-pub const MAX_HUB_INTERVAL_SECS: u64 = 3600;
-/// The `[hub] session_idle_secs` default: how long a hub-held session may sit idle before its
-/// process exits (ADR 0048 §16).
-pub const DEFAULT_HUB_SESSION_IDLE_SECS: u64 = 3600;
-/// The low end of the closed `[hub] session_idle_secs` range.
-pub const MIN_HUB_SESSION_IDLE_SECS: u64 = 60;
-/// The high end of the closed `[hub] session_idle_secs` range.
-pub const MAX_HUB_SESSION_IDLE_SECS: u64 = 86400;
-
-/// `[hub]` (ADR 0048): the hub process. A value outside a range is refused; an unknown key is
-/// skipped and named.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HubConfig {
-    /// `[hub] bind`: the IP address the HTTP API listens on (ADR 0048 §16).
-    pub bind: IpAddr,
-    pub port: u16,
-    pub concurrency: u64,
-    pub interval_secs: u64,
-    /// `[hub] session_idle_secs`: the reclaim window of a hub-held session (ADR 0048 §16).
-    pub session_idle_secs: u64,
-    /// `[hub.hooks]` (ADR 0048 §16): the commands the hub runs from a session's long-lived
-    /// subscription.
-    pub hooks: HubHooks,
-}
-
-impl Default for HubConfig {
-    fn default() -> Self {
-        Self {
-            bind: DEFAULT_HUB_BIND,
-            port: DEFAULT_HUB_PORT,
-            concurrency: DEFAULT_HUB_CONCURRENCY,
-            interval_secs: DEFAULT_HUB_INTERVAL_SECS,
-            session_idle_secs: DEFAULT_HUB_SESSION_IDLE_SECS,
-            hooks: HubHooks::default(),
-        }
-    }
-}
-
-/// `[hub.hooks]` (ADR 0048 §16): one array of shell command lines, run when a live session's
-/// pending queue gets a new head. The array defaults to empty, so a repository that configures
-/// no notification runs none.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HubHooks {
-    /// `[hub.hooks] after_pending`: the commands run in the hub's process.
-    pub after_pending: Vec<String>,
-}
-
 /// `[context]` (ADR 0036): when the host appends subtree context files on first use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextConfig {
@@ -302,8 +237,6 @@ pub struct Config {
     pub integrations: IntegrationsConfig,
     /// `[control]` (ADR 0043): the process control port, on by default.
     pub control: ControlConfig,
-    /// `[hub]` (ADR 0048): the port, concurrency and interval of the hub.
-    pub hub: HubConfig,
     /// `[context]` (ADR 0036): subtree context files.
     pub context: ContextConfig,
     pub compaction: CompactionConfig,
@@ -347,7 +280,7 @@ pub fn resolve_path(
 
 /// Reads a configuration from an already-resolved path (see [`resolve_path`]). A missing file is
 /// an empty configuration (it is never created); any other read failure is the reader's error.
-/// Split out so a host that resolves the path itself (the arc TUI, which has no `--config` flag)
+/// Split out so a host that resolves the path itself (one with no `--config` flag)
 /// reads it with the same rules, and a test can inject a path instead of the environment.
 pub fn load_path(path: Option<&Path>) -> Result<Config, ConfigError> {
     match path {
@@ -371,7 +304,7 @@ pub fn load_path(path: Option<&Path>) -> Result<Config, ConfigError> {
 /// provider-table check that needs `auth.json` runs here, beside the reader's own provider
 /// refusals: every rules-only `[providers.<name>]` table must have an `auth.json` entry of
 /// that name (ADR 0026 D10). [`load_path`] stays auth-free for callers that read the file for
-/// something else (the arc TUI's theme).
+/// something else (a theme, say).
 pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
     let env = std::env::var(RADIAN_CONFIG_ENV).ok();
     let home = crate::home::radian_home();
@@ -459,7 +392,6 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "sandbox" => sandbox::parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
             "control" => parse_control(value, path, &mut config)?,
-            "hub" => parse_hub(value, path, &mut config)?,
             "context" => parse_context(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "hooks" => hooks::parse_hooks(value, &mut config)?,
@@ -583,119 +515,6 @@ fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), 
                 return Err(wrong_type(path, "control.enabled", "a boolean"));
             }
             (other, _) => config.skipped.push(format!("control.{other}")),
-        }
-    }
-    Ok(())
-}
-
-/// Parses `[hub]` (ADR 0048). Each key has a closed range, except `concurrency`, which accepts
-/// every integer of `1` or more: a value outside the range is a configuration error naming the
-/// key and the range, never a guess. An unknown key is skipped and named on the startup line.
-fn parse_hub(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "hub", "a table"));
-    };
-    for (key, value) in table {
-        match (key.as_str(), value) {
-            ("bind", Value::String(text)) => {
-                config.hub.bind = text
-                    .parse()
-                    .map_err(|_| wrong_type(path, "hub.bind", "an IP address"))?;
-            }
-            ("bind", _) => return Err(wrong_type(path, "hub.bind", "an IP address")),
-            ("port", Value::Integer(port))
-                if (i64::from(MIN_HUB_PORT)..=i64::from(MAX_HUB_PORT)).contains(port) =>
-            {
-                config.hub.port = *port as u16;
-            }
-            ("port", Value::Integer(_)) => {
-                return Err(ConfigError::ValueOutOfRange {
-                    path: path.to_path_buf(),
-                    key: "hub.port".into(),
-                    range: "1 to 65535",
-                });
-            }
-            ("port", _) => return Err(wrong_type(path, "hub.port", "an integer")),
-            ("concurrency", Value::Integer(count)) if *count >= 1 => {
-                config.hub.concurrency = *count as u64;
-            }
-            ("concurrency", Value::Integer(_)) => {
-                return Err(ConfigError::ValueOutOfRange {
-                    path: path.to_path_buf(),
-                    key: "hub.concurrency".into(),
-                    range: "1 or more",
-                });
-            }
-            ("concurrency", _) => return Err(wrong_type(path, "hub.concurrency", "an integer")),
-            ("interval_secs", Value::Integer(secs))
-                if (MIN_HUB_INTERVAL_SECS as i64..=MAX_HUB_INTERVAL_SECS as i64).contains(secs) =>
-            {
-                config.hub.interval_secs = *secs as u64;
-            }
-            ("interval_secs", Value::Integer(_)) => {
-                return Err(ConfigError::ValueOutOfRange {
-                    path: path.to_path_buf(),
-                    key: "hub.interval_secs".into(),
-                    range: "5 to 3600",
-                });
-            }
-            ("interval_secs", _) => {
-                return Err(wrong_type(path, "hub.interval_secs", "an integer"));
-            }
-            ("session_idle_secs", Value::Integer(secs))
-                if (MIN_HUB_SESSION_IDLE_SECS as i64..=MAX_HUB_SESSION_IDLE_SECS as i64)
-                    .contains(secs) =>
-            {
-                config.hub.session_idle_secs = *secs as u64;
-            }
-            ("session_idle_secs", Value::Integer(_)) => {
-                return Err(ConfigError::ValueOutOfRange {
-                    path: path.to_path_buf(),
-                    key: "hub.session_idle_secs".into(),
-                    range: "60 to 86400",
-                });
-            }
-            ("session_idle_secs", _) => {
-                return Err(wrong_type(path, "hub.session_idle_secs", "an integer"));
-            }
-            ("hooks", value) => parse_hub_hooks(value, path, config)?,
-            (other, _) => config.skipped.push(format!("hub.{other}")),
-        }
-    }
-    Ok(())
-}
-
-/// Parses `[hub.hooks]` (ADR 0048 §16). `after_pending` is an array of shell command lines, the
-/// same shape arc's `[hooks]` points use; a wrong shape names the key. An unknown key under the
-/// table is skipped and named, the rule the rest of `[hub]` follows.
-fn parse_hub_hooks(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "hub.hooks", "a table"));
-    };
-    for (key, value) in table {
-        match (key.as_str(), value) {
-            ("after_pending", Value::Array(items)) => {
-                for (index, item) in items.iter().enumerate() {
-                    match item {
-                        Value::String(line) => config.hub.hooks.after_pending.push(line.clone()),
-                        _ => {
-                            return Err(wrong_type(
-                                path,
-                                &format!("hub.hooks.after_pending[{index}]"),
-                                "a string",
-                            ));
-                        }
-                    }
-                }
-            }
-            ("after_pending", _) => {
-                return Err(wrong_type(
-                    path,
-                    "hub.hooks.after_pending",
-                    "an array of strings",
-                ));
-            }
-            (other, _) => config.skipped.push(format!("hub.hooks.{other}")),
         }
     }
     Ok(())
@@ -2228,12 +2047,6 @@ future_option = "alpha"
             "sandbox.allow_env",
             "integrations.herdr",
             "control.enabled",
-            "hub.bind",
-            "hub.port",
-            "hub.concurrency",
-            "hub.interval_secs",
-            "hub.session_idle_secs",
-            "hub.hooks.after_pending",
             "context.subtree_files",
             "compaction.auto",
             "compaction.thinking",
@@ -2378,14 +2191,6 @@ future_option = "alpha"
                 "herdr = false\n",
                 "[control]\n",
                 "enabled = false\n",
-                "[hub]\n",
-                "bind = \"127.0.0.1\"\n",
-                "port = 7341\n",
-                "concurrency = 4\n",
-                "interval_secs = 30\n",
-                "session_idle_secs = 3600\n",
-                "[hub.hooks]\n",
-                "after_pending = [\"true\"]\n",
                 "[compaction]\n",
                 "auto = false\n",
                 "thinking = \"low\"\n",
@@ -2560,7 +2365,6 @@ future_option = "alpha"
         "## `[skills]`",
         "## `[memory]`",
         "## `[control]`",
-        "## `[hub]`",
         "## `[context]`",
         "## `[integrations]`",
         "## `[compaction]`",
@@ -2781,20 +2585,6 @@ future_option = "alpha"
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
             ),
-            ("hub.bind", HubConfig::default().bind.to_string()),
-            ("hub.port", HubConfig::default().port.to_string()),
-            (
-                "hub.concurrency",
-                HubConfig::default().concurrency.to_string(),
-            ),
-            (
-                "hub.interval_secs",
-                HubConfig::default().interval_secs.to_string(),
-            ),
-            (
-                "hub.session_idle_secs",
-                HubConfig::default().session_idle_secs.to_string(),
-            ),
             (
                 "control.enabled",
                 ControlConfig::default().enabled.to_string(),
@@ -2838,58 +2628,5 @@ future_option = "alpha"
         let config =
             parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 7\n").unwrap();
         assert_eq!(config.memory.injection().sessions_index_max_lines, 7);
-    }
-
-    /// `[hub] bind` is an IP address (ADR 0048 §16): IPv4 and IPv6 are carried, and a host
-    /// name, an empty string or an address with a port is refused naming the key and saying
-    /// "an IP address".
-    #[test]
-    fn hub_bind_is_an_ip_address() {
-        for (value, expected) in [
-            ("127.0.0.1", IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            ("0.0.0.0", IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-            ("::1", IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-        ] {
-            let text = format!("schema_version = 1\n[hub]\nbind = \"{value}\"\n");
-            let config = parse_str(&text).expect("an IP address is accepted");
-            assert_eq!(config.hub.bind, expected);
-        }
-        for value in ["localhost", "", "127.0.0.1:7341"] {
-            let text = format!("schema_version = 1\n[hub]\nbind = \"{value}\"\n");
-            let error = parse_str(&text).unwrap_err().to_string();
-            assert!(error.contains("hub.bind"), "{value:?}: {error}");
-            assert!(error.contains("an IP address"), "{value:?}: {error}");
-        }
-        // A non-string value names the key too.
-        let error = parse_str("schema_version = 1\n[hub]\nbind = 7341\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("hub.bind"), "{error}");
-        // Absent, the default is loopback.
-        let config = parse_str("schema_version = 1\n[hub]\nport = 7341\n").unwrap();
-        assert_eq!(config.hub.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
-    }
-
-    /// `[hub] session_idle_secs` is the closed range `60` to `86400`: a value outside it is a
-    /// configuration error naming the key and the range, and the endpoints are accepted.
-    /// Mutation: widen the range, or drop the error's key or range → this fails.
-    #[test]
-    fn hub_session_idle_secs_outside_its_range_names_the_key_and_the_range() {
-        for value in [0, 59, 86_401] {
-            let text = format!("schema_version = 1\n[hub]\nsession_idle_secs = {value}\n");
-            let error = parse_str(&text).unwrap_err().to_string();
-            assert!(
-                error.contains("hub.session_idle_secs") && error.contains("60 to 86400"),
-                "{value}: {error}"
-            );
-        }
-        for (value, expected) in [(60, 60), (86_400, 86_400)] {
-            let text = format!("schema_version = 1\n[hub]\nsession_idle_secs = {value}\n");
-            let config = parse_str(&text).expect("the range's endpoints are accepted");
-            assert_eq!(config.hub.session_idle_secs, expected);
-        }
-        // Absent, the default is 3600.
-        let config = parse_str("schema_version = 1\n[hub]\nport = 7341\n").unwrap();
-        assert_eq!(config.hub.session_idle_secs, 3600);
     }
 }

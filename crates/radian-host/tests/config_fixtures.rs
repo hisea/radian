@@ -45,7 +45,6 @@ fn the_reader_matches_the_reference_checker() {
         ("memory.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
-        ("hub.toml", "accept"),
         ("context-subtree-files.toml", "accept"),
         ("hooks.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
@@ -229,106 +228,6 @@ fn the_control_enabled_flag_is_carried() {
     let (path, text) = fixture("minimal.toml");
     let config = config::parse(&path, &text).unwrap();
     assert!(config.control.enabled);
-}
-
-/// `hub.toml` (ADR 0048): the keys are carried with their defaults, a value outside a
-/// range is refused naming the key and the range, and an unknown key is skipped.
-#[test]
-fn the_hub_table_is_carried_and_out_of_range_values_are_refused() {
-    let (path, text) = fixture("hub.toml");
-    let config = config::parse(&path, &text).unwrap();
-    assert_eq!(config.hub.bind, config::DEFAULT_HUB_BIND);
-    assert_eq!(config.hub.port, 7341);
-    assert_eq!(config.hub.concurrency, 4);
-    assert_eq!(config.hub.interval_secs, 30);
-    assert_eq!(config.hub.hooks.after_pending, vec!["true".to_owned()]);
-    assert!(
-        !config.skipped.iter().any(|key| key.starts_with("hub")),
-        "{:?}",
-        config.skipped
-    );
-
-    // An empty configuration gets the documented defaults.
-    let parsed = config::parse(&path, "schema_version = 1\n").unwrap();
-    assert_eq!(
-        parsed.hub,
-        config::HubConfig {
-            bind: config::DEFAULT_HUB_BIND,
-            port: config::DEFAULT_HUB_PORT,
-            concurrency: config::DEFAULT_HUB_CONCURRENCY,
-            interval_secs: config::DEFAULT_HUB_INTERVAL_SECS,
-            session_idle_secs: config::DEFAULT_HUB_SESSION_IDLE_SECS,
-            hooks: config::HubHooks::default(),
-        }
-    );
-
-    // A port over 65535 names the key and the range.
-    let error = config::parse(&path, "schema_version = 1\n[hub]\nport = 70000\n")
-        .expect_err("a port over 65535 is refused");
-    let message = error.to_string();
-    assert!(message.contains("hub.port"), "{message}");
-    assert!(message.contains("1 to 65535"), "{message}");
-
-    // `concurrency` accepts every integer `1` or more, the documented range: a value above the
-    // old `u32` ceiling is carried, never refused or clamped.
-    let parsed = config::parse(
-        &path,
-        "schema_version = 1\n[hub]\nconcurrency = 4294967296\n",
-    )
-    .expect("every integer of 1 or more is in range");
-    assert_eq!(parsed.hub.concurrency, 4_294_967_296);
-    let parsed = config::parse(
-        &path,
-        "schema_version = 1\n[hub]\nconcurrency = 9223372036854775807\n",
-    )
-    .expect("the largest TOML integer is in range");
-    assert_eq!(parsed.hub.concurrency, i64::MAX as u64);
-
-    // A value below 1 is outside the range; it names the key and the range.
-    let error = config::parse(&path, "schema_version = 1\n[hub]\nconcurrency = 0\n")
-        .expect_err("0 is below the range");
-    let message = error.to_string();
-    assert!(message.contains("hub.concurrency"), "{message}");
-    assert!(message.contains("1 or more"), "{message}");
-
-    // An unknown key is skipped and the file still loads.
-    let parsed = config::parse(&path, "schema_version = 1\n[hub]\nother = 1\n")
-        .expect("an unknown hub key is skipped, never refused");
-    assert!(
-        parsed.skipped.contains(&"hub.other".to_string()),
-        "{:?}",
-        parsed.skipped
-    );
-
-    // `[hub.hooks] after_pending` is an array of command lines; a wrong shape names the key,
-    // and an unknown key under the table is skipped like the rest of `[hub]`.
-    let parsed = config::parse(
-        &path,
-        "schema_version = 1\n[hub.hooks]\nafter_pending = [\"curl -s https://ntfy.sh/x\"]\n",
-    )
-    .expect("the hook list parses");
-    assert_eq!(
-        parsed.hub.hooks.after_pending,
-        vec!["curl -s https://ntfy.sh/x".to_owned()]
-    );
-    let error = config::parse(
-        &path,
-        "schema_version = 1\n[hub.hooks]\nafter_pending = \"curl\"\n",
-    )
-    .expect_err("a bare string is not a command list");
-    let message = error.to_string();
-    assert!(message.contains("hub.hooks.after_pending"), "{message}");
-    assert!(message.contains("array of strings"), "{message}");
-    let parsed = config::parse(
-        &path,
-        "schema_version = 1\n[hub.hooks]\nafter_pending = [\"true\"]\nother = 1\n",
-    )
-    .expect("an unknown hook key is skipped");
-    assert!(
-        parsed.skipped.contains(&"hub.hooks.other".to_string()),
-        "{:?}",
-        parsed.skipped
-    );
 }
 
 /// The `providers.toml` fixture (ADR 0026 D10) carries named providers; the names are the

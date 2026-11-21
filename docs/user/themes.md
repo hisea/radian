@@ -27,14 +27,6 @@ background. `mono` uses no color at all: bold, underline and dim only. A
 non-empty `NO_COLOR` environment variable forces `mono`: `/theme` then does
 nothing and says so.
 
-The arc TUI (`radian arc`) draws with the same theme, from the same config
-file: `tui.theme`, a theme file, `[tui.colors]`, `NO_COLOR` and truecolor
-detection all apply there too. It reads them when it opens, so a change made
-while it is open (with `/theme`, for example) shows the next time you open it.
-A theme problem, or a config file that cannot be read or parsed, is one line in
-its footer when it opens; the TUI still opens with the theme the load fell back
-to (`NO_COLOR` and truecolor detection still decide that fallback).
-
 Set the startup theme in the config file:
 
 ```toml
@@ -152,8 +144,8 @@ per level so levels read apart at a glance):
 | `reasoning_xhigh` | The `xhigh` level marker. |
 | `reasoning_max` | The `max` level marker. |
 
-Plan priorities (the arc plans page draws `P0`..`P5` in these roles; `P0` is
-highest):
+Plan priorities (`P0`..`P5` roles; `P0` is highest; no screen of this build draws
+them):
 
 | Role | What it paints | `dark` | `light` | `mono` |
 |---|---|---|---|---|
@@ -167,8 +159,7 @@ highest):
 A theme file sets them by these names; pi has no source role for them. Without
 truecolor each value becomes the nearest 256-color entry, like every role.
 
-Plan marks (the arc plans page draws one mark per plan; see
-[the arc TUI](arc/tui.md#the-plans-page) for the rule that picks it):
+Plan marks (one role per plan state; no screen of this build draws them):
 
 | Role | What it paints | `dark` | `light` | `mono` |
 |---|---|---|---|---|

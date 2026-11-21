@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "crates/radian-core",
-    "crates/radian-arc",
     "crates/agent-extensions",
     "crates/agent-provider-openai-compatible",
     "crates/agent-provider-openai-responses",
