@@ -1,0 +1,61 @@
+{
+  "$schema": "https://operad.io/schemas/dev.schema.json",
+  "name": "radian",
+  "remote": "origin",
+  "mainBranch": "main",
+  "worktreeRoot": ".operad-worktrees",
+  "concurrency": 1,
+  "maxAutoRework": 3,
+  "workers": {
+    "claude": {
+      "use": "claude/agent",
+      "args": [
+        "--model",
+        "sonnet"
+      ],
+      "count": 1,
+      "stallSecs": 900,
+      "wallTimeSecs": 7200
+    }
+  },
+  "reviewer": {
+    "use": "claude/agent",
+    "args": [
+      "--model",
+      "sonnet",
+      "--effort",
+      "medium"
+    ],
+    "fixLevel": "major",
+    "timeoutSecs": 1800,
+    "stallSecs": 900
+  },
+  "gate": {
+    "commands": [
+      {
+        "run": "cargo fmt --all -- --check"
+      },
+      {
+        "run": "CARGO_TARGET_DIR=/Users/hai/.cache/radian-arc-target cargo clippy --workspace --all-targets -- -D warnings"
+      },
+      {
+        "run": "/Users/hai/.local/bin/arc-gate-lxc crates"
+      }
+    ],
+    "commandTimeoutSecs": 1500,
+    "stallSecs": 900
+  },
+  "integration": {
+    "keyCommands": [
+      {
+        "run": "cargo fmt --all -- --check"
+      },
+      {
+        "run": "CARGO_TARGET_DIR=/Users/hai/.cache/radian-arc-target-integration cargo clippy --workspace --all-targets -- -D warnings"
+      },
+      {
+        "run": "/Users/hai/.local/bin/arc-gate-lxc"
+      }
+    ]
+  }
+}
