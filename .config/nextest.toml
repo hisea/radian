@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (268 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (265 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec and
 #    control suites use `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 3 and 4).
@@ -89,10 +89,7 @@ not (
   | test(=an_mcp_input_absorbed_into_an_owner_turn_lowers_it_to_mcp)
   | test(=attachments_become_the_same_parts_as_the_tui_composer)
   | test(=close_answers_ok_before_asking_the_host_and_two_requests_make_one_close)
-  | test(=close_abandons_a_pending_question_and_ends_the_process)
-  | test(=close_and_the_idle_window_race_to_one_clean_exit)
   | test(=close_cancels_a_running_turn_and_leaves_the_open_tool_call_interrupted)
-  | test(=close_ends_a_hub_held_process_cleanly_and_the_journal_stays)
   | test(=close_while_an_approval_is_pending_abandons_it_and_a_late_answer_is_late)
   | test(=close_without_a_host_hook_is_refused_and_changes_nothing)
   | test(=close_without_the_owner_token_changes_nothing_and_keeps_the_process_running)

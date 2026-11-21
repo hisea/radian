@@ -117,7 +117,7 @@ Environment inputs:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REPO_TASKS_SOURCE` | the repository of this script | the repository each tree's base is fetched from, and where `leak.py` looks up later shas; it is never written |
-| `REPO_TASKS_RUNS` | `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs` | the run root; `run.sh` refuses (exit 2) a run root inside any git checkout. `check.sh`, `review.sh` and `report.py` read the same default |
+| `REPO_TASKS_RUNS` | `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs` | the run root; `run.sh` refuses (exit 2) a run root inside any git checkout. `check.sh` and `report.py` read the same default |
 | `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`timeout_run.py`) |
 | `REPO_TASKS_RADIAN_BIN` | `radian` | the radian binary |
 | `REPO_TASKS_PI_BIN` | `pi` | the pi binary |
