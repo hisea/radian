@@ -635,9 +635,7 @@ fn the_hand_written_pages_name_their_canonical_url() {
 #[test]
 fn each_split_page_holds_one_language() {
     // (file, a sentence only the English spans hold, its Chinese twin)
-    let samples = [
-        ("index.html", "Headless, observable.", "无头，可观测。"),
-    ];
+    let samples = [("index.html", "Headless, observable.", "无头，可观测。")];
     for (page, html) in split_pages() {
         let who = format!("{} ({})", page.file, page.lang.code());
         for banned in [
@@ -812,7 +810,8 @@ fn a_source_without_its_chinese_title_fails_the_build() {
     let no_toggle = source("index.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
     let error = split_page(&no_toggle, "index.html", Lang::En).unwrap_err();
     assert!(error.to_string().contains("language toggle"), "{error}");
-    let open = source("index.html").replacen("</span><span class=\"zh\">", "<span class=\"zh\">", 1);
+    let open =
+        source("index.html").replacen("</span><span class=\"zh\">", "<span class=\"zh\">", 1);
     assert!(split_page(&open, "index.html", Lang::Zh).is_err());
 }
 
