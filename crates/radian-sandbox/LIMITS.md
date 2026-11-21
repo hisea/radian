@@ -277,12 +277,12 @@ per-worktree gitdir 就嵌在 common dir 之下——若某条 allow 跟在 deny
 会话中新建的子模块或 worktree 的 `config`/`hooks` 不会被这次挂载覆盖（macOS 的 regex
 覆盖它们）。不存在的路径不挂载：bwrap 会为缺失的挂载点**在宿主文件系统上创建目录**
 （实测），所以 `hooks/`/`config.worktree` 缺失时跳过，和 `deny_read` 跳过缺失路径同一理由。
-`git init` 总会创建 `hooks/`，现有子模块同样如此，所以常规仓库与 arc 工作树布局不受影响。
+`git init` 总会创建 `hooks/`，现有子模块同样如此，所以常规仓库与 linked worktree 布局不受影响。
 
-**Linux 行为测试**：`crates/radian-sandbox/tests/arc_worker.rs`（两平台）：workspace 是
-`<repository>/.radian/arc/worktrees/<task>` 的 linked worktree，common dir 就是
-`<repository>/.git`，`deny_read` 覆盖 `.radian/arc/` 的其余条目。沙箱内 `git add`/`git commit`
-成功，`config`、`hooks/`、`.git` 指针文件被拒，denied 的 arc 路径读不到；每条都在第二个相同的
+**Linux 行为测试**：`crates/radian-sandbox/tests/linked_worktree.rs`（两平台）：workspace 是
+`<repository>/.radian-worktrees/<task>` 的 linked worktree，common dir 就是
+`<repository>/.git`，`deny_read` 覆盖仓库里的另外两个条目。沙箱内 `git add`/`git commit`
+成功，`config`、`hooks/`、`.git` 指针文件被拒，denied 的路径读不到；每条都在第二个相同的
 `FullAccess` 树上对照。修复前 Linux 上的失败是 `git add` 的
 `fatal: Unable to create '…/.git/worktrees/<task>/index.lock': Read-only file system`。
 
@@ -469,7 +469,7 @@ arc worker 在 `workspace` 档位里跑。有一部分测试只因为这个环�
 ```sh
 cargo nextest run --profile sandbox --workspace --locked --no-fail-fast
 # 或只跑本次改动的 crate：
-cargo nextest run --profile sandbox -p radian-host -p radian-arc -p radian-tui \
+cargo nextest run --profile sandbox -p radian-host -p radian-tui \
   -p radian-exec -p radian-coding --locked --no-fail-fast
 ```
 

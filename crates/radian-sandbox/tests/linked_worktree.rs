@@ -1,11 +1,11 @@
-//! ADR 0038 and ADR 0048 decision 5 on the arc worker layout: the workspace is a linked
-//! worktree **inside** its repository (`<repository>/.radian/arc/worktrees/<task>`), so the
-//! shared common git dir is `<repository>/.git`, and every other entry of
-//! `<repository>/.radian/arc/` is on the sandbox deny-read list.
+//! ADR 0038 on a linked worktree nested **inside** its repository
+//! (`<repository>/.radian-worktrees/<task>`): the shared common git dir is
+//! `<repository>/.git`, and other paths in the repository can be on the sandbox deny-read
+//! list.
 //!
-//! Under [`GitAccess::WritableExceptExec`] the worker commits with native git (refs, index and
-//! objects of the common dir are writable) while the entries git executes stay read-only and
-//! the denied arc paths stay unreadable.
+//! Under [`GitAccess::WritableExceptExec`] a sandboxed command commits with native git (refs,
+//! index and objects of the common dir are writable) while the entries git executes stay
+//! read-only and the denied paths stay unreadable.
 //!
 //! This is the Linux regression: before the bwrap carve-out the whole `.git` was one
 //! `--ro-bind`, so `git add` failed with `fatal: Unable to create
@@ -27,13 +27,13 @@ struct Scratch {
 
 impl Scratch {
     /// A repository with one commit and a linked worktree at
-    /// `<repository>/.radian/arc/worktrees/0001-task`, plus the arc entries the wrapper
-    /// denies (a `plans/` directory and `config.toml`).
+    /// `<repository>/.radian-worktrees/0001-task`, plus two denied entries (a
+    /// `.radian/private/plans/` directory and a `config.toml`).
     fn new(label: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
-            "radian-arc-sandbox-{}-{label}-{n}",
+            "radian-linked-worktree-{}-{label}-{n}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
@@ -45,9 +45,9 @@ impl Scratch {
         git(&repo, &["init", "-q"]);
         git(
             &repo,
-            &["config", "user.email", "arc-sandbox@example.invalid"],
+            &["config", "user.email", "linked-worktree@example.invalid"],
         );
-        git(&repo, &["config", "user.name", "arc sandbox"]);
+        git(&repo, &["config", "user.name", "linked worktree"]);
         // A quiet, deterministic repository: no background auto-maintenance, no hooks.
         git(&repo, &["config", "maintenance.auto", "false"]);
         git(&repo, &["config", "gc.auto", "0"]);
@@ -55,11 +55,7 @@ impl Scratch {
         git(&repo, &["add", "README.md"]);
         git(&repo, &["commit", "-qm", "base"]);
 
-        let worktree = repo
-            .join(".radian")
-            .join("arc")
-            .join("worktrees")
-            .join("0001-task");
+        let worktree = repo.join(".radian-worktrees").join("0001-task");
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
         git(
             &repo,
@@ -73,14 +69,13 @@ impl Scratch {
             ],
         );
 
-        // The arc entries the wrapper denies: everything under `.radian/arc/` except
-        // `worktrees/`.
-        let plans = repo.join(".radian").join("arc").join("plans");
+        // The entries the sandbox denies.
+        let plans = repo.join(".radian").join("private").join("plans");
         std::fs::create_dir_all(&plans).unwrap();
-        std::fs::write(plans.join("secret.md"), "ARC-PLAN-SECRET\n").unwrap();
+        std::fs::write(plans.join("secret.md"), "PLAN-SECRET\n").unwrap();
         std::fs::write(
-            repo.join(".radian").join("arc").join("config.toml"),
-            "ARC-CONFIG-SECRET\n",
+            repo.join(".radian").join("private").join("config.toml"),
+            "CONFIG-SECRET\n",
         )
         .unwrap();
 
@@ -92,15 +87,15 @@ impl Scratch {
     }
 
     fn worktree(&self) -> PathBuf {
-        self.repo().join(".radian/arc/worktrees/0001-task")
+        self.repo().join(".radian-worktrees/0001-task")
     }
 
     fn plans(&self) -> PathBuf {
-        self.repo().join(".radian/arc/plans")
+        self.repo().join(".radian/private/plans")
     }
 
     fn config(&self) -> PathBuf {
-        self.repo().join(".radian/arc/config.toml")
+        self.repo().join(".radian/private/config.toml")
     }
 }
 
@@ -152,7 +147,7 @@ fn sandbox_for(worktree: &Path, deny: &[PathBuf]) -> Sandbox {
 }
 
 #[test]
-fn a_worker_commits_in_a_linked_worktree_nested_inside_its_repository() {
+fn a_command_commits_in_a_linked_worktree_nested_inside_its_repository() {
     let sandbox_scratch = Scratch::new("sandbox");
     let control_scratch = Scratch::new("control");
     let delay = vec![sandbox_scratch.plans(), sandbox_scratch.config()];
@@ -165,13 +160,13 @@ fn a_worker_commits_in_a_linked_worktree_nested_inside_its_repository() {
         "the backend must report the carve-out it enforces"
     );
 
-    // The worker's own command: a write inside the worktree, `git add`, `git commit`. The
+    // The command: a write inside the worktree, `git add`, `git commit`. The
     // commit writes the per-worktree index and the shared common dir's refs and object store.
     let commit = "printf 'change\\n' > change.txt && git add change.txt && git commit -qm change";
     let output = run(&sandbox, commit);
     assert!(
         output.status.success(),
-        "the sandboxed worker cannot commit: {}",
+        "the sandboxed command cannot commit: {}",
         text(&output)
     );
     assert!(
@@ -179,25 +174,25 @@ fn a_worker_commits_in_a_linked_worktree_nested_inside_its_repository() {
         "the control cannot commit; the script is not sound"
     );
 
-    // The denied arc paths stay unreadable. A directory deny fails outright on both backends;
+    // The denied paths stay unreadable. A directory deny fails outright on both backends;
     // a file deny is a mask on Linux (`/dev/null`), so the marker is what must not appear.
     let secret = sandbox_scratch.plans().join("secret.md");
     let output = run(&sandbox, &format!("cat {}", q(&secret)));
     assert!(
-        !output.status.success() && !text(&output).contains("ARC-PLAN-SECRET"),
+        !output.status.success() && !text(&output).contains("PLAN-SECRET"),
         "the sandbox read the denied plan: {}",
         text(&output)
     );
     let output = run(&control, &format!("cat {}", q(&secret)));
     assert!(
-        output.status.success() && text(&output).contains("ARC-PLAN-SECRET"),
+        output.status.success() && text(&output).contains("PLAN-SECRET"),
         "the control cannot read the plan; the denial proves nothing: {}",
         text(&output)
     );
     let output = run(&sandbox, &format!("cat {}", q(&sandbox_scratch.config())));
     assert!(
-        !text(&output).contains("ARC-CONFIG-SECRET"),
-        "the sandbox read the denied arc config: {}",
+        !text(&output).contains("CONFIG-SECRET"),
+        "the sandbox read the denied config: {}",
         text(&output)
     );
 
