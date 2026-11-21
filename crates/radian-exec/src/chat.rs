@@ -15,13 +15,9 @@ use super::approval::TerminalApprover;
 use super::events::spawn_signals;
 use super::jsonl;
 use super::redact::redact;
-use super::turn::{LoopDone, Run, hub_held_loop, interactive_loop, one_shot};
+use super::turn::{LoopDone, Run, interactive_loop, one_shot};
 use super::ui::{LineHub, Ui};
 use super::{Cli, Setup, SetupError};
-
-/// How long a `--hub-held` process may sit idle before it exits cleanly, when `--hub-idle-secs`
-/// is absent.
-const HUB_HELD_DEFAULT_IDLE_SECS: u64 = 3600;
 
 /// The exec host's runtime-event sink. It prints a failed turn's masked message as before and
 /// keeps the structured `ModelError` of the latest turn that started, for the `Result` record
@@ -72,7 +68,7 @@ impl radian_runtime::RuntimeEvents for ExecRuntimeEvents {
 }
 
 pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> {
-    let interactive = cli.prompt.is_none() && !cli.hub_held;
+    let interactive = cli.prompt.is_none();
     // `-p -` reads the prompt from stdin to EOF before anything else starts: the line hub
     // below takes stdin as soon as it spawns, so reading here first is the only way the
     // prompt gets the whole pipe.
@@ -119,18 +115,11 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     // ADR 0043: the process control port. Bound before the session so its fan-out can
     // wrap the host's own sinks; a bind failure is a warning, never a startup refusal, so a
     // session always opens. The startup line names the path (a client finds it by pid too).
-    // A hub-held process is the exception: its control port is its only input and its only
-    // channel to the hub, so a port that cannot bind is a startup failure (ADR 0048 §16).
     let control = match radian_host::ControlServer::bind_if(
-        setup.control_enabled || cli.hub_held,
+        setup.control_enabled,
         radian_host::radian_home().as_deref(),
     ) {
         Ok(server) => server,
-        Err(error) if cli.hub_held => {
-            return Err(SetupError(format!(
-                "a hub-held session needs its control port: {error}"
-            )));
-        }
         Err(error) => {
             eprintln!("[control] disabled: {error}");
             None
@@ -153,9 +142,9 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
 
     // The trust question requires a real terminal. Piped stdin is **not** an interactive
     // user: its first line could be a message (or even a stray `y`) and must never be read as
-    // the answer to a trust question. `-p`, piped input, the ACP host and a hub-held process
-    // are all non-interactive.
-    let trust_interactive = interactive && !cli.hub_held && std::io::stdin().is_terminal();
+    // the answer to a trust question. `-p`, piped input, and the ACP host are all
+    // non-interactive.
+    let trust_interactive = interactive && std::io::stdin().is_terminal();
     // `run_metrics.context_window` reports the window this process resolved (ADR 0018), the
     // same value `radian acp` sends as `usage_update.size`.
     let jsonl_window = setup.window.context;
@@ -163,15 +152,8 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         setup,
         &cli,
         super::host::HostWiring {
-            // A hub-held process has no terminal: its approvals and questions go to the
-            // session's pending queue, where the hub answers them through the control port's
-            // `answer` (ADR 0023 U7, ADR 0048 §16).
-            approvals: if cli.hub_held {
-                radian_host::ApprovalRouting::Queued
-            } else {
-                radian_host::ApprovalRouting::Direct(approver)
-            },
-            ask_user: cli.hub_held,
+            approvals: radian_host::ApprovalRouting::Direct(approver),
+            ask_user: false,
             events,
             runtime_events,
             driver_stopped: {
@@ -191,24 +173,17 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         images,
     } = opened;
 
-    // ADR 0043: start accepting control requests for this session. Only a hub-held process
-    // installs the `close` hook: its owner (the hub) may end the process through the port.
-    let (close, close_requests) = radian_host::CloseHandle::channel();
+    // ADR 0043: start accepting control requests for this session.
     if let Some(server) = &control {
-        let target = if cli.hub_held {
-            radian_host::ControlTarget::of(&session)
-                .held_by_hub()
-                .closable(close)
-        } else {
-            radian_host::ControlTarget::of(&session)
-        };
-        server.serve(&tokio::runtime::Handle::current(), target);
+        server.serve(
+            &tokio::runtime::Handle::current(),
+            radian_host::ControlTarget::of(&session),
+        );
     }
 
     // The approval prompt and the prompt loop share stdin. While approval may read, the loop
-    // must not compete for a line; with `--yes` (or nobody to ask) it may. A hub-held process
-    // never reads stdin: its input comes from the control port.
-    ui.set_approval_may_read(can_ask && !cli.yes && !cli.hub_held);
+    // must not compete for a line; with `--yes` (or nobody to ask) it may.
+    ui.set_approval_may_read(can_ask && !cli.yes);
     // `--output jsonl`, installed once the journal exists: the tee returns the prefix length,
     // the prefix is read from the file (the lines written before the tee, e.g.
     // `SessionCreated`), and the printer owns stdout from here on. Because install and every
@@ -250,11 +225,6 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         ui: Arc::clone(&ui),
         driver_ended,
         signals,
-        close: if cli.hub_held {
-            Some(close_requests)
-        } else {
-            None
-        },
         session: Arc::clone(&session),
         secrets: secrets.clone(),
     };
@@ -266,13 +236,7 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
     run.ui.set_turn_started_hook(Arc::new(move || {
         command_hooks.note_turn_started();
     }));
-    let done: LoopDone = if cli.hub_held {
-        let idle = cli.hub_idle_secs.map_or(
-            std::time::Duration::from_secs(HUB_HELD_DEFAULT_IDLE_SECS),
-            std::time::Duration::from_secs,
-        );
-        hub_held_loop(&mut run, idle).await
-    } else if let Some(prompt) = cli.prompt {
+    let done: LoopDone = if let Some(prompt) = cli.prompt {
         one_shot(&mut run, prompt, images).await
     } else {
         interactive_loop(&mut run, &lines).await

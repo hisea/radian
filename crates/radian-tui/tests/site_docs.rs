@@ -9,7 +9,7 @@ use radian_tui::site_docs::{
 use std::collections::HashSet;
 
 /// The hand-written source pages and the canonical URL each must name (`None` for the
-/// 404 page, which is `noindex` instead). The two bilingual sources name the English URL;
+/// 404 page, which is `noindex` instead). The bilingual source names the English URL;
 /// the split pages hold the rest.
 const SOURCE_PAGES: [(&str, Option<&str>); 2] = [
     ("index.html", Some("https://getrad.dev/")),
