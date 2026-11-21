@@ -1,7 +1,7 @@
 # 内部资料
 
 这一页写给要构建 radian、或者要改它代码的人。
-要使用 radian 或 arc，先看 [README](../README.zh-CN.md) 和 [`docs/user/`](user/index.md) 里的用户手册（手册是英文）。
+要使用 radian，先看 [README](../README.zh-CN.md) 和 [`docs/user/`](user/index.md) 里的用户手册（手册是英文）。
 
 反引号里的路径都从仓库根目录算起。
 

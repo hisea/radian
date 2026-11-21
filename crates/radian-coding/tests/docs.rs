@@ -251,7 +251,7 @@ fn an_unlisted_page_fails_naming_it() {
     );
 }
 
-/// Every page still reads through the one virtual root by its unchanged path,.
+/// Every page still reads through the one virtual root by its unchanged path.
 #[tokio::test]
 async fn every_page_reads_at_its_unchanged_path() {
     let dir = TempDir::new("docs-paths");
