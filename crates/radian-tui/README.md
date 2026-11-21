@@ -1142,10 +1142,7 @@ throwaway terminal, not your working one.
     the TUI shows closes when the phone answers (the tool runs, and the TUI shows one dim
     `answered from the hub` line); the footer's model changes at the next turn; the photo
     draws as an image under its placeholder. A late answer from the other front end changes
-    nothing. Then, from the phone, start a new session and close the app for an hour; on
-    reopening, the session is still listed and its transcript is intact (a hub-held process
-    that was idle for longer than `hub.session_idle_secs` has exited, and the next prompt
-    resumes the same journal). *Fail*: record which front end missed the update, the hub's
+    nothing. *Fail*: record which front end missed the update, the hub's
     version, and the session id.
 15. **`/quit` and a remote close** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit`
     while a turn runs; `/quit` while a turn runs and `/queue` left a followup waiting;

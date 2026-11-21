@@ -237,14 +237,14 @@ fn a_thousand_interleaved_pushes_and_answers() {
     assert!(queue.is_empty());
 }
 
-/// A host with no UI (a hub-held `radian exec` runs no TUI and no queue-wake task) answers
+/// A host with no UI (no TUI and no queue-wake task) answers
 /// through the control port, but there is no reader for the ids, so nothing is retained: the
 /// list cannot grow for the life of the process. The trigger is many answers, not one.
 #[test]
 fn a_queue_with_no_ui_reader_retains_no_hub_answer() {
     let queue: PendingQueue<u32, u32> = PendingQueue::new();
     for i in 0..1000u32 {
-        let (id, _answer) = queue.push("hub-held", i);
+        let (id, _answer) = queue.push("no-ui", i);
         queue
             .answer_from_hub(id, i)
             .expect("the waiter is alive and the id is pending");

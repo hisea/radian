@@ -73,7 +73,7 @@ use crate::session::{DriverEnd, LocalSession, SessionQueue};
 /// request when the owner asks to end this process; the host's loop then does what a signal or
 /// idle exit does — cancel the running turn, abandon pending approvals and questions, end the
 /// driver — and leaves the journal in place. A host that installs none cannot be closed
-/// remotely: the full-screen interface and `radian exec`'s hub-held mode install it.
+/// remotely: the full-screen interface installs it.
 #[derive(Clone)]
 pub struct CloseHandle {
     request: mpsc::UnboundedSender<()>,
@@ -194,9 +194,6 @@ pub struct ControlTarget {
     model: Weak<SwitchableModel>,
     /// The background-job registry: running jobs make an idle session `working` (ADR 0034 H2).
     jobs: Option<Weak<radian_coding::Jobs>>,
-    /// `true` when a hub started this process in its hub-held mode (ADR 0048 §16), so the
-    /// `list_sessions` row names the hub as the holder and the hub reports `live: hub`.
-    hub_held: bool,
     /// The host's close hook (ADR 0043's `close` verb). `None` for a host that does not let
     /// an owner end its process remotely; the verb then answers
     /// [`CANNOT_CLOSE`](self::CANNOT_CLOSE).
@@ -221,14 +218,12 @@ impl ControlTarget {
             projection: Arc::downgrade(session.projection()),
             model: Arc::downgrade(&model),
             jobs: session.jobs_registry().map(|jobs| Arc::downgrade(&jobs)),
-            hub_held: false,
             close: None,
         }
     }
 
     /// Give this target a close hook: the owner's `close` verb then asks the host to end the
-    /// process (ADR 0043). The full-screen interface and `radian exec`'s hub-held mode install
-    /// it.
+    /// process (ADR 0043). The full-screen interface installs it.
     #[must_use]
     pub fn closable(mut self, close: CloseHandle) -> Self {
         self.close = Some(close);
@@ -243,14 +238,6 @@ impl ControlTarget {
     /// Asks the host to close; `false` when it was already asked or is already gone.
     fn request_close(&self) -> bool {
         self.close.as_ref().is_some_and(CloseHandle::request)
-    }
-
-    /// Mark this target as a hub-held process (ADR 0048 §16). The `list_sessions` row then
-    /// reports `holder: "hub"`, the fact the hub turns into `live: hub`.
-    #[must_use]
-    pub fn held_by_hub(mut self) -> Self {
-        self.hub_held = true;
-        self
     }
 
     /// The session's inbox, or `None` once the session has closed.
@@ -1155,7 +1142,7 @@ impl ControlServer {
         vec![json!({
             "id": target.session_id,
             "kind": "main",
-            "holder": if target.hub_held { "hub" } else { "tui" },
+            "holder": "tui",
             "workspace": target.workspace.to_string_lossy(),
             "journal": target.journal.to_string_lossy(),
             "model": { "provider": route.provider, "model": route.model },
@@ -1177,8 +1164,8 @@ const CANNOT_CLOSE: &str = "this process cannot be closed remotely";
 /// cancelled through the same path as `cancel`, so the journal records the cancelled turn and
 /// settles an open tool call as cancelled (ADR 0002 E5); pending approvals and questions lose
 /// their waiter, exactly as a process exit abandons them. Then the inbox closes, the driver is
-/// joined, and the journal stays, so the next `prompt` through the hub resumes it. A host calls
-/// this after the port answered `ok`; `radian exec`'s hub-held loop is the one caller.
+/// joined, and the journal stays, so the next `prompt` resumes it. A host calls
+/// this after the port answered `ok`.
 pub async fn close_session(session: &LocalSession) -> Result<(), String> {
     session.inbox().cancel(CancelCause::Requested);
     // The same stop path as SIGTERM: cancel the turn in flight (it still journals its
@@ -2003,118 +1990,6 @@ fn failure(id: Value, message: impl Into<String>) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// The client side: the one-holder lookups a session opener makes
-// ---------------------------------------------------------------------------
-
-/// The hub-held process that hosts a session, found by scanning the control sockets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HubHolder {
-    /// The pid whose `<pid>.sock` reports the session as `holder: hub`.
-    pub pid: u32,
-}
-
-/// The longest a socket that accepted a connection may take to answer `list_sessions`, the
-/// same bound the hub's scanner uses. A socket that never answers costs one timeout.
-const HOLDER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Finds the hub-held process hosting the journal at `journal`, or `None` when no socket
-/// reports it.
-///
-/// ADR 0048 §16's one-process-per-journal rule: a session opener asks this before it takes the
-/// journal's single-writer lock, so a `--resume` of a session a hub-held process holds is
-/// refused by name instead of failing on the lock. `session_id` is the user-chosen id, which
-/// two session directories may share, so a row that reports its journal path must match it
-/// too; a row that reports none (a process older than the field) is matched by the id alone
-/// rather than silently meaning "no holder". The scan is read-only: each socket gets one
-/// `list_sessions` request and the reply is never written back.
-#[cfg(unix)]
-pub fn hub_holder(session_id: &str, journal: &Path) -> Option<HubHolder> {
-    let home = crate::home::radian_home()?;
-    let dir = crate::home::run_dir_for(&home);
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(pid) = name
-            .strip_suffix(".sock")
-            .and_then(|pid| pid.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Some(answer) = list_sessions_at(&entry.path()) else {
-            continue;
-        };
-        let Some(rows) = answer.get("sessions").and_then(Value::as_array) else {
-            continue;
-        };
-        if rows
-            .iter()
-            .any(|row| row_names_the_holder(row, session_id, journal))
-        {
-            return Some(HubHolder { pid });
-        }
-    }
-    None
-}
-
-#[cfg(not(unix))]
-pub fn hub_holder(_session_id: &str, _journal: &Path) -> Option<HubHolder> {
-    None
-}
-
-/// Whether one `list_sessions` row is the hub-held process for the journal at `journal`.
-///
-/// The journal path is what tells two sessions with the same user-chosen id under different
-/// session directories apart. A row that carries no path — a process older than the `journal`
-/// field, or a stand-in hub — has only its id to be matched by, so it counts as the holder:
-/// the lookup must fail closed rather than silently answer "no holder".
-#[cfg(unix)]
-fn row_names_the_holder(row: &Value, session_id: &str, journal: &Path) -> bool {
-    if row.get("kind").and_then(Value::as_str) != Some("main")
-        || row.get("id").and_then(Value::as_str) != Some(session_id)
-        || row.get("holder").and_then(Value::as_str) != Some("hub")
-    {
-        return false;
-    }
-    match row.get("journal").and_then(Value::as_str) {
-        Some(held) => same_journal(Path::new(held), journal),
-        None => true,
-    }
-}
-
-/// Whether two reported journal paths name the same file: the file name exactly, the parent
-/// directory by [`crate::sessions::same_directory`], so a relative `--session-dir` and the same
-/// directory's absolute spelling match.
-fn same_journal(held: &Path, wanted: &Path) -> bool {
-    let same_name = held.file_name() == wanted.file_name();
-    same_name
-        && match (held.parent(), wanted.parent()) {
-            (Some(held), Some(wanted)) => {
-                crate::sessions::same_directory(&held.to_string_lossy(), &wanted.to_string_lossy())
-            }
-            _ => false,
-        }
-}
-
-/// One `list_sessions` request on a fresh connection, bounded by [`HOLDER_PROBE_TIMEOUT`]. A
-/// socket that cannot be reached, does not answer, or answers no JSON is skipped.
-#[cfg(unix)]
-fn list_sessions_at(socket: &std::path::Path) -> Option<Value> {
-    use std::io::{BufRead, BufReader, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
-    let _ = stream.set_read_timeout(Some(HOLDER_PROBE_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(HOLDER_PROBE_TIMEOUT));
-    stream
-        .write_all(br#"{"id":1,"verb":"list_sessions"}"#)
-        .ok()?;
-    stream.write_all(b"\n").ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    let value: Value = serde_json::from_str(line.trim()).ok()?;
-    (value.get("ok") == Some(&Value::Bool(true))).then_some(value)
-}
-
-// ---------------------------------------------------------------------------
 // Unix-only bind/cleanup helpers
 // ---------------------------------------------------------------------------
 
@@ -2230,61 +2105,7 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::row_names_the_holder;
-    use super::same_journal;
     use super::*;
-
-    /// The one-holder lookup compares the journal file, not only the user-chosen session id: two
-    /// session directories may hold the same id, and only the one a hub holds is refused.
-    #[test]
-    fn the_same_journal_needs_the_same_file_not_only_the_id() {
-        let root = std::env::temp_dir().join(format!("radian-journal-{}", std::process::id()));
-        let a = root.join("a");
-        let b = root.join("b");
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        let shared_a = a.join("shared.jsonl");
-        let shared_b = b.join("shared.jsonl");
-        std::fs::write(&shared_a, b"").unwrap();
-        std::fs::write(&shared_b, b"").unwrap();
-        assert!(same_journal(&shared_a, &shared_a));
-        assert!(
-            !same_journal(&shared_a, &shared_b),
-            "the same id in another session directory is another journal"
-        );
-        assert!(!same_journal(&shared_a, &a.join("other.jsonl")));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// A row with no `journal` field — an older process, or a stand-in hub — is still the
-    /// holder of the requested id; it must not read as "no holder". A row that does report a
-    /// journal keeps the exact-file rule.
-    #[cfg(unix)]
-    #[test]
-    fn a_row_without_a_journal_is_matched_by_the_session_id() {
-        let wanted = std::path::Path::new("/tmp/sessions/shared.jsonl");
-        let bare = serde_json::json!({ "id": "shared", "kind": "main", "holder": "hub" });
-        assert!(row_names_the_holder(&bare, "shared", wanted));
-        assert!(!row_names_the_holder(&bare, "other", wanted));
-        let elsewhere = serde_json::json!({
-            "id": "shared",
-            "kind": "main",
-            "holder": "hub",
-            "journal": "/tmp/elsewhere/shared.jsonl",
-        });
-        assert!(
-            !row_names_the_holder(&elsewhere, "shared", wanted),
-            "a reported journal keeps the exact-file rule"
-        );
-        let same = serde_json::json!({
-            "id": "shared",
-            "kind": "main",
-            "holder": "hub",
-            "journal": "/tmp/sessions/shared.jsonl",
-        });
-        assert!(row_names_the_holder(&same, "shared", wanted));
-    }
 
     /// `close` is one of the owner verbs and needs the hook: a missing or wrong token returns
     /// the owner error and asks the host for nothing; a host with no hook refuses it; a valid
@@ -2766,7 +2587,6 @@ mod tests {
             projection: Weak::new(),
             model: Weak::new(),
             jobs: None,
-            hub_held: false,
             close,
         }
     }

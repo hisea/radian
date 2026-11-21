@@ -165,8 +165,8 @@ pub struct PendingQueue<Req, Resp> {
     /// [`PendingQueue::watch_hub_answers`] receiver**. The UI reads this to explain a popup
     /// that closed without it (ADR 0035); only a successful answer is recorded, so a late
     /// answer leaves nothing. A host with no reader has no UI to explain anything to: nothing
-    /// is recorded, so the list cannot grow for the life of the process (a hub-held
-    /// `radian exec` never runs the TUI's wake task).
+    /// is recorded, so the list cannot grow for the life of the process (only the TUI
+    /// runs the wake task).
     answered_from_hub: Mutex<Vec<u64>>,
     /// One receiver per UI that reads hub answers. `()` is never read: the receiver count is
     /// the whole point, so an absent UI costs the queue nothing.
@@ -260,8 +260,7 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
     /// [`PendingQueue::answer`] for the control port's owner `answer`: a successful id is
     /// also recorded for [`PendingQueue::take_answered_from_hub`], so the TUI can say that the
     /// hub answered a popup it was showing. The id is recorded only while a UI holds a
-    /// [`PendingQueue::watch_hub_answers`] receiver: a host with no UI (a hub-held `radian
-    /// exec`) records nothing. The queue is still the arbiter: a late answer is
+    /// [`PendingQueue::watch_hub_answers`] receiver: a host with no UI records nothing. The queue is still the arbiter: a late answer is
     /// [`Answered::Late`], records nothing, and changes nothing.
     pub fn answer_from_hub(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
         self.answer_inner(request_id, response, true)
@@ -309,7 +308,7 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
     /// Makes this queue remember the ids the control port answers, for
     /// [`PendingQueue::take_answered_from_hub`]. Hold the receiver for as long as the UI can
     /// read them: the TUI's queue-wake task holds one for its whole life. Until one exists,
-    /// `answer_from_hub` records nothing, so a host with no UI (a hub-held `radian exec`)
+    /// `answer_from_hub` records nothing, so a host with no UI
     /// keeps no ids.
     pub fn watch_hub_answers(&self) -> watch::Receiver<()> {
         self.hub_answer_readers.subscribe()

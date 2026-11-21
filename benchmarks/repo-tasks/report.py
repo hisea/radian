@@ -115,7 +115,7 @@ def _journal_metrics(run: dict) -> dict | None:
 
 
 def _result(run: dict) -> str:
-    """One run's outcome: timeout, failed, checks-fail, review-fail, pass, no-check."""
+    """One run's outcome: timeout, failed, checks-fail, pass, no-check."""
     if run.get("timed_out") or run.get("status") == "timeout":
         return "timeout"
     if run.get("status") == "failed":
@@ -123,9 +123,6 @@ def _result(run: dict) -> str:
     checks = run.get("checks")
     if checks is not None and not checks.get("checks_ok", False):
         return "checks-fail"
-    review = run.get("review")
-    if review is not None and not review.get("review_ok", False):
-        return "review-fail"
     if checks is not None and checks.get("checks_ok", False):
         return "pass"
     if run.get("status") == "failed":
@@ -150,7 +147,6 @@ def collect(runs_dir: Path, source=None) -> list[dict]:
         out = path.parent
         data["dir"] = str(out)
         data["checks"] = _json(out / "checks.json")
-        data["review"] = _json(out / "review.json")
         data["metrics"] = _journal_metrics(data)
         data["result"] = _result(data)
         data["leak"] = leak.scan_run(out, source)
