@@ -7,8 +7,8 @@
 //! `<out-dir>/llms-full.txt` (every page's Markdown) and `<out-dir>/sitemap.xml`. A broken
 //! inter-page link fails the build with the source page
 //! and the link; a page holding raw HTML is reported on stderr (the HTML is escaped in the
-//! output). It also splits the two bilingual source pages `site/index.html` and
-//! `site/arc.html` into `index.html`, `arc.html`, `zh/index.html` and `zh/arc.html`.
+//! output). It also splits the bilingual source page `site/index.html`
+//! into `index.html` and `zh/index.html`.
 
 use std::path::PathBuf;
 

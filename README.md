@@ -17,9 +17,9 @@
 # radian
 
 radian is a fast, efficient coding agent in one Rust binary.
-Built into the same binary is **arc**, which turns a request into tasks, runs each task with its own radian worker, and merges only what passes a fixed gate.
+Planning, task orchestration, gates and review live in [operad](https://github.com/operad-io/operad), which drives radian through `radian exec`.
 
-[radian](#radian-the-coding-agent) · [arc](#arc-the-orchestrator) · [Install](#install) · [Docs](#docs)
+[radian](#radian-the-coding-agent) · [operad](#operad-planning-and-orchestration) · [Install](#install) · [Docs](#docs)
 
 ## radian: the coding agent
 
@@ -50,50 +50,11 @@ A project can save `workspace` for itself, and a project setting can only narrow
 `full` does not defend against prompt injection from an unfamiliar repository: for a boundary use `workspace`, a container, or a dedicated OS user.
 Details: [`docs/user/permissions.md`](docs/user/permissions.md).
 
-## arc: the orchestrator
+## operad: planning and orchestration
 
-arc (`radian arc`) is a plan and task orchestrator.
-It keeps a plan and its tasks as files in your repository, starts one headless `radian` worker for each task, and merges only what passes the gate.
-arc is a program, not a model: a lead session writes the plan, and you decide what runs and what merges.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-en.gif">
-    <img src=".github/readme/arc-en.gif" alt="the arc TUI: the plans page, a task's worker conversation, brief, diff and attempts, then the board" width="820">
-  </picture>
-  <br><sub>The arc TUI on this repository's own backlog: the plans, one task's conversation, brief, diff and attempts, then the board.</sub>
-</p>
-
-How a request moves:
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/readme/arc-flow-en-dark.png">
-    <img src=".github/readme/arc-flow-en-light.png" alt="arc: one task from request to merge" width="820">
-  </picture>
-  <br><sub>One task from request to merge, as this repository runs it: the gate shown (fmt, clippy, tests) is this repository's own.</sub>
-</p>
-
-
-1. A lead (Claude Code or the radian TUI) writes a plan and its tasks through arc's MCP server, `radian arc mcp`. The lead cannot confirm, start or merge anything.
-2. You confirm the plan. With the plan's `auto` level at `off` you start each task yourself; at `run` arc starts a task once the tasks it waits for are merged.
-3. Each task runs as a separate headless `radian exec` worker, in its own git worktree, on its own branch, with its own session journal.
-4. The gate checks the pushed commit: the commands you configure, optionally a read-only review session, and your approval. A failed stage sends the task back for rework.
-5. A task that passes is merged into your remote main by `radian arc merge`, or by arc itself when the plan's `auto` level is `merge`. If the branch moved after the gate, the approval is void and the task is verified again.
-
-Every task and plan records its cost, and each can carry a cost and wall-time budget.
-The TUI shows the plans, a board that groups open tasks by who acts next (todo, doing, verifying, needs you), each task's conversation, brief, diff and attempts, and the merge page.
-
-```sh
-radian arc init                        # in your repository: the layout, and four checks
-claude mcp add arc -- radian arc mcp   # register arc with a lead (Claude Code here)
-radian arc                             # open the arc TUI
-```
-
-arc needs a git working tree with an `origin` remote you can push the main branch to.
-`radian arc init` checks the credential, the remote, a dry-run push and the sandbox, and warns about each one that fails.
-The gate's commands go in `.radian/arc/config.toml`.
-The commands, the gate, how the integration candidate is built and pushed, and the files arc keeps are in [`docs/user/arc/index.md`](docs/user/arc/index.md), [`arc/integration.md`](docs/user/arc/integration.md), [`arc/gate.md`](docs/user/arc/gate.md), [`arc/files.md`](docs/user/arc/files.md), [`arc/mcp.md`](docs/user/arc/mcp.md) and [`arc/tui.md`](docs/user/arc/tui.md).
+Planning, task orchestration, gates and review now live in [operad](https://github.com/operad-io/operad), a separate program.
+operad drives radian through `radian exec`: it starts one headless worker for each task, runs the gate, and merges only what passes.
+radian itself stays a coding agent: the terminal interface, `radian exec`, and the tools around them.
 
 ## Install
 
