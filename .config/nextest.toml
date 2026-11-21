@@ -346,7 +346,7 @@ not (
   | test(=hooks::tests::workspace_runs_the_hook_sandboxed)
   | test(=profile::tests::the_workspace_tier_asks_for_writable_except_exec)
   | test(=pty_a_session_dir_above_the_workspace_is_refused_and_leaves_no_session)
-  | test(=a_worker_commits_in_a_linked_worktree_nested_inside_its_repository)
+  | test(=a_command_commits_in_a_linked_worktree_nested_inside_its_repository)
   | test(=workspace_write_is_compatible_with_the_common_commands)
   | test(=linked_worktree_outside_the_workspace_allows_native_git)
   | test(=linked_worktree_outside_the_workspace_denies_exec_and_non_git_paths)
