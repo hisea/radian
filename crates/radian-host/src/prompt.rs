@@ -854,8 +854,8 @@ mod tests {
         let first = docs_index();
         assert_eq!(first, docs_index(), "byte-stable");
         assert!(
-            first.contains("arc/loop"),
-            "the arc pages are indexed by their path under docs/user/: {first}"
+            first.contains("commands"),
+            "the pages are indexed by their path under docs/user/: {first}"
         );
         // ADR 0015 rule: ascii bytes / 4 rounded up, plus one per non-ascii char.
         let ascii = first.bytes().filter(|b| *b < 128).count() as u64;

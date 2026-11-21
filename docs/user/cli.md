@@ -191,43 +191,6 @@ The waiting Stop verdicts are counted in `unhandled_stop_notices`; `unhandled_jo
 It accepts the conversation flags above with the same names and meanings, without `-p`, `--output`, `--yes`, and the print-and-exit modes.
 The one-session rule, the protocol methods, the `_meta.radian.*` fields, the permission and `ask_user` mapping, the stdio-only `mcpServers`, and the non-interactive trust gate are on [`acp`](acp.md).
 
-## `radian arc`
-
-`radian arc` is the plan and task orchestrator.
-A bare `radian arc` opens its TUI (plans, board, task and merge pages, with the owner's actions); a subcommand runs one CLI operation.
-The subcommands are `init`, `add`, `list`, `show`, `adopt`, `confirm`, `auto`, `pause`, `start`, `cancel`, `reset-budget`, and `mcp`; run `radian arc --help`.
-arc's exit codes are its own: `3` means the state does not allow the operation and `4`
-means a lock is held.
-See [`arc`](arc/index.md) for the overview, the subcommand list and the exit codes, [`arc/planning`](arc/planning.md), [`arc/running`](arc/running.md) and [`arc/owner`](arc/owner.md) for every subcommand's arguments and flags, [`arc/hooks`](arc/hooks.md) for the `[hooks]` points, [`arc/integration`](arc/integration.md) for how the merge builds and pushes the integration candidate, [`arc/loop`](arc/loop.md) for the scheduling loop and `loop.log`, [`arc/gate`](arc/gate.md), [`arc/gate-review`](arc/gate-review.md) and [`arc/gate-failures`](arc/gate-failures.md) for the gate, its review stage and its failures, [`arc/mcp`](arc/mcp.md) for the lead's MCP server, [`arc/files`](arc/files.md) for every file field, [`arc/config`](arc/config.md) for every configuration key, and [`arc/tui`](arc/tui.md) for the TUI and its owner's actions.
-
-```sh
-radian arc init
-radian arc add plan --slug first --title "First plan" < request.txt
-radian arc list --json
-radian arc confirm PL0001-first
-radian arc auto PL0001-first run
-radian arc start TK0001-first-work
-radian arc cancel TK0001-first-work
-radian arc reset-budget TK0001-first-work
-```
-
-## `radian hub`
-
-`radian hub` manages the repository registry one hub process schedules (`~/.radian/hub/repos.toml`), serves that hub's HTTP API on `<hub.bind>:<hub.port>` (loopback by default), runs the scheduling loop, and prints or rotates the bearer token every request carries.
-A bare `radian hub` serves the HTTP API and schedules every registered repository until it is stopped; its first stdout line is `hub: listening on <addr>:<port>`, an IPv6 address in brackets.
-A bind that is not loopback prints one warning line on stderr at startup: the bearer token and every request travel unencrypted on that network, and `tailscale serve` or an ssh forward is the encrypted way.
-The registry file, every subcommand, the pairing and token rules, every route and the loop are on [`arc/hub`](arc/hub.md).
-
-| Subcommand | Arguments | What it does |
-|---|---|---|
-| `add <PATH>` | `--name <NAME>` (default: the directory's base name) | Register a directory that has a `.radian/arc/`. It prints `added <name>  <path>`. |
-| `remove <NAME>` | — | Remove a registered repository. It prints `removed <name>`. |
-| `list` | `--json` | Print one line per repository (`name  path`), or a JSON array of `{name, path}`. |
-| `pair` | `--url <URL>`, `--no-qr` | Print the URL, the token, and a QR code for a client (text only off a terminal or with `--no-qr`). `--url` puts a reachable address in the code, as in `--url https://mac.example.ts.net` for `tailscale serve`. |
-| `token rotate` | — | Write a new token and print `rotated`; the old token fails on the next request. |
-
-A registry or startup error exits `1`; a usage error exits `2`.
-
 ## `radian login` and `radian logout`
 
 `radian login [PROVIDER]` stores an API key in `~/.radian/credentials/auth.json`.
@@ -371,9 +334,7 @@ radian footer export pi
 
 ## `radian docs`
 
-radian ships two manuals: the radian manual (every page outside `arc/`) and the arc manual (every page under `arc/`).
-Each has its own size budget, so the arc pages never crowd out the radian pages.
-`radian docs` prints one line per radian-manual page, `topic: description`, in table order, then exactly one `arc: <description>` line for the arc manual's index.
+`radian docs` prints one line per manual page, `topic: description`, in table order.
 These are its exact lines, in order:
 
 ```text
@@ -401,42 +362,16 @@ subagent-and-jobs: Run helper sessions and background shell jobs.
 themes: Write a color theme from scratch, import one, and shape the status line.
 tools: The built-in file tools: `read`'s text, directory and image branches with its limits and error codes, and `grep`'s arguments, defaults and caps.
 troubleshooting: Fix common setup, network, and session problems.
-arc: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
-```
-
-`radian docs arc` prints one line per arc-manual page, `arc/<stem>: description`, in table order, with no `arc` line of its own.
-These are its exact lines, in order:
-
-```text
-arc/config: The config.toml keys: every key, its type, default, allowed values and when it takes effect.
-arc/files: The files arc keeps: plan and task files, the worker brief, and the .radian/arc/ layout.
-arc/flows: What an arc flow is: the two-flow example, how a task picks one, the two concurrency limits, binary deliverables, and the five questions every flow answers.
-arc/gate-failures: The gate's failure classes, the retry rules, the budget, and the worker, conflict and moved-branch waits.
-arc/gate-review: The gate's review stage: its prompt and verdict, the rework round, a failed review, the follow-up and a wait on an unavailable model.
-arc/gate: The arc gate: the stage overview, a gate for this repository, and reconcile.
-arc/hooks: The `[hooks]` points, their rules and their environment.
-arc/hub: The hub: its HTTP API on a configurable address (loopback by default), pairing and the bearer token, every route, the repo sessions it reads, the repository registry, the scheduling loop, and the `[hub]` configuration keys.
-arc/index: The arc manual: the overview, the page map, the subcommand list, and the exit codes.
-arc/integration: How the merge builds the integration candidate and gets it onto the target branch: the styles, the key commands, the push, the command method and the checks.
-arc/loop: The arc scheduling loop: one pass, its output and loop.log, the hub, and its signals.
-arc/mcp: The lead's MCP server: registering it, its tools and its tool errors.
-arc/owner: The owner's commands: confirm, auto, priority, pause, merge and reject.
-arc/planning: The commands that write plans and tasks: init, add, list, show and adopt.
-arc/running: The commands that run a task: start, cancel, reset-budget and reverify.
-arc/tui: The arc TUI: the plans, board, task and merge pages, every mark and key, and the owner's actions.
-arc/worker: arc's worker: the session, the brief, the steps before an attempt, the limits, the checks after it exits, and another agent as the worker.
 ```
 
 `radian docs <topic>` prints that page verbatim, the same text the agent reads.
-The topic is a page stem (`commands`), a path under the manual (`arc/loop`), or a file name (`commands.md`, `arc/loop.md`).
-`radian docs index` opens the radian manual's index and `radian docs arc/index` (or `radian docs arc/`) opens the arc manual's.
+The topic is a page stem (`commands`) or a file name (`commands.md`).
+`radian docs index` opens the manual's index.
 An unknown topic exits `2` and lists the pages on stderr.
 
 ```sh
 radian docs
-radian docs arc
 radian docs cli
-radian docs arc/loop
 ```
 
 ## `radian attach`

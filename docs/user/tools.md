@@ -31,7 +31,7 @@ When a read stops before the end of the file (an explicit `limit`, the default 2
 A directory read lists `kind`, size and name rows, sorted by name.
 `radian://docs/<page>.md` reads a manual page from memory.
 A manual page read with no `max_bytes` uses a 65536-byte budget and no line limit, so a page reads whole.
-A path that names a directory reads its `index.md` (`radian://docs/arc/`).
+A path that names a directory reads its `index.md` (`radian://docs/<dir>/`).
 
 ### Images
 

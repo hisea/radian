@@ -180,27 +180,6 @@ fn every_hook_run_end_appears_in_the_manual() {
     }
 }
 
-/// Every `board_column` name `BoardColumn::as_str` writes appears in the manual: the `list
-/// --json`/`show --json` field list and the hub's route page. The source is
-/// [`radian_arc::board::BoardColumn::ALL`], the one list the serializer and the arc TUI read.
-#[test]
-fn every_board_column_appears_in_the_manual() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let planning = std::fs::read_to_string(manifest.join("../../docs/user/arc/planning.md"))
-        .expect("planning.md exists");
-    let hub = std::fs::read_to_string(manifest.join("../../docs/user/arc/hub.md"))
-        .expect("hub.md exists");
-    for column in radian_arc::board::BoardColumn::ALL {
-        for (name, text) in [("planning.md", &planning), ("hub.md", &hub)] {
-            assert!(
-                text.contains(&format!("`{}`", column.as_str())),
-                "board column `{}` is missing from {name}",
-                column.as_str()
-            );
-        }
-    }
-}
-
 /// Every theme role the loader knows appears in `docs/user/themes.md`.
 ///
 /// The source is [`radian_tui::theme::Role::ALL`], the same table the loader parses
@@ -543,18 +522,12 @@ fn docs_topics_match_embedded_pages() {
     assert!(radian_coding::docs::lookup_topic("nope").is_none());
 }
 
-/// `radian docs` prints one line per radian-manual page, then exactly one `arc` line;
-/// a topic prints the page verbatim.
+/// `radian docs` prints one line per manual page; a topic prints the page verbatim.
 #[test]
-fn radian_docs_prints_the_radian_manual_and_the_arc_entry() {
+fn radian_docs_prints_the_manual_and_a_topic_prints_its_page() {
     let bin = env!("CARGO_BIN_EXE_radian");
-    let arc_index = radian_coding::docs::find(radian_coding::docs::Manual::Arc.index())
-        .expect("arc/index.md is embedded");
     let expected: Vec<String> = radian_coding::docs::pages_of(radian_coding::docs::Manual::Radian)
         .map(|(name, text)| radian_coding::docs::topic_line(name, text))
-        .chain(std::iter::once(radian_coding::docs::topic_line(
-            "arc", arc_index,
-        )))
         .collect();
     let index = std::process::Command::new(bin)
         .arg("docs")
@@ -564,20 +537,8 @@ fn radian_docs_prints_the_radian_manual_and_the_arc_entry() {
     assert_eq!(
         String::from_utf8_lossy(&index.stdout),
         format!("{}\n", expected.join("\n")),
-        "radian docs lists the radian manual and one arc entry"
+        "radian docs lists every manual page"
     );
-    // No arc page is also listed under its own topic.
-    for (name, _) in radian_coding::docs::DOCS {
-        if radian_coding::docs::manual_of(name) == radian_coding::docs::Manual::Arc {
-            let topic = radian_coding::docs::topic(name);
-            assert!(
-                !expected
-                    .iter()
-                    .any(|line| line.starts_with(&format!("{topic}:"))),
-                "`radian docs` does not list {topic} as a radian topic"
-            );
-        }
-    }
     // A topic prints the page verbatim (the same table `read` uses).
     let page = std::process::Command::new(bin)
         .arg("docs")
@@ -590,74 +551,8 @@ fn radian_docs_prints_the_radian_manual_and_the_arc_entry() {
     assert_eq!(body, *expected, "page bytes match the table");
 }
 
-/// `radian docs arc` lists every arc-manual page; `arc/<stem>` reads that page, and
-/// `arc/index` (or `arc/`) still opens the arc index.
-#[test]
-fn radian_docs_lists_the_arc_manual_and_reads_nested_pages() {
-    let bin = env!("CARGO_BIN_EXE_radian");
-    let expected: Vec<String> = radian_coding::docs::pages_of(radian_coding::docs::Manual::Arc)
-        .map(|(name, text)| radian_coding::docs::topic_line(name, text))
-        .collect();
-    let listing = std::process::Command::new(bin)
-        .args(["docs", "arc"])
-        .output()
-        .expect("radian docs arc runs");
-    assert!(listing.status.success(), "{listing:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&listing.stdout),
-        format!("{}\n", expected.join("\n")),
-        "radian docs arc lists every arc page"
-    );
-    let (_, index_page) = radian_coding::docs::lookup_topic("arc").expect("arc opens its index");
-    assert_ne!(
-        String::from_utf8_lossy(&listing.stdout),
-        *index_page,
-        "`radian docs arc` is a listing, not the index page"
-    );
-    // `arc/index` and the directory spelling still open the index page.
-    for topic in ["arc/index", "arc/", "arc/index.md"] {
-        let output = std::process::Command::new(bin)
-            .args(["docs", topic])
-            .output()
-            .expect("radian docs runs");
-        assert!(output.status.success(), "{topic}: {output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            *index_page,
-            "{topic} opens arc/index.md"
-        );
-    }
-    // Every page under arc/ reads by its path through the same door, both spellings.
-    for (name, text) in radian_coding::docs::pages_of(radian_coding::docs::Manual::Arc) {
-        for topic in [radian_coding::docs::topic(name), *name] {
-            let output = std::process::Command::new(bin)
-                .args(["docs", topic])
-                .output()
-                .expect("radian docs runs");
-            assert!(output.status.success(), "{topic}: {output:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stdout),
-                *text,
-                "{topic} prints docs/user/{name}"
-            );
-        }
-    }
-    // The old prefixed name is not kept as an alias.
-    let missing = std::process::Command::new(bin)
-        .args(["docs", "arc-loop"])
-        .output()
-        .expect("radian docs arc-loop runs");
-    assert_eq!(missing.status.code(), Some(2), "{missing:?}");
-    let err = String::from_utf8_lossy(&missing.stderr);
-    assert!(
-        err.contains("unknown docs topic `arc-loop`") && err.contains("arc/loop"),
-        "the refusal names the topic and lists the new path: {err}"
-    );
-}
-
-/// `cli.md` states the exact `radian docs` output in two `text` blocks: the radian-manual
-/// topics with the single `arc` entry, then the arc-manual topics. The binary prints exactly
-/// those lines, in that order.
+/// `cli.md` states the exact `radian docs` output in one `text` block. The binary prints
+/// exactly those lines, in that order.
 #[test]
 fn the_manual_states_the_exact_radian_docs_output() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -666,26 +561,19 @@ fn the_manual_states_the_exact_radian_docs_output() {
     let blocks = fenced_blocks(radian_docs_section(&cli_md), "text");
     assert_eq!(
         blocks.len(),
-        2,
-        "the `radian docs` section has two `text` blocks: the radian listing and the arc listing"
+        1,
+        "the `radian docs` section has one `text` block: the listing"
     );
-    let bin = env!("CARGO_BIN_EXE_radian");
-    for (args, documented) in [
-        (&["docs"][..], &blocks[0]),
-        (&["docs", "arc"][..], &blocks[1]),
-    ] {
-        let output = std::process::Command::new(bin)
-            .args(args)
-            .output()
-            .expect("radian docs runs");
-        assert!(output.status.success(), "radian {args:?}: {output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            *documented,
-            "cli.md states the exact output of `radian {}`",
-            args.join(" ")
-        );
-    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_radian"))
+        .arg("docs")
+        .output()
+        .expect("radian docs runs");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        blocks[0],
+        "cli.md states the exact output of `radian docs`"
+    );
 }
 
 /// An unknown topic exits 2 and lists the pages.
@@ -707,10 +595,6 @@ fn radian_docs_unknown_topic_exits_two_and_lists_pages() {
         let topic = radian_coding::docs::topic(name);
         assert!(topics.contains(&topic), "stderr lists {topic}: {err}");
     }
-    assert!(
-        topics.contains(&"arc"),
-        "stderr lists the `arc` topic that maps the arc manual: {err}"
-    );
 }
 
 /// The commands of the `## Verify` block in `AGENTS.md`, in order.

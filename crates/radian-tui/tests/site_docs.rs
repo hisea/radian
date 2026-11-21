@@ -9,7 +9,7 @@ use radian_tui::site_docs::{
 use std::collections::HashSet;
 
 /// The hand-written source pages and the canonical URL each must name (`None` for the
-/// 404 page, which is `noindex` instead). The two bilingual sources name the English URL;
+/// 404 page, which is `noindex` instead). The bilingual source names the English URL;
 /// the split pages hold the rest.
 const SOURCE_PAGES: [(&str, Option<&str>); 2] = [
     ("index.html", Some("https://getrad.dev/")),
@@ -352,42 +352,6 @@ fn a_link_to_a_missing_page_fails_the_build() {
     assert!(
         error.to_string().contains("a.md") && error.to_string().contains("missing.md"),
         "the failure names the source and the link: {error}"
-    );
-}
-
-/// An arc page renders at `arc/<page>.html` and reaches the site root's assets from its own
-/// directory.
-#[test]
-fn an_arc_page_renders_in_its_subdirectory() {
-    let site = site();
-    let index = site
-        .pages
-        .iter()
-        .position(|page| page.stem == "arc/gate")
-        .expect("arc/gate renders");
-    assert_eq!(
-        radian_tui::site_docs::output_path(&site.pages[index].stem),
-        "arc/gate.html"
-    );
-    let html = radian_tui::site_docs::page_html(&site, index);
-    assert!(
-        html.contains("<link rel=\"stylesheet\" href=\"../../docs.css\">"),
-        "an arc page's stylesheet link resolves from arc/: {html}"
-    );
-    assert!(
-        html.contains("href=\"../../favicon.svg\""),
-        "an arc page's icon link resolves from arc/: {html}"
-    );
-    // The root pages still reach the same assets one level up.
-    let root = site
-        .pages
-        .iter()
-        .position(|page| page.stem == "index")
-        .expect("index renders");
-    let root_html = radian_tui::site_docs::page_html(&site, root);
-    assert!(
-        root_html.contains("<link rel=\"stylesheet\" href=\"../docs.css\">"),
-        "a root page's asset link: {root_html}"
     );
 }
 

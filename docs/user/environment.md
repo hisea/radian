@@ -86,13 +86,9 @@ See `mcp` and `configuration` for those rules.
 |---|---|
 | `~/.radian/config/config.toml` (or `$RADIAN_HOME`, `--config`, `RADIAN_CONFIG`) | Every configuration key. See `configuration`. A missing file is an empty configuration. |
 | `~/.radian/credentials/auth.json` | Every stored key, including every `keys[]` item. A missing entry refuses the run and points at `radian login`. The file is `0600`; wide permissions warn. |
-| `~/.radian/hub/repos.toml` | The hub's repository registry: a running `radian hub` re-reads it every `[hub] interval_secs`, `radian hub list` reads it, and `radian hub add` and `remove` write it. A missing file is an empty registry. See `arc/hub`. |
-| `~/.radian/hub/hub.lock` | The flock a running `radian hub` holds with its pid inside. Its presence and holder make a second `radian hub` exit `1` and make the arc TUI start no hub. `radian hub` creates it; nothing else writes it. See `arc/hub`. |
-| `~/.radian/hub/token` | The hub's bearer token, `0600`, created by `radian hub` on its first start or by `radian hub pair`. Every HTTP request must carry it; `radian hub token rotate` replaces it and the old token fails on the next request. A control-port request may also carry it: the request is then the owner's (`User`, with `via: hub` in the message metadata) and it opens the `pending`, `answer`, `config`, `models` and `close` verbs. See `control`. |
+| `~/.radian/hub/token` | The owner token the control port checks, read on every request. A control-port request that carries it is the owner's (`User`, with `via: hub` in the message metadata) and it opens the `pending`, `answer`, `config`, `models` and `close` verbs. Nothing in radian creates the file. See `control`. |
 | `~/.radian/trust/trust.json` | Your remembered per-project trust choices. Confirming the trust prompt writes it. |
 | `~/.radian/sessions/` (or `--session-dir`, `RADIAN_SESSION_DIR`) | The session files `--resume`, `--list`, `--search`, `--export`, `--fork`, and `attach` read. |
 | `<workspace>/.radian/config.toml` | May only narrow the tier (`[permissions] profile = "workspace"`). Wider values, `[sandbox]` keys, and other keys are refused or skipped by name. |
 | `<workspace>/.mcp.json` | Project MCP servers. Loads only when you trust the project; `--trust` or `--no-trust` overrides for one run. Credential variables are blanked wherever they appear in it. |
 | `~/.radian/themes/` | Theme files `tui.theme` names. Missing names warn and fall back to `dark`. |
-| `<repository>/.radian/arc/config.toml` | arc's settings: the remote, the main branch, the limits, and the gate profiles. Written by `radian arc init`, which keeps an existing file. See `arc/config`. |
-| `<repository>/.radian/arc/plans/`, `tasks/` | The plan and task files every arc subcommand reads. You change them through `radian arc`, or with `radian arc adopt` after a hand edit. See `arc/files`. |

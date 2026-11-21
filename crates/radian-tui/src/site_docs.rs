@@ -5,7 +5,7 @@
 //! web manual and `radian docs` can never drift apart. Markdown becomes HTML with
 //! `pulldown-cmark` (tables, strikethrough, heading attributes); raw HTML in a page is
 //! escaped, never passed through. A page's output path is its name under `docs/user/`
-//! (`arc/loop.md` -> `arc/loop.html`), and its asset and page links resolve from that
+//! (`dir/page.md` -> `dir/page.html`), and its asset and page links resolve from that
 //! page's own directory. Links between pages (`foo.md`, `../foo.md`, `foo.md#bar`)
 //! resolve from the source page's directory, as GitHub renders them, and fail the build
 //! when the target page or heading does not exist; relative links out of the manual become
@@ -136,9 +136,9 @@ pub struct DocHeading {
 /// One rendered page.
 #[derive(Debug, Clone)]
 pub struct RenderedPage {
-    /// The file name in `DOCS` (`commands.md`, `arc/loop.md`).
+    /// The file name in `DOCS` (`commands.md`).
     pub name: String,
-    /// The stem (`commands`, `arc/loop`); `index` for the landing page.
+    /// The stem (`commands`); `index` for the landing page.
     pub stem: String,
     /// The first `# ` heading's plain text.
     pub title: String,
@@ -354,7 +354,7 @@ fn toc_into(page: &RenderedPage, out: &mut String) {
 }
 
 /// The output file for a page stem: `index.html` for the landing page, `<stem>.html` for
-/// every other page (`arc/loop` -> `arc/loop.html`, `arc/index` -> `arc/index.html`).
+/// every other page (`dir/page` -> `dir/page.html`).
 pub fn output_path(stem: &str) -> String {
     if stem == "index" {
         "index.html".to_owned()

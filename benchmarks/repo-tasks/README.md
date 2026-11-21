@@ -1,7 +1,7 @@
 # Fixed repository task set
 
 A fixed set of real tasks from this repository's own arc history, with a runner,
-crate-scoped checks, a review and a report. It exists so two A/B rounds can be
+crate-scoped checks and a report. It exists so two A/B rounds can be
 compared: the tasks, the base shas and the column definitions stay fixed, and the
 only thing a round changes is an arm.
 
@@ -26,12 +26,10 @@ repository it reads from.
 | `arms/<name>.md` | One arm: `agent`, `provider`, `model`, `extra` (the agent's own flags) |
 | `run.sh` | One run: run tree, agent, wall-time cap, `change.diff`, session, `run.json`, `leak.json` |
 | `check.sh` | The task's crate-scoped fmt, clippy and nextest; `checks.json` and `checks.log` |
-| `review.sh` | arc's first-review prompt on `change.diff`, run by `arms/reviewer.md`; `review.json` |
-| `prompt.py` | Builds that prompt by reading `crates/radian-arc/src/gate/review.rs` and `verdict.rs` |
-| `timeout_run.py` | The portable wall-time cap the runner and the review use |
+| `timeout_run.py` | The portable wall-time cap the runner uses |
 | `report.py` | Per-task, totals and baseline-ratio tables from each run's session |
 | `leak.py` | Whether a run reached the task's later commits: its leak level and `leak.json` |
-| `eval.sh` | One arm end to end: every task, every k, checks, optional review, report |
+| `eval.sh` | One arm end to end: every task, every k, checks, report |
 | `lib.py` | The task and arm file readers, the run root and the run tree (also the CLI the shell scripts use) |
 | `tests/test_repo_tasks.py` | The tests; no model is called |
 
@@ -45,14 +43,12 @@ benchmarks/repo-tasks/eval.sh full 1 2
 ```
 
 That runs every task twice for the `full` arm, checks each run, and prints the
-report. Add `REPO_TASKS_REVIEW=1` to also review each run, and
-`REPO_TASKS_BASELINE=<arm>` to print the ratios against an arm that already has
+report. Add `REPO_TASKS_BASELINE=<arm>` to print the ratios against an arm that already has
 runs. The individual steps are:
 
 ```sh
 bash benchmarks/repo-tasks/run.sh   full TK0226 1
 bash benchmarks/repo-tasks/check.sh full TK0226 1
-bash benchmarks/repo-tasks/review.sh full TK0226 1      # needs the reviewer's key
 python3 benchmarks/repo-tasks/report.py --baseline full
 ```
 
@@ -121,15 +117,13 @@ Environment inputs:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REPO_TASKS_SOURCE` | the repository of this script | the repository each tree's base is fetched from, and where `leak.py` looks up later shas; it is never written |
-| `REPO_TASKS_RUNS` | `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs` | the run root; `run.sh` refuses (exit 2) a run root inside any git checkout. `check.sh`, `review.sh` and `report.py` read the same default |
+| `REPO_TASKS_RUNS` | `${XDG_CACHE_HOME:-$HOME/.cache}/radian-repo-tasks/runs` | the run root; `run.sh` refuses (exit 2) a run root inside any git checkout. `check.sh` and `report.py` read the same default |
 | `REPO_TASKS_TIMEOUT` | `2700` | the wall-time cap in seconds (`timeout_run.py`) |
 | `REPO_TASKS_RADIAN_BIN` | `radian` | the radian binary |
 | `REPO_TASKS_PI_BIN` | `pi` | the pi binary |
 | `REPO_TASKS_CARGO` | `cargo` | the cargo binary the checks run |
 | `REPO_TASKS_MAX_JOBS` | unset | `--jobs` for clippy and nextest in the checks (never `cargo fmt`, which would pass it to rustfmt) |
 | `REPO_TASKS_TASKS_DIR` / `REPO_TASKS_ARMS_DIR` | `tasks` / `arms` | another task or arm set (tests) |
-| `REPO_TASKS_REVIEW_RS` | `crates/radian-arc/src/gate/review.rs` | the prompt source (tests) |
-| `REPO_TASKS_REVIEW` | `0` | `eval.sh` reviews each run when `1` |
 | `REPO_TASKS_BASELINE` | unset | `eval.sh` passes this to `report.py --baseline` |
 
 ### Checks
@@ -154,26 +148,6 @@ whatever the agent changed. Their results are `binary_ok` and `fixture_ok`
 (null when the tree has no such binary), and they do not enter `checks_ok`.
 `REPO_TASKS_MAX_JOBS` is passed as `--jobs` to clippy and nextest; `cargo fmt`
 takes no job option, and passing one after `--` would reach rustfmt.
-
-### Review
-
-`review.sh` runs `crates/radian-arc`'s first-review prompt: `prompt.py` reads
-`build_prompt` and `report_format` from `src/gate/review.rs` and `REVIEW_LEVELS`
-from `src/gate/verdict.rs`, so the text is the one arc writes, not a copy. The
-prompt holds the task, the brief, the base-head commits and the run's
-`change.diff`; it ends with arc's fenced `json` report. The reviewer is the
-arm-like `arms/reviewer.md` (read-only tools). A completed, exit-0 session that
-parses a report with no blocking item passes; a blocking item, an unparsable or
-incomplete report, a non-zero exit or a timeout exits 1 and is recorded in
-`review.json`. The report is read exactly as arc reads it: the last closed
-`json`/`jsonc` block, with a string `summary`, item lists for `blocking` and
-`suggestions`, a string list `verified`, and every item's `level` from arc's
-`REVIEW_LEVELS`.
-
-A radian reviewer's stdout is JSONL, where the answer is only an escaped string
-inside journal lines, so its report is read from the final assistant message in
-`review-session/`. A pi reviewer's stdout is the plain answer and is read
-directly.
 
 ## Columns
 
@@ -202,7 +176,7 @@ takes it from a `build_report` row like every other number: `journal`,
 file), `p50ms.<bucket>`, `p90ms.<bucket>`, `deterministic_compactions`,
 `rereads_after_compaction`, `rereads_after_compaction_max`, `retained_reads`,
 `compaction_seconds`, `compaction_wall_share` and `outcomes` (the tables' own
-`result` counts a run's outcome from `run.json`, `checks.json` and `review.json`, not a
+`result` counts a run's outcome from `run.json` and `checks.json`, not a
 journal's turn outcomes). Their definitions are in `journal_metrics.py` and in
 [the Terminal-Bench page](../terminal-bench/README.md#journal-metrics-extractor).
 
@@ -297,7 +271,7 @@ A task joins the set when it meets all four rules:
 
 1. **Merged.** The original arc task is on `main`; `base` is the commit its
    first attempt started from (from that task's merged history), and `outcome`
-   is the first attempt's result (`pass` = checks and review passed).
+   is the first attempt's result (`pass` = checks passed).
 2. **Passed first time.** The first attempt passed; a task that needed a rework
    measures the rework, not the agent.
 3. **One crate's change.** The original diff touches one crate (plus docs). This
@@ -306,7 +280,7 @@ A task joins the set when it meets all four rules:
    task per crate the round's change could touch, and no two tasks duplicate a
    crate's central path.
 
-Then copy the worker brief verbatim (the text `radian arc show <id>` prints,
+Then copy the worker brief verbatim (the task's brief,
 without any `## Rework` section) under `## Brief`, fill the five frontmatter
 fields, and put the crate names `check.sh` should run in `crates`. The crates are
 usually the crates the original diff touched plus `radian-coding` for the docs
@@ -322,13 +296,12 @@ python3 benchmarks/repo-tasks/report.py --self-test   # the same tests
 
 No test calls a model: `run.sh` is driven with a stub radian and a temporary git
 repository, `check.sh` with a stub cargo, the leak tests read small radian and
-pi fixture journals, and the report and prompt tests read the checked-in task
-files and the real arc source. The tests cover the run tree (one commit, no
+pi fixture journals, and the report tests read the checked-in task
+files. The tests cover the run tree (one commit, no
 ref, no later sha, a mid-history base, the agent's commits listed from base to
 head), the source's `.git/config` staying byte-identical, a run root inside the
 source, the caller's or another checkout being refused, every leak level in
 both journal formats (the run's own commit, a second history), a run with no
 journal, a level-2 run left out of the totals, an unknown arm/task naming the
 valid ones, a timeout staying in the report (also when `gtimeout`/`timeout`
-are absent), a baseline with no runs, a two-crate check with `--jobs`, the
-review parser and review pass rule, and a prompt built from `review.rs`.
+are absent), a baseline with no runs and a two-crate check with `--jobs`.
