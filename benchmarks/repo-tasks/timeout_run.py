@@ -8,7 +8,7 @@ scripts used to call the agent without a cap when neither `gtimeout` nor
 `timeout` was installed. This program is the cap everywhere: the command runs in
 its own process group, receives SIGTERM (to the whole group) when SECONDS
 elapse, and SIGKILL after `--kill-after` more seconds (default 30). Any run that
-reached the cap exits 124, like GNU `timeout`, so `run.sh` and `review.sh`
+reached the cap exits 124, like GNU `timeout`, so `run.sh` can
 record it as `timeout`; otherwise the command's own exit code passes through
 (128 + the signal when a signal ended it). A SIGINT or SIGTERM the wrapper
 itself receives is forwarded to the command's group (as GNU `timeout` does), so

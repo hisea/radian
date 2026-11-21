@@ -1,14 +1,13 @@
 #!/bin/bash
 # One arm end to end: eval.sh <arm> <k>...
 #
-# Runs every task in the fixed set k times, checks each run, optionally reviews
-# it, and writes the report. This is the one command the README gives for a
+# Runs every task in the fixed set k times, checks each run, and writes the report.
+# This is the one command the README gives for a
 # whole arm.
 #
 # Environment:
-#   REPO_TASKS_REVIEW=1   also run the review for each run
 #   REPO_TASKS_BASELINE   the arm the report's ratios divide by (default: none)
-#   plus every REPO_TASKS_* variable run.sh/check.sh/review.sh read.
+#   plus every REPO_TASKS_* variable run.sh/check.sh read.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -29,9 +28,6 @@ for task in $(python3 "$LIB" list-tasks); do
     echo "== $arm $task k=$k"
     bash "$HERE/run.sh" "$arm" "$task" "$k" || { fail=1; continue; }
     bash "$HERE/check.sh" "$arm" "$task" "$k" || fail=1
-    if [ "${REPO_TASKS_REVIEW:-0}" = "1" ]; then
-      bash "$HERE/review.sh" "$arm" "$task" "$k" || fail=1
-    fi
   done
 done
 

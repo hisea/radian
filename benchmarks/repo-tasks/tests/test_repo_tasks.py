@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the fixed repository task set's runner, checks, review prompt and
-report and leak scan. No test calls a model: the agents and cargo are stub
+"""Tests for the fixed repository task set's runner, checks, report and leak scan. No test calls a model: the agents and cargo are stub
 scripts, the run trees come from a temporary repository, and the leak tests read
 small fixture journals.
 
@@ -32,7 +31,6 @@ sys.path.insert(0, str(ROOT))
 import journal_metrics  # noqa: E402
 import leak  # noqa: E402
 import lib  # noqa: E402
-import prompt  # noqa: E402
 import report  # noqa: E402
 
 TASK_FIELDS = ("id", "slug", "base", "outcome", "crates")
@@ -241,22 +239,6 @@ fi
 exit 0
 """
 
-VALID_REPORT = (
-    "```json\n"
-    '{"summary": "fine", "blocking": [], "suggestions": [], "verified": []}\n'
-    "```\n"
-)
-
-
-def reviewer_stub(directory: Path, body: str) -> Path:
-    path = write(
-        directory / "reviewer-stub.py",
-        "#!/usr/bin/env python3\n" + textwrap.dedent(body),
-    )
-    path.chmod(0o755)
-    return path
-
-
 def tool_journal(name="read", text="abcdef") -> str:
     return journal(
         [
@@ -325,7 +307,7 @@ class TaskSetTest(ScratchCase):
         with self.assertRaises(lib.LookupError) as arm_error:
             lib.find_arm("nope")
         self.assertIn("unknown arm `nope`", str(arm_error.exception))
-        for name in ("full", "pi-like", "reviewer"):
+        for name in ("full", "pi-like"):
             self.assertIn(name, str(arm_error.exception))
 
     def test_the_cli_exits_nonzero_and_names_the_valid_ones(self):
@@ -427,8 +409,7 @@ class RunScriptTest(ScratchCase):
         self.assertIn("not 1", str(error.exception))
 
     def test_the_agents_commits_are_listed_from_base_to_head(self):
-        # The tree is shallow at base; `git log base..HEAD` (commits.txt and the
-        # review prompt) must still list the agent's commits.
+        # The tree is shallow at base; `git log base..HEAD` (commits.txt) must still list the agent's commits.
         repo, base, tasks, arms, _ = self.prepare()
         stub = radian_stub(
             self.root,
@@ -445,25 +426,6 @@ class RunScriptTest(ScratchCase):
         tree = self.root / "runs" / "trees" / "full-T1-1"
         self.assertIn("agent change", (out / "commits.txt").read_text())
         self.assertIn("+x", (out / "change.diff").read_text())
-        arm_file(arms, "reviewer")
-        reviewer = reviewer_stub(
-            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n"
-        )
-        reviewed = subprocess.run(
-            ["bash", str(ROOT / "review.sh"), "full", "T1", "1"],
-            capture_output=True,
-            text=True,
-            env=self.env(
-                REPO_TASKS_TASKS_DIR=tasks,
-                REPO_TASKS_ARMS_DIR=arms,
-                REPO_TASKS_RUNS=self.root / "runs",
-                REPO_TASKS_RADIAN_BIN=reviewer,
-            ),
-        )
-        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
-        prompt_text = (out / "review-prompt.md").read_text()
-        self.assertIn("agent change", prompt_text)
-        self.assertIn(f"{base}..{git(tree, 'rev-parse', 'HEAD')}", prompt_text)
 
     def test_radian_gets_the_tree_as_its_workspace(self):
         # Without `--workspace` radian exec has no file or shell tools, so a run
@@ -1334,145 +1296,6 @@ class LeakTest(ScratchCase):
         self.assertEqual(data["source"], str(self.source))
 
 
-class PromptTest(ScratchCase):
-    def test_the_prompt_is_read_from_review_rs(self):
-        source = REPO / "crates/radian-arc/src/gate/review.rs"
-        copied = self.root / "review.rs"
-        copied.write_text(
-            source.read_text(encoding="utf-8").replace(
-                "You are reviewing one change for the task",
-                "MARKER: You are reviewing one change for the task",
-                1,
-            ),
-            encoding="utf-8",
-        )
-        shutil.copy(source.parent / "verdict.rs", self.root / "verdict.rs")
-        text = prompt.build_prompt(
-            copied, "T1-demo", "the brief", "base1", "head1", "abc one", "+new\n"
-        )
-        self.assertIn("MARKER:", text)
-        for needle in (
-            "`T1-demo`",
-            "the brief",
-            "base1..head1",
-            "abc one",
-            "+new",
-            "Finish with exactly one fenced ```json block",
-            "`critical`, `major`, `minor`",
-        ):
-            self.assertIn(needle, text)
-
-    def test_the_real_source_yields_arcs_first_review_prompt(self):
-        source = REPO / "crates/radian-arc/src/gate/review.rs"
-        text = prompt.build_prompt(
-            source, "TK0001-a", "the brief", "b", "h", "c one", "diff\n"
-        )
-        self.assertTrue(text.startswith("You are reviewing one change for the task `TK0001-a`."))
-        self.assertIn("Check the change against the brief and the rules of this repository", text)
-        self.assertIn('"summary"', text)
-
-
-class ReviewTextTest(unittest.TestCase):
-    def test_the_final_assistant_message_is_the_last_committed_one(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            old = {
-                "event": "MessageAppended",
-                "data": {"message": {"assistant": {"content": [{"text": {"text": "old"}}]}}},
-            }
-            new = {
-                "event": "MessageAppended",
-                "data": {"message": {"assistant": {"content": [{"text": {"text": "new"}}]}}},
-            }
-            torn = json.dumps(new)
-            write(directory / "a.jsonl", json.dumps(old) + "\n")
-            # The second journal wins; its unterminated final line is not committed.
-            write(directory / "b.jsonl", json.dumps(new) + "\n" + torn)
-            self.assertEqual(lib.final_assistant_text(directory), "new")
-            self.assertIsNone(lib.final_assistant_text(directory / "missing"))
-
-    def test_a_minor_blocking_item_blocks(self):
-        text = (
-            "```json\n"
-            '{"summary": "s", "blocking": [{"level": "minor", "text": "x"}], '
-            '"suggestions": [], "verified": []}\n'
-            "```\n"
-        )
-        parsed = lib.parse_review_text(text)
-        self.assertTrue(parsed["parsed"])
-        self.assertEqual(parsed["blocking"], 1)
-        self.assertEqual(parsed["levels"], ["minor"])
-
-    def test_the_last_json_block_wins(self):
-        text = (
-            "```json\n"
-            '{"summary": "old", "blocking": [{"text": "x"}], '
-            '"suggestions": [], "verified": []}\n'
-            "```\n```json\n"
-            '{"summary": "new", "blocking": [], "suggestions": [], '
-            '"verified": []}\n'
-            "```\n"
-        )
-        parsed = lib.parse_review_text(text)
-        self.assertEqual(parsed["blocking"], 0)
-        self.assertEqual(parsed["verdict"]["summary"], "new")
-
-    def test_no_json_block_is_unparsed(self):
-        self.assertFalse(lib.parse_review_text("no report here")["parsed"])
-
-    def test_a_report_missing_arcs_fields_is_unparsed(self):
-        # arc's `parse_report` needs summary, blocking, suggestions and verified.
-        parsed = lib.parse_review_text('```json\n{"blocking": []}\n```\n')
-        self.assertFalse(parsed["parsed"])
-        self.assertEqual(parsed["blocking"], 0)
-        self.assertFalse(parsed["verdict"])
-
-    def test_a_report_without_verified_is_unparsed(self):
-        parsed = lib.parse_review_text(
-            '```json\n{"summary": "s", "blocking": [], "suggestions": []}\n```\n'
-        )
-        self.assertFalse(parsed["parsed"])
-
-    def test_a_level_outside_review_levels_is_unparsed(self):
-        parsed = lib.parse_review_text(
-            "```json\n"
-            '{"summary": "s", "blocking": [{"level": "severe", "text": "x"}], '
-            '"suggestions": [], "verified": []}\n'
-            "```\n"
-        )
-        self.assertFalse(parsed["parsed"])
-
-    def test_an_item_without_text_is_unparsed(self):
-        parsed = lib.parse_review_text(
-            '```json\n{"summary": "s", "blocking": [{"level": "major"}], '
-            '"suggestions": [], "verified": []}\n```\n'
-        )
-        self.assertFalse(parsed["parsed"])
-
-    def test_a_suggestion_must_be_an_item(self):
-        parsed = lib.parse_review_text(
-            '```json\n{"summary": "s", "blocking": [], "suggestions": [7], '
-            '"verified": []}\n```\n'
-        )
-        self.assertFalse(parsed["parsed"])
-
-    def test_a_jsonc_block_is_read_like_arc(self):
-        parsed = lib.parse_review_text(
-            "```jsonc\n"
-            '{"summary": "s", "blocking": [], "suggestions": [], "verified": []}\n'
-            "```\n"
-        )
-        self.assertTrue(parsed["parsed"])
-        self.assertEqual(parsed["blocking"], 0)
-
-    def test_an_unclosed_block_is_unparsed(self):
-        parsed = lib.parse_review_text(
-            '```json\n{"summary": "s", "blocking": [], "suggestions": [], '
-            '"verified": []}\n'
-        )
-        self.assertFalse(parsed["parsed"])
-
-
 class TimeoutRunTest(unittest.TestCase):
     def test_the_cap_ends_a_slow_command_and_exits_124(self):
         start = time.monotonic()
@@ -1560,109 +1383,6 @@ class TimeoutRunTest(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
-
-class ReviewScriptTest(ScratchCase):
-    def prepare(self):
-        runs = self.root / "runs"
-        tree = init_repo(runs / "trees" / "full-T1-1")
-        base = git(tree, "rev-parse", "HEAD")
-        tasks = self.root / "tasks"
-        arms = self.root / "arms"
-        task_file(tasks, "T1-demo", base, crates="crate-a")
-        arm_file(arms, "reviewer")
-        out = runs / "full" / "T1" / "1"
-        write(out / "run.json", json.dumps({"arm": "full", "task": "T1", "k": 1}))
-        write(out / "change.diff", "diff --git a/x b/x\n+new\n")
-        return tasks, arms, out
-
-    def review(self, tasks, arms, stub, timeout="30"):
-        return subprocess.run(
-            ["bash", str(ROOT / "review.sh"), "full", "T1", "1"],
-            capture_output=True,
-            text=True,
-            env=self.env(
-                REPO_TASKS_TASKS_DIR=tasks,
-                REPO_TASKS_ARMS_DIR=arms,
-                REPO_TASKS_RUNS=self.root / "runs",
-                REPO_TASKS_RADIAN_BIN=stub,
-                REPO_TASKS_TIMEOUT=timeout,
-            ),
-        )
-
-    def test_a_completed_review_with_no_blocking_item_passes(self):
-        tasks, arms, out = self.prepare()
-        stub = reviewer_stub(
-            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n"
-        )
-        result = self.review(tasks, arms, stub)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        data = json.loads((out / "review.json").read_text())
-        self.assertTrue(data["parsed"])
-        self.assertTrue(data["review_ok"])
-
-    def test_a_radian_reviewer_report_is_read_from_its_session(self):
-        # `radian exec --output jsonl` puts the answer on stdout only as an
-        # escaped string, so the final message in the session is the report.
-        tasks, arms, out = self.prepare()
-        record = {
-            "event": "MessageAppended",
-            "data": {"message": {"assistant": {"content": [{"text": {"text": VALID_REPORT}}]}}},
-        }
-        result_line = {"type": "Result", "outcome": "completed"}
-        stub = reviewer_stub(
-            self.root,
-            "import json, pathlib, sys\n"
-            "args = sys.argv[1:]\n"
-            "session = pathlib.Path(args[args.index('--session-dir') + 1])\n"
-            "session.mkdir(parents=True, exist_ok=True)\n"
-            f"(session / 's.jsonl').write_text(json.dumps({record!r}) + '\\n')\n"
-            f"sys.stdout.write(json.dumps({record!r}) + '\\n')\n"
-            f"sys.stdout.write(json.dumps({result_line!r}) + '\\n')\n"
-            "sys.exit(0)\n",
-        )
-        reviewed = self.review(tasks, arms, stub)
-        self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
-        data = json.loads((out / "review.json").read_text())
-        self.assertTrue(data["parsed"])
-        self.assertTrue(data["review_ok"])
-
-    def test_a_nonzero_reviewer_exit_fails_even_with_a_valid_report(self):
-        tasks, arms, out = self.prepare()
-        stub = reviewer_stub(
-            self.root, f"import sys\nsys.stdout.write({VALID_REPORT!r})\nsys.exit(1)\n"
-        )
-        result = self.review(tasks, arms, stub)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        data = json.loads((out / "review.json").read_text())
-        self.assertTrue(data["parsed"])
-        self.assertFalse(data["review_ok"])
-
-    def test_a_timed_out_reviewer_fails(self):
-        tasks, arms, out = self.prepare()
-        stub = reviewer_stub(
-            self.root,
-            f"import sys, time\nsys.stdout.write({VALID_REPORT!r})\n"
-            "sys.stdout.flush()\ntime.sleep(30)\nsys.exit(0)\n",
-        )
-        result = self.review(tasks, arms, stub, timeout="1")
-        self.assertEqual(result.returncode, 1, result.stderr)
-        data = json.loads((out / "review.json").read_text())
-        self.assertTrue(data["timed_out"])
-        self.assertFalse(data["review_ok"])
-
-    def test_an_incomplete_session_fails_even_with_a_valid_report(self):
-        result_line = json.dumps({"type": "Result", "outcome": "incomplete"}) + "\n"
-        tasks, arms, out = self.prepare()
-        stub = reviewer_stub(
-            self.root,
-            f"import sys\nsys.stdout.write({result_line!r})\n"
-            f"sys.stdout.write({VALID_REPORT!r})\nsys.exit(0)\n",
-        )
-        result = self.review(tasks, arms, stub)
-        self.assertEqual(result.returncode, 1, result.stderr)
-        data = json.loads((out / "review.json").read_text())
-        self.assertTrue(data["parsed"])
-        self.assertFalse(data["review_ok"])
 
 
 if __name__ == "__main__":
