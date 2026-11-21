@@ -3,8 +3,7 @@
 //! E5), abandons pending approvals and questions, and joins the driver.
 //!
 //! These tests open a real session with no control socket, so they run inside the workspace
-//! sandbox; the verb and its socket are covered by `tests/control.rs` and the hub-held process
-//! by `radian-exec`'s `tests/hub_close.rs`.
+//! sandbox; the verb and its socket are covered by `tests/control.rs`.
 
 #![cfg(unix)]
 

@@ -1446,7 +1446,7 @@ async fn wait_journal(fixture: &Fixture, want: impl Fn(&Value) -> bool) {
 }
 
 /// The host side of a `close` (ADR 0043): wait for the port's request, then end the session
-/// exactly the way `radian exec`'s hub-held loop does.
+/// the way a host's loop does.
 fn spawn_close_host(
     session: Arc<LocalSession>,
     mut requests: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -2293,8 +2293,7 @@ async fn close_answers_ok_before_asking_the_host_and_two_requests_make_one_close
     let _ = radian_host::close_session(&fixture.session).await;
 }
 
-/// A host that installs no close hook (any embedder but the full-screen interface and `radian
-/// exec`'s hub-held mode) refuses the verb and changes nothing.
+/// A host that installs no close hook (any embedder but the full-screen interface) refuses the verb and changes nothing.
 #[tokio::test]
 async fn close_without_a_host_hook_is_refused_and_changes_nothing() {
     let server = MockServer::start(vec![text_reply("still here")]).await;

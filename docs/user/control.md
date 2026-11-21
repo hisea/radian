@@ -270,11 +270,10 @@ and sends it as the resumed session's first turn.
 
 A host that installs no close hook answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. This
-build installs the hook in the full-screen interface (`radian`) and in the hub-held
-`radian exec` process a hub starts; every other hosting process refuses the verb. Two `close`
+build installs the hook in the full-screen interface (`radian`); every other hosting
+process refuses the verb. Two `close`
 requests crossing at once both answer `ok`, and the host
-is asked once, so the process exits once. A `close` that meets the hub-held idle window also
-produces one clean exit. A client that stops reading cannot hold the process open: the wait for
+is asked once, so the process exits once. A client that stops reading cannot hold the process open: the wait for
 the open connections is bounded.
 
 ## `list_sessions`
@@ -299,7 +298,7 @@ One process serves one session, so the list has one `main` row:
 |---|---|
 | `id` | the session id |
 | `kind` | always `main` |
-| `holder` | `hub` when the process runs in the hub-held mode a hub starts, `tui` for every other hosting process (a `radian` TUI, an interactive `radian exec`, a `-p` run). The hub reports a session with `holder` `hub` as `live: hub` and every other live one as `live: tui`. |
+| `holder` | always `tui`; the field stays so that a client written against it keeps working. |
 | `workspace` | the canonical workspace the session was opened in |
 | `journal` | the journal file this process has open; two sessions with the same `id` under different session directories are told apart by it. A process that does not report the field (an older build) is matched by `id` alone, so a lookup never reads "no holder" from a missing field. |
 | `model` | the model route in force |

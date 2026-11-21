@@ -16,10 +16,7 @@ its socket. (`radian serve` and `radian mcp` remain reserved subcommands.)
   both drop a guard that removes it. At startup every `*.sock` in `run/` whose pid is no longer
   alive (`kill(pid, 0)`, `EPERM` counts as alive) is removed, so a `kill -9` does not leave one.
 - On by default. `[control] enabled = false` in the config file turns the port off for this
-  process; the startup line then does not print a `[control]` path. A hub-held process (ADR
-  0048 §16) is the exception: its port is its only input and the hub's only channel to it, so
-  the mode binds the port whatever `[control] enabled` says, and a bind failure is a startup
-  error for that process.
+  process; the startup line then does not print a `[control]` path.
 - The startup writes one line naming the path: `[control] /home/me/.radian/run/12345.sock`.
 
 ## The protocol
@@ -221,8 +218,7 @@ closes the queue before it cancels, so a followup waiting behind the running tur
 turn; it also journals one `HostNotice` (`session closed remotely`, ADR 0006 §5.14) before it
 leaves, and a resume renders it as a transcript notice.
 
-A host that installs no close hook — any embedder but the full-screen interface and `radian
-exec`'s hub-held mode — answers
+A host that installs no close hook — any embedder but the full-screen interface — answers
 `{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. The host
 is asked once however many connections crossed, so the process exits once. A client that stops
 reading cannot hold the process open: the wait for the drain is bounded (a quarter second).
@@ -325,7 +321,7 @@ One `main` row (one process serves one session):
 |---|---|
 | `workspace` | the canonical workspace this session was opened in |
 | `journal` | the journal file this process has open, so two sessions with the same user-chosen id under different session directories are told apart. A process that does not report the field (an older build) is matched by `id` alone. |
-| `holder` | `hub` for a process a hub started in its hub-held mode (ADR 0048 §16), `tui` for every other hosting process. The hub turns `hub` into `live: hub` and `tui` into `live: tui`. |
+| `holder` | always `tui`; the field stays so that a client written against it keeps working. |
 | `model` | the model route in force (ADR 0026 D8) |
 | `state` | `idle`, `working` or `blocked` by ADR 0034 H2: a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, an idle block (the wake budget, a `/goal` budget, a lost job notice, the intent-stop cap or the idle hook-continuation cap) is `blocked` while no turn runs, and everything else is `idle` |
 | `pending` | the pending approval/question count |
