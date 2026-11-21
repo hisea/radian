@@ -1588,6 +1588,8 @@ fn the_verdicts_route_reads_the_newest_attempts_verdicts() {
     assert_eq!(list[0]["stage"], "human");
     assert_eq!(list[0]["result"], "pass");
     assert!(list[0]["reason"].is_null());
+    // The hub reports the canonical path (macOS temp dirs sit behind the `/var` symlink).
+    let path = path.canonicalize().expect("the verdict file exists");
     assert_eq!(list[0]["path"], path.display().to_string());
     assert_eq!(list[0]["verdict"]["stage"], "human");
     assert_eq!(list[0]["verdict"]["result"], "pass");

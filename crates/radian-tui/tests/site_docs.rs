@@ -11,9 +11,8 @@ use std::collections::HashSet;
 /// The hand-written source pages and the canonical URL each must name (`None` for the
 /// 404 page, which is `noindex` instead). The two bilingual sources name the English URL;
 /// the split pages hold the rest.
-const SOURCE_PAGES: [(&str, Option<&str>); 3] = [
+const SOURCE_PAGES: [(&str, Option<&str>); 2] = [
     ("index.html", Some("https://getrad.dev/")),
-    ("arc.html", Some("https://getrad.dev/arc.html")),
     ("404.html", None),
 ];
 
@@ -636,10 +635,7 @@ fn the_hand_written_pages_name_their_canonical_url() {
 #[test]
 fn each_split_page_holds_one_language() {
     // (file, a sentence only the English spans hold, its Chinese twin)
-    let samples = [
-        ("index.html", "Headless, observable.", "无头，可观测。"),
-        ("arc.html", "Not installed yet?", "还没装？"),
-    ];
+    let samples = [("index.html", "Headless, observable.", "无头，可观测。")];
     for (page, html) in split_pages() {
         let who = format!("{} ({})", page.file, page.lang.code());
         for banned in [
@@ -738,7 +734,7 @@ fn the_split_pages_point_at_each_other() {
 }
 
 /// Every site-absolute URL a split page uses is a file under `site/`, a generated docs
-/// page, or one of the four hand-written pages.
+/// page, or one of the two hand-written pages.
 #[test]
 fn the_split_pages_name_files_the_site_serves() {
     let root = repo_root();
@@ -811,11 +807,12 @@ fn a_source_without_its_chinese_title_fails_the_build() {
             "{text}"
         );
     }
-    let no_toggle = source("arc.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
-    let error = split_page(&no_toggle, "arc.html", Lang::En).unwrap_err();
+    let no_toggle = source("index.html").replace("<div class=\"lang\"", "<div class=\"langs\"");
+    let error = split_page(&no_toggle, "index.html", Lang::En).unwrap_err();
     assert!(error.to_string().contains("language toggle"), "{error}");
-    let open = source("arc.html").replace("</video>", "");
-    assert!(split_page(&open, "arc.html", Lang::Zh).is_err());
+    let open =
+        source("index.html").replacen("</span><span class=\"zh\">", "<span class=\"zh\">", 1);
+    assert!(split_page(&open, "index.html", Lang::Zh).is_err());
 }
 
 /// `sitemap.xml` lists the hand-written pages and every manual page exactly once.
@@ -834,7 +831,7 @@ fn the_sitemap_lists_every_page_once() {
         .iter()
         .map(|p| format!("https://getrad.dev{}", p.path))
         .collect();
-    assert_eq!(expected.len(), 4, "English and Chinese home and arc pages");
+    assert_eq!(expected.len(), 2, "English and Chinese home pages");
     expected.extend(
         site.pages
             .iter()
