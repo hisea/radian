@@ -1,0 +1,333 @@
+//! The mock HTTP server behind every adapter's `testing` module (feature `testing`).
+//!
+//! It speaks just enough HTTP/1.1 to stream a chunked response, hang, or cut the connection,
+//! and it records every request it receives. Replies are used in order, one per request.
+//! Each adapter wraps it with its own `Reply` constructors and wire event builders.
+
+use std::collections::VecDeque;
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// What the mock does with one request.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    /// `200` with an event stream, one network chunk per piece, `pause` between pieces, and
+    /// these extra response headers.
+    Sse {
+        pieces: Vec<Vec<u8>>,
+        pause: Duration,
+        headers: Vec<(String, String)>,
+    },
+    /// The pieces, then silence: the connection stays open and nothing more is sent.
+    SseThenHang { pieces: Vec<Vec<u8>> },
+    /// The pieces, then the connection is cut without the end of the chunked body.
+    SseThenCut { pieces: Vec<Vec<u8>> },
+    /// A complete response with this status, extra headers and body.
+    Status {
+        code: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    /// A barrier: this request waits until every `Reply::Barrier` sharing the same [`Barrier`]
+    /// has arrived (or the barrier's own timeout expires), then gets `reply`. Queue one of
+    /// these per expected request; a test asserts [`Barrier::peak`] to prove they overlapped.
+    Barrier { barrier: Barrier, reply: Box<Reply> },
+}
+
+/// A one-shot rendezvous over the mock's requests. It records how many requests waited at the
+/// same time, so "three child processes overlapped" is a recorded fact and not a guess.
+#[derive(Clone)]
+pub struct Barrier {
+    state: Arc<BarrierState>,
+    timeout: Duration,
+}
+
+struct BarrierState {
+    /// Requests currently inside the wait.
+    waiting: AtomicUsize,
+    /// The most that were inside at once.
+    peak: AtomicUsize,
+    barrier: tokio::sync::Barrier,
+}
+
+impl fmt::Debug for Barrier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Barrier")
+            .field("waiting", &self.state.waiting.load(Ordering::SeqCst))
+            .field("peak", &self.peak())
+            .finish()
+    }
+}
+
+impl Barrier {
+    /// `needed` parties; a wait gives up after `timeout` (which is only a hang guard — a real
+    /// overlap releases at once).
+    pub fn new(needed: usize, timeout: Duration) -> Self {
+        Self {
+            state: Arc::new(BarrierState {
+                waiting: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                barrier: tokio::sync::Barrier::new(needed),
+            }),
+            timeout,
+        }
+    }
+
+    /// The most requests that were inside the barrier at the same time.
+    pub fn peak(&self) -> usize {
+        self.state.peak.load(Ordering::SeqCst)
+    }
+
+    /// Waits for the other parties, counting this request as inside while it waits.
+    async fn wait(&self) {
+        let waiting = self.state.waiting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state.peak.fetch_max(waiting, Ordering::SeqCst);
+        let _ = tokio::time::timeout(self.timeout, self.state.barrier.wait()).await;
+        self.state.waiting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// One `data: {event}` line pair per event, the framing every adapter's `Reply::sse` uses.
+pub fn sse_pieces(events: &[Value]) -> Vec<Vec<u8>> {
+    events
+        .iter()
+        .map(|event| format!("data: {event}\n\n").into_bytes())
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordedRequest {
+    pub method: String,
+    pub path: String,
+    /// Header names are lower-case.
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl RecordedRequest {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn json(&self) -> Value {
+        serde_json::from_str(&self.body).expect("the request body is JSON")
+    }
+}
+
+pub struct MockServer {
+    /// `http://127.0.0.1:<port>` followed by the `base_path` given to [`MockServer::start`].
+    pub base_url: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl MockServer {
+    /// Serves `replies` in order, one per request. `base_path` is what the adapter's own base
+    /// URL carries after the port (`""` or `"/v1"`); it only shapes [`MockServer::base_url`].
+    pub async fn start(replies: Vec<Reply>, base_path: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let replies = Arc::new(Mutex::new(VecDeque::from(replies)));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let task = {
+            let (replies, requests) = (Arc::clone(&replies), Arc::clone(&requests));
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(handle(stream, Arc::clone(&replies), Arc::clone(&requests)));
+                }
+            })
+        };
+        Self {
+            base_url: format!("http://127.0.0.1:{port}{base_path}"),
+            requests,
+            task,
+        }
+    }
+
+    pub fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn handle(
+    mut stream: TcpStream,
+    replies: Arc<Mutex<VecDeque<Reply>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+) {
+    let Some(request) = read_request(&mut stream).await else {
+        return;
+    };
+    // ADR 0026 D0: the host refreshes a provider's model list with `GET <base>/models`. Answer
+    // it here, outside the scripted queue (a real endpoint serves it too), so the background
+    // refresh cannot consume a reply a test scripted for a chat call. It is not recorded:
+    // `requests()` stays the model calls a test asserts on.
+    if request.method == "GET" && request.path.trim_end_matches('/').ends_with("/models") {
+        let _ = write_plain(&mut stream, 200, &[], r#"{"object":"list","data":[]}"#).await;
+        return;
+    }
+    requests.lock().unwrap().push(request);
+    let reply = replies.lock().unwrap().pop_front();
+    let _ = respond(&mut stream, reply).await;
+}
+
+async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Result<()> {
+    match reply {
+        None => write_plain(stream, 500, &[], "no reply was scripted").await,
+        Some(Reply::Status {
+            code,
+            headers,
+            body,
+        }) => write_plain(stream, code, &headers, &body).await,
+        Some(Reply::Sse {
+            pieces,
+            pause,
+            headers,
+        }) => {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
+                 transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                response_headers(&headers)
+            );
+            stream.write_all(head.as_bytes()).await?;
+            for piece in pieces {
+                write_chunk(stream, &piece).await?;
+                if !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
+                }
+            }
+            stream.write_all(b"0\r\n\r\n").await?;
+            stream.shutdown().await
+        }
+        Some(Reply::Barrier { barrier, reply }) => {
+            barrier.wait().await;
+            Box::pin(respond(stream, Some(*reply))).await
+        }
+        Some(Reply::SseThenHang { pieces }) => {
+            stream.write_all(sse_head(&[]).as_bytes()).await?;
+            for piece in pieces {
+                write_chunk(stream, &piece).await?;
+            }
+            std::future::pending().await
+        }
+        Some(Reply::SseThenCut { pieces }) => {
+            stream.write_all(sse_head(&[]).as_bytes()).await?;
+            for piece in pieces {
+                write_chunk(stream, &piece).await?;
+            }
+            Ok(()) // dropping the stream cuts it without the closing chunk
+        }
+    }
+}
+
+fn sse_head(headers: &[(String, String)]) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
+         transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+        response_headers(headers)
+    )
+}
+
+fn response_headers(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(n, v)| format!("{n}: {v}\r\n"))
+        .collect()
+}
+
+async fn write_chunk(stream: &mut TcpStream, piece: &[u8]) -> std::io::Result<()> {
+    stream
+        .write_all(format!("{:x}\r\n", piece.len()).as_bytes())
+        .await?;
+    stream.write_all(piece).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.flush().await
+}
+
+async fn write_plain(
+    stream: &mut TcpStream,
+    code: u16,
+    headers: &[(String, String)],
+    body: &str,
+) -> std::io::Result<()> {
+    let extra: String = headers
+        .iter()
+        .map(|(n, v)| format!("{n}: {v}\r\n"))
+        .collect();
+    let response = format!(
+        "HTTP/1.1 {code} Status\r\ncontent-type: application/json\r\n{extra}\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+async fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
+    let mut buffer = Vec::new();
+    let mut scratch = [0u8; 8192];
+    let head_end = loop {
+        if let Some(pos) = find(&buffer, b"\r\n\r\n") {
+            break pos;
+        }
+        if buffer.len() > MAX_REQUEST_BYTES {
+            return None;
+        }
+        let n = stream.read(&mut scratch).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&scratch[..n]);
+    };
+    let head = String::from_utf8_lossy(&buffer[..head_end]).into_owned();
+    let mut lines = head.split("\r\n");
+    let mut first = lines.next()?.split(' ');
+    let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_owned()))
+        .collect();
+    let length: usize = headers
+        .iter()
+        .find(|(n, _)| n == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+    let body_start = head_end + 4;
+    while buffer.len() < body_start + length {
+        if buffer.len() > MAX_REQUEST_BYTES {
+            return None;
+        }
+        let n = stream.read(&mut scratch).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&scratch[..n]);
+    }
+    let body = String::from_utf8_lossy(&buffer[body_start..body_start + length]).into_owned();
+    Some(RecordedRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
