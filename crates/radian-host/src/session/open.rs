@@ -391,8 +391,8 @@ pub async fn open_session(
     ));
     // ADR 0011 L2: a turn runs with the least-privileged source of the input that opened it
     // and every input the turn admits — a waking `steer` already queued when it opens, and a
-    // `steer`/`inject` a later safe point admits. The control port may queue an owner input
-    // while another turn runs (it must not raise that turn's source), so the source is fixed
+    // `steer`/`inject` a later safe point admits. An input queued while another turn runs
+    // must not raise that turn's source, so the source is fixed
     // at the claim and lowered by the drain callback, never at the enqueue.
     command_hooks.set_turn_source_hooks(Arc::downgrade(&hooks));
     // ADR 0045 §4: the permission layer asks the same command hooks to answer an `ask`

@@ -358,3 +358,14 @@ runtime_events -E 'test(<name>)'`, and the file was restored from `.radian/bak/`
 |---|---|---|---|
 | TK0321-M8 | `HostNotice::critical()` returns `true` instead of `false` | ✅ 1 failed (rc=100) | `tests/runtime_events.rs::a_host_notice_round_trips_and_is_not_a_transcript_record` (`a host notice is audit, not state`) |
 | TK0321-M9 | `HostNotice` is missing from `KNOWN_EVENTS`, so a v1 reader skips the line as an unknown non-critical event | ✅ 1 failed (rc=100) | `tests/runtime_events.rs::a_host_notice_round_trips_and_is_not_a_transcript_record` (`the event round-trips`: no accepted event) |
+
+## T-0010: old journals keep the control-port input sources (2026-11-21, branch `work/T-0010-remove-control-port`)
+
+`Scheduler`, `Mcp` and `Subagent` stay readable (ADR 0011 L2) though no process produces them. The
+mutation was applied to `radian-core/src/message.rs` and the file restored afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| T-0010-M3 | `InputSource::Mcp` serializes as `mcp_old`, so an old journal's `mcp` source no longer reads back | ✅ 1 failed (rc=101) | `read_fixtures::an_old_journal_with_control_port_sources_still_opens` |
+
+1/1 caught.

@@ -528,7 +528,7 @@ fn continuation_message_id() -> MessageId {
 /// the running turn's provenance. A claim of any other input clears it (a new turn). It is
 /// also the turn-start seam for the permission source (ADR 0011 L2, ADR 0043): the turn
 /// runs with the least-privileged source of the input that opened it and of every waking
-/// `steer` already queued for it, so a `User` input the control port queued mid-turn
+/// `steer` already queued for it, so a `User` input queued mid-turn
 /// cannot raise the rights of a turn that also absorbs a `Scheduler`/`Mcp`/`Subagent`
 /// input, and never resets while another turn runs. A plain `inject` waits for a natural
 /// step boundary; the drain callback below lowers the turn when that safe point admits it.

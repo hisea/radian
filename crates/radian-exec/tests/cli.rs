@@ -315,7 +315,7 @@ fn scratch(name: &str) -> ScratchDir {
     // share a directory, and `remove_dir_all` below would delete a running test's files.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+    // /tmp, not $TMPDIR: the sandbox only writes inside the workspace.
     let dir = PathBuf::from("/tmp").join(format!("radian-exec-{name}-{n}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -9842,6 +9842,49 @@ async fn an_old_memory_config_table_warns_once_and_the_session_starts() {
         .unwrap_or_default()
         .to_owned();
     assert!(!system.contains("<memory>"), "{system}");
+}
+
+/// An old config that still carries `[control]` (the process control port was removed, ADR
+/// 0043) starts the session: one retired-key warning, nothing else changes, and no socket or
+/// `[control]` startup line appears.
+#[tokio::test]
+async fn an_old_control_config_table_warns_once_and_the_session_starts() {
+    let (dir, ws, sessions) = subtree_scratch("old-control-config");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[control]\nenabled = false\n",
+    );
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+    assert_eq!(
+        stderr.matches("[config] ignored key `control`").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stderr.contains("[control]"), "{stderr}");
 }
 
 /// An old journal holding a `MemoryInjected` record and a `memory_addition` message still

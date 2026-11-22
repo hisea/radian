@@ -27,7 +27,7 @@ const STATE_WATCHDOG: Duration = Duration::from_secs(60);
 // ---------- helpers ----------
 
 fn scratch(name: &str) -> PathBuf {
-    // Short prefix: on macOS $TMPDIR can push the child's <home>/run/<pid>.sock past SUN_LEN (104).
+    // A short path, the same shape as the other suites'.
     let dir = common::process_dir(&format!("rx-sub-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -220,21 +220,21 @@ fn session_of(pid: u32) -> i32 {
     unsafe { libc::getsid(pid as libc::pid_t) }
 }
 
-/// The child radian's pid: it binds `<RADIAN_HOME>/run/<pid>.sock` before its first model call,
-/// and the parent's own socket is already there, so the other socket is the child.
-async fn child_pid(env: &Env, parent_pid: u32) -> u32 {
-    let run_dir = env.home.join("run");
-    let others = || -> Vec<u32> {
-        std::fs::read_dir(&run_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| entry.path().file_stem()?.to_str()?.parse::<u32>().ok())
-            .filter(|pid| *pid != parent_pid)
+/// The child radian's pid: the one direct child of the parent radian (`pgrep -P`), once the
+/// `subagent` tool has started it.
+async fn child_pid(_env: &Env, parent_pid: u32) -> u32 {
+    let children = || -> Vec<u32> {
+        let out = std::process::Command::new("pgrep")
+            .args(["-P", &parent_pid.to_string()])
+            .output()
+            .expect("pgrep runs");
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|pid| pid.parse().ok())
             .collect()
     };
-    wait_until("the child's control socket", || !others().is_empty()).await;
-    others().into_iter().next().expect("the child pid")
+    wait_until("the child radian", || !children().is_empty()).await;
+    children().into_iter().next().expect("the child pid")
 }
 
 fn sigint(child: &Child) {
@@ -808,8 +808,7 @@ async fn the_parents_header_reaches_the_child_and_nothing_else_writes_it() {
 
 /// The two pids the stub command records: its own (the command runs in its own session, so this
 /// is that session's leader) and `$PPID` (the child radian), or `None` until the file is
-/// complete. No control socket is involved: a long temp path makes `run/<pid>.sock` exceed
-/// `SUN_LEN`, and the pid is what this test needs.
+/// complete. The pid is what this test needs.
 fn recorded_pids(path: &Path) -> Option<(u32, u32)> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut parts = text.split_whitespace();

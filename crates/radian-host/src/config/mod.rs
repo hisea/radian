@@ -147,21 +147,6 @@ impl Default for IntegrationsConfig {
     }
 }
 
-/// `[control]` (ADR 0043): the process control port. `enabled` defaults to
-/// **true** — every hosting process binds `$RADIAN_HOME/run/<pid>.sock` — and `false` turns
-/// the socket off for this process. The socket carries the same verbs O6 lists; a client can
-/// never declare the `User` source and there is no approval verb.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ControlConfig {
-    pub enabled: bool,
-}
-
-impl Default for ControlConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 /// `[context]` (ADR 0036): when the host appends subtree context files on first use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextConfig {
@@ -200,8 +185,6 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     pub sandbox: SandboxConfig,
     pub integrations: IntegrationsConfig,
-    /// `[control]` (ADR 0043): the process control port, on by default.
-    pub control: ControlConfig,
     /// `[context]` (ADR 0036): subtree context files.
     pub context: ContextConfig,
     pub compaction: CompactionConfig,
@@ -354,7 +337,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "permissions" => parse_permissions(value, path, read_only, &mut config)?,
             "sandbox" => sandbox::parse_sandbox(value, path, &mut config)?,
             "integrations" => parse_integrations(value, path, &mut config)?,
-            "control" => parse_control(value, path, &mut config)?,
+            "control" => parse_control(&mut config),
             "context" => parse_context(value, path, &mut config)?,
             "compaction" => parse_compaction(value, path, &mut config)?,
             "hooks" => hooks::parse_hooks(value, &mut config)?,
@@ -465,22 +448,11 @@ fn parse_integrations(value: &Value, path: &Path, config: &mut Config) -> Result
     Ok(())
 }
 
-/// Parses `[control]` (ADR 0043). Only the `enabled` key exists today; an unknown
-/// key is reported and ignored (the `tui.*` rule, not refuse).
-fn parse_control(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "control", "a table"));
-    };
-    for (key, value) in table {
-        match (key.as_str(), value) {
-            ("enabled", Value::Boolean(on)) => config.control.enabled = *on,
-            ("enabled", _) => {
-                return Err(wrong_type(path, "control.enabled", "a boolean"));
-            }
-            (other, _) => config.skipped.push(format!("control.{other}")),
-        }
-    }
-    Ok(())
+/// `[control]` is retired (ADR 0008): the process control port was removed (ADR 0043). The
+/// table and every key under it, whatever the value, is skipped with one line (`control`) on
+/// the startup line and otherwise ignored, never a refusal of the file.
+fn parse_control(config: &mut Config) {
+    config.skipped.push("control".to_owned());
 }
 
 fn parse_context(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
@@ -1928,7 +1900,6 @@ future_option = "alpha"
             "sandbox.allow_unix_sockets",
             "sandbox.allow_env",
             "integrations.herdr",
-            "control.enabled",
             "context.subtree_files",
             "compaction.auto",
             "compaction.thinking",
@@ -2066,8 +2037,6 @@ future_option = "alpha"
                 "allow_env = [\"MY_NAME\"]\n",
                 "[integrations]\n",
                 "herdr = false\n",
-                "[control]\n",
-                "enabled = false\n",
                 "[compaction]\n",
                 "auto = false\n",
                 "thinking = \"low\"\n",
@@ -2235,7 +2204,6 @@ future_option = "alpha"
         "## `[permissions]`",
         "## `[hooks]`",
         "## `[skills]`",
-        "## `[control]`",
         "## `[context]`",
         "## `[integrations]`",
         "## `[compaction]`",
@@ -2422,10 +2390,6 @@ future_option = "alpha"
             (
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
-            ),
-            (
-                "control.enabled",
-                ControlConfig::default().enabled.to_string(),
             ),
             (
                 "context.subtree_files",

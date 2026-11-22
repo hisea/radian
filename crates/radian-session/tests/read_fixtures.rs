@@ -773,3 +773,68 @@ fn the_pending_wake_fixture_reads_back_the_pending_wake_mark() {
         recover(&session.journal_records()).unwrap()
     );
 }
+
+/// An old journal written while the control port existed carries user messages whose source is
+/// `scheduler`, `mcp` or `subagent` (a client could declare them). The port is gone (ADR 0043)
+/// but the values stay readable (ADR 0011 L2, ADR 0006): the journal opens and each message
+/// keeps its source.
+#[test]
+fn an_old_journal_with_control_port_sources_still_opens() {
+    let line = |seq: u64, event: &str, data: serde_json::Value| {
+        json!({
+            "schema_version": 1,
+            "session_id": "66666666-6666-4666-8666-666666666666",
+            "seq": seq,
+            "ts": "2026-10-12T14:00:00.000000Z",
+            "event": event,
+            "critical": true,
+            "data": data,
+        })
+        .to_string()
+    };
+    let user = |seq: u64, index: u64, text: &str, source: &str| {
+        line(
+            seq,
+            "MessageAppended",
+            json!({"index": index, "message": {"user": {
+                "content": [{"text": {"text": text}}],
+                "meta": {"id": format!("inbox-{index}"), "source": source},
+            }}}),
+        )
+    };
+    let text = [
+        line(
+            0,
+            "SessionCreated",
+            json!({"workspace": "/work/example", "config_snapshot": {}}),
+        ),
+        user(1, 0, "from the port, default", "scheduler"),
+        user(2, 1, "declared mcp", "mcp"),
+        user(3, 2, "declared subagent", "subagent"),
+    ]
+    .join("\n")
+        + "\n";
+    let dir = TempDir::new("legacy-sources");
+    let path = dir.file("old.jsonl");
+    std::fs::write(&path, text).unwrap();
+
+    let session = Session::open(&path).unwrap();
+    assert!(session.skipped().is_empty());
+    let sources: Vec<_> = session
+        .history()
+        .unwrap()
+        .iter()
+        .map(|message| match message {
+            Message::User { meta, .. } => meta.source,
+            other => panic!("expected a user message, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        sources,
+        vec![
+            Some(InputSource::Scheduler),
+            Some(InputSource::Mcp),
+            Some(InputSource::Subagent)
+        ]
+    );
+}

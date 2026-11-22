@@ -36,7 +36,7 @@ pub(crate) struct LoopDone {
 /// ever **lowers** (ADR 0011 L2), so a mid-turn non-human input takes the turn's
 /// rights down and a later human input cannot raise them back. The host's turn-claimed
 /// observer restates the source of the input that opens each turn, so an input queued for a
-/// later turn (the control port's owner `followup`) applies its own source when that turn
+/// later turn applies its own source when that turn
 /// starts; a mid-turn `followup` still must not lower the running turn. All CLI inputs are
 /// terminal input today, so this never lowers yet — but the path is wired, and this is the
 /// only place to change for them.
