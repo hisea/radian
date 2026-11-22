@@ -506,4 +506,3 @@ async fn concurrent_runtime_and_core_appends_keep_seq_in_file_order() {
         assert_eq!(journal.next_seq(), 1 + 8 * 25, "round {round}");
     }
 }
-
