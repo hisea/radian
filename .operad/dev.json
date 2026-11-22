@@ -39,7 +39,7 @@
         "run": "CARGO_TARGET_DIR=/Users/hai/.cache/radian-arc-target cargo clippy --workspace --all-targets -- -D warnings"
       },
       {
-        "run": "/Users/hai/.local/bin/arc-gate-lxc crates"
+        "run": "/Users/hai/.local/bin/radian-gate-lxc crates"
       }
     ],
     "commandTimeoutSecs": 1500,
@@ -54,7 +54,7 @@
         "run": "CARGO_TARGET_DIR=/Users/hai/.cache/radian-arc-target-integration cargo clippy --workspace --all-targets -- -D warnings"
       },
       {
-        "run": "/Users/hai/.local/bin/arc-gate-lxc"
+        "run": "/Users/hai/.local/bin/radian-gate-lxc"
       }
     ]
   }

@@ -2,8 +2,8 @@
 //! the message's [`ContentPart`]s.
 //!
 //! The TUI's send path (a dropped image, an `@` file) and the process control port both end
-//! in [`user_message`], so a message typed at the keyboard and one sent through the control port carry
-//! the same parts. The caps are the composer's own: one file at most [`MAX_FILE_BYTES`], all files
+//! in [`user_message`], so a message typed at the keyboard and one sent through the control port
+//! carry the same parts. The caps are the composer's own: one file at most [`MAX_FILE_BYTES`], all files
 //! together at most [`MAX_TOTAL_BYTES`].
 
 use radian_coding::image::LoadedImage;

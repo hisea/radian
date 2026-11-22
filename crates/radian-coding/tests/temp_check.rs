@@ -1,5 +1,5 @@
 //! The temp file system check of `scripts/temp-check.sh`, which `verify.sh` and
-//! `arc-gate.sh` run before their first step.
+//! `gate.sh` run before their first step.
 //!
 //! A stub `df` first on `PATH` returns the two outputs a test names, so the
 //! check never reads the real file system. Each expectation from the brief has
@@ -385,7 +385,7 @@ fn a_limit_past_the_bound_fails_the_check() {
 }
 
 /// Both scripts run the check before any step: with low inodes the real
-/// `verify.sh` and `arc-gate.sh quick` exit `1` without starting a build.
+/// `verify.sh` and `gate.sh quick` exit `1` without starting a build.
 #[test]
 fn both_scripts_check_before_their_first_step() {
     let df = FakeDf::new("wiring");
@@ -393,7 +393,7 @@ fn both_scripts_check_before_their_first_step() {
     let calls = df.root().join("cargo-calls.txt");
     for (script, args, prefix) in [
         ("verify.sh", Vec::<&str>::new(), "verify: "),
-        ("arc-gate.sh", vec!["quick"], "arc-gate.sh: "),
+        ("gate.sh", vec!["quick"], "gate.sh: "),
     ] {
         let output = Command::new("bash")
             .arg(scripts().join(script))

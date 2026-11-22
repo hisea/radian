@@ -409,7 +409,7 @@ fn relative_page_links_resolve_from_the_source_directory() {
 /// A link from a sub page to a missing sibling fails the build, not silently becomes a repo
 /// link.
 #[test]
-fn a_link_to_a_missing_sibling_from_an_arc_page_fails_the_build() {
+fn a_link_to_a_missing_sibling_from_a_sub_page_fails_the_build() {
     let pages = [("sub/loop.md", "# Loop\n\nSee [gone](missing.md).\n")];
     let error = render_site(&pages).expect_err("a missing sibling must fail");
     assert_eq!(error.page, "sub/loop.md");
