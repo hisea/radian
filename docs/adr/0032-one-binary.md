@@ -44,7 +44,7 @@ radian login | logout | config import-pi | trust | theme | footer | docs   manag
 
 ### A4 Tests
 
-Tests still drive the **real binary**: `radian-exec` end-to-end tests drive `radian exec`. TUI pty tests already drive `radian`. Old `agent` behavior cases stay covered (especially default line mode, streaming output, per-step approval, exit-code-2 cases). No test-only binary exists for compatibility.
+Tests still drive the **real binary**: `radian-exec` end-to-end tests drive `radian exec`. TUI pty tests already drive `radian`. Old `agent` behavior cases stay covered (especially default line mode, streaming output, per-step approval, exit-code-2 cases). No test-only binary exists for compatibility. The `radian-exec` end-to-end tests are one file per command (`cmd_run.rs`, `cmd_model.rs`, `cmd_mcp.rs`, `cmd_sessions.rs`, `cmd_config.rs`, `cmd_login.rs`, `cmd_trust.rs`) over one shared spawn-and-fixture module; an assertion the `jsonl`, `acp` or `subagent` suites already make is not repeated in them.
 
 ## Constraints and Costs
 
