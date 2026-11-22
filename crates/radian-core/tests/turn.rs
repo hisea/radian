@@ -339,8 +339,9 @@ async fn the_call_cap_beats_a_truncation_continuation() {
 /// can never happen (ADR 0017 §2).
 #[tokio::test]
 async fn a_passed_deadline_beats_a_truncation_continuation() {
-    /// Blocks long enough that the turn deadline passes between the response and the notice.
-    struct SlowAfterResponse;
+    /// Blocks until the turn deadline has passed (not for a fixed time), so the deadline is
+    /// passed by the time the notice would be written however slow the machine is.
+    struct SlowAfterResponse(tokio::time::Instant);
 
     impl Hooks for SlowAfterResponse {
         async fn after_model_response(
@@ -348,16 +349,20 @@ async fn a_passed_deadline_beats_a_truncation_continuation() {
             _cx: &HookContext,
             _response: &ModelResponse,
         ) -> Result<(), HookError> {
-            std::thread::sleep(Duration::from_millis(600));
+            while tokio::time::Instant::now() <= self.0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             Ok(())
         }
     }
 
     let model = ScriptedModel::new([stop(StopReason::MaxTokens, "half"), text("never sent")]);
-    let agent = Arc::new(Agent::new(model.clone(), NoTools).with_hooks(SlowAfterResponse));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    let agent =
+        Arc::new(Agent::new(model.clone(), NoTools).with_hooks(SlowAfterResponse(deadline)));
     let mut chat = agent.open_session().await.unwrap();
     let options = TurnOptions {
-        deadline: Some(tokio::time::Instant::now() + Duration::from_millis(300)),
+        deadline: Some(deadline),
         ..Default::default()
     };
 
