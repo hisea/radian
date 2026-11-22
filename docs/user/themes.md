@@ -170,6 +170,8 @@ the free space and the compaction buffer):
 | `ctx_free` | The free space. |
 | `ctx_buffer` | The compaction buffer. |
 
+The old `ctx_memory` role (the removed memory cell) is an unknown role now: a theme file that still sets it loads, with one warning, and the role is ignored.
+
 Footer:
 
 | Role | What it paints |

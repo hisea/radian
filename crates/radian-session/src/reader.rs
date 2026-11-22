@@ -217,7 +217,7 @@ pub enum EventData {
     ApprovalPolicyChanged {
         policy: ApprovalPolicyValue,
     },
-    /// The memory injected before a model request (ADR 0021 D6). Typed for an exact round
+    /// The memory injected before a model request (ADR 0006 decision 5.12). Typed for an exact round
     /// trip; audit only, never a transcript record. A record carries exactly one shape:
     /// `records` (the old JSONL store's ids/revisions/scopes) or `indexes` (the file store's
     /// index paths and hashes). The reader accepts both; the other vector is empty.
@@ -1456,7 +1456,7 @@ struct ApprovalPolicyChangedData {
 
 #[derive(Deserialize)]
 struct MemoryInjectedData {
-    // Exactly one of the two shapes is present (ADR 0021 D6). `Option` distinguishes an absent
+    // Exactly one of the two shapes is present (ADR 0006 decision 5.12). `Option` distinguishes an absent
     // field from an empty array; the empty array is still a present field.
     #[serde(default)]
     records: Option<Vec<MemoryInjectedRecord>>,
@@ -1465,7 +1465,7 @@ struct MemoryInjectedData {
 }
 
 /// Accepts one `MemoryInjected` shape and refuses a record with both or neither, naming the
-/// line (ADR 0021 D6). An `indexes` entry is validated against the same contract the writer uses.
+/// line (ADR 0006 decision 5.12). An `indexes` entry is validated against the same contract the writer uses.
 fn memory_injected_shape(
     data: MemoryInjectedData,
     lineno: u64,
