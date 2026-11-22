@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (211 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (209 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec suite
 #    uses `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 3 and 4).
@@ -93,7 +93,6 @@ not (
   | test(=a_lower_schema_version_refuses_to_start_without_creating_a_session)
   | test(=a_missing_workspace_is_a_workspace_error_and_leaves_no_session)
   | test(=a_missing_workspace_is_refused_with_the_radian_prefix)
-  | test(=a_model_error_exits_one)
   | test(=a_new_session_directory_and_file_are_owner_only)
   | test(=a_new_session_writes_a_valid_jsonl)
   | test(=a_non_generic_descriptor_refuses_base_url_and_header)
@@ -187,7 +186,6 @@ not (
   | test(=no_config_mcp_ignores_the_config_mcp_section)
   | test(=no_config_mcp_skips_the_project_file)
   | test(=no_resume_run_groups_equal_session_groups)
-  | test(=one_shot_model_error_still_exits_one_and_shows_the_error)
   | test(=one_shot_streams_text_to_stdout_only)
   | test(=one_shot_without_a_terminal_denies_without_waiting)
   | test(=opencode_go_sends_the_session_header_byte_for_byte)

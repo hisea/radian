@@ -901,3 +901,11 @@ the `run/` directory at the start of `chat.rs` and the file was restored afterwa
 | T-0010-M2 | `radian exec` creates `$RADIAN_HOME/run/` at startup again | ✅ 1 failed (rc=101) | `exec::exec_binds_no_control_socket` |
 
 1/1 caught.
+
+T-0020 (test-suite dedupe): `cmd_run.rs` dropped `a_model_error_exits_one` (same scenario as `diagnostics_carry_the_radian_prefix`, which now also asserts `HTTP 401`) and `one_shot_model_error_still_exits_one_and_shows_the_error` (covered by `diagnostics_carry_the_radian_prefix` and `a_context_overflow_error_adds_a_hint`: exit 1, `HTTP <status>` on stderr, empty stdout).
+
+| id | mutation | test that fails | result |
+|---|---|---|---|
+| T-0020-M1 | `exit_code_for_status` maps `RunStatus::Failed` to 0 | `cmd_run::diagnostics_carry_the_radian_prefix`, `cmd_run::a_context_overflow_error_adds_a_hint` | ✅ 2 failed |
+
+1/1 caught.

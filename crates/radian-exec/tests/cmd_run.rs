@@ -36,28 +36,6 @@ async fn one_shot_streams_text_to_stdout_only() {
     assert_eq!(last_user_text(&messages_of(&server, 0)), "hi");
 }
 
-#[tokio::test]
-async fn a_model_error_exits_one() {
-    let server = MockServer::start(vec![Reply::status(
-        401,
-        "{\"error\":{\"message\":\"bad key\"}}",
-    )])
-    .await;
-
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[],
-        ),
-        "",
-    )
-    .await;
-
-    assert_eq!(code, 1);
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.contains("HTTP 401"), "{stderr}");
-}
-
 /// ADR 0032: the diagnostics say `radian: …`, not `agent: …` (the binary is
 /// gone; `radian exec` is the headless command). Every failure line carries the prefix.
 #[tokio::test]
@@ -79,6 +57,7 @@ async fn diagnostics_carry_the_radian_prefix() {
 
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("HTTP 401"), "{stderr}");
     assert!(
         stderr.lines().any(|line| line.starts_with("radian: ")),
         "a diagnostic line starts with `radian: `: {stderr}"
@@ -2570,23 +2549,6 @@ async fn a_transient_error_is_retried_and_the_turn_still_succeeds() {
         2,
         "the first attempt and its retry reached the model"
     );
-}
-
-/// One-shot mode is unchanged: a model error still exits 1, and the message is on stderr.
-#[tokio::test]
-async fn one_shot_model_error_still_exits_one_and_shows_the_error() {
-    let server = MockServer::start(vec![Reply::status(400, "provider is down")]).await;
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
-            &[("OPENAI_API_KEY", KEY)],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("HTTP 400"), "{stderr}");
-    assert!(stdout.is_empty(), "stdout must stay model-only: {stdout}");
 }
 
 /// ADR 0018's fallback: a recognizable context-overflow error is classified as such and gets
