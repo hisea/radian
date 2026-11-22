@@ -1,20 +1,16 @@
-//! The pure text helpers both folds need: a message's display text, its images, the `!` command
-//! block, and the row summary an ACP worker's non-protocol line gets.
+//! The pure text helpers the fold needs: a message's display text, its images and the `!`
+//! command block.
 //!
 //! None of this draws anything; it only decides what an entry's `text` is. They live here so a
-//! journal folded by the hub and the same journal folded by the TUI produce character-for-
+//! journal folded by `radian attach` and the same journal folded by the TUI produce character-for-
 //! character the same entries.
 
 use std::sync::Arc;
 
 use radian_coding::image;
 use radian_core::ContentPart;
-use serde_json::{Map, Value};
 
 use super::{Entry, EntryKind, ImagePart};
-
-/// The keys a row's summary is taken from, in this order (ADR 0048 §13).
-pub const SUMMARY_KEYS: [&str; 5] = ["text", "message", "command", "content", "summary"];
 
 /// Concatenated text parts, for display.
 pub fn text_of(parts: &[ContentPart]) -> String {
@@ -102,38 +98,4 @@ pub fn bash_entry_from_context(text: &str) -> Option<Entry> {
         },
         format!("{command}\n{}", body.trim_end_matches('\n')),
     ))
-}
-
-/// The first non-empty summary string: the keys of [`SUMMARY_KEYS`] at the top level first,
-/// then the same keys one level down inside every object-valued field.
-pub fn first_summary(object: &Map<String, Value>) -> Option<&str> {
-    for key in SUMMARY_KEYS {
-        if let Some(text) = object
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|text| !text.is_empty())
-        {
-            return Some(text);
-        }
-    }
-    for value in object.values() {
-        let Some(inner) = value.as_object() else {
-            continue;
-        };
-        for key in SUMMARY_KEYS {
-            if let Some(text) = inner
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-            {
-                return Some(text);
-            }
-        }
-    }
-    None
-}
-
-/// A summary is one row: its line breaks become spaces.
-pub fn line_breaks_to_spaces(text: &str) -> String {
-    text.replace("\r\n", " ").replace(['\n', '\r'], " ")
 }

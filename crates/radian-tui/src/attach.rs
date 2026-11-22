@@ -3,8 +3,8 @@
 //!
 //! **What it reads.** The journal is the observation bus: no socket, no token, and the observed
 //! session does not know anyone is looking. The fold itself is the host's
-//! ([`radian_host::transcript::AttachFold`], ADR 0023 U1) — the same code the hub folds a
-//! journal with — and it wraps `radian_session::JournalTail`, whose per-line parser is the
+//! ([`radian_host::transcript::AttachFold`], ADR 0023 U1) — the same code every reader folds
+//! a journal with — and it wraps `radian_session::JournalTail`, whose per-line parser is the
 //! **same** `LineScanner` and `TranscriptFold` a resume's `Session::open` folds, and which never
 //! takes the writer's lock and never writes. The transcript it hands back is the recovered
 //! history of the committed prefix. This module **mirrors** the fold's entries into the TUI's
@@ -71,8 +71,8 @@ impl AttachView {
     /// reports a missing session before entering the terminal.
     pub fn open(path: &Path, id: &str) -> Result<Self, String> {
         // ADR 0035: a memory card in the observed transcript resolves against this process's
-        // memory root, the same one the recording session used. The fold resolves it, so the
-        // hub's entries carry the same card.
+        // memory root, the same one the recording session used. The fold resolves it, so every
+        // reader's entries carry the same card.
         let fold = AttachFold::open(path, radian_host::memory_dir())?;
         let mut app = App::new("", id);
         app.set_memory_root(radian_host::memory_dir());
@@ -181,12 +181,6 @@ impl AttachView {
         AttachKey::Redraw
     }
 
-    /// The theme the transcript draws with. The caller that owns a theme (`radian arc`) sets
-    /// it; a bare attach view keeps the default.
-    pub fn set_theme(&mut self, theme: Theme) {
-        self.app.theme = theme;
-    }
-
     /// Scrolls the transcript one line at a time, up (`delta < 0`) or down.
     pub fn scroll_lines(&mut self, delta: i32) {
         self.app.scroll_by(delta);
@@ -234,8 +228,8 @@ impl AttachView {
         frame.render_widget(Paragraph::new(footer), chunks[1]);
     }
 
-    /// Draws the transcript into `area` (no footer): the arc TUI's conversation tab puts the
-    /// same blocks inside its own frame, so an attached session and a task's journal agree.
+    /// Draws the transcript into `area` (no footer): the attach view's own frame draws
+    /// the footer below it.
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let theme = self.app.theme.clone();
         draw_entries(&mut self.app, frame, area, &theme);
@@ -243,8 +237,8 @@ impl AttachView {
 }
 
 /// Draws an [`App`]'s transcript entries into `area` with the attach view's layout, theme and
-/// scroll state. The attach view and the arc conversation tab's folded ACP stream both call
-/// this, so both draw the same blocks by construction (ADR 0048 §13).
+/// scroll state. The attach view calls it, and so draws the same blocks the live
+/// TUI does by construction.
 pub(crate) fn draw_entries(app: &mut App, frame: &mut Frame, area: Rect, theme: &Theme) {
     let width = area.width as usize;
     let height = area.height as usize;

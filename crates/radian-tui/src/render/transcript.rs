@@ -50,8 +50,6 @@ pub(crate) fn marker_prefix(kind: EntryKind) -> &'static str {
         EntryKind::Warning => "! ",
         // Rule 2: two cells like every other marker; the `Tip:` label is content now.
         EntryKind::Tip => "  ",
-        // The attempt's outcome line has no marker of its own: it is the worker's final row.
-        EntryKind::Outcome { .. } => "",
         // ADR 0033: the command line; `!` (context) vs `!!` (not) differ in color, not marker.
         EntryKind::Bash { .. } => "$ ",
     }
@@ -71,20 +69,6 @@ const REASONING_MARKER: &str = "◻ ";
 /// `ascii` ([`crate::footer::Glyphs::open_marker`]).
 fn reasoning_marker(glyphs: crate::footer::Glyphs) -> &'static str {
     glyphs.open_marker()
-}
-
-/// The suffix a user message the owner sent through the control port carries (ADR 0035):
-/// ` · hub`, drawn in the weak level at the end of the message's last row. It is render-only,
-/// like `[interrupted]`: neither a copy nor a search sees it.
-const HUB_SUFFIX: &str = " · hub";
-
-/// The weak suffixes an entry's last row carries (ADR 0035).
-fn tail_spans(entry: &Entry, theme: &Theme) -> Vec<Span<'static>> {
-    if entry.kind == EntryKind::User && entry.via.as_deref() == Some("hub") {
-        vec![Span::styled(HUB_SUFFIX, theme.truncation)]
-    } else {
-        Vec::new()
-    }
 }
 
 /// The user row's marker in the terminal's glyph set (ADR 0035): `❯ `
@@ -119,10 +103,6 @@ fn marker(entry: &Entry, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'sta
         // The compaction one-liner is structural (ADR 0035): the `frame`
         // role, the same dim level every other structural line uses.
         EntryKind::Compaction => theme.frame,
-        // The worker's outcome (ADR 0048 §13): the done or the failed colour, as the row
-        // view draws it.
-        EntryKind::Outcome { ok: true } => theme.status_ok,
-        EntryKind::Outcome { ok: false } => theme.status_error,
         // ADR 0033: `!` uses the command color; `!!` steps down to the hint level.
         EntryKind::Bash {
             exclude_from_context: false,
@@ -139,15 +119,10 @@ fn marker(entry: &Entry, theme: &Theme, glyphs: crate::footer::Glyphs) -> (&'sta
         EntryKind::Reasoning => reasoning_marker(glyphs),
         _ => marker_prefix(kind),
     };
-    // The hub-answer line is weaker than an ordinary notice (ADR 0035).
-    let style = if entry.dim { theme.truncation } else { style };
     (prefix, style)
 }
 
 fn body_style(entry: &Entry, theme: &Theme) -> Style {
-    if entry.dim {
-        return theme.truncation;
-    }
     match entry.kind {
         EntryKind::Reasoning => theme.reasoning,
         EntryKind::ToolCall => theme.tool_call,
@@ -166,8 +141,6 @@ fn body_style(entry: &Entry, theme: &Theme) -> Style {
         EntryKind::Tip => theme.hint,
         // The expanded summary is body text; its one-liner is styled by `marker`.
         EntryKind::Compaction => theme.notice_body,
-        EntryKind::Outcome { ok: true } => theme.status_ok,
-        EntryKind::Outcome { ok: false } => theme.status_error,
         // ADR 0033: the same split as `marker`.
         EntryKind::Bash {
             exclude_from_context: false,
@@ -274,9 +247,6 @@ fn entry_lines(
             line.spans
                 .push(Span::styled(" [interrupted]", theme.interrupted));
         }
-        if Some(i) == last {
-            line.spans.extend(tail_spans(entry, theme));
-        }
         lines.push(line);
     }
     lines
@@ -361,11 +331,8 @@ fn render_row(
         " ".repeat(prefix.width())
     };
     // A notice's content is the secondary level (the assignment: its value is 次,
-    // only its label is 强调); the marker's own role stays `notice`. The hub-answer line is
-    // the weak level instead (ADR 0035).
-    let body = if entry.dim {
-        theme.truncation
-    } else if placeholder {
+    // only its label is 强调); the marker's own role stays `notice`.
+    let body = if placeholder {
         theme.reasoning
     } else if matches!(entry.kind, EntryKind::Notice | EntryKind::Startup) {
         theme.notice_body
@@ -666,9 +633,6 @@ pub fn visible_lines_images(
                 if Some(i) == last && entry.interrupted {
                     line.spans
                         .push(Span::styled(" [interrupted]", theme.interrupted));
-                }
-                if Some(i) == last {
-                    line.spans.extend(tail_spans(entry, theme));
                 }
                 out.push(line);
             }

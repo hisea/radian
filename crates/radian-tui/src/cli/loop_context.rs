@@ -117,26 +117,14 @@ impl LoopContext<'_> {
                 }
                 app.update(AppInput::Runtime(event))
             }
-            UiEvent::Pending { answered_from_hub } => {
+            UiEvent::Pending => {
                 // ADR 0023 U7: the UI shows the queue's head. Reading it here is what makes a
-                // waiter that gave up (a cancelled turn) disappear immediately. The ids the
-                // control port answered are passed on, so a popup it answered closes with one
-                // weak line saying so (ADR 0035).
+                // waiter that gave up (a cancelled turn) disappear immediately.
                 let head = self.queue.head();
                 app.update(AppInput::Pending {
                     head: head.map(Box::new),
                     len: self.queue.len(),
-                    answered_from_hub,
                 })
-            }
-            UiEvent::ControlClose { session_id } => {
-                // ADR 0043: the owner ended this session through the control port. An end for
-                // another session is not ours: `/new` replaces the session and the old port's
-                // close can land after the new loop started, so ignore it.
-                if session_id != self.session.id().as_str() {
-                    return false;
-                }
-                app.update(AppInput::RemoteClose)
             }
             UiEvent::Command(input) => app.update(input),
             UiEvent::Input(InputEvent::Key(key)) => app.on_key(key),
@@ -241,17 +229,6 @@ impl LoopContext<'_> {
                 self.command(radian_host::SessionCommand::Cancel)
             }
             Effect::Quit => Ok(()),
-            // The remote close's durable notice (ADR 0006 §5.14). The live transcript entry is
-            // already pushed; this is the record a resume reads. Best effort like the audit
-            // sink: a broken journal must not stop the process from closing.
-            Effect::HostNotice { text } => {
-                let _ = self.runtime.block_on(
-                    self.host
-                        .journal
-                        .append_runtime_event(radian_session::RuntimeEvent::HostNotice { text }),
-                );
-                Ok(())
-            }
             // ADR 0043: a quitting session closes its inbox before it cancels, so the driver
             // leaves at the cancelled turn's boundary instead of claiming a followup queued
             // behind it (a turn `session.stop()` would then drop mid-flight).

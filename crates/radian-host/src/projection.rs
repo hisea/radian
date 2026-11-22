@@ -123,7 +123,7 @@ struct Facts {
     /// ADR 0034 H2: the session is idle-blocked — a used-up wake budget, a `/goal` budget
     /// stop, a lost job notice, the intent-stop cap or the idle hook-continuation cap. The TUI
     /// folds the five into this one bit so a host that does not see the TUI's own state (the
-    /// control port a hub reads) reports the same `blocked` state herdr does.
+    /// control port reads it) reports the same `blocked` state herdr does.
     idle_blocked: bool,
 }
 

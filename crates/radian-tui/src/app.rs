@@ -127,10 +127,6 @@ pub enum Effect {
     /// followup that is already queued, and a followup that arrives between the quit and
     /// `session.stop()` is refused, not started. Idempotent.
     CloseInbox,
-    /// Journal one durable host notice before leaving (ADR 0006 §5.14). The remote close
-    /// commits `session closed remotely`; the TUI shows it live too, but this is the record
-    /// a resume reads.
-    HostNotice { text: String },
     /// The TUI's idle timer fired (ADR 0045 §6): run the session's `Notification` hooks with
     /// `idle_prompt`. It observes only and never opens a turn.
     NotifyIdle,
@@ -340,7 +336,6 @@ impl PartialEq for Effect {
         match (self, other) {
             (SendFollowup(a), SendFollowup(b)) | (Steer(a), Steer(b)) => a == b,
             (Cancel, Cancel) | (CloseInbox, CloseInbox) | (Quit, Quit) => true,
-            (HostNotice { text: a }, HostNotice { text: b }) => a == b,
             (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
             (SetMemory { off: a }, SetMemory { off: b }) => a == b,
@@ -796,9 +791,6 @@ pub struct App {
     /// stops the still-running turn, exactly as a process stop would; that is the one case the
     /// stop drops a live turn.
     pub quit_after_turn: Option<Instant>,
-    /// The `HostNotice` a deferred remote close still has to journal: kept from the close
-    /// until the quit runs, so the notice is the last durable fact before the process leaves.
-    pending_close_notice: Option<String>,
     /// When the current idle stretch began: a turn end, or the last input. `None` before the
     /// first turn. The `idle_prompt` timer reads it (ADR 0045 §6).
     pub idle_since: Option<Instant>,

@@ -72,7 +72,7 @@ impl Expansion {
 }
 
 /// The display text of a user message's parts. The host's fold writes the same text into an
-/// entry (ADR 0023 U1), so the TUI and the hub show the same line.
+/// entry (ADR 0023 U1), so the TUI and `radian attach` show the same line.
 pub use radian_host::transcript::parts::display_parts;
 
 /// One referenced file that exists but cannot be attached.

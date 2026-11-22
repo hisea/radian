@@ -20,12 +20,10 @@ facts (the journal and the events a `JournalObserver` folds) and an ACP attempt'
 `result.jsonl` into one `Entry` sequence, and it owns that entry type: the entry a user message,
 an assistant reply, a reasoning block, a tool call with its result, a compaction summary or a
 notice becomes, plus the tool-card data and the memory reference the card carries. Three
-front ends fold through it — `radian attach`, the arc TUI's conversation page and the hub — so
-none of them forks the folding rules. The TUI's own `Entry` is that host entry plus render
+front ends fold through it, so none of them forks the folding rules. The TUI's own `Entry` is that host entry plus render
 state (the live flag, decoded images, the layout caches), and `radian-tui` keeps everything
 about drawing it: layout, themes, scrolling and ratatui. The split is one-way: the fold crate
-knows nothing about ratatui and nothing about `radian-tui`, and `radian-arc` (the hub) reads
-the same fold without a renderer.
+knows nothing about ratatui and nothing about `radian-tui`.
 
 ### U2 Event-driven loop
 
@@ -90,7 +88,7 @@ When observing another process session: only `Observe` capability exists. No wri
 
 Approval and structured questions share one arrival-order queue. Elements carry `origin: SessionId`. Completion still uses oneshot (the permission-layer race, the UI-exit "abandoned", and silent late-answer drops stay unchanged). The queue gives stable order and source, and completes all its requests with abort results when its session closes. The UI shows only the head. The status bar shows the pending count. Approval fail-closed semantics (ADR 0012) stay unchanged by one word.
 
-A second front end may answer the same queue through the process control port's owner-token `answer` verb (ADR 0043). The queue is the one arbiter, so the first answer wins: once the TUI (or the ACP bridge, or the control port) has completed an entry, a later answer for the same id returns `Answered::Late` and changes nothing. The TUI's own path and the queue's completion rules are unchanged.
+The queue is the one arbiter, so the first answer wins: once the TUI (or the ACP bridge) has completed an entry, a later answer for the same id returns `Answered::Late` and changes nothing. The queue's completion rules are unchanged.
 
 ### U8 Panels and layout tree; only built-in compile-time panels
 
@@ -147,4 +145,4 @@ Each item already depends on Core facts: `EventSink::emit` is synchronous and no
 
 ## Verification
 
-`tests/update.rs` (each effect and result input), `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`, `tests/btw.rs` (`/btw` effect, reject, Esc, reopen, streaming and completion inputs), `tests/purity.rs` (`app.rs` holds no `std::fs`, `MemoryService`, `tokio`, or `mention::expand`). `projection.rs` order unit tests. `tests/virtual.rs` window tests. Pty tests cover idle zero-redraw, signals, flood draw fairness, terminal loss and orphans, `--block-input` and `--freeze-draw`, `/btw` overlay end to end (request-body prefix sameness, session file with no side questions). `/new` coverage: `command.rs` parse and HELP tests, `tests/update.rs` accept and reject tests, pty one-round, `/new`, one-round tests (two session files, second `SessionCreated` carrying route and levels, `ConfigChanged` backfill, `Session::history` replay, `/sessions` listing both) plus reject and lock-release tests. `tests/perf_render.rs` and `benchmarks/perf-baseline.md` record P95 and long-list metrics. The folds are pinned in `radian-host`: the journal fold against the TUI's attach path, an ACP `result.jsonl` fixture against the arc conversation page, the serialized shape of every entry kind, and a late tool result updating its own entry in both folds.
+`tests/update.rs` (each effect and result input), `tests/input.rs`, `tests/command.rs`, `tests/approval.rs`, `tests/btw.rs` (`/btw` effect, reject, Esc, reopen, streaming and completion inputs), `tests/purity.rs` (`app.rs` holds no `std::fs`, `MemoryService`, `tokio`, or `mention::expand`). `projection.rs` order unit tests. `tests/virtual.rs` window tests. Pty tests cover idle zero-redraw, signals, flood draw fairness, terminal loss and orphans, `--block-input` and `--freeze-draw`, `/btw` overlay end to end (request-body prefix sameness, session file with no side questions). `/new` coverage: `command.rs` parse and HELP tests, `tests/update.rs` accept and reject tests, pty one-round, `/new`, one-round tests (two session files, second `SessionCreated` carrying route and levels, `ConfigChanged` backfill, `Session::history` replay, `/sessions` listing both) plus reject and lock-release tests. `tests/perf_render.rs` and `benchmarks/perf-baseline.md` record P95 and long-list metrics. The folds are pinned in `radian-host`: the journal fold against the TUI's attach path, an ACP `result.jsonl` fixture, the serialized shape of every entry kind, and a late tool result updating its own entry in both folds.

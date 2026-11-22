@@ -85,7 +85,7 @@ pub struct PermissionHooks {
     /// Session grants a `PermissionRequest` hook recorded with `updatedPermissions`
     /// (ADR 0045 §4). They are kept apart from the human grants because a hook answers
     /// asks on every turn source, including a non-human one (`exec -p`, a `Stop`
-    /// continuation, an arc worker), while a human grant still needs a human turn. A hook
+    /// continuation, a subagent), while a human grant still needs a human turn. A hook
     /// grant answers only a question the rules already asked, so it widens nothing.
     hook_grants: Mutex<HashSet<SessionGrant>>,
     /// The current turn's source, set by the host before each turn. `HookContext` has no

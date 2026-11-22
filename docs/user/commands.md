@@ -263,9 +263,7 @@ the waiting count.
 the running turn. `ctrl-c` cancels the running turn. A second `ctrl-c`
 within 2 seconds on an empty input quits; any other key disarms it. `/quit`
 quits too, cancelling a running turn first and leaving a queued followup
-unstarted (see `/quit` above). A remote close from the owner (the
-hub) takes the same `/quit` path after one `session closed remotely` notice;
-the notice is journaled, so a resume shows it. A draft typed at that moment is
+unstarted (see `/quit` above). A draft typed at that moment is
 lost the way a `ctrl-c` quit loses it. A side
 question (`/btw`) and a read command (`/context`,
 `/usage`, `/memory list`, `/memory show`, `/memory stale`, `/memory open`, `/memory project`) run while a turn

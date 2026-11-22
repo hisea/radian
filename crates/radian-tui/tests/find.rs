@@ -204,7 +204,6 @@ fn ctrl_f_is_refused_while_an_approval_is_pending() {
             )),
         })),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     app.on_key(ctrl('f'));
     assert!(app.find_state().is_none(), "no find box over an approval");

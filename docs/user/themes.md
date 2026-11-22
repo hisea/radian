@@ -144,37 +144,6 @@ per level so levels read apart at a glance):
 | `reasoning_xhigh` | The `xhigh` level marker. |
 | `reasoning_max` | The `max` level marker. |
 
-Plan priorities (`P0`..`P5` roles; `P0` is highest; no screen of this build draws
-them):
-
-| Role | What it paints | `dark` | `light` | `mono` |
-|---|---|---|---|---|
-| `priority_p0` | The `P0` text. | `okhsl(20 72% 67%)` (red) | `okhsl(20 91% 47%)` (red) | no color |
-| `priority_p1` | The `P1` text. | `okhsl(45 75% 67%)` (orange) | `okhsl(45 85% 47%)` (orange) | no color |
-| `priority_p2` | The `P2` text. | `okhsl(65 75% 67%)` (amber) | `okhsl(65 85% 47%)` (amber) | no color |
-| `priority_p3` | The `P3` text. | `okhsl(83 88% 67%)` (yellow) | `okhsl(83 99% 47%)` (yellow) | no color |
-| `priority_p4` | The `P4` text. | `okhsl(120 75% 67%)` (yellow-green) | `okhsl(120 85% 47%)` (yellow-green) | no color |
-| `priority_p5` | The `P5` text. | `okhsl(159 59% 67%)` (green) | `okhsl(159 75% 46%)` (green) | no color |
-
-A theme file sets them by these names; pi has no source role for them. Without
-truecolor each value becomes the nearest 256-color entry, like every role.
-
-Plan marks (one role per plan state; no screen of this build draws them):
-
-| Role | What it paints | `dark` | `light` | `mono` |
-|---|---|---|---|---|
-| `plan_needs_you` | The `◉` mark. | `okhsl(45 75% 67%)` (orange), bold | `okhsl(45 85% 47%)` (orange), bold | bold, no color |
-| `plan_running` | The `●` mark. | `okhsl(202 58% 67%)` (cyan) | `okhsl(203 73% 46%)` (cyan) | no color |
-| `plan_queued` | The `○` mark. | `okhsl(295 50% 67%)` (violet) | `okhsl(295 60% 46%)` (violet) | no color |
-| `plan_paused` | The `◍` mark. | `okhsl(65 75% 67%)` (amber) | `okhsl(65 85% 47%)` (amber) | no color |
-| `plan_done` | The `✓` mark. | `okhsl(159 59% 67%)` (green) | `okhsl(159 75% 46%)` (green) | no color |
-| `plan_draft` | The `◌` mark. | `okhsl(229 8% 56%)` (grey) | `okhsl(229 7% 59%)` (grey) | no color |
-| `plan_cancelled` | The `✕` mark. | `okhsl(20 72% 67%)` (red) | `okhsl(20 91% 47%)` (red) | no color |
-
-A theme file sets them by these names. A theme that does not set one keeps the
-built-in default of its `appearance`; without truecolor each value becomes the
-nearest 256-color entry, like every role.
-
 Tool block backgrounds by state:
 
 | Role | What it paints |
@@ -284,11 +253,7 @@ existing output without `--force`.
 
 What converts: pi's text levels and semantic colors map onto the matching
 roles (user message text to `user`, thinking text to `reasoning`, tool title
-to `tool_call`). The seven plan marks take pi's tokens where pi has one:
-`success` → `plan_done`, `error` → `plan_cancelled`, `warning` →
-`plan_needs_you`, `accent` → `plan_queued`, and `dim` → `plan_draft`;
-`plan_running` and `plan_paused` have no pi source, so the report lists them
-among the roles that keep the built-in value. The import report names every
+to `tool_call`). The import report names every
 mapped value, every pi key it
 drops, and every role that keeps the built-in value: read it for the full
 mapping of your file. What does not convert: pi roles nothing consumes

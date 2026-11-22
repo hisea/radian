@@ -8,7 +8,7 @@ crates: radian-host, radian-exec, radian-runtime, radian-permissions, radian-tui
 ## Brief
 
 ## Problem
-When a turn ends on a model error, an unattended `radian exec` or arc worker tells no one. Without herdr, a TUI user gets no signal when radian waits for approval or for input.
+When a turn ends on a model error, an unattended `radian exec` or subagent tells no one. Without herdr, a TUI user gets no signal when radian waits for approval or for input.
 
 ## Decisions
 Read `docs/backlog/hooks-stopfailure-notification.md`; it is the spec. In short, two observe-only events in `HOOK_EVENTS`: no blocking, stdout not read, exit codes and timeouts only produce a recent-runs entry and never fail closed, default timeout 60 s, run in the background.

@@ -178,7 +178,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
-| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、一个 memory scope 目录内的文件、`~/.radian/credentials/auth.json`、`~/.radian/trust/trust.json` 与 `~/.radian/hub/` 读失败；沙箱内的 `shell` 写 `memory/` 不会改变真实目录；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 8 拒 + 3 可（+1 跳过） | 4 拒 + 2 可（`skills_readable`/`trust_unreadable`/`hub_unreadable` 待 VM 恢复后补跑） |
+| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、一个 memory scope 目录内的文件、`~/.radian/credentials/auth.json`、与 `~/.radian/trust/trust.json` 读失败；沙箱内的 `shell` 写 `memory/` 不会改变真实目录；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 7 拒 + 3 可（+1 跳过） | 3 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
 | deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |
@@ -462,7 +462,7 @@ SKIP），`escape-macos.{txt,json}` 已更新。重跑时须给进程一个排�
 
 ## 在沙箱内跑测试（nextest profile `sandbox`）
 
-arc worker 在 `workspace` 档位里跑。有一部分测试只因为这个环境而失败：它们不是被测代码
+worker 在 `workspace` 档位里跑。有一部分测试只因为这个环境而失败：它们不是被测代码
 的回归，但会让每份 worker 报告都多出一串红色失败，真正的回归藏在这串失败里。`.config/nextest.toml` 的
 `profile.sandbox` 就是给这个环境用的：它跑默认 profile 跑的**全部**测试，只减去一张**精确测试名**清单。
 
@@ -489,7 +489,7 @@ cargo nextest run --profile sandbox -p radian-host -p radian-tui \
 | 组 | 原因 | 条数 | 对应限制 |
 |---|---|---|---|
 | 1 | 在 `/tmp` 下建测试目录（`create_dir_all` 被拒，`EPERM`）：工作区外不可写 | 231 | 本文“表述约束”（工作区外不可写）；这些 harness 用 `/tmp` 是因为工作区内的 `TMPDIR` 太长，会让 Unix socket 路径越过 `SUN_LEN`（第 5 组） |
-| 2 | `ps -o lstart=` 被拒（exit 126），取不到进程启动时间；arc 把“没有启动时间”当成进程已死 | 3 | 本节；`ps` 的进程信息读取不在当前放开清单里 |
+| 2 | `ps -o lstart=` 被拒（exit 126），取不到进程启动时间；harness 把“没有启动时间”当成进程已死 | 3 | 本节；`ps` 的进程信息读取不在当前放开清单里 |
 | 3 | 嵌套 Seatbelt：外层已约束时 `sandbox-exec` 无法再套一层，探测失败、后端退化为 `inherited`（只有外层规则） | 13 | 本文“嵌套：已在沙箱内的 radian 沿用外层” |
 | 4 | `TMPDIR` 在仓库里：`std::env::temp_dir()` 的临时目录落在仓库内，git/规范工作区/上下文文件/skill 发现会看到外层仓库，外层 `AGENTS.md` 也会进入测试工作区 | 12 | 本文“在沙箱内跑测试”本节 |
 | 5 | 同一个过长的 `TMPDIR` 让 Unix socket 路径越过 `SUN_LEN`（`bind` 报 path must be shorter than SUN_LEN），还没轮到沙箱规则 | 6 | 本文“嵌套”节的 `TMPDIR` 说明 |

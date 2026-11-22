@@ -192,28 +192,10 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         Role::StatusOk => Some("success"),
         Role::StatusWarn => Some("warning"),
         Role::StatusError => Some("error"),
-        // The arc plans page's seven plan marks (ADR 0048 decision 11): the five marks whose
-        // state pi has a token for take it; running and paused have no pi source, so a
-        // theme file sets them by their Radian names and the import reports them unmapped.
-        Role::PlanDone => Some("success"),
-        Role::PlanCancelled => Some("error"),
-        Role::PlanNeedsYou => Some("warning"),
-        Role::PlanQueued => Some("accent"),
-        Role::PlanDraft => Some("dim"),
-        Role::PlanRunning | Role::PlanPaused => None,
         // The `/context` grid's category roles have no pi source (spec
         // `tui-context-grid`): a theme file sets them by their Radian names, and
         // anything else falls back to the built-in palette.
-        // The arc plans page's priority roles (ADR 0048 decision 3) have no pi source: a
-        // theme file sets them by their Radian names (`priority_p0`..`priority_p5`), and
-        // anything else falls back to the built-in palette.
-        Role::PriorityP0
-        | Role::PriorityP1
-        | Role::PriorityP2
-        | Role::PriorityP3
-        | Role::PriorityP4
-        | Role::PriorityP5
-        | Role::CtxSystem
+        Role::CtxSystem
         | Role::CtxFiles
         | Role::CtxMemory
         | Role::CtxTools

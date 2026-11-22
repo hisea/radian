@@ -222,12 +222,12 @@ fn every_docs_page_carries_a_tech_article_record() {
         "https://getrad.dev/docs/"
     );
     assert_eq!(
-        radian_tui::site_docs::page_url("arc/index"),
-        "https://getrad.dev/docs/arc/"
+        radian_tui::site_docs::page_url("sub/index"),
+        "https://getrad.dev/docs/sub/"
     );
     assert_eq!(
-        radian_tui::site_docs::page_url("arc/loop"),
-        "https://getrad.dev/docs/arc/loop.html"
+        radian_tui::site_docs::page_url("sub/loop"),
+        "https://getrad.dev/docs/sub/loop.html"
     );
 }
 
@@ -356,18 +356,18 @@ fn a_link_to_a_missing_page_fails_the_build() {
 }
 
 /// Page links are written relative to their source page, as GitHub renders them, and resolve
-/// in both directions across the `arc/` boundary.
+/// in both directions across the `sub/` boundary.
 #[test]
 fn relative_page_links_resolve_from_the_source_directory() {
     let pages = [
         (
-            "arc/loop.md",
+            "sub/loop.md",
             "# Loop\n\n## Deep\n\nSee [gate](gate.md#here), [config](../configuration.md#setup), and [home](../index.md).\n",
         ),
-        ("arc/gate.md", "# Gate\n\n## Here\n"),
+        ("sub/gate.md", "# Gate\n\n## Here\n"),
         (
             "configuration.md",
-            "# Config\n\n## Setup\n\nSee [the loop](arc/loop.md#deep).\n",
+            "# Config\n\n## Setup\n\nSee [the loop](sub/loop.md#deep).\n",
         ),
         ("index.md", "# Home\n"),
     ];
@@ -375,7 +375,7 @@ fn relative_page_links_resolve_from_the_source_directory() {
     let loop_page = site
         .pages
         .iter()
-        .find(|page| page.stem == "arc/loop")
+        .find(|page| page.stem == "sub/loop")
         .expect("the loop page renders");
     assert!(
         loop_page.body.contains("href=\"gate.html#here\""),
@@ -400,19 +400,19 @@ fn relative_page_links_resolve_from_the_source_directory() {
         .find(|page| page.stem == "configuration")
         .expect("the configuration page renders");
     assert!(
-        config.body.contains("href=\"arc/loop.html#deep\""),
-        "a link into arc/: {}",
+        config.body.contains("href=\"sub/loop.html#deep\""),
+        "a link into sub/: {}",
         config.body
     );
 }
 
-/// A link from an arc page to a missing sibling fails the build, not silently becomes a repo
+/// A link from a sub page to a missing sibling fails the build, not silently becomes a repo
 /// link.
 #[test]
 fn a_link_to_a_missing_sibling_from_an_arc_page_fails_the_build() {
-    let pages = [("arc/loop.md", "# Loop\n\nSee [gone](missing.md).\n")];
+    let pages = [("sub/loop.md", "# Loop\n\nSee [gone](missing.md).\n")];
     let error = render_site(&pages).expect_err("a missing sibling must fail");
-    assert_eq!(error.page, "arc/loop.md");
+    assert_eq!(error.page, "sub/loop.md");
     assert_eq!(error.link, "missing.md");
 }
 
@@ -446,7 +446,7 @@ fn the_hand_written_pages_only_link_generated_docs() {
                 Some((target, fragment)) => (target, Some(fragment)),
                 None => (rest, None),
             };
-            // The generator writes `docs/index.html`; `/docs/` and `/docs/arc/` are the
+            // The generator writes `docs/index.html`; `/docs/` and `/docs/sub/` are the
             // directory indexes GitHub Pages serves from those files.
             let output = if target.is_empty() {
                 "index.html".to_owned()

@@ -50,7 +50,7 @@
 | `prompt-deliver-first.md` | idea | 0036 | 提示词：先交付能跑的版本再迭代、用参照物差分；cobol smoke 是现成复现 |
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
-| `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表；第一阶段的用户是 arc（arc 即 ACP 客户端已落地） |
+| `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表 |
 | `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
 | `provider-gemini-native.md` | idea（方向已定：做） | 0026、0014、0007、0015、0017 | Gemini 原生 `generateContent` adapter，过 provider contract；第二步 Vertex（同协议加 GCP 认证） |
 | `provider-azure-responses.md` | idea | 0026 | Azure OpenAI 走 Responses：同一 adapter 的配置变体（deployment URL、`api-version`、`api-key` header），有用户需要再做 |

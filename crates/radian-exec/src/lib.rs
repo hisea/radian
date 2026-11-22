@@ -210,12 +210,6 @@ pub struct CommonArgs {
     #[arg(long = "tools", value_name = "NAME,...", hide = true)]
     tools: Option<String>,
 
-    /// Hidden: extra paths the sandbox denies reading, and the file tools deny in the `full`
-    /// tier (repeatable). Internal: a wrapper that runs a worker sets it so files outside
-    /// the worker's worktree stay unreadable. It is not a user input.
-    #[arg(long = "deny-read", value_name = "PATH", hide = true)]
-    deny_read: Vec<PathBuf>,
-
     /// Hidden, test-only: the core's tool cancel grace for this process's turns, in
     /// milliseconds (`DEFAULT_TOOL_CANCEL_GRACE`, 5 s, when absent). It is not a user input and
     /// it is not in the manual: only `crates/radian-exec/tests/subagent.rs` sets it, to put the
@@ -589,7 +583,6 @@ mod tests {
         // The hidden internal flags a wrapper sets are accepted.
         for flag in [
             "--tools",
-            "--deny-read",
             "--no-config-mcp",
             "--parent",
             "--parent-seq",

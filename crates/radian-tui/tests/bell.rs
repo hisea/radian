@@ -32,7 +32,6 @@ fn pending(app: &mut App, id: u64, len: usize) -> Vec<Effect> {
     app.update(Input::Pending {
         head: Some(Box::new(view(id))),
         len,
-        answered_from_hub: Vec::new(),
     })
     .effects
 }

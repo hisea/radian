@@ -112,19 +112,6 @@ Unattended runs **do not register** `ask_user`. The test is "a human sits at the
 - The queue's abort outcomes are unchanged: a closing session denies an approval and gives a
   question `PromptError::Gone`.
 
-### Q9 The control port is a second front end
-
-- A session's own process control port answers the same pending queue (ADR 0023 U7) when the
-  request carries the owner token (ADR 0043). An approval answers `allow_once`, `allow_always`
-  or `reject_once` with an optional reason; a question answers a full `QuestionAnswer`, so free
-  text, multi-select and `Other` are all answerable — more than the ACP surface (Q8) can
-  represent.
-- First answer wins. Once the TUI, the ACP bridge or the control port has completed an entry,
-  another answer for that id returns an error and changes nothing (`Answered::Late`); an id
-  that was never issued is `Answered::Unknown`.
-- The queue's abort outcomes (Q4) and the tool-result landing (Q3) are unchanged: an answer is
-  a tool result, never user input and never a permission grant.
-
 ## No Changes to `radian-core`
 
 `ToolContext.cancellation`, `ToolOutput.structured`, `ToolConcurrency::Exclusive`, `ToolExecutionStarted` and `Settled`, and per-await `before_tool_call` all already exist. `ask_user` is a normal `ToolSession` member. Core never knows it waits on a human.

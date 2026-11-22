@@ -26,19 +26,14 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
   skills/<name>/SKILL.md   user-level skills (ADR 0025)              sandbox-readable
   access/access.json       per-project tier records (ADR 0038)       sandbox-unreadable
   run/<pid>.sock           control socket (ADR 0043, non-task verbs); process coordinates only  sandbox-readable
-  hub/                     0700                                     sandbox-unreadable
-    repos.toml             the registered repositories (ADR 0048)
-    token                  the hub's bearer token (ADR 0048)
-    hub.lock               the flock a running hub holds (ADR 0048)
-    hub.log                the output of the `[hub.hooks] after_pending` commands (ADR 0048 §16)
 ```
 
 `RADIAN_HOME` override moves all subdirectories with it. `--session-dir` moves only the session directory.
 
 ### 3. Sandbox read scope
 
-- **Readable**: `config/`, `cache/`, `themes/`, `skills/`, `run/`. These hold user UI data, model-read text, or process coordinates. They carry no credentials. `run/` stays readable because it is only process coordinates: a sandboxed shell can reach a control socket, but the owner token in `hub/token` is unreadable, so the shell gains no owner power (ADR 0043). `$HOME/.agents/skills/` (Agent Skills standard location, ADR 0025) lives outside `$RADIAN_HOME` and outside the denylist, so the sandbox can read it. It never joins the layout tree above.
-- **Unreadable**: `sessions/`, `memory/`, `credentials/`, `trust/`, `access/` (the map of which projects run without a sandbox, ADR 0038 decision 3), `hub/` (the repository registry, its bearer token and its lock, ADR 0048), plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
+- **Readable**: `config/`, `cache/`, `themes/`, `skills/`, `run/`. These hold user UI data, model-read text, or process coordinates. They carry no credentials. `run/` stays readable because it is only process coordinates: a sandboxed shell can reach a control socket (ADR 0043). `$HOME/.agents/skills/` (Agent Skills standard location, ADR 0025) lives outside `$RADIAN_HOME` and outside the denylist, so the sandbox can read it. It never joins the layout tree above.
+- **Unreadable**: `sessions/`, `memory/`, `credentials/`, `trust/`, `access/` (the map of which projects run without a sandbox, ADR 0038 decision 3), plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
 - The `full` tier has no sandbox, so its shell ignores this scope (chosen explicitly by the user). The file tools apply the unreadable list in every tier (ADR 0039 decision 4).
 
 The host first creates `sessions/`, `memory/`, `credentials/`, and `trust/` (0700), then hides them. Linux bwrap can only hide existing paths; `access/` is hidden when it exists, and a missing one holds nothing to hide. `full` has no sandbox.
@@ -53,7 +48,7 @@ Data at old locations (`~/Library/Application Support/radian/sessions`, `$XDG_DA
 
 ### 6. Project-level directories
 
-`<workspace>/.radian/` holds only `config.toml` (ADR 0008 project-level narrow configuration; its narrowing applies regardless of trust) and `arc/`: everything arc stores for the repository (ADR 0048 decisions 5 and 15). `init` lists it in `.git/info/exclude`; the owner can choose to track `arc/config.toml`, `arc/plans/`, and `arc/tasks/`. Project-level skills live in `.agents/skills/` directories (ADR 0025; from the workspace up to the repository root, loaded only when trusted). They are ordinary files inside the workspace. The `workspace`-tier sandbox reads them as usual. The denylist never lists them separately. `.radian-sandbox/` is a sandbox temp directory inside the workspace, next to `.radian/`. It is not a project resource.
+`<workspace>/.radian/` holds only `config.toml` (ADR 0008 project-level narrow configuration; its narrowing applies regardless of trust). Project-level skills live in `.agents/skills/` directories (ADR 0025; from the workspace up to the repository root, loaded only when trusted). They are ordinary files inside the workspace. The `workspace`-tier sandbox reads them as usual. The denylist never lists them separately. `.radian-sandbox/` is a sandbox temp directory inside the workspace, next to `.radian/`. It is not a project resource.
 
 ## Verification
 

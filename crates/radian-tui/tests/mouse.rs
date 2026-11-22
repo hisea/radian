@@ -78,7 +78,6 @@ fn a_modal_swallows_the_wheel() {
     app.update(Input::Pending {
         head: Some(Box::new(view())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     let before = app.session.scroll;
     let result = app.mouse_scroll(MouseScrollDirection::Up);

@@ -149,7 +149,6 @@ fn a_press_on_a_modal_never_starts_one() {
     app.update(Input::Pending {
         head: Some(Box::new(approval())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     // With the approval modal up the selection is off entirely: even a press inside the
     // shrunk transcript viewport (rows 0..2 are still transcript on screen) starts nothing —
@@ -350,7 +349,6 @@ fn auto_scroll_only_ticks_while_a_drag_is_live() {
     app.update(Input::Pending {
         head: Some(Box::new(approval())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     assert!(
         !app.mouse_autoscroll(),

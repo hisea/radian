@@ -19,8 +19,8 @@
 //! `global/` or `projects/<id>/`, never a deeper directory.
 //!
 //! The module lives here rather than beside the renderer because the fold resolves the
-//! reference: the same journal must produce the same `ToolCard::memory` for the hub and for the
-//! TUI (ADR 0023 U1).
+//! reference: the same journal must produce the same `ToolCard::memory` for `radian attach` and for
+//! the TUI (ADR 0023 U1).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};

@@ -37,7 +37,7 @@ pub use radian_host::transcript::EntryKind;
 /// One transcript entry as the renderer sees it: the **folded entry** plus render state.
 ///
 /// The folded part ([`Entry::data`]) is exactly what the host's folds produce
-/// (`radian_host::transcript::Entry`) and what the hub sends to a remote client. Field access
+/// (`radian_host::transcript::Entry`) and what `radian attach` reads. Field access
 /// goes through `Deref`, so the renderer, the live update path and the tests name `entry.text`,
 /// `entry.kind` and `entry.tool` exactly as the folds do, and a field can never be added on one
 /// side only. What is left here is state only a screen has: the live flag, the decoded images,
@@ -49,10 +49,6 @@ pub struct Entry {
     pub data: radian_host::transcript::Entry,
     /// True while the entry is fed by live deltas and not yet a committed message.
     pub live: bool,
-    /// Draw this entry's marker and body in the weak (`truncation`) role. Only the
-    /// `answered from the hub` line uses it: that line must read as the least important in
-    /// the transcript, below an ordinary notice's secondary level (ADR 0035).
-    pub dim: bool,
     /// The images the entry's message carried (ADR 0028 R10), decoded for drawing. A user
     /// message's placeholder line is already in `text`; a tool result's placeholder row is
     /// synthesized by the layout above the image run.
@@ -118,7 +114,6 @@ impl Entry {
         Self {
             data: radian_host::transcript::Entry::new(kind, text),
             live: false,
-            dim: false,
             images: Vec::new(),
             context: None,
             fold_override: None,
@@ -286,7 +281,6 @@ pub(super) fn is_user_input(input: &Input) -> bool {
         | Input::Event(_)
         | Input::Runtime(_)
         | Input::Pending { .. }
-        | Input::RemoteClose
         | Input::MentionsExpanded(_)
         | Input::DroppedLoaded { .. }
         | Input::ClipboardRead(_)

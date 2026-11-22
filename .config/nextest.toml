@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (265 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (234 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec and
 #    control suites use `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 3 and 4).
@@ -61,13 +61,6 @@ test-group = "pty"
 # 4. The same long `TMPDIR` pushes a Unix socket path past SUN_LEN (6 names). The
 #    bind fails with "path must be shorter than SUN_LEN" before any sandbox rule is
 #    involved.
-#
-# 5. The TUI's hub-side tests (6 names). They drive a real `radian` under a pty and
-#    talk to its control socket (the marker, the popup the hub answers, the late
-#    answer, the owner's `close`, and the owner's `close` with a followup queued): the
-#    same short-home and
-#    Unix-socket-connect limits as the Unix-socket tests above, and the app
-#    cannot enter the alternate screen inside the sandbox either.
 
 [profile.sandbox]
 # See the group list above; the blank lines below separate the groups.
@@ -75,41 +68,12 @@ default-filter = """
 not (
     test(=a_bad_mcp_config_leaves_no_session)
   | test(=a_bad_attachment_names_the_item_and_enqueues_nothing)
-  | test(=a_crossing_close_is_answered_before_the_host_is_asked)
-  | test(=a_facade_followup_during_a_non_human_turn_keeps_it_and_opens_its_own_turn_as_user)
-  | test(=a_followup_with_the_owner_token_is_user_with_the_hub_origin)
-  | test(=a_mid_turn_owner_followup_gives_its_own_turn_the_user_source)
-  | test(=a_mid_turn_scheduler_followup_does_not_lower_the_running_user_turn)
-  | test(=a_queued_inject_lowers_the_owner_turn_it_is_absorbed_into)
-  | test(=a_steer_with_the_token_during_a_running_turn_is_a_user_steer)
-  | test(=a_token_file_with_a_trailing_newline_matches_the_token_without_it)
-  | test(=a_wrong_prefix_or_missing_token_stays_scheduler_without_the_hub_origin)
   | test(=an_over_limit_line_gets_an_error_and_the_connection_stays_usable)
-  | test(=an_owner_input_does_not_raise_a_running_non_human_turn)
-  | test(=an_mcp_input_absorbed_into_an_owner_turn_lowers_it_to_mcp)
   | test(=attachments_become_the_same_parts_as_the_tui_composer)
-  | test(=close_answers_ok_before_asking_the_host_and_two_requests_make_one_close)
-  | test(=close_cancels_a_running_turn_and_leaves_the_open_tool_call_interrupted)
-  | test(=close_while_an_approval_is_pending_abandons_it_and_a_late_answer_is_late)
-  | test(=close_without_a_host_hook_is_refused_and_changes_nothing)
-  | test(=close_without_the_owner_token_changes_nothing_and_keeps_the_process_running)
-  | test(=two_close_requests_at_once_both_get_ok_and_the_process_exits_once)
-  | test(=without_a_token_file_any_token_stays_scheduler)
-  | test(=the_owner_verbs_require_the_token_and_change_nothing)
-  | test(=an_allow_once_answer_from_the_port_runs_the_tool_and_a_later_answer_is_late)
-  | test(=an_answer_after_the_in_process_approver_is_late_and_the_outcome_is_unchanged)
-  | test(=a_reject_once_answer_carries_its_reason_into_the_tool_result)
-  | test(=a_free_text_question_answer_through_the_port_equals_a_keyboard_answer)
-  | test(=allow_always_stops_a_second_identical_request_from_being_queued)
-  | test(=a_mid_turn_config_model_switch_leaves_the_in_flight_request_on_the_old_route)
-  | test(=a_config_with_an_unknown_key_is_refused_and_queues_nothing)
-  | test(=subscribe_receives_the_pending_head_and_a_null_after_the_answer)
-  | test(=a_subscriber_without_the_token_sees_only_the_redacted_pending_head)
   | test(=an_idle_inject_does_not_set_the_turn_source_before_a_turn_claims_it)
   | test(=list_sessions_reports_blocked_while_an_approval_waits_and_idle_after_the_turn)
   | test(=list_sessions_reports_an_idle_block_as_blocked)
   | test(=list_sessions_reports_working_while_an_exec_hosts_turn_runs)
-  | test(=models_returns_the_model_list_with_the_current_route_marked)
   | test(=a_base_url_with_credentials_is_redacted_in_errors)
   | test(=a_budget_exceeded_turn_names_the_limit_and_the_flag)
   | test(=a_cancelled_run_has_no_model_error)
@@ -199,7 +163,6 @@ not (
   | test(=config_import_pi_write_creates_the_file_and_refuses_to_overwrite)
   | test(=dash_p_reads_the_prompt_from_stdin_to_eof)
   | test(=default_p_stdout_is_only_model_text)
-  | test(=deny_read_refuses_the_path_in_the_full_tier)
   | test(=diagnostics_carry_the_radian_prefix)
   | test(=every_decision_is_audited_once_with_the_right_approver)
   | test(=every_exit_reaps_the_mcp_children)
@@ -330,7 +293,6 @@ not (
   | test(=waiting_on_a_running_job_does_not_continue)
   | test(=without_a_configured_route_both_kinds_follow_the_parent)
   | test(=without_a_window_the_budget_is_off_and_says_so)
-  | test(=without_deny_read_the_full_tier_reads_the_same_path)
   | test(=without_workspace_the_built_in_tools_do_not_exist)
   | test(=workspace_outside_sandbox_is_denied_without_a_terminal)
   | test(=workspace_runs_a_sandboxed_shell_without_a_terminal_and_without_yes)
@@ -373,12 +335,5 @@ not (
   | test(=herdr::tests::the_reporter_sends_the_report_line)
   | test(=herdr::tests::the_slot_keeps_only_the_latest)
   | test(=herdr::tests::the_slots_keep_the_latest_per_kind_and_the_queue_order)
-
-  | test(=pty_a_hub_followup_is_marked_and_a_plain_one_is_not)
-  | test(=pty_an_approval_answered_through_the_control_port_closes_the_popup)
-  | test(=pty_a_local_answer_first_makes_the_port_answer_late)
-  | test(=pty_a_control_config_switch_shows_in_the_footer_at_the_next_turn)
-  | test(=pty_owner_close_commits_the_notice_and_exits)
-  | test(=pty_owner_close_abandons_a_queued_followup)
 )
 """

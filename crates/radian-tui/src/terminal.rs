@@ -32,9 +32,8 @@ static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the alternate screen is up. The panic hook reads it: while a TUI owns the screen, a
 /// panic on a thread other than `main` must not write to stderr, where its report would print
-/// over the UI. The text still goes to the panic log and `last_panic`; the arc TUI shows a
-/// worker's failure on its footer line, and the session TUI prints `last_panic` once the
-/// terminal is restored.
+/// over the UI. The text still goes to the panic log and `last_panic`; the TUI prints
+/// `last_panic` once the terminal is restored.
 static ALT_SCREEN: AtomicBool = AtomicBool::new(false);
 
 /// The environment variable that decides the startup terminal probe:
@@ -707,10 +706,9 @@ fn stderr_text(record: &PanicRecord, main: bool, alternate_screen: bool) -> Opti
 /// The report, and the diagnostic of a panic log that could not be written, go to stderr
 /// **on `main`, always**, and on another thread only while the alternate screen is not up.
 /// Under the alternate screen a worker's report would be printed over a UI that keeps
-/// drawing; `record_panic` still puts the text in `LAST_PANIC` and the panic log, the arc
-/// TUI's reply puts the failure on its footer line, and the session TUI prints `last_panic`
-/// after the restore. A worker that panics before the terminal is entered, or after it is
-/// restored, still reports on stderr as before.
+/// drawing; `record_panic` still puts the text in `LAST_PANIC` and the panic log, and the TUI
+/// prints `last_panic` after the restore. A worker that panics before the terminal is entered,
+/// or after it is restored, still reports on stderr as before.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let record = record_panic(info);
