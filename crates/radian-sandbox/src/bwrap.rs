@@ -409,7 +409,7 @@ mod tests {
         let ws = root
             .join("repo")
             .join(".radian")
-            .join("arc")
+            .join("work")
             .join("worktrees")
             .join("wt");
         std::fs::create_dir_all(&ws).unwrap();
