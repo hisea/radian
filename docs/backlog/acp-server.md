@@ -2,7 +2,7 @@
 
 - 状态：idea（第二阶段：编辑器）；第一阶段已落地，见 ADR 0049 与手册 `radian acp` 页
 - 涉及 ADR：0049（`radian acp` 的全部决定）、0024（审批与提问映射到 `request_permission`）、0031（信任门）、0023（宿主面分层）
-- 来源：`research/2026-10-18-area-deep-dive/11-ecosystem-compat.md` §5.6、§6 ⑥
+- 来源：早期的生态兼容调研（已归档，不在本仓库）
 - 关系：第一阶段（`radian acp` 服务端）已落地。本条只剩编辑器场景。
 
 ## 第一阶段（已落地）

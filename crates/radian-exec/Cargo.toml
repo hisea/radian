@@ -17,7 +17,6 @@ agent-extensions = { version = "0.2.0", path = "../agent-extensions" }
 agent-provider-openai-compatible = { version = "0.2.0", path = "../agent-provider-openai-compatible" }
 radian-coding = { version = "0.2.0", path = "../radian-coding" }
 radian-host = { version = "0.2.0", path = "../radian-host" }
-radian-memory = { version = "0.2.0", path = "../radian-memory" }
 radian-permissions = { version = "0.2.0", path = "../radian-permissions" }
 radian-runtime = { version = "0.2.0", path = "../radian-runtime" }
 radian-sandbox = { version = "0.2.0", path = "../radian-sandbox" }
@@ -44,6 +43,7 @@ libc = "0.2"
 [dev-dependencies]
 # The shared heading-anchored table reader for the manual drift tests.
 radian-coding = { path = "../radian-coding", features = ["testing"] }
+radian-memory = { path = "../radian-memory" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 libc = "0.2"

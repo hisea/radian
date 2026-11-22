@@ -20,7 +20,7 @@ Status: accepted
 
 - `cargo tree -p grok-mermaid -e normal` shows only `unicode-width`. No second vendored renderer crate lives in the repo.
 - `third_party/grok-mermaid/src/mermaid.rs` diffs against upstream `4827113` only in `use` rows and `pub(crate)` → `pub` (check script or test: restoring both replaces matches sha256 against recorded values). All upstream embedded tests pass.
-- Snapshots: research-doc samples pin output at 80 and 120 columns (`radian-tui/tests/mermaid.rs`). Over-wide blocks show source plus one `mermaid: needs N columns, have W` row. Subgraph with 4-participant sequence charts draw at 80 columns.
+- Snapshots: recorded samples pin output at 80 and 120 columns (`radian-tui/tests/mermaid.rs`). Over-wide blocks show source plus one `mermaid: needs N columns, have W` row. Subgraph with 4-participant sequence charts draw at 80 columns.
 - All Verify commands run.
 
 ## Mutations

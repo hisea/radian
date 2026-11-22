@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `orchestration-leftovers.md` | decided | 0048、0006、0008 | 清 arc 残留：评审 verdict fixture、`spikes/`、`research/` 移出、ADR 0048 引用、`radian-memory` 的死依赖 |
 | `remove-control-port.md` | decided | 0043、0011、0020、0008、0013、0049 | 删掉 `run/<pid>.sock` 控制端口：hub 走后无人用，operad 只用 exec；`[control]` 退役为 inert |
 | `exec-run-metrics-totals.md` | decided | 0044、0049、0007、0010 | `run_metrics` 只留总数，删 `request_log`、按模型/工具细项；不再对齐 `journal_metrics.py` |
 | `benchmarks-to-operad.md` | decided | 0044 | `benchmarks/` 整体移到 operad，Verify 去掉 `metrics.py --self-test` |
@@ -45,7 +44,7 @@
 | `hooks-split-and-trim.md` | decided（1）；idea（2） | 0045、0008、0047、0031 | `hooks.rs`（296 KB）先按职责拆模块；async、StopFailure、Notification 等按使用证据再定 |
 | `test-suite-dedupe.md` | decided | 0023、0032 | pty（548 KB/31 测试）与 exec `cli.rs`（421 KB）去掉与帧断言、其它套件重复的测试 |
 | `context-report-reuse-budget.md` | decided | 0015 | `/context` 估算改用 `radian_core::budget` 的计数，删掉重复实现 |
-| `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
+| `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记已归档，不在本仓库 |
 | `build-cache-and-verify-time.md` | idea（3、4；1、2 已落地） | 无；第 4 项新 ADR | Linux worker 依赖缓存（sccache / ZFS block cloning）与合并测试二进制为 idea |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
@@ -61,14 +60,14 @@
 | `runtime-resource-limits.md` | idea | 0036 | `<runtime>` 写实际可用 CPU/内存（cgroup），避免 `make -j16` 跑在 2 核容器 |
 | `deadline-awareness.md` | idea | 0017、0036、0032 | radian 知道回合期限、自己收尾，并（待定）告诉模型剩余时间 |
 | `acp-server.md` | idea（第二阶段：编辑器；第一阶段已落地，见 0049） | 0049、0024、0031、0023 | 只剩编辑器场景：多 session 是一个连接多会话还是每线程一个进程、编辑器里的信任门怎么问、要不要调客户端 `fs/*` 看未保存缓冲区、上 agentclientprotocol.com 的列表 |
-| `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记 `research/2026-10-24-claude-code-hooks.md` 含不采纳项 |
+| `hooks-lifecycle-events.md` | idea | 0045、0011、0036、0018、0021 | 其余三个生命周期事件按用例逐个加：`UserPromptSubmit`、`SessionStart`、`PreCompact`/`PostCompact`；研究笔记（已归档）含不采纳项 |
 | `provider-gemini-native.md` | idea（方向已定：做） | 0026、0014、0007、0015、0017 | Gemini 原生 `generateContent` adapter，过 provider contract；第二步 Vertex（同协议加 GCP 认证） |
 | `provider-azure-responses.md` | idea | 0026 | Azure OpenAI 走 Responses：同一 adapter 的配置变体（deployment URL、`api-version`、`api-key` header），有用户需要再做 |
 | `provider-bedrock-converse.md` | idea | 0026、0020、0013 | Bedrock Converse：SigV4 签名加 AWS 二进制事件流，没有明确需求不做；先看 OpenAI 兼容接口能否替代 |
 | `provider-compat-flags.md` | idea | 0026、0014、0008 | 照 pi 的 `compat` 按真实故障逐个加模型兼容开关，不一次照搬；首个候选是会话粘性 header |
 | `provider-mistral-and-pi-messages.md` | idea（不做） | 0026 | Mistral 已有 OpenAI 兼容 chat；pi-messages 是 pi 自家网关私有协议；写明重新考虑的条件 |
 
-只占索引行（暂无文件；来源都是总报告 `research/2026-10-18-area-deep-dive/README.md`）：
+只占索引行（暂无文件；来源都是早期的总报告（已归档，不在本仓库））：
 
 | (无文件) | 状态 | ADR | 一句话 |
 |---|---|---|---|
