@@ -3722,3 +3722,12 @@ file and restored from `.radian/bak/`, which `cmp` found identical.
 | T-0014-M1 | the items-table loop in `Footer::from_config` never warns about a retired `command`/`period` | `footer::a_retired_command_item_warns_once_and_shows_its_id`, `footer::a_retired_command_under_a_builtin_id_warns_and_the_builtin_draws` | ✅ 2 failed |
 
 1/1 caught.
+
+T-0020 (test-suite dedupe): the pty tests removed in this task were replaced by the non-pty tests below; each mutation was applied by hand, the named test failed, and the code was restored.
+
+| id | mutation | test that fails | result |
+|---|---|---|---|
+| T-0020-M1 | `/new` no longer checks `TurnState::Running` (`if false && ...` in `app/commands.rs`) | `update::new_is_refused_while_a_turn_runs` (replaces `pty_new_refuses_while_a_turn_runs`) | ✅ 1 failed |
+| T-0020-M2 | `/fork` no longer checks `TurnState::Running` | `update::fork_is_refused_while_a_turn_runs` (replaces `pty_fork_refuses_while_a_turn_runs`) | ✅ 1 failed |
+
+2/2 caught.
