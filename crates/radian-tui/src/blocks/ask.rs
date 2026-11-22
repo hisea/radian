@@ -84,8 +84,6 @@ pub(super) fn ask_line(pieces: Vec<(String, MdStyle)>) -> BodyLine {
         frame: Frame::None,
         role: tools::LineRole::Normal,
         hint: true,
-        diagram: None,
-        reason: false,
         md: Some(md),
         syntax: None,
         image: None,

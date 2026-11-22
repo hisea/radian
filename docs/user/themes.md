@@ -193,13 +193,7 @@ Diff lines:
 | `diff_context` | Context lines. |
 | `diff_hunk` | File headers and `@@` markers. |
 
-Rendered diagrams:
-
-| Role | What it paints |
-|---|---|
-| `mermaid_node` | Diagram nodes. |
-| `mermaid_edge` | Diagram edges. |
-| `mermaid_text` | Diagram text. |
+Retired roles: `mermaid_node`, `mermaid_edge` and `mermaid_text` are inert. The diagram renderer was removed, so nothing reads them. A theme file or `[tui.colors]` that still sets one loads normally and gets one warning for the unknown role.
 
 Assistant Markdown:
 

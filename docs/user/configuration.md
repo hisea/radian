@@ -294,11 +294,11 @@ Display preferences never refuse the file: unknown keys and wrong types warn and
 | `tui.brand` | string | per glyph set (`R` for `unicode`, the Nerd mark for `nerd`, `rad` for `ascii`, `⚡` for `emoji`) | any text at most 4 display columns wide | Brand text for the footer and the banner. Wider text refuses the file; a non-string warns and keeps the default. |
 | `tui.spinner` | string | `pulse` | `pulse`, `arc`, `quadrant`, `braille` | The spinner shape. Unknown names warn and use `pulse`. |
 | `tui.usage_period_secs` | integer | `60` | clamped to `15`–`600`; `0` disables | The usage refresh period. |
-| `tui.display` | table | defaults below | the five keys below | The transcript display shapes. A bad entry warns and keeps the key default. |
+| `tui.display` | table | defaults below | the keys below | The transcript display shapes. A bad entry warns and keeps the key default. |
 | `tui.display.reasoning` | string | `collapsed` | `collapsed`, `expanded`, `hidden` | The reasoning block shape. |
 | `tui.display.tool_output` | string | `errors` | `collapsed`, `expanded`, `errors` | The tool body shape. `errors` expands failures only. |
 | `tui.display.tool_preview_lines` | positive integer | `5` | `1` and up | Body lines a collapsed tool card shows. A zero, negative, or non-integer value warns and keeps `5`. |
-| `tui.display.mermaid` | boolean | `true` | `true`, `false` | Draw closed `mermaid` blocks as diagrams. A non-boolean warns and keeps `true`. |
+| `tui.display.mermaid` | any | none | none | Retired and inert. The diagram renderer was removed, so a `mermaid` block shows as ordinary code. A file that sets it starts normally and gets one warning line naming `tui.display.mermaid` as an ignored key, whatever the value. |
 | `tui.display.highlight` | boolean | `true` | `true`, `false` | Syntax-highlight fenced code blocks. A non-boolean warns and keeps `true`. |
 | `tui.footer` | table | the `deck` preset rows | the keys below | The footer layout. A bad entry warns and keeps the default. |
 | `tui.footer.preset` | string | `deck` | `deck`, `full`, `pi`, `classic` | The footer layout. An unknown value warns and uses `deck`. `classic` draws one status line and carries no rows. |

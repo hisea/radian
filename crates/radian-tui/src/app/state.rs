@@ -75,10 +75,6 @@ pub struct Entry {
     /// measured at. The renderer keeps it so a frame only re-lays out entries that changed or
     /// are on screen.
     pub(crate) layout_cache: Option<(LayoutKey, usize)>,
-    /// Rendered Mermaid diagrams (ADR 0028 R8), keyed by `(width, text_len)`: the width is in
-    /// the key because `TooWide` can succeed on a wider terminal. Filled by the mutable measure
-    /// pass; the immutable layout paths render fresh on a miss.
-    pub(crate) diagram_cache: Option<(usize, usize, Vec<crate::blocks::DiagramOutcome>)>,
     /// The entry's laid-out Markdown paragraph lines (ADR 0028 R2), keyed by `(width,
     /// text_len)` and indexed by the paragraph block's start. The layout does not depend on
     /// the reasoning/tool folds, so a global fold toggle reuses it instead of re-parsing every
@@ -118,7 +114,6 @@ impl Entry {
             reasoning_ended: None,
             block_cache: None,
             layout_cache: None,
-            diagram_cache: None,
             md_cache: std::cell::RefCell::new(None),
             md_count_cache: None,
         }

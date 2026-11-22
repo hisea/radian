@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn footer_closed_sets_and_defaults_appear_in_configuration_md() {
         use crate::app::config::{
-            DEFAULT_BANNER, DEFAULT_HIGHLIGHT, DEFAULT_MERMAID, DEFAULT_MOUSE, DEFAULT_TIPS,
+            DEFAULT_BANNER, DEFAULT_HIGHLIGHT, DEFAULT_MOUSE, DEFAULT_TIPS,
             DEFAULT_TOOL_PREVIEW_LINES,
         };
         use crate::blocks::ReasoningMode;
@@ -1023,10 +1023,6 @@ mod tests {
                 ToolDisplay::default().preview_lines.to_string(),
             ),
             (
-                "tui.display.mermaid",
-                crate::tools::DisplayModes::default().mermaid.to_string(),
-            ),
-            (
                 "tui.display.highlight",
                 crate::tools::DisplayModes::default().highlight.to_string(),
             ),
@@ -1041,7 +1037,6 @@ mod tests {
             ("tui.mouse", DEFAULT_MOUSE.to_string()),
             ("tui.tips", DEFAULT_TIPS.to_string()),
             ("tui.banner", DEFAULT_BANNER.to_string()),
-            ("tui.display.mermaid", DEFAULT_MERMAID.to_string()),
             ("tui.display.highlight", DEFAULT_HIGHLIGHT.to_string()),
             (
                 "tui.display.tool_preview_lines",
