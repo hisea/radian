@@ -5,30 +5,18 @@
 //! `$RADIAN_HOME/run/<pid>.sock` (directory 0700, file 0600). The socket is where an external
 //! script or agent drives the session: it can enqueue `followup`/`steer`/`inject` inputs,
 //! `cancel` the running turn, `list_sessions` (the hosting session), and `subscribe` to the
-//! committed event stream. With the owner token it also answers the pending approval/question
-//! queue (`pending`, `answer`), queues a turn-boundary configuration change (`config`), lists
-//! the routes `/model` offers (`models`), and ends the process (`close`). There are no task
-//! verbs (`spawn_task`, `wait_task`, `task_status`) and no separate `radian serve` (ADR 0043):
-//! the process that owns a session owns its socket.
+//! committed event stream. There are no task verbs (`spawn_task`, `wait_task`, `task_status`)
+//! and no separate `radian serve` (ADR 0043): the process that owns a session owns its socket.
+//! Approvals and questions are not answered through it: the session that asked answers them.
 //!
 //! **Sources (ADR 0043, decided item 4; ADR 0011 L2, ADR 0012).** The source is fixed by
 //! the port, never by the client's word: it defaults to [`InputSource::Scheduler`], a client
 //! may declare `Subagent` or `Mcp`, and `User`/`PermissionDecision` are refused with an error
-//! line. The one exception is the owner's token: a request whose `token` equals the trimmed
-//! content of `$RADIAN_HOME/hub/token` is the owner's input and is `User` (with
-//! `{"via":"hub"}` recorded in the message's `origin`, ADR 0005 G1). The input's source is
-//! what the inbox records and what the turn it starts runs with. A turn that is already
-//! running keeps its own effective source, which only ever lowers (ADR 0011 L2): a `steer` or
-//! `inject` joins it and can lower it, never raise it, while a `followup` belongs to a later
-//! turn and leaves the running turn alone — the turn it opens applies its own source when the
-//! driver claims it. The owner token also gates the five queue/config/process verbs: without it
-//! they return an error line and change nothing, and an unknown verb changes nothing. `answer`
-//! is a front end on the pending queue (ADR 0023 U7, ADR 0024 Q9), never a new permission
-//! source: the first answer wins and a late one changes nothing. `close` answers `ok` before it
-//! asks the host to end the process ([`CloseHandle`], [`close_session`]); before the host is
-//! asked, every open connection finishes its answers and the request lines already on its wire,
-//! so two `close` requests crossing at once both see `ok` ([`CloseDrain`]). A host with no close
-//! hook refuses it, so every other embedder keeps control of its own lifetime.
+//! line. The input's source is what the inbox records and what the turn it starts runs with. A
+//! turn that is already running keeps its own effective source, which only ever lowers
+//! (ADR 0011 L2): a `steer` or `inject` joins it and can lower it, never raise it, while a
+//! `followup` belongs to a later turn and leaves the running turn alone — the turn it opens
+//! applies its own source when the driver claims it. An unknown verb changes nothing.
 //!
 //! **Inputs carry attachments.** `followup`/`steer`/`inject` may carry `images` (base64 plus a
 //! MIME) and `files` (a name plus text). They become the message's parts through
@@ -40,9 +28,7 @@
 //! **Never blocks the runtime.** Handlers run on the runtime and use the async `Inbox`, not
 //! `LocalSession`'s `block_on` wrappers (ADR 0043; the background's rule). `subscribe`
 //! fans the committed events out to each client through a **bounded** per-client channel: a
-//! client that falls behind is disconnected, and the producer never waits on a client. A queue
-//! change also pushes one `pending` event (source `control`): the head and length, full for an
-//! owner subscriber and redacted to the request id, kind and tool name for every other one.
+//! client that falls behind is disconnected, and the producer never waits on a client.
 //!
 //! **Cleanup (ADR 0043).** The socket is removed when the server is dropped — the normal
 //! exit path and the panic-unwind path both drop it. At startup every `*.sock` whose pid is no
@@ -82,7 +68,7 @@ pub struct ControlTarget {
     /// raise the turn's source (ADR 0011 L2), and it is the live turn state a `list_sessions`
     /// row reports — the one signal a host that does not fold committed events has.
     turn_running: Weak<AtomicBool>,
-    /// The pending approval/question queue (ADR 0023 U7): the owner verbs read and answer it.
+    /// The pending approval/question queue (ADR 0023 U7): `list_sessions` reports its length.
     queue: Weak<SessionQueue>,
     /// The turn state the `list_sessions` row reports when no turn is running: the last
     /// committed outcome (ADR 0034 H2).
@@ -458,8 +444,7 @@ impl ControlServer {
     }
 
     /// `followup`/`steer`/`inject` (ADR 0011 L1's four ops minus `cancel`): fix the source the
-    /// port decides (the owner token makes it `User`, otherwise the client's declared
-    /// `Scheduler`/`Subagent`/`Mcp`), build the message through the shared composer, then
+    /// port decides (the client's declared `Scheduler`/`Subagent`/`Mcp`), build the message through the shared composer, then
     /// enqueue on the async inbox.
     async fn input(
         &self,
@@ -1085,9 +1070,7 @@ fn parse_source(request: &Value) -> Result<InputSource, String> {
             "scheduler" => Ok(InputSource::Scheduler),
             "subagent" => Ok(InputSource::Subagent),
             "mcp" => Ok(InputSource::Mcp),
-            "user" => Err(
-                "a client cannot declare the `User` source; only the owner token grants it".into(),
-            ),
+            "user" => Err("a client cannot declare the `User` source".into()),
             "permission_decision" => {
                 Err("the control port never accepts the `PermissionDecision` source".into())
             }

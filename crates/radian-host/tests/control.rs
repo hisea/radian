@@ -746,8 +746,8 @@ async fn a_bad_attachment_names_the_item_and_enqueues_nothing() {
         "a refused attachment must not reach the inbox"
     );
 
-    // A present `null` is a wrong-typed field, not an absent one. The hub's write routes reject
-    // it as `400`; the port refuses it before anything is enqueued.
+    // A present `null` is a wrong-typed field, not an absent one. The port refuses it
+    // before anything is enqueued.
     for (id, field) in [(3, "images"), (4, "files")] {
         let response = client
             .request(json!({
