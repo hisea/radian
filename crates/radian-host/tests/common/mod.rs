@@ -83,8 +83,7 @@ pub fn process_dir(prefix: &str) -> PathBuf {
     process_dir_at(unique(prefix))
 }
 
-/// [`process_dir`] at an explicit path (a short `/tmp` base keeps a control socket under the
-/// length cap).
+/// [`process_dir`] at an explicit path (a short `/tmp` base).
 pub fn process_dir_at(path: PathBuf) -> PathBuf {
     std::fs::create_dir_all(&path).unwrap();
     EXIT_DIRS.lock().unwrap().push(path.clone());

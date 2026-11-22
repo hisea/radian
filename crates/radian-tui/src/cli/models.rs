@@ -89,7 +89,7 @@ pub(super) fn model_route_candidates(
     config_providers: &std::collections::BTreeMap<String, radian_host::ProviderDecl>,
 ) -> Vec<radian_tui::command::Candidate> {
     // Only providers a switch could accept (ADR 0026 D5/D6): the host's one `/model` list
-    // (`radian_host::model_choices`, shared with the control port's `models` verb). The label
+    // (`radian_host::model_choices`). The label
     // is the model, the description the provider (ADR 0035).
     radian_host::model_choices(current_provider, config_providers)
         .into_iter()

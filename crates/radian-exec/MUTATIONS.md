@@ -890,3 +890,14 @@ the run: `cargo nextest run -p radian-exec --no-fail-fast an_old_journal_with_me
 | T-0009-M2 | `validate_memory_injected_index` always returns `Err`, so the reader refuses every old `MemoryInjected` index record | ✅ 1 failed (rc=100) | `cli::an_old_journal_with_memory_records_lists_exports_and_resumes` |
 
 1/1 caught.
+
+## T-0010: no control socket (2026-11-21, branch `work/T-0010-remove-control-port`)
+
+`radian exec` binds no `$RADIAN_HOME/run/<pid>.sock` and creates no `run/`. The mutation re-created
+the `run/` directory at the start of `chat.rs` and the file was restored afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| T-0010-M2 | `radian exec` creates `$RADIAN_HOME/run/` at startup again | ✅ 1 failed (rc=101) | `exec::exec_binds_no_control_socket` |
+
+1/1 caught.

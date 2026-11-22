@@ -266,10 +266,10 @@ async fn a_missing_workspace_is_refused_with_the_radian_prefix() {
     assert!(!err.contains("agent: "), "{err}");
 }
 
-/// ADR 0043: a hosting process binds `$RADIAN_HOME/run/<pid>.sock`, names it on
-/// the startup line, and removes it when the process exits.
+/// ADR 0043: no process control port. A hosting process binds no socket, creates no
+/// `$RADIAN_HOME/run/`, and its startup output has no `[control]` line.
 #[tokio::test]
-async fn the_control_socket_is_named_and_removed_when_the_process_exits() {
+async fn exec_binds_no_control_socket() {
     use agent_provider_openai_compatible::testing::{MockServer, Reply, chunk};
 
     let server = MockServer::start(vec![Reply::sse(&[
@@ -293,18 +293,12 @@ async fn the_control_socket_is_named_and_removed_when_the_process_exits() {
         ],
         &env,
     );
-    let pid = child.id().expect("the child pid");
-    let socket = env.home.join("run").join(format!("{pid}.sock"));
-
     let (code, stdout, stderr) = run(child).await;
     assert_eq!(code, 0, "{stderr}");
     assert!(stdout.contains("ok"), "{stdout}");
+    assert!(!stderr.contains("[control]"), "{stderr}");
     assert!(
-        stderr.contains(&socket.display().to_string()),
-        "the startup line names the socket at {socket:?}: {stderr}"
-    );
-    assert!(
-        !socket.exists(),
-        "the control socket is removed when the process exits: {socket:?}"
+        !env.home.join("run").exists(),
+        "a process that binds no socket creates no run/ directory"
     );
 }

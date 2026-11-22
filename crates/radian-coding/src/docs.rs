@@ -35,7 +35,6 @@ pub const DOCS: &[(&str, &str)] = &[
         "context-files.md",
         include_str!("../../../docs/user/context-files.md"),
     ),
-    ("control.md", include_str!("../../../docs/user/control.md")),
     (
         "environment.md",
         include_str!("../../../docs/user/environment.md"),

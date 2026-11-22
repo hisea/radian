@@ -8807,7 +8807,7 @@ async fn pty_pick_resumes_the_selected_id_and_enters_once() {
 /// exists, so every startup diagnostic printed with `eprintln!` between the picker and the
 /// session lands on the alternate screen. The renderer diffs a frame against the *previous*
 /// frame's cells and skips the ones that did not change, so those bytes stay where they were
-/// written: `[control] <sock>` and the trust status line sat drawn over the input box and never
+/// written: the trust status line (and, in the version that bound a control port, its socket line) sat drawn over the input box and never
 /// cleared. On this path the startup diagnostics must not reach the terminal at all.
 ///
 /// The check reads the **raw** output, not the `vt100` screen. The raw stream is the direct
@@ -8869,8 +8869,8 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
     let (_, after_enter) = raw
         .split_once("\u{1b}[?1049h")
         .unwrap_or_else(|| panic!("the alternate screen was never entered:\n{raw}"));
-    // The two diagnostics this path produces every time: the control socket line and the trust
-    // status line (the workspace has no project resources, so the decision is the default).
+    // The diagnostic this path produces every time: the trust status line (the workspace has no
+    // project resources, so the decision is the default). No `[control]` line exists any more.
     assert!(
         !after_enter.contains("[control] "),
         "a startup diagnostic was written into the alternate screen:\n{after_enter}"
@@ -8879,20 +8879,20 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
         !after_enter.contains("project resources: not loaded"),
         "a startup diagnostic was written into the alternate screen:\n{after_enter}"
     );
-    // Deferring must not lose them: the transcript's startup block carries both. The trust line
-    // is pushed there for **every** run (ADR 0031 T3), so deferring it as well would show it
-    // twice; it must appear exactly once.
+    // Deferring must not lose it: the transcript's startup block carries the trust line. It is
+    // pushed there for **every** run (ADR 0031 T3), so deferring it as well would show it twice;
+    // it must appear exactly once. The block has no `[control]` line.
     pty.expand_startup();
-    assert!(
-        pty.wait_for_screen("[control] ", wait_positive()),
-        "the control socket line is missing from the startup block:\n{}",
-        pty.screen()
-    );
     assert!(
         pty.wait_until(wait_positive(), |screen| {
             screen.matches("project resources: not loaded").count() == 1
         }),
         "the trust status line must be in the startup block exactly once:\n{}",
+        pty.screen()
+    );
+    assert!(
+        !pty.screen().contains("[control]"),
+        "the startup block names a control socket:\n{}",
         pty.screen()
     );
     pty.quit();
@@ -13751,8 +13751,8 @@ fn dir_entries(dir: &Path) -> Vec<String> {
     names
 }
 
-/// `run/` under the app's `RADIAN_HOME`: where a control-port socket would appear. attach must
-/// never create one (it reads the journal directly, ADR 0043 decision 7).
+/// `run/` under the app's `RADIAN_HOME`: nothing creates it any more (no control port, ADR 0043);
+/// the check pins that attach and a key press still leave it empty.
 fn run_entries(home: &Path) -> Vec<String> {
     dir_entries(&home.join("run"))
 }
@@ -14004,7 +14004,7 @@ async fn pty_attach_swallows_every_other_key() {
     assert_eq!(
         run_entries(home.path()),
         before_run,
-        "a key press opened a control-port connection"
+        "a key press created something under run/"
     );
     assert_eq!(
         dir_entries(dir.path()),

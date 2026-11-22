@@ -1,8 +1,8 @@
 //! The read-only observer of a session's **committed** facts (ADR 0023 U6, ADR 0043).
 //!
 //! [`JournalObserver`] wraps a [`JournalTail`] and folds the events it reads into a
-//! [`SessionProjection`], so a consumer that did not open the session (the control port's
-//! `subscribe`, `radian attach`, the TUI's read-only follow) sees the same facts the owning
+//! [`SessionProjection`], so a consumer that did not open the session (`radian attach`,
+//! the TUI's read-only follow) sees the same facts the owning
 //! process would show. It is the single source of committed facts.
 //!
 //! **What it answers.** "What is it doing" (the projection: turn state, usage, the last tool)

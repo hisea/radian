@@ -10,9 +10,9 @@ radian is a coding agent of "one general interactive session": TUI is the main i
 
 ### 1. One session kind, no in-process orchestration
 
-- Only one general interactive session exists. `radian` opens TUI, `radian exec` runs the headless build of the same host. No named/task/lead session kinds, `/mode`, `/tasks`, control-port task verbs, project-level `orchestration.toml`/`agents/`/`prompts/`/`progress/`, task worktrees, or `git_commit` exist.
+- Only one general interactive session exists. `radian` opens TUI, `radian exec` runs the headless build of the same host. No named/task/lead session kinds, `/mode`, `/tasks`, project-level `orchestration.toml`/`agents/`/`prompts/`/`progress/`, task worktrees, or `git_commit` exist.
 - A session never starts, tracks, or merges other sessions, except the one-shot `subagent` (decision 2).
-- `control.rs` stays, but drops task verbs: `followup`, `steer`, `inject`, `cancel`, `list_sessions` (one row for this session only: id, kind, workspace, model, state, pending), `subscribe`. **The port decides the source, not the client**: the default is `Scheduler`, a client may declare `Subagent` or `Mcp`, and `User`/`PermissionDecision` are always refused. There is no owner token. Approvals and structured questions are answered only in the session that asked them (TUI popup, or `radian exec` stdin).
+- **No process control port.** Radian binds no `$RADIAN_HOME/run/<pid>.sock` and no other listener: neither the TUI nor `radian exec` serves one. An outside driver uses `radian exec --output jsonl` (ADR 0044) or `radian acp` (ADR 0049); `radian attach` and the TUI's follow read the journal. Approvals and structured questions are answered only in the session that asked them (TUI popup, or `radian exec` stdin).
 - Project dir `<workspace>/.radian/` keeps only `config.toml` (ADR 0008 narrow config, with §2 tier claims). Project skills live in `.agents/skills/` (ADR 0025; from workspace up to repo root). `.radian-sandbox/` is a sandbox temp dir beside `.radian/` in the workspace, never a project resource. The trust gate (ADR 0031) lists `.agents/skills/` with `config.toml`. The former loads only when trusted. `config.toml` only triggers the trust question. Its narrow-only `permissions.profile` narrowing always applies.
 
 ### 2. `subagent`: one blocking one-shot child session
@@ -54,7 +54,7 @@ Three concrete sets stay pinned by test: brand-new interactive TUI workspace ses
 
 ### 5. Permission, policy, and safety layers
 
-- The list keeps ADR 0012 allow/ask/deny rules with two tiers. The effective source of a turn only lowers when the turn mixes non-human input (ADR 0011 L2). The list also keeps sandbox probe-failure deny, deny-read lists, Unix socket allowlists, project-level configs never widen, `.git` read-only entries (ADR 0038 decision 3), fd-level file tools (ADR 0039 decisions 1–3), credential redaction (ADR 0026), trust gate (ADR 0031), control-port `User` refusal, unrebindable approval keys, background-job caps (ADR 0037).
+- The list keeps ADR 0012 allow/ask/deny rules with two tiers. The effective source of a turn only lowers when the turn mixes non-human input (ADR 0011 L2). The list also keeps sandbox probe-failure deny, deny-read lists, Unix socket allowlists, project-level configs never widen, `.git` read-only entries (ADR 0038 decision 3), fd-level file tools (ADR 0039 decisions 1–3), credential redaction (ADR 0026), trust gate (ADR 0031), unrebindable approval keys, background-job caps (ADR 0037).
 - Under `auto`, ask rules never prompt, even in a session with a person present.
 - The sandbox is an **option**, never the default. Default `full` lets models read and write everything users can, network included.
 
@@ -71,7 +71,7 @@ radian decisions as a first-class herdr agent live in **ADR 0034**: state, sessi
 - No in-process orchestration: parallel work uses many `subagent` calls in one reply. Cross-session keeps need own journals each, viewed through `attach`.
 - Default `full`: safety rests on user-explicit sandbox choices, approval rules, and project trust. Strange repos with unattended runs open `workspace`.
 - Parallel `general` children can stack load. No extra process-level concurrency cap exists.
-- The control port and herdr reports are local IPC, never remote protocols. Radian adds no listener and no outbound connection for them (ADR 0013).
+- herdr reports are local IPC, never a remote protocol. Radian adds no listener and no outbound connection for them (ADR 0013).
 - `attach` is read-only. It never answers approvals for watched sessions, and never sees streaming output.
 
 ## Verification

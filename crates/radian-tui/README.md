@@ -1405,7 +1405,7 @@ if it stayed under `a/`. While the box is up, other keys do not type into the in
 Approvals and `ask_user` questions share **one** arrival-ordered queue in `radian-host`
 (`PendingQueue`), and the UI shows its head: a second request waits behind the first instead of
 superseding it. The queue is a wake-up source (its `watch` receiver is a `UiEvent::Pending`
-carrying the ids the control port answered since the last wake), so
+carrying the ids answered since the last wake), so
 a waiter that gives up — a cancelled turn — removes the modal immediately, without waiting for
 anything else. The status bar counts the queue (`N pending`) while it is not empty. Answering
 goes through the session facade (`answer`), which re-validates the `AnswerRequest` capability,

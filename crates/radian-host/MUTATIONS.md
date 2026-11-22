@@ -2333,3 +2333,15 @@ the file restored from a copy afterwards.
 | T-0009-M1 | `parse_memory` no longer pushes `memory` onto `skipped`, so the retired table is silently ignored with no warning | ✅ 2 failed (rc=100) | `config_fixtures::an_old_memory_table_warns_once_and_is_ignored`, `config_fixtures::no_old_memory_shape_refuses_the_file` |
 
 1/1 caught.
+
+## T-0010: the `[control]` config table is a retired key (2026-11-21, branch `work/T-0010-remove-control-port`)
+
+The process control port was removed (ADR 0043). An old config that still carries `[control]` must
+parse and warn once, never refuse. The mutation was applied to `src/config/mod.rs`
+(`parse_control`) and the line restored afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| T-0010-M1 | `parse_control` no longer pushes `control` onto `skipped`, so the retired table is silently ignored with no warning | ✅ 1 failed (rc=101) | `config_fixtures::an_old_control_table_is_a_retired_key` |
+
+1/1 caught.
