@@ -35,7 +35,7 @@ Planning, task orchestration, gates and review live in [operad](https://operad.i
     <source media="(prefers-color-scheme: dark)" srcset=".github/readme/terminal-dark.png">
     <img src=".github/readme/terminal-light.png" alt="the radian TUI at 120 columns: a thinking block, a shell call, a read, a patch with its diff, job notices, the input and the footer" width="820">
   </picture>
-  <br><sub>radian at 120 columns, rendered by the TUI prototype script (<code>research/2026-10-16-render-prototype/</code>).</sub>
+  <br><sub>radian at 120 columns, rendered by the TUI prototype script.</sub>
 </p>
 
 ```sh

@@ -175,16 +175,14 @@ theme = "dark"               # dark | light | mono; NO_COLOR forces mono
 
 ## 文档
 
-用户手册在 `docs/user/`；决策在 `docs/adr/`；设计在 `ARCHITECTURE.md`；`research/` 是实验记录（大部分是中文）。
+用户手册在 `docs/user/`；决策在 `docs/adr/`；设计在 `ARCHITECTURE.md`。
 
 | 内容 | 位置 |
 |---|---|
 | 设计 | `ARCHITECTURE.md` |
 | 决策（改代码前先读） | `docs/adr/` |
-| 沙箱后端实际强制了什么 | `crates/radian-sandbox/LIMITS.md`（spike：`spikes/macos-sandbox/README.md`、`spikes/linux-sandbox/README.md`） |
+| 沙箱后端实际强制了什么 | `crates/radian-sandbox/LIMITS.md` |
 | Provider 契约和它的两个出口 | `crates/agent-provider-contract/README.md`，线上格式笔记在 `crates/agent-provider-anthropic/WIRE.md` |
 | 会话格式样例和检查脚本 | `docs/schema/`（`check-fixtures.sh`、`check-config-fixtures.sh`、`fixtures/`、`config/`） |
-| 自用记录（用 radian 开发 radian） | `research/2026-10-12-radian-tui-dogfooding.md`、`research/2026-10-12-opencode-zen-dogfooding.md` |
 | 性能基线和复现命令 | `benchmarks/perf-baseline.md` |
-| Spike 报告（沙箱、TUI、OAuth） | `spikes/` |
 | Agent 指令（验证命令） | `AGENTS.md` |

@@ -2,7 +2,7 @@
 
 - 状态：idea（`StopFailure` 与 `Notification` 已拆到 `hooks-stopfailure-notification.md`，decided）
 - 涉及 ADR：0045（§1 "no more events exist"）、0011（inbox 认领点、L2 来源、L5 空闲）、0036（基础提示词与上下文文件）、0018（自动压缩）、0021（memory）、0034（向 herdr 上报状态）、0017（模型错误结束回合）、0013（默认无遥测）
-- 来源：`research/2026-10-24-claude-code-hooks.md`；Claude Code hooks 参考页各事件一节；radian 三事件子集的对照
+- 来源：早期的 Claude Code hooks 调研（已归档，不在本仓库）；Claude Code hooks 参考页各事件一节；radian 三事件子集的对照
 
 ## 背景
 

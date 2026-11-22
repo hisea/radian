@@ -35,7 +35,7 @@ radian 是一个快速、高效的编码 agent，只有一个 Rust 二进制。
     <source media="(prefers-color-scheme: dark)" srcset=".github/readme/terminal-dark.png">
     <img src=".github/readme/terminal-light.png" alt="radian TUI 120 列：一个思考块、一次 shell 调用、一次 read、一次带 diff 的 patch、job 通知、输入框和底栏" width="820">
   </picture>
-  <br><sub>radian 在 120 列下的画面，由 TUI 原型脚本渲染（<code>research/2026-10-16-render-prototype/</code>）。</sub>
+  <br><sub>radian 在 120 列下的画面，由 TUI 原型脚本渲染。</sub>
 </p>
 
 ```sh

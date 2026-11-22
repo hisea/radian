@@ -2,7 +2,7 @@
 
 - 状态：第 3、4 项 idea（第 1 项 worktree 脚本与第 2 项 nextest 已落地）
 - 涉及 ADR：无；第 4 项见 `verify-test-binaries.md`（新 ADR）
-- 来源：`research/2026-10-15-build-timings.md`；本条目里的实测
+- 来源：早期的构建耗时调研（已归档，不在本仓库）；本条目里的实测
 
 ## 背景
 
