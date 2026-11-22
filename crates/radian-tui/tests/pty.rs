@@ -7,6 +7,18 @@
 //! line and the input line are single widgets, so their text arrives together) or wait for that
 //! text too. `pty_two_approvals_are_shown_in_order` flaked on exactly this: `b.txt` appears in
 //! the transcript's tool-call line a frame before the second approval box is drawn.
+//!
+//! **Tests removed because another test covers them** (T-0020), each with its replacement:
+//! - `pty_startup_shows_the_trust_hint_until_trusted`: `startup.rs` `the_trust_hint_shows_until_the_project_is_trusted`; `--trust` still runs in `pty_trust_override_and_saved_decision_skip_the_modal`
+//! - `pty_editing_in_the_middle_sends_the_edited_text`: `composer.rs` `editing_keys_edit_at_the_cursor`, `enter_clears_the_input_and_records_every_submitted_line`
+//! - `pty_fork_refuses_while_a_turn_runs`: `update.rs` `fork_is_refused_while_a_turn_runs`
+//! - `pty_new_refuses_while_a_turn_runs`: `update.rs` `new_is_refused_while_a_turn_runs`
+//! - `pty_job_never_asks_for_approval`: `radian-permissions` `job.rs` `job_is_allowed_in_every_tier_without_a_prompt`
+//! - `pty_find_jumps_to_an_earlier_match`: `find.rs` `ctrl_f_opens_and_typing_jumps_to_the_nearest_match_above`
+//! - `pty_the_wheel_scrolls_an_open_overlay`: `mouse.rs` `a_picker_overlay_scrolls_its_own_selection`; the real SGR wheel stays in `pty_wheel_scrolls_the_transcript_not_the_input_history`
+//! - `pty_the_slash_completion_walks_the_command_tree`: `update.rs` `the_slash_completion_walks_the_command_tree`
+//! - `pty_attach_refuses_a_path_like_id_without_reading_it`: `attach.rs` `a_path_like_session_id_is_refused_before_anything_is_read` (real binary)
+//! - `pty_ctrl_c_clears_a_draft_before_quitting`: `quit.rs` `idle_with_text_the_first_ctrl_c_clears_it_into_the_history`, plus `composer.rs` history recall
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

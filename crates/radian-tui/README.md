@@ -1666,8 +1666,3 @@ transcript and the TUI renders it like any other `System` message (the same shap
 ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
 result are the card). A pending question's result arrives as the `ask_user` card.
 
-## Mermaid blocks
-
-The Mermaid renderer is removed (ADR 0042). A `mermaid` fence is an ordinary code block.
-`tui.display.mermaid` is a retired key (one warning, then ignored) and the `mermaid_node`,
-`mermaid_edge` and `mermaid_text` theme roles are inert.

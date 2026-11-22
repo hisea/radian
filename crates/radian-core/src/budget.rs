@@ -126,6 +126,45 @@ impl RequestSize {
         self.ascii_bytes.div_ceil(bytes_per_token) + self.non_ascii_chars + self.image_tokens
     }
 
+    /// Splits the token estimate of several pieces so the parts sum to the estimate of their
+    /// total: sizes are summed first (one `div_ceil`), each piece keeps its floor, and the
+    /// remainder goes to the pieces with the largest fractional part. A per-piece `tokens`
+    /// would overcount by up to one token per piece. A remainder no piece has a fraction
+    /// for (the `[]`/`null` framing) goes to the first non-empty piece, or the first.
+    pub fn split_tokens(sizes: &[RequestSize], bytes_per_token: u32) -> Vec<u64> {
+        let bpt = u64::from(bytes_per_token.max(1));
+        let total = sizes
+            .iter()
+            .fold(RequestSize::default(), |sum, size| sum.plus(*size))
+            .tokens(bytes_per_token);
+        let mut tokens: Vec<u64> = sizes
+            .iter()
+            .map(|s| s.ascii_bytes / bpt + s.non_ascii_chars + s.image_tokens)
+            .collect();
+        let mut remainder = total.saturating_sub(tokens.iter().sum());
+        let mut order: Vec<usize> = (0..sizes.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(sizes[i].ascii_bytes % bpt));
+        for i in order {
+            if remainder == 0 {
+                break;
+            }
+            if !sizes[i].ascii_bytes.is_multiple_of(bpt) {
+                tokens[i] += 1;
+                remainder -= 1;
+            }
+        }
+        if remainder > 0 {
+            let target = sizes
+                .iter()
+                .position(|s| s.ascii_bytes > 0 || s.non_ascii_chars > 0)
+                .unwrap_or(0);
+            if let Some(slot) = tokens.get_mut(target) {
+                *slot += remainder;
+            }
+        }
+        tokens
+    }
+
     /// Field-wise sum, for adding the sizes of separately counted pieces.
     pub fn plus(self, other: RequestSize) -> RequestSize {
         RequestSize {

@@ -1293,6 +1293,27 @@ mod tests {
         assert!(config.exists());
     }
 
+    /// An old `[tui.colors]` (ADR 0029) that still sets a removed `mermaid_*` role loads: one
+    /// warning names the role, it never draws, and the other override applies.
+    #[test]
+    fn an_old_tui_colors_with_a_mermaid_role_loads_with_one_warning() {
+        use radian_host::config::TuiColorOverride;
+        let colors = vec![
+            (
+                "mermaid_node".to_string(),
+                TuiColorOverride::from_toml(&toml::Value::String("#88c0d0".into())).unwrap(),
+            ),
+            (
+                "tool_call".to_string(),
+                TuiColorOverride::from_toml(&toml::Value::String("#010203".into())).unwrap(),
+            ),
+        ];
+        let (theme, warnings) = load(Some("dark"), false, true, None, &colors);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("mermaid_node"), "{warnings:?}");
+        assert_ne!(theme.tool_call.fg, Theme::dark().tool_call.fg);
+    }
+
     #[test]
     fn names_round_trip_and_unknown_names_are_none() {
         for name in [ThemeName::Dark, ThemeName::Light, ThemeName::Mono] {

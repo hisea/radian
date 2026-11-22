@@ -55,7 +55,7 @@ without an `item` key is a structural mistake and drops the whole
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `item` | string | none | The item id. A built-in id draws its component; any other id draws a contributor's published text once one exists, else its own id text with one warning. |
+| `item` | string | none | The item id. A built-in id draws its component; any other id draws its own id text with one warning (no configuration key registers a contributor). |
 | `icon` / `symbol` | string | the glyph set's icon | Both names set the same field. Drawn before the text. `""` draws no icon. |
 | `symbol_style` | style | the item's text style | The icon's own style, when it differs from the text's. A bad value warns and follows the text. |
 | `format` | string | the item's own default | `{placeholder}` names from the item's section below, plus `[text](style)` spans with an inline style. An unknown placeholder or a bad inline style warns and shows the format as written. |
@@ -287,8 +287,7 @@ of the unit, whole numbers above. Money renders `$14.510`. Percents render
 with one decimal (`41.3%`).
 
 An unknown item id, placeholder or style shows as written with one warning
-each and never blocks startup — except an id a contributor publishes, which
-draws that text normally. An unknown scalar parameter on a built-in item is
+each and never blocks startup. An unknown scalar parameter on a built-in item is
 kept and ignored silently; a non-scalar one (an array or a table) drops the
 whole `[tui.footer]` block with a warning.
 

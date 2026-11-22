@@ -145,5 +145,9 @@ Branch `work/TK0263-summary-floor-rejects-non-summaries`. Each mutation was appl
 | id | 变异 | 结果 | 捕获的测试 |
 |---|---|---|---|
 | T-0018-M1 | `RequestSize::remove_unsent_fields` 不再减去 `meta`（`if false && …`） | ✅ 1 failed | `tests/budget.rs::a_large_host_meta_does_not_change_the_request_estimate` |
+| T-0018-M2 | `RequestSize::remove_unsent_fields` 不再减去 `reasoning`（`if false && !count_reasoning …`） | ✅ 1 failed | `tests/budget.rs::reasoning_is_counted_only_when_the_budget_asks_for_it` |
+| T-0018-M3 | `RequestSize::plus` 的 `ascii_bytes` 只取 `self`，不加 `other` | ✅ 5 failed | `radian-host` `context_estimate::tests::the_categories_sum_to_the_total`（另有 `every_message_and_tool_definition_is_counted_once`、`images_are_their_own_line_and_never_their_bytes`、`reasoning_is_listed_only_when_counted`、`the_skill_and_mcp_splits_sum_back_to_their_wholes`） |
+| T-0018-M4 | `RequestSize::saturating_minus` 的 `ascii_bytes` 不减 `other` | ✅ 3 failed | `radian-host` `context_estimate::tests::the_categories_sum_to_the_total`、`images_are_their_own_line_and_never_their_bytes`、`the_skill_and_mcp_splits_sum_back_to_their_wholes` |
+| T-0022-M1 | `RequestSize::split_tokens` 不再把余数分给小数部分最大的块（删掉 `tokens[i] += 1`） | ✅ 3 failed | `radian-host` `context_estimate::tests::the_categories_sum_to_the_total`、`images_are_their_own_line_and_never_their_bytes`、`the_skill_and_mcp_splits_sum_back_to_their_wholes` |
 
-1/1 caught.
+5/5 caught.

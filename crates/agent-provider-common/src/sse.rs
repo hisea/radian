@@ -48,8 +48,8 @@ impl SseParser {
     }
 
     /// The event still pending when the stream ends. The SSE spec drops it, but some servers
-    /// end the stream (for example after `data: [DONE]`) without the final blank line, so it is returned here and the caller
-    /// decides whether it is usable.
+    /// end the stream (for example after `data: [DONE]`) without the final blank line, so it
+    /// is returned here and the caller decides whether it is usable.
     pub fn finish(&mut self) -> Result<Option<String>, ModelError> {
         let mut events = Vec::new();
         if !self.line.is_empty() {
