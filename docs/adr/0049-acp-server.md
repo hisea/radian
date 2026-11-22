@@ -47,7 +47,7 @@ The line-prompt and print-and-exit inputs are absent: `-p`/`--prompt`, `--image`
 `--output`, `--yes`, `--list`, `--export`, `--search`, `--fork`, `--at`, `--format`,
 `--out`, `--force`, `--include-reasoning` and `--include-provider-payload`. Input arrives as
 `session/prompt`, output goes over the protocol, and approvals go over the protocol. The
-argument string an arc wrapper builds for a `radian exec` worker is therefore accepted
+argument string built for a `radian exec` process is therefore accepted
 unchanged once `-p -`, `--output jsonl` and `--yes` are removed.
 
 ### 3. One process holds one session
@@ -233,8 +233,8 @@ session has none: the first call that needs an approval asks again.
 
 ## Constraints and Costs
 
-- One prompt runs at a time per process; parallel work belongs to arc's processes or to the
-  `subagent` tool, not to one ACP connection.
+- One prompt runs at a time per process; parallel work belongs to the
+  `subagent` tool or to separate processes, not to one ACP connection.
 - `request_permission` is a lossy channel for structured questions: free text and
   multi-selection are not representable.
 - The hand-written wire layer covers the methods above; an unimplemented method is a
