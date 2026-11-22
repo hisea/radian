@@ -32,14 +32,24 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
+| `orchestration-leftovers.md` | decided | 0048、0006、0008 | 清 arc 残留：评审 verdict fixture、`spikes/`、`research/` 移出、ADR 0048 引用、`radian-memory` 的死依赖 |
+| `remove-control-port.md` | decided | 0043、0011、0020、0008、0013、0049 | 删掉 `run/<pid>.sock` 控制端口：hub 走后无人用，operad 只用 exec；`[control]` 退役为 inert |
+| `exec-run-metrics-totals.md` | decided | 0044、0049、0007、0010 | `run_metrics` 只留总数，删 `request_log`、按模型/工具细项；不再对齐 `journal_metrics.py` |
+| `benchmarks-to-operad.md` | decided | 0044 | `benchmarks/` 整体移到 operad，Verify 去掉 `metrics.py --self-test` |
+| `remove-import-claude.md` | decided | 0046、0045、0008 | 删 `radian config import-claude`（约 170 KB 含测试），保留 `import-pi` |
+| `remove-memory.md` | decided | 0021、0006、0008、0012、0015、0020、0035、0036、0038、0039、0043 | 删持久记忆整套（约 300 KB）；旧 journal 仍可读，`[memory]` 退役为 inert，不动用户的 `~/.radian/memory/` |
+| `remove-footer-command-items.md` | decided | 0027、0008、0013 | 删 footer `command` 项这个公开扩展点；内部 contributor 保留 |
+| `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
+| `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |
+| `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |
+| `hooks-split-and-trim.md` | decided（1）；idea（2） | 0045、0008、0047、0031 | `hooks.rs`（296 KB）先按职责拆模块；async、StopFailure、Notification 等按使用证据再定 |
+| `test-suite-dedupe.md` | decided | 0023、0032 | pty（548 KB/31 测试）与 exec `cli.rs`（421 KB）去掉与帧断言、其它套件重复的测试 |
+| `context-report-reuse-budget.md` | decided | 0015 | `/context` 估算改用 `radian_core::budget` 的计数，删掉重复实现 |
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记 `research/2026-10-21-intent-stop.md` |
 | `build-cache-and-verify-time.md` | idea（3、4；1、2 已落地） | 无；第 4 项新 ADR | Linux worker 依赖缓存（sccache / ZFS block cloning）与合并测试二进制为 idea |
 | `tool-source-tag.md` | idea | 0012、0043 | 工具来源注册时打标签，替代 `__` 推断 MCP；与 mcp-servers-json 一起（外部审核 P2-4） |
 | `trust-load-in-session.md` | idea | 0031、0004、0025、0008 | TUI 弹窗信任后当场装载项目 skill 与 `.mcp.json`（今天要下次启动；exec 当场装载） |
 | `overflow-three-stage.md` | idea | 0018、0017 | 超长兜底按 70% → 50% → 35% 三档推进，今天只有一档 50% |
-| `memory-provider.md` | idea | 0021、0013、0031 | MemoryBackend trait + 命令 backend + 离线 capture |
-| `memory-aging.md` | decided（1、2；自动归档天数未定） | 0021 | 宿主在 `read` 时写 `last_used`，`memory stale` 列久未用的；自动归档等数据 |
-| `memory-shared-tier.md` | idea | 0021、0020、0031、0036 | 随仓库走的共享记忆层与多机私有记忆：是否另开 `.radian/memory/`，倾向共享层由人经 PR 放 |
 | `subagent-ask-forwarding.md` | idea | 0043、0010、0024 | 子会话仍要问的 ask 转回父会话；缺 durable `PermissionRequested` 与 control 收审批；依赖沙箱内放行 |
 | `verify-test-binaries.md` | idea | 新 ADR | 合并集成测试二进制压 Verify 时间；`set_var` 与全局状态先处理；release 调优不做 |
 | `mcp-full-tier-ask.md` | idea | 0012、0043 | full 档 MCP 按 server 首次询问，工具定义按哈希固定 |
