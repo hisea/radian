@@ -16,7 +16,6 @@ mod config;
 mod model;
 mod overflow;
 mod request;
-mod sse;
 mod stream;
 
 #[cfg(feature = "testing")]

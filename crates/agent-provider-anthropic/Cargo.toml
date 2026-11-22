@@ -10,9 +10,10 @@ publish = false
 
 [features]
 # An in-process mock HTTP server for tests, here and in dependent crates.
-testing = ["tokio/net", "tokio/io-util"]
+testing = ["tokio/net", "tokio/io-util", "agent-provider-common/testing"]
 
 [dependencies]
+agent-provider-common = { version = "0.2.0", path = "../agent-provider-common" }
 radian-core = { version = "0.2.0", path = "../radian-core" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "system-proxy"] }
 serde_json.workspace = true

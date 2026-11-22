@@ -29,7 +29,7 @@ use serde_json::Value;
 /// left out rather than guessed. The body's own `resets_in_seconds` countdown is used verbatim
 /// — the adapter never computes one from `resets_at` and the local clock — both for the message
 /// and for `resets_in`.
-pub(crate) fn usage_limit(status: u16, body: &str) -> Option<ModelError> {
+pub fn usage_limit(status: u16, body: &str) -> Option<ModelError> {
     if status != 429 {
         return None;
     }

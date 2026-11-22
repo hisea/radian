@@ -33,7 +33,6 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |
-| `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |
 | `hooks-split-and-trim.md` | idea | 0045、0008、0047、0031 | 拆模块已落地；async、StopFailure、Notification 等按使用证据再定是否瘦身 |
 | `test-suite-dedupe.md` | decided | 0023、0032 | pty（548 KB/31 测试）与 exec `cli.rs`（421 KB）去掉与帧断言、其它套件重复的测试 |
 | `context-report-reuse-budget.md` | decided | 0015 | `/context` 估算改用 `radian_core::budget` 的计数，删掉重复实现 |
