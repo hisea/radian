@@ -213,7 +213,6 @@ const EXPANDED: DisplayModes = DisplayModes {
         fold: radian_tui::tools::ToolFold::Expanded,
         preview_lines: 5,
     },
-    mermaid: true,
     highlight: true,
     glyphs: radian_tui::footer::Glyphs::Unicode,
 };

@@ -397,6 +397,31 @@ fancy_role = "#010203"
         );
     }
 
+    /// An old theme file (ADR 0029) that still sets the removed `mermaid_*` roles loads: one
+    /// warning names them, they never draw, and the rest of the file applies.
+    #[test]
+    fn an_old_theme_with_mermaid_roles_loads_with_one_warning() {
+        let (theme, warnings) = loaded(
+            r##"
+[roles]
+mermaid_node = "#88c0d0"
+mermaid_edge = "#4c566a"
+mermaid_text = ""
+tool_call = "#010203"
+"##,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("unknown role(s) mermaid_edge, mermaid_node, mermaid_text"),
+            "{warnings:?}"
+        );
+        assert_ne!(
+            theme.tool_call.fg,
+            Theme::dark().tool_call.fg,
+            "the rest applies"
+        );
+    }
+
     /// `appearance` decides which built-in the untouched roles take (decision 4).
     #[test]
     fn a_missing_role_falls_back_by_appearance() {

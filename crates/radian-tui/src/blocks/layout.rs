@@ -86,7 +86,6 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize, height: usiz
             count
         }
         EntryKind::Assistant => {
-            let mut diagram_index = 0;
             parse_blocks_for(entry, mode)
                 .iter()
                 .map(|block| match block {
@@ -94,26 +93,11 @@ pub fn line_count(entry: &Entry, modes: DisplayModes, width: usize, height: usiz
                         md_line_count_cached(entry, *start, *end, body_width, modes.glyphs, &text)
                     }
                     Block::Code {
-                        start,
-                        end,
-                        closed,
-                        lang,
+                        start, end, closed, ..
                     } => {
-                        let source = &text[*start..*end];
                         // ADR 0035: the frame lines are counted too
                         // (the layout draws them).
-                        let frame = if *closed { 2 } else { 1 };
-                        if is_mermaid(lang, *closed, modes.mermaid) {
-                            let index = diagram_index;
-                            diagram_index += 1;
-                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
-                            {
-                                DiagramOutcome::Rendered(lines) => lines.len() + frame,
-                                DiagramOutcome::Failed(_) => 1 + code_line_count(source, *closed),
-                            }
-                        } else {
-                            code_line_count(source, *closed)
-                        }
+                        code_line_count(&text[*start..*end], *closed)
                     }
                 })
                 .sum()
@@ -187,27 +171,6 @@ pub fn line_count_cached(
     }
     if entry.kind == EntryKind::Assistant {
         let blocks = blocks_for(entry, modes.reasoning);
-        // Render this width's diagrams once and keep them: the key is `(width, text_len)`, so a
-        // resize re-renders (a `TooWide` failure can succeed on a wider terminal) and an append
-        // re-renders (a longer source is a different diagram).
-        if modes.mermaid {
-            let text = crate::render::display_text(entry);
-            let sources = mermaid_sources(&blocks, &text, modes.mermaid);
-            let fresh = entry
-                .diagram_cache
-                .as_ref()
-                .filter(|(cached_width, cached_len, _)| {
-                    *cached_width == width && *cached_len == text_len
-                })
-                .is_none();
-            if fresh {
-                let outcomes = sources
-                    .iter()
-                    .map(|source| diagram_for(source, width))
-                    .collect();
-                entry.diagram_cache = Some((width, text_len, outcomes));
-            }
-        }
         // The Markdown paragraph counts do not depend on the folds, so cache them by
         // `(width, text_len)`: a global fold toggle re-counts the entries but does not re-parse
         // their Markdown (the R7 toggle gate). **Counts only** (resume-perf2): the first frame
@@ -349,8 +312,6 @@ fn layout_unstripped(
                 frame: Frame::None,
                 role: tools::LineRole::Normal,
                 hint: true,
-                diagram: None,
-                reason: false,
                 md: None,
                 syntax: None,
                 image: None,
@@ -372,7 +333,6 @@ fn layout_unstripped(
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
-            let mut diagram_index = 0;
             for block in blocks {
                 match block {
                     Block::Paragraph { start, end, .. } => {
@@ -393,55 +353,28 @@ fn layout_unstripped(
                     } => {
                         let source = &text[*start..*end];
                         let md_glyphs = MdGlyphs::for_glyphs(modes.glyphs);
-                        // A Mermaid block is drawn, not highlighted; every other closed block
-                        // whose language is in the table is (ADR 0028 R2).
-                        let highlight = if is_mermaid(lang, *closed, modes.mermaid) {
-                            None
-                        } else {
-                            syntax_lines_cached(*start, *end, &text, lang, *closed, modes.highlight)
-                        };
+                        // A closed block whose language is in the table is highlighted
+                        // (ADR 0028 R2).
+                        let highlight = syntax_lines_cached(
+                            *start,
+                            *end,
+                            &text,
+                            lang,
+                            *closed,
+                            modes.highlight,
+                        );
                         // ADR 0035: the block is an open frame — a top
                         // line titled with the language, a rail on every row, and a bottom
                         // line when the block is closed. The frame is in the marker column.
                         lines.push(code_frame_top(lang, *start, width, &md_glyphs));
-                        if is_mermaid(lang, *closed, modes.mermaid) {
-                            let index = diagram_index;
-                            diagram_index += 1;
-                            match diagram_outcome(entry, index, &code_body(source, *closed), width)
-                            {
-                                DiagramOutcome::Rendered(rendered) => {
-                                    lines.extend(
-                                        rendered
-                                            .into_iter()
-                                            .map(|spans| BodyLine::diagram(*end, *start, spans)),
-                                    );
-                                }
-                                DiagramOutcome::Failed(reason) => {
-                                    lines.push(BodyLine::reason(
-                                        *start,
-                                        *start,
-                                        format!("mermaid: {reason}"),
-                                    ));
-                                    lines.extend(code_lines(
-                                        source,
-                                        *start,
-                                        *closed,
-                                        width,
-                                        &md_glyphs,
-                                        highlight.as_deref().map(Vec::as_slice),
-                                    ));
-                                }
-                            }
-                        } else {
-                            lines.extend(code_lines(
-                                source,
-                                *start,
-                                *closed,
-                                width,
-                                &md_glyphs,
-                                highlight.as_deref().map(Vec::as_slice),
-                            ));
-                        }
+                        lines.extend(code_lines(
+                            source,
+                            *start,
+                            *closed,
+                            width,
+                            &md_glyphs,
+                            highlight.as_deref().map(Vec::as_slice),
+                        ));
                         // A closed block is a separate line even when it is identical to the
                         // opening (the usual ``` pair).
                         if *closed && source.lines().count() > 1 {
@@ -491,8 +424,6 @@ fn layout_unstripped(
                     frame: Frame::None,
                     role: tools::LineRole::Normal,
                     hint: true,
-                    diagram: None,
-                    reason: false,
                     md: None,
                     syntax: None,
                     image: None,
@@ -675,7 +606,6 @@ pub fn body_text_lines(
         }
         (EntryKind::Assistant, _) => {
             let mut lines = Vec::new();
-            let mut diagram_index = 0;
             for block in parse_blocks_for(entry, mode) {
                 match block {
                     Block::Paragraph { start, end, .. } => {
@@ -686,32 +616,10 @@ pub fn body_text_lines(
                         );
                     }
                     Block::Code {
-                        start,
-                        end,
-                        closed,
-                        lang,
+                        start, end, closed, ..
                     } => {
                         let source = &text[start..end];
-                        if is_mermaid(&lang, closed, modes.mermaid) {
-                            let index = diagram_index;
-                            diagram_index += 1;
-                            match diagram_outcome(entry, index, &code_body(source, closed), width) {
-                                DiagramOutcome::Rendered(rendered) => {
-                                    lines.extend(rendered.into_iter().map(|spans| {
-                                        spans
-                                            .into_iter()
-                                            .map(|(piece, _)| piece)
-                                            .collect::<String>()
-                                    }));
-                                }
-                                DiagramOutcome::Failed(reason) => {
-                                    lines.push(format!("mermaid: {reason}"));
-                                    lines.extend(code_text_lines(source, closed, width));
-                                }
-                            }
-                        } else {
-                            lines.extend(code_text_lines(source, closed, width));
-                        }
+                        lines.extend(code_text_lines(source, closed, width));
                     }
                 }
             }
@@ -796,7 +704,6 @@ pub(crate) mod tests {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
-        mermaid: true,
         highlight: true,
         glyphs: crate::footer::Glyphs::Unicode,
     };

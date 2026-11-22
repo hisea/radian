@@ -1110,14 +1110,18 @@ theme = "light"
         assert!(config.skipped.contains(&"tui.input_style".to_string()));
     }
 
-    /// `tui.display.mermaid` (ADR 0028 R8): a bool is carried; an unknown value is skipped.
+    /// `tui.display.mermaid` is retired (ADR 0008): any value is one skipped-key line, then
+    /// ignored; the rest of `[tui.display]` still applies and the file is never refused.
     #[test]
-    fn the_display_mermaid_flag_is_carried_and_a_non_bool_is_skipped() {
-        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = false\n").unwrap();
-        assert_eq!(config.tui.display_mermaid, Some(false));
-        let config = parse_str("schema_version = 1\n[tui.display]\nmermaid = \"yes\"\n").unwrap();
-        assert_eq!(config.tui.display_mermaid, None);
-        assert!(config.skipped.contains(&"tui.display.mermaid".to_string()));
+    fn the_display_mermaid_key_is_retired_and_never_refused() {
+        for value in ["false", "true", "\"yes\""] {
+            let config = parse_str(&format!(
+                "schema_version = 1\n[tui.display]\nmermaid = {value}\nhighlight = false\n"
+            ))
+            .unwrap();
+            assert_eq!(config.skipped, vec!["tui.display.mermaid".to_string()]);
+            assert_eq!(config.tui.display_highlight, Some(false));
+        }
     }
 
     /// `tui.display.highlight` (ADR 0028 R2): a bool is carried; an unknown value is skipped.
@@ -1928,7 +1932,6 @@ future_option = "alpha"
             "tui.display.reasoning",
             "tui.display.tool_output",
             "tui.display.tool_preview_lines",
-            "tui.display.mermaid",
             "tui.display.highlight",
             "tui.footer.preset",
             "tui.footer.separator",
@@ -2089,7 +2092,6 @@ future_option = "alpha"
                 "reasoning = \"hidden\"\n",
                 "tool_output = \"expanded\"\n",
                 "tool_preview_lines = 3\n",
-                "mermaid = false\n",
                 "highlight = false\n",
                 "[tui.footer]\n",
                 "preset = \"pi\"\n",

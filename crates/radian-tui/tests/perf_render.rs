@@ -851,11 +851,6 @@ fn dbg_render_costs() {
         .draw(|frame| render::draw(frame, &mut app))
         .unwrap();
     println!("second frame (cached): {} ms", t.elapsed().as_millis());
-    // A big mermaid diagram.
-    let diagram: String = (0..200).map(|i| format!("A{i}-->B{i};\n")).collect();
-    let t = Instant::now();
-    let _ = grok_mermaid::render(&format!("graph TD;\n{diagram}"), Some(120));
-    println!("mermaid 200 edges: {} ms", t.elapsed().as_millis());
 }
 
 #[test]

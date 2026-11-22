@@ -26,7 +26,7 @@ Status: accepted
 | Diff | Red deletes, green adds, symbols and line numbers, no row background: see ADR 0028 diff rules |
 | Math | Shows source text as-is (inline and standalone alike) |
 | HTML | `<br>` breaks lines, `<hr>` draws dividers, `<blockquote>` quotes, all other tags drop shells and keep text |
-| Mermaid | ADR 0028 R8 / ADR 0042 |
+| Mermaid | A `mermaid` block is an ordinary code block (open line box, highlight by the same rules) |
 | Thinking | Head row, duration, single-color Markdown body, folded rows: see ADR 0028. Thinking and the block below take 1 blank row between them |
 
 ### V3 Input box style

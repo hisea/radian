@@ -35,7 +35,6 @@ fn thinking_modes(reasoning: ReasoningMode) -> DisplayModes {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
-        mermaid: true,
         highlight: true,
         glyphs: radian_tui::footer::Glyphs::Unicode,
     }
