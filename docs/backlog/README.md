@@ -33,7 +33,6 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `remove-import-claude.md` | decided | 0046、0045、0008 | 删 `radian config import-claude`（约 170 KB 含测试），保留 `import-pi` |
-| `remove-footer-command-items.md` | decided | 0027、0008、0013 | 删 footer `command` 项这个公开扩展点；内部 contributor 保留 |
 | `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
 | `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |
 | `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |

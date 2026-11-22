@@ -231,7 +231,6 @@ pub(crate) fn build_rows(
     default_separator: &str,
     separator_style: &ItemStyle,
     items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
-    command_ids: &std::collections::BTreeSet<String>,
     aliased: &mut std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Vec<Row> {
@@ -253,12 +252,12 @@ pub(crate) fn build_rows(
                 left: row
                     .left
                     .iter()
-                    .filter_map(|item| resolve_item(item, items, command_ids, aliased, warnings))
+                    .filter_map(|item| resolve_item(item, items, aliased, warnings))
                     .collect(),
                 right: row
                     .right
                     .iter()
-                    .filter_map(|item| resolve_item(item, items, command_ids, aliased, warnings))
+                    .filter_map(|item| resolve_item(item, items, aliased, warnings))
                     .collect(),
                 separator: row
                     .separator
@@ -318,17 +317,10 @@ pub(crate) fn is_bare(config: &TuiFooterItemConfig) -> bool {
         && !config.disabled
 }
 
-/// Whether a configured item carries a `command` (ADR 0027): the id is an
-/// out-of-process footer component.
-pub(crate) fn is_command_item(config: &TuiFooterItemConfig) -> bool {
-    config.params.iter().any(|(key, _)| key == "command")
-}
-
 /// Resolves one configured item, recording its warnings. `None` when it is disabled.
 fn resolve_item(
     config: &TuiFooterItemConfig,
     items: &std::collections::BTreeMap<String, TuiFooterItemConfig>,
-    command_ids: &std::collections::BTreeSet<String>,
     warned: &mut std::collections::BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Option<Item> {
@@ -344,10 +336,8 @@ fn resolve_item(
     // An id an earlier version used for a provider's usage row is the `usage` component here
     // (ADR 0027), with one warning.
     let id = canonical_id(&effective.id, warned, warnings);
-    // A `command` id is known (its producer publishes it); an ordinary id no built-in claims is
-    // shown raw until a contributor publishes it, with one warning.
-    let command = command_ids.contains(&id);
-    if !command && components::builtin(&id).is_none() {
+    // An id no built-in claims is shown raw until a contributor publishes it, with one warning.
+    if components::builtin(&id).is_none() {
         warnings.push(format!(
             "tui.footer: unknown item {id:?}; showing it as written unless a contributor \
              publishes it"
@@ -374,7 +364,7 @@ fn resolve_item(
         }
     }
     if let Some(format) = &effective.format {
-        validate_format(&id, format, command, warnings);
+        validate_format(&id, format, warnings);
     }
     Some(Item {
         id: id.clone(),
@@ -388,7 +378,7 @@ fn resolve_item(
         thresholds,
         params: effective.params.clone(),
         disabled: false,
-        unknown: !command && components::builtin(&id).is_none(),
+        unknown: components::builtin(&id).is_none(),
     })
 }
 
@@ -433,7 +423,7 @@ pub(crate) fn merge_into_item(
         item.symbol_style = Some(symbol_style);
     }
     if let Some(format) = &config.format {
-        validate_format(&item.id, format, false, warnings);
+        validate_format(&item.id, format, warnings);
         item.format = Some(format.clone());
     }
     if let Some(style) = parse_style_or_warn(config.style.as_deref(), &item.id, "style", warnings) {
@@ -456,14 +446,8 @@ pub(crate) fn merge_into_item(
 }
 
 /// Warns about an unknown placeholder or a bad inline style in a format, once at parse time.
-fn validate_format(id: &str, format: &str, command: bool, warnings: &mut Vec<String>) {
-    // A command item's data is the store's `{value}` (ADR 0027); every
-    // other id takes the component registry's placeholder list.
-    let known: &[&str] = if command {
-        &["value"]
-    } else {
-        components::placeholders(id).unwrap_or(&[])
-    };
+fn validate_format(id: &str, format: &str, warnings: &mut Vec<String>) {
+    let known: &[&str] = components::placeholders(id).unwrap_or(&[]);
     for placeholder in placeholders(format) {
         if !known.contains(&placeholder.as_str()) {
             warnings.push(format!(

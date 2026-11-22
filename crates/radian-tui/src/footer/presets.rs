@@ -104,7 +104,6 @@ pub(crate) fn preset_footer_rows(preset: Preset, warnings: &mut Vec<String>) -> 
         &separator,
         &ItemStyle::Role(Role::FooterSeparator),
         &std::collections::BTreeMap::new(),
-        &std::collections::BTreeSet::new(),
         &mut std::collections::BTreeSet::new(),
         warnings,
     )

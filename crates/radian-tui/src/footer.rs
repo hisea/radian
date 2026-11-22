@@ -29,8 +29,7 @@ pub(crate) use draw::{
 pub(crate) use presets::preset_footer_rows;
 pub use presets::{PRESET_NAMES, Preset, export_preset};
 pub(crate) use rows::{
-    Item, ItemStyle, Row, build_rows, canonical_id, is_command_item, merge_into_item,
-    parse_item_style,
+    Item, ItemStyle, Row, build_rows, canonical_id, merge_into_item, parse_item_style,
 };
 pub use rows::{RowPosition, fold_legacy_widgets};
 
@@ -43,6 +42,14 @@ pub fn footer_item_ids() -> Vec<&'static str> {
 /// The `{placeholder}`s one built-in id offers, or `None` when no component claims the id.
 pub fn footer_item_placeholders(id: &str) -> Option<&'static [&'static str]> {
     components::placeholders(id)
+}
+
+/// The item keys that are retired and ignored: the out-of-process `command` item was removed.
+pub const RETIRED_ITEM_KEYS: &[&str] = &["command", "period"];
+
+/// The one warning for a footer item that sets the retired `command` or `period` (ADR 0027).
+fn retired_warning(id: &str) -> String {
+    format!("tui.footer: item {id:?} sets `command` or `period`, which are retired and ignored")
 }
 
 /// The parameters one built-in id reads from its item (an empty list when it reads none),
@@ -295,38 +302,28 @@ impl Footer {
             }),
         };
         let transparent = config.transparent.unwrap_or(false);
-        // An inline `command` (or `period`) in a row is not read: only
-        // `[tui.footer.items.<id>]` starts a command. Warn once per row item and do not mark
-        // the id as a command item through the inline table. When the items table sets
-        // `command` for the same id, that entry still marks it (a bare id takes the items
-        // table; an inline table is otherwise used as written).
+        // `command` and `period` are retired (ADR 0027): one warning per item that sets either
+        // (in the items table or inline in a row), then they are ignored and the id follows the
+        // unknown-id rule.
+        let retired = |item: &TuiFooterItemConfig| {
+            item.params
+                .iter()
+                .any(|(key, _)| RETIRED_ITEM_KEYS.contains(&key.as_str()))
+        };
+        for (id, item) in &config.items {
+            if retired(item) {
+                warnings.push(retired_warning(id));
+            }
+        }
         for item in config
             .rows
             .iter()
             .flat_map(|row| row.left.iter().chain(row.right.iter()))
         {
-            if item
-                .params
-                .iter()
-                .any(|(key, _)| key == "command" || key == "period")
-            {
-                let id = &item.id;
-                warnings.push(format!(
-                    "tui.footer: item {id:?} sets `command` (or `period`) inline; inline \
-                     `command`/`period` is not read, move it to `[tui.footer.items.{id}]`"
-                ));
+            if retired(item) {
+                warnings.push(retired_warning(&item.id));
             }
         }
-        // The ids configured as out-of-process `command` items (ADR 0027).
-        // Such an id is not an unknown-id typo: until the background producer publishes a value
-        // the item hides (never a raw id), and `{value}` is its one placeholder. Only an id no
-        // built-in claims can be a command item — a built-in always wins its id.
-        let command_ids: std::collections::BTreeSet<String> = config
-            .items
-            .iter()
-            .filter(|(id, item)| components::builtin(id).is_none() && is_command_item(item))
-            .map(|(id, _)| id.clone())
-            .collect();
         // The per-field `items` table, with an earlier version's usage ids canonicalized
         // (ADR 0027), so an old id written in `[tui.footer.items]` lands
         // on the `usage` item. A `usage` block wins when both are written.
@@ -356,7 +353,6 @@ impl Footer {
                 &separator,
                 &separator_style,
                 &items,
-                &command_ids,
                 &mut aliased,
                 &mut warnings,
             )

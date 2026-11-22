@@ -213,8 +213,7 @@ fn render_item(app: &App, item: &Item) -> Option<Piece> {
     })
 }
 
-/// The item's own `symbol`/`icon` first, then a symbol the data carries (a command's JSON
-/// `symbol`, ADR 0027), then the component's default glyph under the
+/// The item's own `symbol`/`icon` first, then a symbol the data carries, then the component's default glyph under the
 /// footer's set.
 fn symbol_for(app: &App, item: &Item, data: &ItemData, component: &dyn Component) -> String {
     item.icon

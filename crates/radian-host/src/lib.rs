@@ -14,7 +14,6 @@ pub mod auth;
 pub mod btw;
 mod catalog;
 pub mod chatgpt_usage;
-pub mod command_footer;
 pub mod compose;
 pub mod config;
 pub mod context;
@@ -112,11 +111,6 @@ pub use catalog::{
 pub use chatgpt_usage::{
     ChatGptUsage, USAGE_BASE as CHATGPT_USAGE_BASE, USAGE_URL as CHATGPT_USAGE_URL,
 };
-pub use command_footer::{
-    BUILTIN_FOOTER_ITEMS, COMMAND_TIMEOUT, CommandContributor, CommandSpec, FooterContext,
-    FooterSnapshot, MAX_OUTPUT_BYTES, command_specs, is_builtin_footer_item,
-    parse_command as parse_footer_command,
-};
 pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
 pub use config::migrate_claude::{
     ClaudeDraft, ClaudeMcpServer, ClaudeMigrateError, ClaudeSkill, ClaudeTargets,
@@ -139,7 +133,7 @@ pub use context::{
 pub use contrib::{
     Contribution, ContributionStore, ContributorRunner, GitContributor, NOTICE_AFTER, Segment,
     SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
-    spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
+    spawn_gated as spawn_contributor_gated,
 };
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, budget_exceeded_line, describe};
 pub use diagnostics::{

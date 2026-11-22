@@ -365,7 +365,7 @@ a tuned override pastes straight into `[roles]`.
 
 The footer is the status line under the input box. It follows the theme
 roles above and is configured separately: `footer.md` lists every preset,
-row, item and command item, including the `loop` item, each item's own
+row and item, including the `loop` item, each item's own
 parameters, the per-preset rows, and `tui.widgets`.
 
 A `[tui.colors]` key, a theme file role, and a footer item `style` all name
