@@ -1863,6 +1863,36 @@ fn a_retired_command_item_warns_once_and_shows_its_id() {
     );
 }
 
+/// The committed old-config fixture, loaded through the real reader: both items warn once each
+/// and draw as unknown ids, and the file is not refused.
+#[test]
+fn the_old_footer_command_fixture_loads_and_warns_per_item() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/schema/config/tui-footer-command.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let config = radian_host::config::parse(&path, &text).unwrap();
+    let (footer, warnings) = Footer::from_config(&config.tui.footer);
+    let retired: Vec<_> = warnings.iter().filter(|w| w.contains("retired")).collect();
+    assert_eq!(retired.len(), 2, "one line per item: {warnings:?}");
+    assert!(
+        retired.iter().any(|w| w.contains("\"weather\"")),
+        "{retired:?}"
+    );
+    assert!(
+        retired.iter().any(|w| w.contains("\"host_tag\"")),
+        "{retired:?}"
+    );
+    let mut app = App::new("mock", "s");
+    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
+    app.footer = footer;
+    let terminal = render(&mut app, 60, 12);
+    let line = row(&terminal, 11);
+    assert!(
+        line.contains("Mock 5") && line.contains("weather"),
+        "{line:?}"
+    );
+}
+
 /// An inline `command` or `period` in a row is retired the same way.
 #[test]
 fn an_inline_retired_command_warns_and_shows_its_id() {
