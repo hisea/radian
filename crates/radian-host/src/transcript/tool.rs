@@ -39,17 +39,9 @@ pub struct ToolCard {
     /// Whether the paired result is an error. A failed `patch` changed nothing, so its card
     /// shows the tool's own error text instead of the call's edits, and no `+N −M`.
     pub is_error: bool,
-    /// The ACP tool call's status, as the conversation page draws it: `queued`, `running`,
-    /// `done` or `failed` (ADR 0048 §13). It rides on the head's meta instead of the status
-    /// glyph, so a `terminal` content block (which has no result to pair) still shows its
-    /// state. `None` for every radian-owned tool call, whose status is the glyph alone.
-    pub status: Option<String>,
-    /// The byte offset in the result entry's display text where a plain `content` text starts
-    /// after a `diff` body (ADR 0048 §13). `None` when the body is all one kind.
-    pub trailing_from: Option<usize>,
     /// The memory file this call settled on (ADR 0035): present only after a successful
     /// `read`, `write` or `patch` whose path is a record under the memory root. Host-side
-    /// display data; never serialized (the hub's clients draw the entry text instead).
+    /// display data; never serialized (a client draws the entry text instead).
     #[serde(skip_serializing)]
     pub memory: Option<MemoryRef>,
 }
@@ -64,8 +56,6 @@ impl ToolCard {
             duration_ms: None,
             result_lines: None,
             is_error: false,
-            status: None,
-            trailing_from: None,
             memory: None,
         }
     }

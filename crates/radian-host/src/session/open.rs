@@ -83,7 +83,6 @@ pub async fn open_session(
         skills_builtin,
         skills_disabled,
         tools_allow,
-        extra_deny_read,
         skills_allow,
         memory_injection,
         subtree_files,
@@ -387,8 +386,7 @@ pub async fn open_session(
         .filter(|skill| skill.body.is_none())
         .map(|skill| skill.dir.clone())
         .collect();
-    let mut file_deny_read = crate::home::file_tool_deny_read(&session_dir);
-    file_deny_read.extend(extra_deny_read);
+    let file_deny_read = crate::home::file_tool_deny_read(&session_dir);
     // ADR 0039 decision 4: the two memory scope directories are the file tools' writable
     // roots. A read never registers a project, so an unlinked workspace passes `global/`
     // only; the memory deny entry above stays for the sandbox (the shell).

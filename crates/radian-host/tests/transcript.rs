@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use radian_core::Message;
-use radian_host::transcript::{AcpFold, AttachFold, Card, Entry, EntryKind};
+use radian_host::transcript::{AttachFold, Card, Entry, EntryKind};
 
 /// A scratch directory that removes itself.
 struct Scratch(PathBuf);
@@ -63,129 +63,6 @@ fn append(path: &Path, lines: &[String]) {
     file.flush().unwrap();
 }
 
-/// The `kind` of every entry, in order.
-fn kinds(fold: &AcpFold) -> Vec<EntryKind> {
-    fold.entries().iter().map(|entry| entry.kind).collect()
-}
-
-/// The `text` of every entry, in order.
-fn texts(fold: &AcpFold) -> Vec<String> {
-    fold.entries()
-        .iter()
-        .map(|entry| entry.text.clone())
-        .collect()
-}
-
-/// One `{"type":"acp","message":{...}}` envelope around a `session/update`.
-fn update(session_update: serde_json::Value) -> String {
-    serde_json::json!({
-        "type": "acp",
-        "message": {
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {"sessionId": "s", "update": session_update},
-        },
-    })
-    .to_string()
-}
-
-/// One text chunk of a session update kind.
-fn chunk(kind: &str, text: &str) -> String {
-    update(serde_json::json!({
-        "sessionUpdate": kind,
-        "content": {"type": "text", "text": text},
-    }))
-}
-
-/// A real attempt's `result.jsonl`, shrunk to the lines that shape the conversation: a thought,
-/// a tool call with a permission answer and a result, two message chunks, and the outcome
-/// (ADR 0048 §13). The wrapper writes exactly these envelope shapes.
-fn result_jsonl() -> Vec<String> {
-    vec![
-        chunk("agent_thought_chunk", "Looking at the file."),
-        update(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "c1",
-            "title": "Read main.rs",
-            "kind": "read",
-            "status": "pending",
-        })),
-        serde_json::json!({
-            "type": "acp",
-            "message": {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "session/request_permission",
-                "params": {"sessionId": "s", "toolCall": {"toolCallId": "c1"}, "options": []},
-            },
-        })
-        .to_string(),
-        serde_json::json!({
-            "type": "acp",
-            "answer": {"requestId": 1, "kind": "allow_once", "optionId": null},
-        })
-        .to_string(),
-        update(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "c1",
-            "status": "completed",
-            "content": [{"type": "content", "content": {"type": "text", "text": "1: fn main() {}"}}],
-        })),
-        chunk("agent_message_chunk", "Done."),
-        chunk("agent_message_chunk", " No further changes."),
-        serde_json::json!({"type": "Result", "outcome": "completed", "text": "finished"})
-            .to_string(),
-    ]
-}
-
-/// **Edge case 2.** An arc attempt's `result.jsonl` folds to the entries the conversation page
-/// shows: a thought, the call with its result, the permission answer after it, one merged
-/// assistant message and the outcome line (ADR 0048 §13).
-///
-/// Mutation: drop the `EntryKind::Assistant` mapping in [`AcpFold::push_line`]'s chunk path (or
-/// the `tool_call` one) and this FAILS.
-#[test]
-fn an_arc_result_jsonl_fixture_folds_to_the_conversation_entries() {
-    let mut fold = AcpFold::new();
-    for line in result_jsonl() {
-        fold.push_line(&line);
-    }
-    assert_eq!(
-        kinds(&fold),
-        vec![
-            EntryKind::Reasoning,
-            EntryKind::ToolCall,
-            EntryKind::ToolResult,
-            EntryKind::Notice,
-            EntryKind::Assistant,
-            EntryKind::Outcome { ok: true },
-        ]
-    );
-    assert_eq!(
-        texts(&fold),
-        vec![
-            "Looking at the file.",
-            "Read main.rs",
-            "1: fn main() {}",
-            "permission allow_once",
-            "Done. No further changes.",
-            "Result completed finished",
-        ]
-    );
-    let call = &fold.entries()[1];
-    assert_eq!(call.card, Card::Head);
-    assert_eq!(call.result, Some(false));
-    assert_eq!(
-        call.tool.as_ref().map(|card| card.call_id.as_str()),
-        Some("c1")
-    );
-    assert_eq!(
-        call.tool.as_ref().and_then(|card| card.status.as_deref()),
-        Some("done")
-    );
-    assert_eq!(fold.entries()[2].card, Card::Tail);
-}
-
 /// **Edge case 3.** Every entry kind has one stable JSON shape: a snake_case object whose first
 /// key is the `kind` tag, with every field present in declaration order. An image's base64
 /// payload is never serialized (the placeholder line in `text` stands in for it).
@@ -209,10 +86,6 @@ fn the_json_shape_of_every_entry_kind_is_stable() {
         (EntryKind::Compaction, r#"{"kind":"compaction""#),
         (EntryKind::Context, r#"{"kind":"context""#),
         (
-            EntryKind::Outcome { ok: true },
-            r#"{"kind":"outcome","ok":true"#,
-        ),
-        (
             EntryKind::Bash {
                 exclude_from_context: true,
             },
@@ -220,12 +93,12 @@ fn the_json_shape_of_every_entry_kind_is_stable() {
         ),
     ];
     // The tail every entry carries, unchanged by its kind.
-    let tail = r#""text":"x","is_error":false,"result":null,"error_code":null,"card":"none","tool":null,"compaction":null,"interrupted":false,"images":[],"via":null}"#;
+    let tail = r#""text":"x","is_error":false,"result":null,"error_code":null,"card":"none","tool":null,"compaction":null,"interrupted":false,"images":[]}"#;
     for (kind, head) in golden {
         let entry = Entry::new(kind, "x");
         let json = serde_json::to_string(&entry).unwrap();
         assert_eq!(json, format!("{head},{tail}"), "{kind:?}");
-        // Round-trips through JSON: the value the hub sends parses to the same value.
+        // Round-trips through JSON: the serialized value parses to the same value.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, serde_json::to_value(&entry).unwrap(), "{kind:?}");
     }
@@ -395,92 +268,4 @@ fn a_late_journal_result_updates_the_call_entry_it_folded_earlier() {
     assert_eq!(fold.entries()[call_index + 1].kind, EntryKind::ToolResult);
     assert_eq!(fold.entries()[call_index + 1].text, "7: fn a() {}");
     assert_eq!(fold.entries()[call_index + 1].card, Card::Tail);
-}
-
-/// **Edge case 4 (the ACP fold).** A `tool_call` whose `tool_call_update` arrives later updates
-/// the entry the call already has; the result is one more entry after it (ADR 0048 §13).
-///
-/// Mutation: make `refresh_tool` append a call entry instead of rewriting the tracked one and
-/// this FAILS.
-#[test]
-fn a_late_acp_result_updates_the_call_entry_it_folded_earlier() {
-    let mut fold = AcpFold::new();
-    fold.push_line(&update(serde_json::json!({
-        "sessionUpdate": "tool_call",
-        "toolCallId": "c1",
-        "title": "Edit image.txt",
-        "kind": "edit",
-        "status": "pending",
-    })));
-    assert_eq!(kinds(&fold), vec![EntryKind::ToolCall]);
-    assert_eq!(
-        fold.entries()[0]
-            .tool
-            .as_ref()
-            .and_then(|card| card.status.as_deref()),
-        Some("queued")
-    );
-    fold.push_line(&update(serde_json::json!({
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": "c1",
-        "status": "completed",
-        "content": [{"type": "content", "content": {"type": "text", "text": "wrote 4 bytes"}}],
-    })));
-    assert_eq!(
-        kinds(&fold),
-        vec![EntryKind::ToolCall, EntryKind::ToolResult],
-        "the call keeps its entry and the result follows it"
-    );
-    assert_eq!(fold.entries()[0].text, "Edit image.txt");
-    assert_eq!(fold.entries()[0].card, Card::Head);
-    assert_eq!(
-        fold.entries()[0]
-            .tool
-            .as_ref()
-            .and_then(|card| card.status.as_deref()),
-        Some("done")
-    );
-    assert_eq!(
-        fold.entries()[0]
-            .tool
-            .as_ref()
-            .and_then(|card| card.result_lines),
-        Some(1)
-    );
-    assert_eq!(fold.entries()[1].text, "wrote 4 bytes");
-    assert_eq!(fold.entries()[1].card, Card::Tail);
-}
-
-/// ADR 0035: the fold keeps a message's `origin.via` (ADR 0005 G1), so a message the owner
-/// sent through the control port is marked after a resume too. A typed message carries none.
-#[test]
-fn a_hub_message_keeps_its_origin_via_through_the_fold() {
-    let mut hub = Message::user("from the phone");
-    if let Message::User { meta, .. } = &mut hub {
-        meta.origin = Some(
-            radian_core::OpaqueJson::parse(serde_json::json!({"via": "hub"}).to_string())
-                .expect("valid origin JSON"),
-        );
-    }
-    let lines = vec![
-        envelope(
-            0,
-            "SessionCreated",
-            true,
-            serde_json::json!({"workspace": "/w", "config_snapshot": {}}),
-        ),
-        envelope(1, "MessageAppended", false, appended(0, hub)),
-        envelope(
-            2,
-            "MessageAppended",
-            false,
-            appended(1, Message::user("typed")),
-        ),
-    ];
-    let (_scratch, _path, fold) = open_fold("via", "shared-fold", &lines);
-    let entries = fold.entries();
-    assert_eq!(entries[0].kind, EntryKind::User);
-    assert_eq!(entries[0].via.as_deref(), Some("hub"));
-    assert_eq!(entries[1].kind, EntryKind::User);
-    assert_eq!(entries[1].via, None, "a typed message has no via marker");
 }

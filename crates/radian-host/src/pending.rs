@@ -160,17 +160,6 @@ pub struct PendingQueue<Req, Resp> {
     /// Bumped on every change that could alter the head or the count. A `watch` receiver
     /// `changed()`s once per version, so many changes coalesce into one wake-up.
     version: watch::Sender<u64>,
-    /// The ids completed through [`PendingQueue::answer_from_hub`] since the last
-    /// [`PendingQueue::take_answered_from_hub`], **while a UI reader holds a
-    /// [`PendingQueue::watch_hub_answers`] receiver**. The UI reads this to explain a popup
-    /// that closed without it (ADR 0035); only a successful answer is recorded, so a late
-    /// answer leaves nothing. A host with no reader has no UI to explain anything to: nothing
-    /// is recorded, so the list cannot grow for the life of the process (only the TUI
-    /// runs the wake task).
-    answered_from_hub: Mutex<Vec<u64>>,
-    /// One receiver per UI that reads hub answers. `()` is never read: the receiver count is
-    /// the whole point, so an absent UI costs the queue nothing.
-    hub_answer_readers: watch::Sender<()>,
     /// The highest `request_id` handed out; 0 before the first `push`.
     last_issued: AtomicU64,
 }
@@ -184,14 +173,11 @@ impl<Req, Resp> Default for PendingQueue<Req, Resp> {
 impl<Req, Resp> PendingQueue<Req, Resp> {
     pub fn new() -> Self {
         let (version, _) = watch::channel(0u64);
-        let (hub_answer_readers, _) = watch::channel(());
         Self {
             state: Mutex::new(State {
                 entries: VecDeque::new(),
             }),
             version,
-            answered_from_hub: Mutex::new(Vec::new()),
-            hub_answer_readers,
             last_issued: AtomicU64::new(0),
         }
     }
@@ -254,24 +240,6 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
     /// answered/aborted) is [`Answered::Late`] and changes nothing; an id that was never
     /// issued is [`Answered::Unknown`]. Never panics and never completes twice.
     pub fn answer(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
-        self.answer_inner(request_id, response, false)
-    }
-
-    /// [`PendingQueue::answer`] for the control port's owner `answer`: a successful id is
-    /// also recorded for [`PendingQueue::take_answered_from_hub`], so the TUI can say that the
-    /// hub answered a popup it was showing. The id is recorded only while a UI holds a
-    /// [`PendingQueue::watch_hub_answers`] receiver: a host with no UI records nothing. The queue is still the arbiter: a late answer is
-    /// [`Answered::Late`], records nothing, and changes nothing.
-    pub fn answer_from_hub(&self, request_id: u64, response: Resp) -> Result<(), Answered> {
-        self.answer_inner(request_id, response, true)
-    }
-
-    fn answer_inner(
-        &self,
-        request_id: u64,
-        response: Resp,
-        from_hub: bool,
-    ) -> Result<(), Answered> {
         let entry = {
             let mut state = self.lock();
             match state
@@ -295,35 +263,8 @@ impl<Req, Resp> PendingQueue<Req, Resp> {
             Ok(()) => Ok(()),
             Err(_) => Err(Answered::Late),
         };
-        if result.is_ok() && from_hub && self.hub_answer_readers.receiver_count() > 0 {
-            self.answered_from_hub
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(request_id);
-        }
         self.bump();
         result
-    }
-
-    /// Makes this queue remember the ids the control port answers, for
-    /// [`PendingQueue::take_answered_from_hub`]. Hold the receiver for as long as the UI can
-    /// read them: the TUI's queue-wake task holds one for its whole life. Until one exists,
-    /// `answer_from_hub` records nothing, so a host with no UI
-    /// keeps no ids.
-    pub fn watch_hub_answers(&self) -> watch::Receiver<()> {
-        self.hub_answer_readers.subscribe()
-    }
-
-    /// Takes the ids the control port answered since the last call. The UI reads them on a
-    /// queue wake-up. With no [`PendingQueue::watch_hub_answers`] reader held, nothing was
-    /// recorded and this is empty.
-    pub fn take_answered_from_hub(&self) -> Vec<u64> {
-        std::mem::take(
-            &mut *self
-                .answered_from_hub
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        )
     }
 
     /// Completes every request of `origin` with `response` and removes them. Other sessions are

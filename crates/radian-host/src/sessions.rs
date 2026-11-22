@@ -91,7 +91,7 @@ pub fn open_index(dir: &Path) -> Result<Option<Index>, String> {
 /// canonicalized (a recorded directory that no longer exists) is compared as written.
 ///
 /// The one rule for "the same workspace": `--list`, `--search`, `--export` and `--resume` use
-/// it here, and the hub uses it to assign a live session to a registered repository.
+/// it here.
 pub fn same_directory(a: &str, b: &str) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
