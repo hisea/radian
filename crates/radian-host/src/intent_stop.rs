@@ -210,7 +210,7 @@ mod tests {
     /// label is the rule's expected verdict — including the two long lead reports,
     /// which the length limit knowingly misses (`hold`, the documented recall gap),
     /// and the two short waits, which the pure rule fires on (`fire`; the running-job
-    /// suppression that holds them in production is pinned in `hooks.rs` instead).
+    /// suppression that holds them in production is pinned in `hooks/tests/` instead).
     #[test]
     fn the_fixed_sample_labels_hold() {
         let samples: Vec<Sample> = serde_json::from_str(include_str!("intent_stop_sample.json"))
