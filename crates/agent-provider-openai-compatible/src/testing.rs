@@ -1,19 +1,12 @@
-//! A mock OpenAI-compatible server for tests (feature `testing`).
-//!
-//! It speaks just enough HTTP/1.1 to stream a chunked response, hang, or cut the connection,
-//! and it records every request it receives. Replies are used in order, one per request.
+//! A mock OpenAI-compatible server for tests (feature `testing`): the shared mock HTTP server
+//! of `agent-provider-common` plus the Chat Completions chunk builder.
 
-use std::collections::VecDeque;
-use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agent_provider_common::testing as common;
+pub use agent_provider_common::testing::Barrier;
+pub use agent_provider_common::testing::RecordedRequest;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
-const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// What the mock does with one request.
 #[derive(Debug, Clone)]
@@ -41,74 +34,46 @@ pub enum Reply {
     Barrier { barrier: Barrier, reply: Box<Reply> },
 }
 
-/// A one-shot rendezvous over the mock's requests. It records how many requests waited at the
-/// same time, so "three child processes overlapped" is a recorded fact and not a guess.
-#[derive(Clone)]
-pub struct Barrier {
-    state: Arc<BarrierState>,
-    timeout: Duration,
-}
-
-struct BarrierState {
-    /// Requests currently inside the wait.
-    waiting: AtomicUsize,
-    /// The most that were inside at once.
-    peak: AtomicUsize,
-    barrier: tokio::sync::Barrier,
-}
-
-impl fmt::Debug for Barrier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Barrier")
-            .field("waiting", &self.state.waiting.load(Ordering::SeqCst))
-            .field("peak", &self.peak())
-            .finish()
-    }
-}
-
-impl Barrier {
-    /// `needed` parties; a wait gives up after `timeout` (which is only a hang guard — a real
-    /// overlap releases at once).
-    pub fn new(needed: usize, timeout: Duration) -> Self {
-        Self {
-            state: Arc::new(BarrierState {
-                waiting: AtomicUsize::new(0),
-                peak: AtomicUsize::new(0),
-                barrier: tokio::sync::Barrier::new(needed),
-            }),
-            timeout,
+impl From<Reply> for common::Reply {
+    fn from(reply: Reply) -> Self {
+        match reply {
+            Reply::Sse {
+                pieces,
+                pause,
+                headers,
+            } => common::Reply::Sse {
+                pieces,
+                pause,
+                headers,
+            },
+            Reply::SseThenHang { pieces } => common::Reply::SseThenHang { pieces },
+            Reply::SseThenCut { pieces } => common::Reply::SseThenCut { pieces },
+            Reply::Status {
+                code,
+                headers,
+                body,
+            } => common::Reply::Status {
+                code,
+                headers,
+                body,
+            },
+            Reply::Barrier { barrier, reply } => common::Reply::Barrier {
+                barrier,
+                reply: Box::new((*reply).into()),
+            },
         }
-    }
-
-    /// The most requests that were inside the barrier at the same time.
-    pub fn peak(&self) -> usize {
-        self.state.peak.load(Ordering::SeqCst)
-    }
-
-    /// Waits for the other parties, counting this request as inside while it waits.
-    async fn wait(&self) {
-        let waiting = self.state.waiting.fetch_add(1, Ordering::SeqCst) + 1;
-        self.state.peak.fetch_max(waiting, Ordering::SeqCst);
-        let _ = tokio::time::timeout(self.timeout, self.state.barrier.wait()).await;
-        self.state.waiting.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl Reply {
-    /// An event stream with one piece per event, ending with `[DONE]`.
+    /// An event stream with one `data:` line per event, ending with `[DONE]`.
     pub fn sse(chunks: &[Value]) -> Self {
-        let mut pieces = sse_pieces(chunks);
-        pieces.push(b"data: [DONE]\n\n".to_vec());
-        Reply::Sse {
-            pieces,
-            pause: Duration::ZERO,
-            headers: Vec::new(),
-        }
+        Self::sse_with_headers(chunks, Vec::new())
     }
 
-    /// Like [`Reply::sse`], with extra response headers (e.g. the `x-ratelimit-*` ones).
+    /// Like [`Reply::sse`], with extra response headers.
     pub fn sse_with_headers(chunks: &[Value], headers: Vec<(String, String)>) -> Self {
-        let mut pieces = sse_pieces(chunks);
+        let mut pieces = common::sse_pieces(chunks);
         pieces.push(b"data: [DONE]\n\n".to_vec());
         Reply::Sse {
             pieces,
@@ -119,9 +84,14 @@ impl Reply {
 
     /// A complete response with this status and body.
     pub fn status(code: u16, body: &str) -> Self {
+        Self::status_with_headers(code, body, Vec::new())
+    }
+
+    /// A complete response with this status, body and extra headers.
+    pub fn status_with_headers(code: u16, body: &str, headers: Vec<(String, String)>) -> Self {
         Reply::Status {
             code,
-            headers: Vec::new(),
+            headers,
             body: body.into(),
         }
     }
@@ -129,7 +99,7 @@ impl Reply {
     /// The same bytes as [`Reply::sse`], but cut into pieces of `size` bytes, so events and
     /// even characters are split across network chunks.
     pub fn sse_split(chunks: &[Value], size: usize) -> Self {
-        let mut bytes = sse_pieces(chunks).concat();
+        let mut bytes = common::sse_pieces(chunks).concat();
         bytes.extend_from_slice(b"data: [DONE]\n\n");
         Reply::Sse {
             pieces: bytes.chunks(size).map(<[u8]>::to_vec).collect(),
@@ -137,13 +107,6 @@ impl Reply {
             headers: Vec::new(),
         }
     }
-}
-
-fn sse_pieces(chunks: &[Value]) -> Vec<Vec<u8>> {
-    chunks
-        .iter()
-        .map(|chunk| format!("data: {chunk}\n\n").into_bytes())
-        .collect()
 }
 
 /// A stream chunk with one choice.
@@ -155,229 +118,24 @@ pub fn chunk(delta: Value, finish_reason: Option<&str>) -> Value {
     })
 }
 
-#[derive(Debug, Clone)]
-pub struct RecordedRequest {
-    pub method: String,
-    pub path: String,
-    /// Header names are lower-case.
-    pub headers: Vec<(String, String)>,
-    pub body: String,
-}
-
-impl RecordedRequest {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-    }
-
-    pub fn json(&self) -> Value {
-        serde_json::from_str(&self.body).expect("the request body is JSON")
-    }
-}
-
+/// The mock server; see `agent_provider_common::testing::MockServer`.
 pub struct MockServer {
     /// `http://127.0.0.1:<port>/v1`
     pub base_url: String,
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
-    task: tokio::task::JoinHandle<()>,
+    inner: common::MockServer,
 }
 
 impl MockServer {
     pub async fn start(replies: Vec<Reply>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let port = listener.local_addr().expect("address").port();
-        let replies = Arc::new(Mutex::new(VecDeque::from(replies)));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let task = {
-            let (replies, requests) = (Arc::clone(&replies), Arc::clone(&requests));
-            tokio::spawn(async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    tokio::spawn(handle(stream, Arc::clone(&replies), Arc::clone(&requests)));
-                }
-            })
-        };
+        let inner =
+            common::MockServer::start(replies.into_iter().map(Into::into).collect(), "/v1").await;
         Self {
-            base_url: format!("http://127.0.0.1:{port}/v1"),
-            requests,
-            task,
+            base_url: inner.base_url.clone(),
+            inner,
         }
     }
 
     pub fn requests(&self) -> Vec<RecordedRequest> {
-        self.requests.lock().unwrap().clone()
+        self.inner.requests()
     }
-}
-
-impl Drop for MockServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn handle(
-    mut stream: TcpStream,
-    replies: Arc<Mutex<VecDeque<Reply>>>,
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
-) {
-    let Some(request) = read_request(&mut stream).await else {
-        return;
-    };
-    // ADR 0026 D0: the host refreshes a provider's model list with `GET <base>/models`. Answer
-    // it here, outside the scripted queue (a real endpoint serves it too), so the background
-    // refresh cannot consume a reply a test scripted for a chat call. It is not recorded:
-    // `requests()` stays the model calls a test asserts on.
-    if request.method == "GET" && request.path.trim_end_matches('/').ends_with("/models") {
-        let _ = write_plain(&mut stream, 200, &[], r#"{"object":"list","data":[]}"#).await;
-        return;
-    }
-    requests.lock().unwrap().push(request);
-    let reply = replies.lock().unwrap().pop_front();
-    let _ = respond(&mut stream, reply).await;
-}
-
-async fn respond(stream: &mut TcpStream, reply: Option<Reply>) -> std::io::Result<()> {
-    match reply {
-        None => write_plain(stream, 500, &[], "no reply was scripted").await,
-        Some(Reply::Status {
-            code,
-            headers,
-            body,
-        }) => write_plain(stream, code, &headers, &body).await,
-        Some(Reply::Barrier { barrier, reply }) => {
-            barrier.wait().await;
-            Box::pin(respond(stream, Some(*reply))).await
-        }
-        Some(Reply::Sse {
-            pieces,
-            pause,
-            headers,
-        }) => {
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
-                 transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
-                response_headers(&headers)
-            );
-            stream.write_all(head.as_bytes()).await?;
-            for piece in pieces {
-                write_chunk(stream, &piece).await?;
-                if !pause.is_zero() {
-                    tokio::time::sleep(pause).await;
-                }
-            }
-            stream.write_all(b"0\r\n\r\n").await?;
-            stream.shutdown().await
-        }
-        Some(Reply::SseThenHang { pieces }) => {
-            stream.write_all(sse_head(&[]).as_bytes()).await?;
-            for piece in pieces {
-                write_chunk(stream, &piece).await?;
-            }
-            std::future::pending().await
-        }
-        Some(Reply::SseThenCut { pieces }) => {
-            stream.write_all(sse_head(&[]).as_bytes()).await?;
-            for piece in pieces {
-                write_chunk(stream, &piece).await?;
-            }
-            Ok(()) // dropping the stream cuts it without the closing chunk
-        }
-    }
-}
-
-fn sse_head(headers: &[(String, String)]) -> String {
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{}\
-         transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
-        response_headers(headers)
-    )
-}
-
-fn response_headers(headers: &[(String, String)]) -> String {
-    headers
-        .iter()
-        .map(|(n, v)| format!("{n}: {v}\r\n"))
-        .collect()
-}
-
-async fn write_chunk(stream: &mut TcpStream, piece: &[u8]) -> std::io::Result<()> {
-    stream
-        .write_all(format!("{:x}\r\n", piece.len()).as_bytes())
-        .await?;
-    stream.write_all(piece).await?;
-    stream.write_all(b"\r\n").await?;
-    stream.flush().await
-}
-
-async fn write_plain(
-    stream: &mut TcpStream,
-    code: u16,
-    headers: &[(String, String)],
-    body: &str,
-) -> std::io::Result<()> {
-    let extra: String = headers
-        .iter()
-        .map(|(n, v)| format!("{n}: {v}\r\n"))
-        .collect();
-    let response = format!(
-        "HTTP/1.1 {code} Status\r\ncontent-type: application/json\r\n{extra}\
-         content-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.shutdown().await
-}
-
-async fn read_request(stream: &mut TcpStream) -> Option<RecordedRequest> {
-    let mut buffer = Vec::new();
-    let mut scratch = [0u8; 8192];
-    let head_end = loop {
-        if let Some(pos) = find(&buffer, b"\r\n\r\n") {
-            break pos;
-        }
-        if buffer.len() > MAX_REQUEST_BYTES {
-            return None;
-        }
-        let n = stream.read(&mut scratch).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buffer.extend_from_slice(&scratch[..n]);
-    };
-    let head = String::from_utf8_lossy(&buffer[..head_end]).into_owned();
-    let mut lines = head.split("\r\n");
-    let mut first = lines.next()?.split(' ');
-    let (method, path) = (first.next()?.to_owned(), first.next()?.to_owned());
-    let headers: Vec<(String, String)> = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_owned()))
-        .collect();
-    let length: usize = headers
-        .iter()
-        .find(|(n, _)| n == "content-length")
-        .and_then(|(_, v)| v.parse().ok())
-        .unwrap_or(0);
-    let body_start = head_end + 4;
-    while buffer.len() < body_start + length {
-        if buffer.len() > MAX_REQUEST_BYTES {
-            return None;
-        }
-        let n = stream.read(&mut scratch).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buffer.extend_from_slice(&scratch[..n]);
-    }
-    let body = String::from_utf8_lossy(&buffer[body_start..body_start + length]).into_owned();
-    Some(RecordedRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }

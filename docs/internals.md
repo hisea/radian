@@ -14,6 +14,7 @@ Paths in backticks are from the repository root.
 | `agent-provider-contract` | Adapter-neutral contract suite: the semantics every `Model` implementation must satisfy, independent of wire format. | `crates/agent-provider-contract/README.md` |
 | `agent-provider-openai-compatible` | Model adapter for OpenAI-compatible Chat Completions (`/chat/completions`), streaming. | `crates/agent-provider-openai-compatible/README.md`, `crates/agent-provider-contract/README.md` |
 | `agent-provider-anthropic` | Model adapter for the Anthropic Messages API (`/v1/messages`), streaming, API-key auth, extended thinking. | `crates/agent-provider-anthropic/README.md`, `crates/agent-provider-anthropic/WIRE.md` |
+| `agent-provider-common` | Code the three provider adapters share: the SSE reader, `Retry-After` parsing, usage-limit recognizers, and (feature `testing`) the mock HTTP server. | `docs/adr/0026-provider-credentials-and-model-switching.md` |
 | `radian-session` | Session JSONL v1 storage: the durable `TranscriptJournal` seam, the reader/replay path, the disposable SQLite index and the export renderers. | `crates/radian-session/README.md` |
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md` |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md` |

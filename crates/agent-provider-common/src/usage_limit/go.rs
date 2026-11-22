@@ -34,11 +34,7 @@ const GO_USAGE_LIMIT: &str = "GoUsageLimitError";
 /// `retry_after` is the response's own `Retry-After`, read by the caller before the body. The
 /// body seen carries no reset time; an optional `error.resets_in_seconds` countdown is honoured
 /// too, and the header wins when both are present. With neither, `resets_in` is `None`.
-pub(crate) fn usage_limit(
-    status: u16,
-    body: &str,
-    retry_after: Option<Duration>,
-) -> Option<ModelError> {
+pub fn usage_limit(status: u16, body: &str, retry_after: Option<Duration>) -> Option<ModelError> {
     if status != 429 {
         return None;
     }

@@ -2,8 +2,9 @@
 //!
 //! It works on bytes and decodes a line only once the line is complete, so a multi-byte
 //! character split across two network chunks is fine. Line ends may be `\n`, `\r\n` or `\r`,
-//! including a `\r\n` split across chunks. Identical in shape to the Chat Completions adapter's
-//! reader; the Responses stream is the same `data: {json}` framing.
+//! including a `\r\n` split across chunks. Only `data:` fields are read; an adapter that needs
+//! the SSE `event:` name finds it in the `data` JSON instead (Anthropic repeats the event
+//! `type` there, see `crates/agent-provider-anthropic/WIRE.md` §4).
 
 use radian_core::ModelError;
 
@@ -11,7 +12,7 @@ use radian_core::ModelError;
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Default)]
-pub(crate) struct SseParser {
+pub struct SseParser {
     line: Vec<u8>,
     data: String,
     has_data: bool,
@@ -21,7 +22,7 @@ pub(crate) struct SseParser {
 
 impl SseParser {
     /// Feeds bytes and returns the `data` of every event completed by them.
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, ModelError> {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, ModelError> {
         let mut events = Vec::new();
         for &byte in bytes {
             if std::mem::take(&mut self.skip_lf) && byte == b'\n' {
@@ -47,9 +48,9 @@ impl SseParser {
     }
 
     /// The event still pending when the stream ends. The SSE spec drops it, but some servers
-    /// end the stream without the final blank line, so it is returned here and the caller
+    /// end the stream (for example after `data: [DONE]`) without the final blank line, so it is returned here and the caller
     /// decides whether it is usable.
-    pub(crate) fn finish(&mut self) -> Result<Option<String>, ModelError> {
+    pub fn finish(&mut self) -> Result<Option<String>, ModelError> {
         let mut events = Vec::new();
         if !self.line.is_empty() {
             self.end_line(&mut events)?;
@@ -119,6 +120,7 @@ mod tests {
             let (a, b) = stream.split_at(cut);
             assert_eq!(all(&[a, b]), expected, "split at byte {cut}");
         }
+        // One byte at a time, which also splits every `\r\n`.
         let bytes: Vec<&[u8]> = stream.chunks(1).collect();
         assert_eq!(all(&bytes), expected);
     }
@@ -140,6 +142,7 @@ mod tests {
     #[test]
     fn the_final_event_without_a_blank_line_is_still_returned() {
         assert_eq!(all(&[b"data: a\n\ndata: [DONE]"]), ["a", "[DONE]"]);
+        assert_eq!(all(&[b"data: a\n\ndata: [DONE]\n"]), ["a", "[DONE]"]);
     }
 
     #[test]
