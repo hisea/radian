@@ -30,7 +30,8 @@ Every wire field the adapter relies on, with its source, is in
 
 ## Testing
 
-The `testing` feature adds an in-process mock HTTP server. The adapter passes the shared
+The `testing` feature adds an in-process mock HTTP server (the shared one of
+`agent-provider-common`, wrapped with the Responses event builders). The adapter passes the shared
 `agent-provider-contract` suite with a Responses harness (`tests/contract.rs`); the wire-level
 unit tests are `tests/http.rs` and the per-event units in `src/stream.rs`. Mutations and the
 test that catches each are in `MUTATIONS.md`.

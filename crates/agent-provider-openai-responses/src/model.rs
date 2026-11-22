@@ -1,19 +1,19 @@
 use std::collections::HashSet;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use radian_core::{
     CANCELLATION_MESSAGE, EventSink, Message, Model, ModelContext, ModelError, ModelRequest,
     ModelResponse, RateLimits,
 };
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Url, redirect};
 
 use crate::config::{ConfigError, OpenAiResponsesConfig, is_local_host, redact_url};
 use crate::overflow::classify_overflow;
 use crate::request::build_body;
-use crate::sse::SseParser;
 use crate::stream::{Assembler, Progress};
-use crate::usage_limit::usage_limit;
+use agent_provider_common::usage_limit::chatgpt::usage_limit;
+use agent_provider_common::{SseParser, retry_after};
 
 /// How much of an error body is quoted in the error message.
 const ERROR_BODY_BYTES: usize = 2048;
@@ -103,7 +103,7 @@ impl OpenAiResponses {
         let limits = rate_limits(&response);
         let status = response.status();
         if !status.is_success() {
-            let retry_after = retry_after(&response);
+            let retry_after = retry_after(response.headers());
             let snippet = read_error_body(&mut response, self.config.idle_timeout).await;
             let message = format!("HTTP {status}: {snippet}");
             // ADR 0018: a recognizable context-overflow error is its own kind.
@@ -347,122 +347,14 @@ async fn read_error_body(response: &mut reqwest::Response, idle: Duration) -> St
     }
 }
 
-/// The wait the provider asked for in `Retry-After`, if the header is present and parseable.
-fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    let value = response.headers().get(RETRY_AFTER)?;
-    parse_retry_after(value.to_str().ok()?, SystemTime::now())
-}
-
-fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    let date = parse_http_date(value)?;
-    Some(date.duration_since(now).unwrap_or_default())
-}
-
-/// `Sun, 06 Nov 1994 08:49:37 GMT` (IMF-fixdate). The weekday is ignored.
-fn parse_http_date(value: &str) -> Option<SystemTime> {
-    let rest = value.strip_suffix(" GMT")?;
-    let (weekday, rest) = rest.split_once(", ")?;
-    if weekday.len() != 3 {
-        return None;
-    }
-    let mut parts = rest.split(' ');
-    let day: i64 = parts.next()?.parse().ok()?;
-    let month = month_number(parts.next()?)?;
-    let year: i64 = parts.next()?.parse().ok()?;
-    let time = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    let (hour, rest) = time.split_once(':')?;
-    let (minute, second) = rest.split_once(':')?;
-    let hour: i64 = hour.parse().ok()?;
-    let minute: i64 = minute.parse().ok()?;
-    let second: i64 = second.parse().ok()?;
-    if !(1..=31).contains(&day) || !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
-        return None;
-    }
-    if !(0..=60).contains(&second) {
-        return None;
-    }
-    let days = days_from_civil(year, month, day)?;
-    let seconds = days
-        .checked_mul(86_400)?
-        .checked_add(hour * 3600 + minute * 60 + second)?;
-    if seconds < 0 {
-        return Some(UNIX_EPOCH);
-    }
-    UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
-}
-
-fn month_number(name: &str) -> Option<i64> {
-    Some(match name {
-        "Jan" => 1,
-        "Feb" => 2,
-        "Mar" => 3,
-        "Apr" => 4,
-        "May" => 5,
-        "Jun" => 6,
-        "Jul" => 7,
-        "Aug" => 8,
-        "Sep" => 9,
-        "Oct" => 10,
-        "Nov" => 11,
-        "Dec" => 12,
-        _ => return None,
-    })
-}
-
-/// Days from 1970-01-01 to `year-month-day`, by Howard Hinnant's civil-calendar algorithm.
-fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe - 719_468)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn at(unix_seconds: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(unix_seconds)
-    }
 
     #[test]
     fn secrets_include_the_bare_bearer_token() {
         let secrets = secrets(&[("Authorization".into(), "Bearer sk-abc-123".into())]);
         assert!(secrets.contains(&"Bearer sk-abc-123".to_owned()));
         assert!(secrets.contains(&"sk-abc-123".to_owned()));
-    }
-
-    #[test]
-    fn retry_after_seconds_and_dates_are_understood() {
-        assert_eq!(
-            parse_retry_after("12", at(0)),
-            Some(Duration::from_secs(12))
-        );
-        let target = 784_111_777;
-        assert_eq!(
-            parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT", at(target - 30)),
-            Some(Duration::from_secs(30))
-        );
-        assert_eq!(parse_retry_after("soon", at(0)), None);
-        assert_eq!(parse_retry_after("-1", at(0)), None);
-    }
-
-    #[test]
-    fn days_from_civil_matches_known_epochs() {
-        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
-        assert_eq!(days_from_civil(1994, 11, 6), Some(9_075));
     }
 }
