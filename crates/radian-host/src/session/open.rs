@@ -293,28 +293,6 @@ pub async fn open_session(
             }
         }
     }
-    // ADR 0006 §5.14: the durable host notices a resume renders, each with the number of
-    // recovered transcript messages that preceded it. The parse is already here (resume-perf B),
-    // so this reads no second time; a notice is rare (currently only the remote close), so the
-    // per-notice fold to its journal position is not a resume cost.
-    let host_notices: Vec<(usize, String)> = parsed
-        .as_ref()
-        .map(|parsed| {
-            parsed
-                .events()
-                .iter()
-                .filter_map(|event| match &event.data {
-                    radian_session::EventData::HostNotice { text } => {
-                        let after =
-                            radian_core::recover(&parsed.journal_records_through(event.seq))
-                                .map_or(usize::MAX, |history| history.len());
-                        Some((after, text.clone()))
-                    }
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let subtree_context = Arc::new(crate::context::SubtreeContext::new(
         &workspace,
         loaded_context,
@@ -888,7 +866,6 @@ pub async fn open_session(
         facts,
         config_snapshot,
         history: recovered_history,
-        host_notices,
     })
 }
 

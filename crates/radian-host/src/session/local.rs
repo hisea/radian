@@ -142,10 +142,6 @@ pub struct LocalSession {
     /// The recovered transcript (resume-perf B): `open_session` already folded it, so the host
     /// does not re-open the journal for its initial view.
     pub history: Vec<Message>,
-    /// The `HostNotice` lines the journal records, in file order (ADR 0006 §5.14), each with
-    /// the number of recovered transcript messages that preceded it. The TUI renders each one
-    /// after exactly that much of the resumed history.
-    pub(super) host_notices: Vec<(usize, String)>,
 }
 
 impl LocalSession {
@@ -339,13 +335,6 @@ impl LocalSession {
     /// The journal, for host work that reads the session file (`/export`, `/sessions`).
     pub fn journal(&self) -> &Arc<SessionJournal> {
         &self.journal
-    }
-
-    /// The host notices the journal records (ADR 0006 §5.14), in file order, each with the
-    /// number of recovered transcript messages before it. A resumed transcript interleaves
-    /// them at that position; a fresh session has none.
-    pub fn host_notices(&self) -> &[(usize, String)] {
-        &self.host_notices
     }
 
     /// The background-job registry (ADR 0037). The panic-path test hook starts a job through
