@@ -37,7 +37,6 @@
 | `exec-run-metrics-totals.md` | decided | 0044、0049、0007、0010 | `run_metrics` 只留总数，删 `request_log`、按模型/工具细项；不再对齐 `journal_metrics.py` |
 | `benchmarks-to-operad.md` | decided | 0044 | `benchmarks/` 整体移到 operad，Verify 去掉 `metrics.py --self-test` |
 | `remove-import-claude.md` | decided | 0046、0045、0008 | 删 `radian config import-claude`（约 170 KB 含测试），保留 `import-pi` |
-| `remove-memory.md` | decided | 0021、0006、0008、0012、0015、0020、0035、0036、0038、0039、0043 | 删持久记忆整套（约 300 KB）；旧 journal 仍可读，`[memory]` 退役为 inert，不动用户的 `~/.radian/memory/` |
 | `remove-footer-command-items.md` | decided | 0027、0008、0013 | 删 footer `command` 项这个公开扩展点；内部 contributor 保留 |
 | `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
 | `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |

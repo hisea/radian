@@ -19,7 +19,7 @@ The **folded transcript is host-owned.** `radian-host::transcript` turns a sessi
 facts (the journal and the events a `JournalObserver` folds) and an ACP attempt's
 `result.jsonl` into one `Entry` sequence, and it owns that entry type: the entry a user message,
 an assistant reply, a reasoning block, a tool call with its result, a compaction summary or a
-notice becomes, plus the tool-card data and the memory reference the card carries. Three
+notice becomes, plus the tool-card data. Three
 front ends fold through it, so none of them forks the folding rules. The TUI's own `Entry` is that host entry plus render
 state (the live flag, decoded images, the layout caches), and `radian-tui` keeps everything
 about drawing it: layout, themes, scrolling and ratatui. The split is one-way: the fold crate
@@ -58,7 +58,7 @@ One `Vec<Layer>`, each layer marking a level:
 
 | Level | Examples | Input rule |
 |---|---|---|
-| Modal | Approval, structured questions, `/memory` confirm | Must resolve explicitly before it disappears. Always stays **above** Overlay in the stack |
+| Modal | Approval, structured questions | Must resolve explicitly before it disappears. Always stays **above** Overlay in the stack |
 | Overlay | Search box, `@` completion list, session selector, inspector (`jobs \| tools \| mcp \| hooks`) | Temporary float. **Never** pushed above any Modal |
 | Surface | Transcript plus composer, workspace pages | Long-lived. Receives inputs unconsumed above |
 

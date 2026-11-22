@@ -33,7 +33,7 @@ Project resources that trigger a trust decision (only listed resources trigger):
 - Format is one JSON object `{ "<normalized directory path>": true | false }`, UTF-8, keys sorted, temp file plus `rename` atomic write, 0700 directory and 0600 file modes.
 - Reads accept only `true` and `false`. Other types or non-objects **wholly reject with a warning** (fail closed: re-ask rather than guess). A missing file means empty decisions.
 - Each write also writes one `ProjectTrustChanged { path, decision }` (non-critical) audit record.
-- **The sandbox cannot read it**: `~/.radian/trust/` joins the ADR 0020 denylist (same as `sessions/`, `memory/`, and `credentials/`). The host creates it (0700) before hiding it in the sandbox. The escape matrix covers `trust_unreadable`.
+- **The sandbox cannot read it**: `~/.radian/trust/` joins the ADR 0020 denylist (same as `sessions/` and `credentials/`). The host creates it (0700) before hiding it in the sandbox. The escape matrix covers `trust_unreadable`.
 
 ### T3 How to ask, options, and how to change
 

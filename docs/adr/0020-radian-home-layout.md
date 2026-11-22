@@ -19,7 +19,6 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
     catalog/models.json    models.dev catalog cache (ADR 0018)       sandbox-readable
     diagnostics/           panic logs and similar (ADR 0013)         sandbox-readable
   sessions/                session JSONL and index.db (ADR 0006)     sandbox-unreadable
-  memory/                  memory record files and per-scope MEMORY.md indexes (ADR 0021); the file tools reach the two scope directories only (ADR 0039 decision 4)  sandbox-unreadable
   credentials/auth.json    credentials (ADR 0026)                    sandbox-unreadable
   trust/trust.json         project trust records (ADR 0031)          sandbox-unreadable
   themes/<name>.toml       theme files (ADR 0029)                    sandbox-readable
@@ -33,10 +32,10 @@ The directory carries mode 0700 and files carry 0600 on first use (ADR 0013 perm
 ### 3. Sandbox read scope
 
 - **Readable**: `config/`, `cache/`, `themes/`, `skills/`, `run/`. These hold user UI data, model-read text, or process coordinates. They carry no credentials. `run/` stays readable because it is only process coordinates: a sandboxed shell can reach a control socket (ADR 0043). `$HOME/.agents/skills/` (Agent Skills standard location, ADR 0025) lives outside `$RADIAN_HOME` and outside the denylist, so the sandbox can read it. It never joins the layout tree above.
-- **Unreadable**: `sessions/`, `memory/`, `credentials/`, `trust/`, `access/` (the map of which projects run without a sandbox, ADR 0038 decision 3), plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
+- **Unreadable**: `sessions/`, `credentials/`, `trust/`, `access/` (the map of which projects run without a sandbox, ADR 0038 decision 3), plus the actual session directory that `--session-dir` or `RADIAN_SESSION_DIR` points at. Only Radian own tools and commands reach them.
 - The `full` tier has no sandbox, so its shell ignores this scope (chosen explicitly by the user). The file tools apply the unreadable list in every tier (ADR 0039 decision 4).
 
-The host first creates `sessions/`, `memory/`, `credentials/`, and `trust/` (0700), then hides them. Linux bwrap can only hide existing paths; `access/` is hidden when it exists, and a missing one holds nothing to hide. `full` has no sandbox.
+The host first creates `sessions/`, `credentials/`, and `trust/` (0700), then hides them. Linux bwrap can only hide existing paths; `access/` is hidden when it exists, and a missing one holds nothing to hide. `full` has no sandbox.
 
 ### 4. Sandbox temp directory inside the workspace
 
@@ -52,4 +51,4 @@ Data at old locations (`~/Library/Application Support/radian/sessions`, `$XDG_DA
 
 ## Verification
 
-`radian-host::home` pure-function tests cover `RADIAN_HOME` override, the default `$HOME/.radian`, and each subdirectory name. CLI tests cover sessions under `RADIAN_HOME` landing in `sessions/`, `RADIAN_SESSION_DIR` priority, and the old-location one-line notice without move. The `radian-sandbox` `radian_home` escape matrix covers `sessions`, `memory`, `credentials`, and `trust` unreadable plus `config`, `cache`, `themes`, and `skills` readable, plus a moved session directory unreadable.
+`radian-host::home` pure-function tests cover `RADIAN_HOME` override, the default `$HOME/.radian`, and each subdirectory name. CLI tests cover sessions under `RADIAN_HOME` landing in `sessions/`, `RADIAN_SESSION_DIR` priority, and the old-location one-line notice without move. The `radian-sandbox` `radian_home` escape matrix covers `sessions`, `credentials`, and `trust` unreadable plus `config`, `cache`, `themes`, and `skills` readable, plus a moved session directory unreadable.

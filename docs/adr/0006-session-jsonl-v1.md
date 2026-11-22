@@ -73,7 +73,7 @@ Safe append (the write-back side, including the ADR 0002 E9 repair write-back):
 | `ModelUsageRecorded` | false | Core | Usage of one dialogue model call (§5.7). |
 | `PermissionResolved` | false | runtime | Approval audit. |
 | `ApprovalPolicyChanged` | false | runtime | Auto switch audit. |
-| `MemoryInjected` | false | runtime | Injected memory index audit. |
+| `MemoryInjected` | false | runtime | Old memory index audit. Read only: this version never writes it. |
 | `SessionForked` | false | runtime | Parent-log fork lineage audit. |
 | `ProjectTrustChanged` | false | runtime | Project trust write audit. |
 | `UserBash` | false | runtime | `!`/`!!` execution audit. |
@@ -112,7 +112,7 @@ Convention: the `message` field is the Core `Message` serde JSON unchanged (oute
 | `index` | integer | yes | Equals the transcript length at append time. Replay requires continuity from 0. |
 | `message` | `Message` JSON | yes | An assistant variant can carry `interrupted` (false does not serialize) and `reasoning` (empty does not serialize). All three variants can carry `meta`. The `meta` inner field order is fixed as `id, source, origin`. A fully empty `meta` key never appears. |
 
-A compaction summary message is a `User` message with `source = System` and `origin = {"kind":"compaction_summary","user_messages":[…]}`. A memory-addition message is a `User` message with `source = System` and `origin = {"kind":"memory_addition","records":[…]}`.
+A compaction summary message is a `User` message with `source = System` and `origin = {"kind":"compaction_summary","user_messages":[…]}`. An old journal may hold a memory-addition message: a `User` message with `source = System` and `origin = {"kind":"memory_addition","records":[…]}`. A reader keeps it as an ordinary message; this version never writes one.
 
 ### 5.2 `ToolExecutionStarted` / `ToolExecutionSettled`
 
@@ -211,9 +211,9 @@ Replay rules live in one Core place (`TranscriptFold`), per ADR 0019. Uncommitte
 
 `child_session_id`, `parent_seq`. Written in the parent log. Non-critical audit. The child session `SessionCreated.parent` is the lineage authority.
 
-### 5.12 `MemoryInjected` / `ProjectTrustChanged` / `UserBash`
+### 5.12 `MemoryInjected` (read only) / `ProjectTrustChanged` / `UserBash`
 
-- `MemoryInjected { indexes: [{ scope, path, sha256, lines, bytes }] }`: one entry per injected index file, in injection order. `scope` is one of `project`, `global`. `path` is the scope's `MEMORY.md`. `sha256` is the 64-hex content hash; `lines` and `bytes` are its size. It never copies the index text. A reader also accepts the old `{ records: [{ id, revision, scope }] }` shape from journals written before the file store; a record carrying both shapes or neither is refused at its line. This build writes only `indexes`.
+- `MemoryInjected { indexes: [{ scope, path, sha256, lines, bytes }] }`: an old audit record of one injected memory index file per entry; `scope` is one of `project`, `global`. `sha256` is the 64-hex content hash. A reader also accepts the older `{ records: [{ id, revision, scope }] }` shape; a record carrying both shapes or neither is refused at its line. This version never writes the record, it is non-critical (`critical: false`), and replay ignores it.
 - `ProjectTrustChanged { path, decision }`: `path` is the normalized directory. `decision` is boolean.
 - `UserBash { command, exclude_from_context, exit_code, cancelled }`: `!`/`!!` audit. `!!` records the same way.
 

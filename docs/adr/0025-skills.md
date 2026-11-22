@@ -19,7 +19,7 @@ Status: accepted
 - **Budget**: soft default **1000 tokens** (ADR 0015 conservative estimate). On exceed it truncates in discovery order and states in the prompt "N more unlisted, use `/skills`". It counts into ADR 0018 `T`.
 - **Deterministic**: the same skill set (same files, same order) must produce a byte-identical section.
 - **Bodies do not stay resident**: only a call reads them. A `/skill:` expanded user message counts as a normal message under `B` and compaction.
-- This section computes once per process, like the memory section (ADR 0036 invariance).
+- This section computes once per process (ADR 0036 invariance).
 
 ### S3 Call: one built-in tool plus `/skill:`
 
@@ -37,10 +37,10 @@ Status: accepted
 
 **Core knows no skill**: it sees only one section in the system prompt string and one normal tool named `skill`. Discovery, parsing, body reads, prompt assembly, and budget all live in `radian-host`. Changes to `radian-core`: none.
 
-### S6 Relation with memory, `B`, compaction, and fork
+### S6 Relation with `B`, compaction, and fork
 
-- Order: **base prompt, then memory section, then skills section**. The order is fixed and keeps determinism.
-- Budgets are independent: memory section default 2000 tokens, skills section default 1000. Both plus the base prompt and tool definitions enter ADR 0018 `T`.
+- Order: **base prompt, then skills section**. The order is fixed and keeps determinism.
+- The skills section default budget is 1000 tokens. It plus the base prompt and tool definitions enter ADR 0018 `T`.
 - Compaction does not touch the system prompt, so the skills section stays. A `/skill:` expanded user message summarizes and retains as a normal user message.
 - Fork copies **session facts**: a `/skill:` expanded message copies as a normal message. **The available list does not enter history**. A child sees the current skill set, which can differ from the parent time.
 
