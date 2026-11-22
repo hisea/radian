@@ -372,9 +372,6 @@ See `providers` for login and `environment` for the variable rules.
 `radian config import-pi --from <DIR>` drafts a file from a Pi agent directory: the draft on stdout, the mapping report on stderr.
 `--write` saves to the configuration path and refuses an existing file.
 Nothing is written without `--write`.
-`radian config import-claude --claude-home <DIR> --project <DIR>` drafts from Claude Code files, including skill files and `AGENTS.md`.
-Its `--write` saves every file and skips anything that exists, one report line each.
-At least one of `--claude-home` and `--project` is required.
 See `cli` for flags and exit codes, `pi-migration` for the Pi mapping table.
 
 A fresh version mismatch behaves like this: an unknown top-level field or an unknown nested field is accepted and ignored — the write-back must preserve it or refuse, never drop it silently.

@@ -1,6 +1,8 @@
 # ADR 0046: `radian config import-claude` (Claude Code One-Shot Import)
 
-Status: accepted
+Status: removed
+
+Removed: `radian config import-claude` is removed from radian, code and docs. `radian config import-pi` stays the migration entry (`docs/user/pi-migration.md`). Running `radian config import-claude` is an unknown subcommand. No part of the text below is in force. It is kept only as history. Do not build on it.
 
 ## Background
 

@@ -222,13 +222,7 @@ matches every kind.
 | `empty_response` | A final answer with no text and no tool call. |
 
 Any other value is a load-time warning and that entry never runs; `rate_limit`
-is one of those (it is Claude's name, not a radian kind). The table above is
-also the Claude import mapping for `authentication_failed` → `protocol`,
-`billing_error` → `usage_limit`, `invalid_request` → `protocol`,
-`rate_limit` → `unavailable`, and `server_error` → `unavailable`; Claude's
-`max_output_tokens` and `unknown` have no radian kind, so an entry naming one
-is dropped with one report line. `import-claude` reports every translation and
-drop.
+is one of those (it is Claude's name, not a radian kind).
 
 Its stdin:
 
@@ -257,9 +251,7 @@ keeps the hook running in the background and kills it when the session ends.
 
 `Notification` observes two moments. `matcher` is a closed set of two values;
 `*`, a blank string, or a missing matcher matches both. Any other value is a
-load-time warning and that entry never runs. `import-claude` keeps
-`permission_prompt` and `idle_prompt` entries and drops Claude's other
-notification types with one report line.
+load-time warning and that entry never runs.
 
 | Matcher | When it runs |
 |---|---|

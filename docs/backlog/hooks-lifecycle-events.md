@@ -24,5 +24,4 @@ Claude Code 有 35 个事件，radian 有意只做三个（0045 §1）。多数�
 ## 验收
 
 - 每个落地的事件：`docs/user/hooks.md` 有一节写 stdin 字段、matcher 全部取值、能否阻止、超时默认；配置 drift 测试读到 matcher 闭集；ADR 0045 §1 在同分支的 docs-only commit 里列出新事件。
-- import-claude（0046）把对应事件的 Claude 条目带过来，其余仍按子集外丢弃并报告。
 - 未落地的事件名在配置里出现仍按今天的规则跳过并警告一行。

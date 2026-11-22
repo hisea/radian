@@ -118,10 +118,6 @@ pub use command_footer::{
     parse_command as parse_footer_command,
 };
 pub use config::default::{DEFAULT_CONFIG_TEMPLATE, ensure_default_config};
-pub use config::migrate_claude::{
-    ClaudeDraft, ClaudeMcpServer, ClaudeMigrateError, ClaudeSkill, ClaudeTargets,
-    ClaudeWriteReport, import_claude, write_claude_draft,
-};
 pub use config::migrate_pi::{PiDraft, PiMigrateError, import_pi, write_draft as write_pi_draft};
 pub use config::model_write::{ModelWriteError, write_model_route};
 pub use config::providers_write::{ProviderRuleOutcome, ProviderWriteError, write_protocol_rule};
