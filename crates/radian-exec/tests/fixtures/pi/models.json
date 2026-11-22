@@ -1,0 +1,11 @@
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "api": "openai-responses",
+      "apiKey": "${OPENAI_API_KEY}",
+      "headers": { "x-tenant": "team", "x-trace": "Bearer ${TRACE_TOKEN}" },
+      "models": [{ "id": "gpt-5" }]
+    }
+  }
+}

@@ -11,7 +11,7 @@
 # `terminate-after` more periods, and counts as failed instead of wedging the run.
 # The slowest measured pty test takes ~12 s (queue-during-turn, 6-wide on a 10-core
 # M4); the exec suites wait on a 120 s in-test `EXIT_WATCHDOG` before calling a stuck
-# CLI stuck (crates/radian-exec/tests/{cli,exec,exec_jobs,jsonl,subagent}.rs), and
+# CLI stuck (crates/radian-exec/tests/{cmd_*,exec,exec_jobs,jsonl,subagent}.rs), and
 # the pty suite waits up to 60 s per wait (`WAIT_POSITIVE`). The period must stay above
 # the largest in-test watchdog so a hung CLI fails inside the test first, keeping the
 # child's stderr in the panic message instead of nextest's bare timeout: 180 s gives
