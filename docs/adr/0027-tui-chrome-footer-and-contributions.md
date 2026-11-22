@@ -12,7 +12,7 @@ Status: accepted
 
 - **Rows**: `[[tui.footer.rows]]` each row is a table. `left` and `right` are both optional, plus optional `separator` and `position = "footer" | "above_input" | "below_input"` (default footer). `[tui.widgets]` converts on read with old semantics and warns for one version.
 - **Items**: one string (id only, with default icon and format) or one table (`item` required, plus optional `icon`, `format`, `style`, `symbol_style`, `priority`, `thresholds`, and item-only parameters).
-- **Component model**: each built-in item is a `Component` (internal trait, not public): id, placeholders, four default icon sets (unicode, nerd, ascii, emoji), default role, priority, thresholds, `data(&App)`. The render pipeline knows no id. Contributor-registered items are also `Component`. The only public extension point is the `command` component.
+- **Component model**: each built-in item is a `Component` (internal trait, not public): id, placeholders, four default icon sets (unicode, nerd, ascii, emoji), default role, priority, thresholds, `data(&App)`. The render pipeline knows no id. Contributor-registered items are also `Component`. There is no public extension point.
 - **Presets are data**: `deck`, `full`, `pi`, and `classic` are each one TOML file (`crates/radian-tui/presets/<name>.toml`) through the same parser as user configuration. `radian footer export <preset>` prints it. Default preset is `deck`:
   - Row 1: provider usage component. Without usage data this row never appears.
   - Row 2: left group `model` · `cwd` · `git_branch` (with change count) · `worktree`; right group `context_bar`/`context` · `reasoning` · `queued` (shows followup count when pending; hidden at 0).
@@ -27,10 +27,13 @@ Status: accepted
 - **Compact numbers**: tokens and windows use K/M (below 10 one decimal, 10 and above integers; below 1000 as-is). Percent uses one decimal. Cost uses `$` with 3 decimals. Items separate with one space and no label words.
 - **Context fill line**: `[tui.footer] context_line = "off" | "percentage"` draws a fill line between left and right groups for context use.
 - **`transparent`**: `tui.footer.transparent = true` leaves the footer without background color.
+- **Retired keys**: `command` and `period` in `[tui.footer.items.<id>]` or in an inline row item are retired (the out-of-process `command` item was removed). Each such item warns one line, then is ignored; the item is then treated as an unknown id. They never block startup. Their documentation says they are inert.
 - **Tolerance**: unknown item ids, unknown placeholders, and unknown parameters show as-is and warn once. They never block startup. Narrow terminals omit right-side items first, then left-side items from the end. `priority` can override default priority.
 - Items read only projections and the contribution store. **Drawing does no I/O.** `git_branch`, `cwd`, and `worktree` data refresh in the background.
 
 ### C3 Contributors
+
+Contributors are internal: they serve only built-in items, and no configuration key registers one.
 
 - `StatusContributor` trait (`crates/radian-host/src/contrib.rs`): `id`, item id list, refresh period, `refresh(ctx) -> Vec<Segment>`. `Segment` is "text plus theme role" with no raw escape sequences. The theme stays the only color source.
 - Each contributor runs its own periodic task on tokio. Results write into a shared contribution store, then send one dirty notice per U2. The UI draws it next frame. On refresh failure it keeps the last value and marks it stale (dimmed). Consecutive failures send only one notice. The UI never waits on contributors.
@@ -44,10 +47,6 @@ Status: accepted
 - `Headers`: reads limit headers from each model response (Anthropic `anthropic-ratelimit-*`, OpenAI-compatible `x-ratelimit-*`; ChatGPT `x-codex-*`). `ModelResponse.limits` carries back to the host. The `limits` field of `AgentEvent::ModelResponseReceived` forwards to the footer. Limit windows are live footer facts and never enter the journal.
 - A provider whose descriptor lacks `usage` leaves the component empty and the row absent. `/usage` reads the same snapshot and prints all windows in full.
 - Display content: **remaining** percent per time window (not used quota) plus reset countdown. `resetsAt` accepts ISO-8601 strings and epoch second or millisecond numbers. One window parse failure drops only that window, never the whole row. Keys never enter journal, logs, or notices. Only display values enter the contribution store.
-
-### Out-of-process `command` component
-
-`[tui.footer.items.<id>] command = "<executable or command line>"`, `period = <seconds>` (15-3600; `0` means run once at startup). stdin receives one JSON object (model, cwd, branch, context share, tokens, cost). stdout first line is display text, or one JSON line `{"text","style","symbol"}`. Rules: user-level configuration only; runs directly as the user, never in the sandbox; environment follows the MCP child `env_clear` allowlist plus `RADIAN_*`; 5-second timeout; output truncates to 1 line and 256 bytes; timeout or nonzero exit keeps the last value and marks it stale; output enters only display, never journal, model context, or herdr reports. This is not radian own network item (ADR 0013 unchanged).
 
 ### Spinner and state line
 
@@ -77,10 +76,10 @@ Status: accepted
 
 ## Constraints and Costs
 
-- Footer is a component composition: the four preset outputs match the old version byte for byte except separators. The `command` component is the only public extension point. No in-process plugin API exists.
+- Footer is a component composition: the four preset outputs match the old version byte for byte except separators. There is no public extension point: no `command` item and no in-process plugin API.
 - `usage` data source depends on provider. A provider without a source leaves the row absent. It never invents.
 - Cost estimates and incomplete marks are display facts. They never write back into journal history.
 
 ## Verification
 
-`crates/radian-tui/tests/footer.rs` and `pty.rs` cover preset snapshots, per-field configuration, colors, compact numbers, narrow-terminal omit, bad-write fallback, `command` component (timeout and stale, two lines taking only the first, JSON style), and `jobs`. `radian-host` `contrib`, `usage_gate`, and `cost_resume` tests cover the contribution store, usage gating, pricing, and resume foldback. `spinner` unit tests cover breath frames and interpolation. `scripts/check-glyph-coverage.py` plus the README glyph table. Each of the two provider contracts adds "with headers and without headers" cases.
+`crates/radian-tui/tests/footer.rs` and `pty.rs` cover preset snapshots, per-field configuration, colors, compact numbers, narrow-terminal omit, bad-write fallback, the retired `command` and `period` keys, and `jobs`. `radian-host` `contrib`, `usage_gate`, and `cost_resume` tests cover the contribution store, usage gating, pricing, and resume foldback. `spinner` unit tests cover breath frames and interpolation. `scripts/check-glyph-coverage.py` plus the README glyph table. Each of the two provider contracts adds "with headers and without headers" cases.
