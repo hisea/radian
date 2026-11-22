@@ -65,6 +65,7 @@ Host display must mark the source: `Reported` can print an exact value. `Reporte
 - Stack identity: category sum (used `T`) plus free space before auto-compact plus reserve buffer equals the window. Free space is threshold `B` minus used (0 when over budget). Buffer is window minus `B` (the gap from output reserve and input limit). `B` is the auto-compaction threshold (ADR 0018).
 - Report lines always carry separate labels (C1): the latest provider-reported input (`prompt_total()` of the last `ModelUsageRecorded` inside the current transcript revision; reset after `TranscriptReplaced`). With no report, the line reads "none yet". It never shares a label with an estimate.
 - The view also carries message counts and session compaction counts (committed `TranscriptReplacementCommitted` count). Read-only command: it reads the committed view of the session file and the system layers stored at session start. It never touches inbox or driver. It works mid-turn and never interrupts a turn.
+- The split counts with the same `radian_core::budget::RequestSize` that C2 uses (the host keeps no counting of its own); it only divides what that type counts into categories.
 - The split result is a pure data structure, independent of rendering. View code only renders it. Presentation changes touch only the view, never the split.
 
 ## Constraints and costs
