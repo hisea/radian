@@ -366,15 +366,11 @@ async fn a_fresh_run_names_the_configured_route_not_the_adapter_kind() {
     assert_eq!(code, 0, "{err}");
     let result: Value = serde_json::from_str(out.lines().last().expect("a Result line"))
         .expect("the last stdout line is the Result record");
-    assert_eq!(
-        result["run_metrics"]["models"][0]["provider"], "corp",
-        "the configured route, not `openai-compatible`: {result}"
+    assert!(
+        result["run_metrics"].get("models").is_none(),
+        "run_metrics carries totals only: {result}"
     );
-    assert_eq!(result["run_metrics"]["models"][0]["model"], "m", "{result}");
-    assert_eq!(
-        result["run_metrics"]["models"][0]["requests"], 1,
-        "{result}"
-    );
+    assert_eq!(result["run_metrics"]["requests"], 1, "{result}");
 }
 
 /// The golden stdout: every durable line is byte-identical to the journal file, live lines
@@ -419,8 +415,8 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
         })
         .collect();
     assert_eq!(streamed, "hello jsonl");
-    // The `Result` line folds the run and the session totals. The per-request log carries a
-    // real timestamp and latency, so it is asserted field by field rather than whole.
+    // The `Result` line folds the run and the session totals. The metrics are asserted field by
+    // field rather than whole.
     let mut without_metrics = result.clone();
     let metrics = without_metrics
         .as_object_mut()
@@ -452,16 +448,19 @@ async fn jsonl_stdout_is_durable_lines_plus_live_plus_result() {
     assert_eq!(metrics["peak_context"], 10, "{metrics}");
     assert!(metrics["cache_read"].is_null(), "{metrics}");
     assert!(metrics["fee_micros"].is_null(), "{metrics}");
-    assert_eq!(metrics["models"][0]["model"], "m", "{metrics}");
-    assert_eq!(metrics["models"][0]["requests"], 1, "{metrics}");
-    assert_eq!(metrics["request_log"][0]["kind"], "chat", "{metrics}");
-    assert_eq!(metrics["request_log"][0]["input_uncached"], 10, "{metrics}");
-    assert_eq!(metrics["request_log"][0]["output"], 4, "{metrics}");
-    assert_eq!(metrics["request_log"][0]["model"], "m", "{metrics}");
-    assert!(
-        metrics["request_log"][0]["latency_ms"].is_u64(),
-        "a request after TurnStarted has a latency: {metrics}"
-    );
+    for removed in [
+        "tools",
+        "models",
+        "request_log",
+        "request_log_truncated",
+        "compaction_ms",
+        "max_tokens_responses",
+    ] {
+        assert!(
+            metrics.get(removed).is_none(),
+            "{removed} is gone: {metrics}"
+        );
+    }
     // ... and its field set is the checked-in fixture's field set (each fixture line that
     // carries no `model_error`: that optional field belongs to a failed run only, ADR 0044 §2b).
     let fixture_text =
