@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_provider_openai_compatible::testing::{Barrier, MockServer, Reply, chunk};
-use radian_core::{NoopSink, TurnOptions};
+use radian_core::{InputSource, Message, NoopSink, TurnOptions};
 use radian_host::compose::{Attachment, user_message};
 use radian_host::control::MAX_REQUEST_BYTES;
 use radian_host::{
@@ -850,9 +850,14 @@ async fn list_sessions_reports_blocked_while_an_approval_waits_and_idle_after_th
     assert_eq!(row["model"]["provider"], "openai-compatible", "{idle}");
     assert_eq!(row["model"]["model"], "mock", "{idle}");
 
-    client
-        .request(json!({"id": 1, "verb": "followup", "text": "write it"}))
-        .await;
+    // A port input is never a human turn and could not ask; the session's own front end
+    // starts the human turn whose approval waits.
+    fixture
+        .session
+        .inbox()
+        .followup(Message::user("write it"), InputSource::User)
+        .await
+        .expect("enqueue the User input");
     wait_queue(&fixture, 1).await;
     let blocked = client
         .request(json!({"id": 2, "verb": "list_sessions"}))

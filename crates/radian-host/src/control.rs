@@ -642,7 +642,6 @@ const IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/we
 /// Parses the optional `images` and `files` of an input request into the composer's inputs. A
 /// failure names the item (an image by its 1-based position, a file by its name) and rejects
 /// the whole request before anything is enqueued.
-
 fn parse_attachments(request: &Value) -> Result<(Vec<LoadedImage>, Vec<Attachment>), String> {
     let images = parse_images(request)?;
     let files = parse_files(request)?;
