@@ -1,0 +1,7 @@
+{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-5",
+  "theme": "dark",
+  "compaction": { "enabled": false },
+  "defaultThinkingLevel": "high"
+}

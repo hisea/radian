@@ -1772,74 +1772,6 @@ async fn pty_trust_on_saves_journals_and_applies_at_the_next_start() {
     assert_eq!(pty.app_exit_code(), Some(0), "clean exit code");
 }
 
-/// decision: a project with no trusted decision shows
-/// `untrusted project · /trust to trust it` under the wordmark (no modal when there
-/// are no project resources); a trusted project shows no hint.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_startup_shows_the_trust_hint_until_trusted() {
-    let server = MockServer::start(vec![text_reply("HINT-OK")]).await;
-    let dir = TempDir::new("trust-hint-session");
-    let home = TempDir::new("trust-hint-home");
-    let ws = TempDir::new("trust-hint-ws");
-    let mut pty = Pty::spawn_with_env(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "trust-hint",
-            "--workspace",
-            ws.path().to_str().unwrap(),
-        ],
-        &[("RADIAN_HOME", home.path().to_str().unwrap())],
-        30,
-        120,
-    );
-    assert!(
-        pty.wait_for_screen("/trust to trust it", wait_positive()),
-        "the trust hint is missing:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-
-    // `--trust` trusts for this process: the expanded block loads, and the hint is gone.
-    let mut pty = Pty::spawn_with_env(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "trust-hint-trusted",
-            "--workspace",
-            ws.path().to_str().unwrap(),
-            "--trust",
-        ],
-        &[("RADIAN_HOME", home.path().to_str().unwrap())],
-        30,
-        120,
-    );
-    pty.expand_startup();
-    assert!(
-        pty.wait_for_screen("project resources: loaded", wait_positive()),
-        "the session did not start:\n{}",
-        pty.screen()
-    );
-    assert!(
-        !pty.screen().contains("/trust to trust it"),
-        "a trusted project shows no hint:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
 /// The diagnostics directory the app will use when `HOME` is `home` (ADR 0020):
 /// `<home>/.radian/cache/diagnostics`.
 fn diagnostics_dir(home: &Path) -> PathBuf {
@@ -5724,44 +5656,6 @@ fn last_user_text(server: &MockServer, n: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_editing_in_the_middle_sends_the_edited_text() {
-    let dir = TempDir::new("composer-edit");
-    let server = MockServer::start(vec![text_reply("EDITED-OK")]).await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "edit",
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    // "helo", move left twice (past `o` and `l`) and insert an `l`.
-    pty.send(b"helo");
-    pty.send(b"\x1b[D\x1b[D");
-    pty.send(b"l");
-    pty.send(b"\r");
-    assert!(
-        pty.wait_for_screen("EDITED-OK", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    assert_eq!(last_user_text(&server, 0), "hello");
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_multiline_history_and_paste_edit_at_the_cursor() {
     let dir = TempDir::new("composer-multiline");
     let server = MockServer::start(vec![text_reply("MULTI-OK"), text_reply("PASTE-OK")]).await;
@@ -6770,71 +6664,6 @@ async fn pty_a_fork_gives_up_when_the_turn_is_still_being_written() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// `/fork` while a turn is running is refused with a notice and creates nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_fork_refuses_while_a_turn_runs() {
-    let dir = TempDir::new("fork-pty-running");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-
-    // A shell tool call that sleeps keeps the turn running while the input box is free.
-    let server = MockServer::start(vec![
-        tool_reply(
-            "call_1",
-            "shell",
-            &json!({"command": "sleep 5"}).to_string(),
-        ),
-        text_reply("NEVER"),
-    ])
-    .await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "running",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"go\r");
-    assert!(
-        pty.wait_for_screen("sleep 5", wait_positive()),
-        "the sleeping tool call did not start:\n{}",
-        pty.screen()
-    );
-
-    pty.send(b"/fork\r");
-    assert!(
-        pty.wait_for_screen("finish the current turn before forking", wait_positive()),
-        "a running turn must refuse /fork:\n{}",
-        pty.screen()
-    );
-    // No child file was created.
-    let jsonl: Vec<String> = std::fs::read_dir(&sessions)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".jsonl"))
-        .collect();
-    assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
-    pty.quit();
-}
-
 /// `/new` (the decided first slice): one turn, switches of model/tier/auto, `/new`, one
 /// more turn. The new session file's `SessionCreated` carries the switched route and tier;
 /// the notice names the old session and its resume command; `/sessions` lists both; both
@@ -7107,75 +6936,6 @@ async fn pty_new_carries_thinking_into_the_new_sessions_startup_footer() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
-/// `/new` while a turn runs is refused with a notice and the session is unchanged.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_new_refuses_while_a_turn_runs() {
-    let dir = TempDir::new("new-pty-running");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-
-    // A shell tool call that sleeps keeps the turn running while the input box is free.
-    let server = MockServer::start(vec![
-        tool_reply(
-            "call_1",
-            "shell",
-            &json!({"command": "sleep 5"}).to_string(),
-        ),
-        text_reply("NEVER"),
-    ])
-    .await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "running",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--yes",
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"go\r");
-    assert!(
-        pty.wait_for_screen("sleep 5", wait_positive()),
-        "the sleeping tool call did not start:\n{}",
-        pty.screen()
-    );
-
-    pty.send(b"/new\r");
-    assert!(
-        pty.wait_for_screen(
-            "finish the current turn before starting a new session",
-            wait_positive()
-        ),
-        "a running turn must refuse /new:\n{}",
-        pty.screen()
-    );
-    // No new session file was created.
-    let jsonl: Vec<String> = std::fs::read_dir(&sessions)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".jsonl"))
-        .collect();
-    assert_eq!(jsonl, vec!["running.jsonl".to_owned()], "{jsonl:?}");
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
-}
-
 /// `/new` while a background job runs is refused with a notice pointing to `/jobs kill`;
 /// after the kill it works and the old session is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7343,78 +7103,6 @@ async fn pty_new_kills_a_running_async_hook() {
     assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
 }
 
-/// A background job can be managed with `job` without an approval prompt: `job` is fixed
-/// `allow` in every tier because the command was approved when it started (ADR 0037
-/// decision 8). The call names an id the mock cannot know (real ids carry the app's pid),
-/// but the permission decision happens before the id is resolved, so this still catches
-/// the old fall-through to `ask`: the second turn stopped at the approval box.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_job_never_asks_for_approval() {
-    let dir = TempDir::new("job-no-prompt");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-
-    let server = MockServer::start(vec![
-        tool_reply(
-            "call_1",
-            "shell",
-            r#"{"command":"sleep 60","background":true}"#,
-        ),
-        text_reply("JOB-STARTED"),
-        tool_reply(
-            "call_2",
-            "job",
-            r#"{"id":"job-unknown","op":"wait","timeout_ms":1}"#,
-        ),
-        text_reply("JOB-NO-PROMPT"),
-    ])
-    .await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "job-no-prompt",
-            "--workspace",
-            ws.to_str().unwrap(),
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"start a background job\r");
-    assert!(
-        pty.wait_for_screen("JOB-STARTED", wait_positive()),
-        "the job did not start:\n{}",
-        pty.screen()
-    );
-
-    pty.send(b"manage the job\r");
-    assert!(
-        pty.wait_for_screen("JOB-NO-PROMPT", wait_positive()),
-        "a `job` call waited for approval instead of running:\n{}",
-        pty.screen()
-    );
-    assert!(
-        !pty.screen().contains("approve tool call?"),
-        "`job` must not ask for approval:\n{}",
-        pty.screen()
-    );
-
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0), "{}", pty.screen());
-}
-
 /// `/new` drops the old session's write lock while the process lives: a second process
 /// can `--resume` the old session while the first one runs the new session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7515,83 +7203,6 @@ fn assert_journal_replays(sessions: &std::path::Path, id: &str) {
         history.len() >= 2,
         "the {id} journal replayed to {history:?}, but its turns are missing"
     );
-}
-
-/// Phase 5: `Ctrl-F` searches the transcript and jumps to an earlier match.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_find_jumps_to_an_earlier_match() {
-    let dir = TempDir::new("find-pty");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-
-    // A long transcript: the first reply holds the marker, seven more fill it.
-    let mut replies = vec![text_reply("ALPHA-MARKER")];
-    for i in 2..=8 {
-        let filler = (0..12)
-            .map(|j| format!("filler-{i}-line-{j}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        replies.push(text_reply(&filler));
-    }
-    let server = MockServer::start(replies).await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "find",
-            "--workspace",
-            ws.to_str().unwrap(),
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"m1\r");
-    assert!(
-        pty.wait_for_screen("ALPHA-MARKER", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    for i in 2..=8 {
-        pty.send(format!("m{i}\r").as_bytes());
-        assert!(
-            pty.wait_for_screen(&format!("filler-{i}-line-11"), wait_positive()),
-            "{}",
-            pty.screen()
-        );
-    }
-    assert!(
-        !pty.screen().contains("ALPHA-MARKER"),
-        "the marker should have scrolled off:\n{}",
-        pty.screen()
-    );
-
-    // Ctrl-F opens the box; typing jumps to the earlier match.
-    pty.send(&[0x06]);
-    pty.send(b"ALPHA");
-    assert!(
-        pty.wait_for_screen("match 1/1", wait_positive()),
-        "the find status is missing:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("ALPHA-MARKER", wait_positive()),
-        "the match did not scroll into view:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 // ---------- the terminal going away, and a panicking test's cleanup ----------
@@ -8637,81 +8248,6 @@ fn pty_every_exit_path_releases_the_mouse() {
         assert_eq!(pty.app_exit_code(), Some(143));
         assert_mouse_released(&pty, "signal");
     }
-}
-
-/// With an overlay open, the wheel scrolls the overlay, not the transcript: the picker's
-/// selected row moves.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_the_wheel_scrolls_an_open_overlay() {
-    let dir = TempDir::new("mouse-overlay");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let workspace = std::fs::canonicalize(&ws)
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    seed_session(&sessions, "alpha", &workspace, "ALPHA").await;
-    seed_session(&sessions, "beta", &workspace, "BETA").await;
-    let server = MockServer::start(vec![text_reply("R")]).await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "current",
-            "--workspace",
-            ws.to_str().unwrap(),
-        ],
-        24,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"/sessions\r");
-    assert!(
-        pty.wait_for_screen("filter:", wait_positive()),
-        "the picker did not open:\n{}",
-        pty.screen()
-    );
-    // The header's `--resume <id>` hint is drawn with the picker's rows; `filter:` alone can
-    // be up a frame earlier under load. Wait for both before snapshotting.
-    assert!(
-        pty.wait_until(wait_positive(), |screen| screen.contains("filter:")
-            && screen.contains("--resume ")),
-        "the picker's rows did not appear:\n{}",
-        pty.screen()
-    );
-    let before = pty.screen();
-    let before_hint = before
-        .split("--resume ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("a --resume hint")
-        .to_string();
-    // One notch down moves the picker's selection; the hint names a different session.
-    pty.send(&wheel(false));
-    assert!(
-        pty.wait_until(wait_positive(), |screen| {
-            screen
-                .split("--resume ")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                != Some(before_hint.as_str())
-        }),
-        "the wheel did not move the picker's selection:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 // ---------- the `--pick` overlay (ADR 0023 U4, plan B) ----------
@@ -10248,61 +9784,6 @@ async fn pty_ask_user_is_registered_without_a_workspace() {
         body.contains("\"name\":\"read\""),
         "the current directory is the coding root: {body}"
     );
-}
-
-/// The slash command tree completes every level: typing `/mem` lists the
-/// commands, Tab completes the name, the next level's list appears, and Tab completes it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_the_slash_completion_walks_the_command_tree() {
-    let dir = TempDir::new("slash-completion");
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            "http://127.0.0.1:1/v1",
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "slash",
-            "--offline-catalog",
-        ],
-        24,
-        100,
-    );
-    assert!(
-        pty.wait_for_screen("type a message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-
-    pty.send(b"/exp");
-    assert!(
-        pty.wait_for_screen("/export", wait_positive()),
-        "the command list did not appear:\n{}",
-        pty.screen()
-    );
-    pty.send(b"\t");
-    assert!(
-        pty.wait_for_screen("❯ /export ", wait_positive()),
-        "Tab did not complete the command name:\n{}",
-        pty.screen()
-    );
-    // The next level's list is already up; a partial is fuzzy-matched and completed.
-    pty.send(b"js");
-    assert!(
-        pty.wait_for_screen("json", wait_positive()),
-        "the subcommand list did not appear:\n{}",
-        pty.screen()
-    );
-    pty.send(b"\t");
-    assert!(
-        pty.wait_for_screen("❯ /export json", wait_positive()),
-        "Tab did not complete the subcommand:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
 }
 
 // ---------- the default workspace ----------
@@ -12460,60 +11941,6 @@ async fn pty_ctrl_c_twice_quits_and_one_press_only_hints() {
     );
 }
 
-/// Idle with text, one Ctrl-C clears the input (it does not quit) and the cleared line is
-/// back through `Up`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_ctrl_c_clears_a_draft_before_quitting() {
-    let dir = TempDir::new("ctrl-c-clear");
-    let server = MockServer::start(vec![]).await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "ctrl-c-clear",
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"a draft");
-    assert!(
-        pty.wait_for_screen("a draft", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(&[0x03]);
-    // The input line is empty again and the app is still running (no quit).
-    assert!(
-        pty.app_exit_code().is_none(),
-        "clearing must not quit:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.screen_absent("Press Ctrl-C again to quit"),
-        "clearing must not arm the quit window:\n{}",
-        pty.screen()
-    );
-    // `Up` recalls the cleared line from the history.
-    pty.send(&[0x1b, b'[', b'A']);
-    assert!(
-        pty.wait_for_screen("a draft", wait_positive()),
-        "the cleared line is in the history:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
 // ---------- /theme: switch and write back (ADR 0008) ----------
 
 /// `/theme light` end to end: the notice names the saved file, the config's other bytes
@@ -13871,60 +13298,6 @@ async fn pty_attach_follow_shows_new_committed_events() {
     );
 }
 
-/// A session id becomes a file name, so a path-like id must be refused before anything is read:
-/// one level above the session directory sits a real, readable session (the decoy), and its
-/// text must never reach the screen. The refusal is the same rule `--resume` applies
-/// (`validate_session_id`).
-///
-/// Mutation: drop the validation and build the path from the raw id → the decoy is opened, its
-/// `ATTACH-OLD-USER` shows, and the refusal line is missing → FAILED.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_attach_refuses_a_path_like_id_without_reading_it() {
-    let scratch = TempDir::new("attach-bad-id");
-    // `<scratch>/decoy.jsonl`, which is where `attach ../decoy` would resolve to.
-    let _decoy = attach_session(scratch.path(), "decoy", 0).await;
-    let sessions = scratch.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-
-    let mut pty = Pty::spawn(
-        &[
-            "attach",
-            "../decoy",
-            "--session-dir",
-            sessions.to_str().unwrap(),
-        ],
-        24,
-        100,
-    );
-    assert!(
-        pty.wait_for_raw(
-            "must be 1-128 characters of [A-Za-z0-9._-]",
-            wait_positive()
-        ),
-        "the one-line id refusal is not on the terminal:\n{}",
-        pty.screen()
-    );
-    assert!(
-        !String::from_utf8_lossy(&pty.raw()).contains("ATTACH-OLD-USER"),
-        "the file outside the session directory was read:\n{}",
-        pty.screen()
-    );
-    assert_eq!(
-        {
-            assert!(
-                pty.wait_for_exit(wait_positive()).is_some(),
-                "the refusal did not end the process:\n{}",
-                pty.screen()
-            );
-            // `wait_for_exit` reports the shell wrapper's status; the app's own code is the
-            // `EXITED:<n>` line it printed.
-            pty.app_exit_code()
-        },
-        Some(2),
-        "the refusal exits non-zero:\n{}",
-        pty.screen()
-    );
-}
 /// stays up, the journal's bytes are identical, no file appears in the session directory and
 /// no control-port socket is created. attach has no input path at all, so this holds by
 /// construction; the test is what keeps it so.

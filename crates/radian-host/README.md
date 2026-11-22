@@ -253,13 +253,13 @@ End-to-end, through the binaries (besides the transcript folds' integration test
 
 | Guarantee | Test | Where |
 |---|---|---|
-| `--provider anthropic` really uses the Messages API, and the snapshot names the real provider | `anthropic_provider_sends_a_messages_request_and_shows_the_reply`, `the_session_snapshot_names_the_real_provider` | `radian-exec/tests/cli.rs` |
-| The default key env switches with the provider and the key never leaks | `anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it` | `radian-exec/tests/cli.rs` |
-| `--thinking` reaches the request body | `anthropic_thinking_modes_are_sent_in_the_body` | `radian-exec/tests/cli.rs` |
-| A thinking budget outside the documented range is refused before a session file exists | `anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session` | `radian-exec/tests/cli.rs` |
-| Anthropic-only flags are refused under `openai-compatible` in both hosts | `anthropic_only_flags_are_refused_under_openai_compatible`, `pty_anthropic_only_flags_are_refused_under_openai_compatible` | `radian-exec/tests/cli.rs`, `radian-tui/tests/pty.rs` |
-| The startup text does not claim credential isolation, and the `workspace-write` notice names the MCP sandbox gap | `the_startup_text_does_not_claim_credential_isolation`, `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` | `radian-exec/tests/cli.rs`, `radian-tui/tests/pty.rs` |
-| A base URL with credentials is redacted in errors | `a_base_url_with_credentials_is_redacted_in_errors` | `radian-exec/tests/cli.rs` |
+| `--provider anthropic` really uses the Messages API, and the snapshot names the real provider | `anthropic_provider_sends_a_messages_request_and_shows_the_reply`, `the_session_snapshot_names_the_real_provider` | `radian-exec/tests/cmd_model.rs` |
+| The default key env switches with the provider and the key never leaks | `anthropic_reads_anthropic_api_key_env_by_default_and_never_leaks_it` | `radian-exec/tests/cmd_model.rs` |
+| `--thinking` reaches the request body | `anthropic_thinking_modes_are_sent_in_the_body` | `radian-exec/tests/cmd_model.rs` |
+| A thinking budget outside the documented range is refused before a session file exists | `anthropic_rejects_a_thinking_budget_out_of_range_before_creating_a_session` | `radian-exec/tests/cmd_model.rs` |
+| Anthropic-only flags are refused under `openai-compatible` in both hosts | `anthropic_only_flags_are_refused_under_openai_compatible`, `pty_anthropic_only_flags_are_refused_under_openai_compatible` | `radian-exec/tests/cmd_run.rs`, `radian-tui/tests/pty.rs` |
+| The startup text does not claim credential isolation, and the `workspace-write` notice names the MCP sandbox gap | `the_startup_text_does_not_claim_credential_isolation`, `pty_the_workspace_write_notice_names_the_mcp_sandbox_gap` | `radian-exec/tests/cmd_run.rs`, `radian-tui/tests/pty.rs` |
+| A base URL with credentials is redacted in errors | `a_base_url_with_credentials_is_redacted_in_errors` | `radian-exec/tests/cmd_run.rs` |
 
 `MUTATIONS.md` records the mutation checks for provider selection and the shared `describe`
 (M1–M4 caught; M5–M7 for the thinking-budget and Anthropic-only-flag checks).

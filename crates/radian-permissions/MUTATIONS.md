@@ -172,3 +172,11 @@ empty).
 | TK0270-M5 | `memory_rules()` returns no rule (the review's deleted-rule regression), so `memory_search` falls to the tier default | ✅ 1 failed (rc=100, `workspace` left `Ask`) | `profile::tests::memory_search_is_allowed_in_every_tier_and_no_memory_write_tool_asks` (renamed since to `memory_search_gets_the_default_for_an_unknown_tool`; the allow rule is gone, so this row is historical) |
 
 5/5 caught, no equivalent mutation.
+
+T-0020 (test-suite dedupe): `radian-tui`'s `pty_job_never_asks_for_approval` was removed; this check shows the permission tests still fail without the rule.
+
+| id | mutation | test that fails | result |
+|---|---|---|---|
+| T-0020-M1 | `always_allowed()` no longer lists `job` | `profile::tests::job_is_allowed_in_every_tier`, `job::job_is_allowed_in_every_tier_without_a_prompt` | ✅ 2 failed |
+
+1/1 caught.
