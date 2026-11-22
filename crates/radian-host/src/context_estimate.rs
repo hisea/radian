@@ -1,10 +1,8 @@
 //! `/context`: per-category estimate of the next request (ADR 0015 C1/C2).
 //!
 //! The estimator rule is ADR 0015 C2 (ASCII bytes rounded up ÷ `bytes_per_token`,
-//! one token per non-ASCII char), the same rule `radian_core::budget` uses. This
-//! module reimplements only the counting (it cannot reuse `budget`'s private
-//! `add_str`/`add_json`), and pins the total against
-//! `radian_core::budget::estimate_tokens_with` in tests, so the two cannot drift.
+//! one token per non-ASCII char). All counting is `radian_core::budget::RequestSize`'s;
+//! this module only splits what it counts into categories.
 //!
 //! The sum of the categories equals the total: sizes are summed first (one
 //! `div_ceil`), then the remainder of the division is distributed to the
@@ -16,7 +14,7 @@
 //! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
 //! detail (context files, skills, MCP/built-in tools).
 
-use radian_core::budget::{ImageContribution, image_contributions};
+use radian_core::budget::RequestSize as Size;
 use radian_core::{ContentPart, Message, ModelRequest, ToolSpec};
 
 /// One estimated category, in display order.
@@ -141,60 +139,6 @@ impl ContextReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Size {
-    ascii: u64,
-    non_ascii_chars: u64,
-}
-
-impl Size {
-    fn add_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            if ch.is_ascii() {
-                self.ascii += 1;
-            } else {
-                self.non_ascii_chars += 1;
-            }
-        }
-    }
-
-    fn add_bytes(&mut self, bytes: &[u8]) {
-        // JSON is UTF-8; count it the same way `budget` does.
-        match std::str::from_utf8(bytes) {
-            Ok(text) => self.add_str(text),
-            Err(_) => self.ascii += bytes.len() as u64,
-        }
-    }
-
-    fn add_json<T: serde::Serialize>(&mut self, value: &T) {
-        if let Ok(bytes) = serde_json::to_vec(value) {
-            self.add_bytes(&bytes);
-        }
-    }
-
-    fn remove_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            if ch.is_ascii() {
-                self.ascii = self.ascii.saturating_sub(1);
-            } else {
-                self.non_ascii_chars = self.non_ascii_chars.saturating_sub(1);
-            }
-        }
-    }
-
-    fn plus(self, other: Size) -> Size {
-        Size {
-            ascii: self.ascii + other.ascii,
-            non_ascii_chars: self.non_ascii_chars + other.non_ascii_chars,
-        }
-    }
-
-    fn tokens(&self, bytes_per_token: u64) -> u64 {
-        let bpt = bytes_per_token.max(1);
-        self.ascii.div_ceil(bpt) + self.non_ascii_chars
-    }
-}
-
 /// The system layers split for the estimate.
 #[derive(Debug, Clone, Default)]
 pub struct SystemSplit {
@@ -263,14 +207,7 @@ fn split_tools(whole: Size, tools: &[ToolSpec], mcp_server_ids: &[String]) -> (S
             builtin_count += 1;
         }
     }
-    let framing = Size {
-        ascii: whole
-            .ascii
-            .saturating_sub(builtin_content.ascii + mcp_content.ascii),
-        non_ascii_chars: whole
-            .non_ascii_chars
-            .saturating_sub(builtin_content.non_ascii_chars + mcp_content.non_ascii_chars),
-    };
+    let framing = whole.saturating_minus(builtin_content.plus(mcp_content));
     if builtin_count > 0 || mcp_count == 0 {
         (builtin_content.plus(framing), mcp_content)
     } else {
@@ -278,59 +215,26 @@ fn split_tools(whole: Size, tools: &[ToolSpec], mcp_server_ids: &[String]) -> (S
     }
 }
 
-/// Counts `text` the way `budget` counts a system prompt.
-fn size_of_str(text: &str) -> Size {
-    let mut size = Size::default();
-    size.add_str(text);
-    size
-}
-
-/// The JSON contribution of one message, minus host `meta` (ADR 0005, like
-/// `budget::request_size_with`). When `count_reasoning` is false an
-/// assistant's `reasoning` field is subtracted too (ADR 0014 R6). Image parts
-/// are removed from the text size and returned as their pixel estimate (ADR
-/// 0015 C2), so the second element is the images category.
+/// The JSON contribution of one message, minus what the provider never receives
+/// (host `meta`, unwanted `reasoning`). Image parts are removed from the text size and
+/// returned as their pixel estimate (ADR 0015 C2), so the second element is the images
+/// category.
 fn message_size(message: &Message, count_reasoning: bool) -> (Size, u64) {
     let mut size = Size::default();
     size.add_json(message);
-    if !message.meta().is_empty() {
-        let field = serde_json::json!({ "meta": message.meta() }).to_string();
-        if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-            size.remove_str(",");
-            size.remove_str(inner);
-        }
-    }
-    if !count_reasoning
-        && let Message::Assistant { reasoning, .. } = message
-        && !reasoning.is_empty()
-    {
-        let field = serde_json::json!({ "reasoning": reasoning }).to_string();
-        if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-            size.remove_str(",");
-            size.remove_str(inner);
-        }
-    }
-    let image_tokens = remove_images(&mut size, message);
-    (size, image_tokens)
+    let images = remove_unsent(&mut size, message, count_reasoning);
+    (size, images)
 }
 
-/// Subtracts every image part's JSON and separator commas from `size` and returns
-/// their pixel token estimate (ADR 0015 C2). The same bytes are removed from the
-/// array serialization, so the framing difference stays exact.
-fn remove_images(size: &mut Size, message: &Message) -> u64 {
-    let mut tokens = 0u64;
-    for ImageContribution {
-        json,
-        tokens: image_tokens,
-        commas,
-    } in image_contributions(message)
-    {
-        size.remove_str(&json);
-        for _ in 0..commas {
-            size.remove_str(",");
-        }
-        tokens += image_tokens;
-    }
+/// Applies the unsent-field and image adjustments to `size`, a count of `message`'s
+/// JSON or of an array holding it. Returns the image pixel estimate and leaves it out
+/// of `size`, whose categories are byte counts.
+fn remove_unsent(size: &mut Size, message: &Message, count_reasoning: bool) -> u64 {
+    let before = size.image_tokens;
+    size.add_images(message);
+    size.remove_unsent_fields(message, count_reasoning);
+    let tokens = size.image_tokens - before;
+    size.image_tokens = before;
     tokens
 }
 
@@ -363,8 +267,8 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let count_reasoning = input.count_reasoning;
 
     // System: two additive string pieces.
-    let base_size = size_of_str(&input.system.base);
-    let context_size = size_of_str(&input.system.context_files);
+    let base_size = Size::of_str(&input.system.base);
+    let context_size = Size::of_str(&input.system.context_files);
     // The request's prompt must be exactly these two concatenated; when it
     // is not (a hook rewrote it), the remainder stays in base so nothing is
     // lost and the sum still matches the request.
@@ -376,13 +280,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         size
     };
     let pieces = base_size.plus(context_size);
-    let base_size = Size {
-        ascii: base_size.ascii + prompt_size.ascii.saturating_sub(pieces.ascii),
-        non_ascii_chars: base_size.non_ascii_chars
-            + prompt_size
-                .non_ascii_chars
-                .saturating_sub(pieces.non_ascii_chars),
-    };
+    let base_size = base_size.plus(prompt_size.saturating_minus(pieces));
 
     // Tools: the whole array is the category (each definition counted once).
     let mut tools_size = Size::default();
@@ -410,12 +308,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
                 if count_reasoning && !reasoning.is_empty() {
                     let fragment = reasoning_fragment_size(reasoning);
                     reasoning_size = reasoning_size.plus(fragment);
-                    assistant_size = assistant_size.plus(Size {
-                        ascii: full.ascii.saturating_sub(fragment.ascii),
-                        non_ascii_chars: full
-                            .non_ascii_chars
-                            .saturating_sub(fragment.non_ascii_chars),
-                    });
+                    assistant_size = assistant_size.plus(full.saturating_minus(fragment));
                 } else {
                     assistant_size = assistant_size.plus(full);
                 }
@@ -430,35 +323,11 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     // Remove the metas/reasoning from the array size the same way the
     // per-message sizes did, so the framing difference is exact.
     for message in &request.messages {
-        remove_images(&mut messages_array_size, message);
-        if !message.meta().is_empty() {
-            let field = serde_json::json!({ "meta": message.meta() }).to_string();
-            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-                messages_array_size.remove_str(",");
-                messages_array_size.remove_str(inner);
-            }
-        }
-        if !count_reasoning
-            && let Message::Assistant { reasoning, .. } = message
-            && !reasoning.is_empty()
-        {
-            let field = serde_json::json!({ "reasoning": reasoning }).to_string();
-            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-                messages_array_size.remove_str(",");
-                messages_array_size.remove_str(inner);
-            }
-        }
+        remove_unsent(&mut messages_array_size, message, count_reasoning);
     }
-    let framing = Size {
-        ascii: messages_array_size
-            .ascii
-            .saturating_sub(per_message_total.ascii),
-        non_ascii_chars: messages_array_size
-            .non_ascii_chars
-            .saturating_sub(per_message_total.non_ascii_chars),
-    };
-    if framing.ascii > 0 || framing.non_ascii_chars > 0 {
-        if tool_results_size.ascii > 0
+    let framing = messages_array_size.saturating_minus(per_message_total);
+    if framing.ascii_bytes > 0 || framing.non_ascii_chars > 0 {
+        if tool_results_size.ascii_bytes > 0
             || tool_results_size.non_ascii_chars > 0
             || request
                 .messages
@@ -466,7 +335,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
                 .any(|m| matches!(m, Message::Tool { .. }))
         {
             tool_results_size = tool_results_size.plus(framing);
-        } else if assistant_size.ascii > 0 || assistant_size.non_ascii_chars > 0 {
+        } else if assistant_size.ascii_bytes > 0 || assistant_size.non_ascii_chars > 0 {
             assistant_size = assistant_size.plus(framing);
         } else {
             user_size = user_size.plus(framing);
@@ -487,13 +356,8 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     // tool, or the empty `[]` on `tool definitions` when there are no tools at
     // all). Either split sums back to its whole byte for byte, so the category
     // tokens still sum to the total exactly.
-    let skills_size = size_of_str(input.skills_section);
-    let system_size = Size {
-        ascii: base_size.ascii.saturating_sub(skills_size.ascii),
-        non_ascii_chars: base_size
-            .non_ascii_chars
-            .saturating_sub(skills_size.non_ascii_chars),
-    };
+    let skills_size = Size::of_str(input.skills_section);
+    let system_size = base_size.saturating_minus(skills_size);
     let (builtin_size, mcp_size) = split_tools(tools_size, &request.tools, input.mcp_server_ids);
     let mut parts: Vec<(&'static str, Size)> = vec![
         ("system prompt", system_size),
@@ -515,26 +379,26 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
 
     // One ceil for the total; distribute the remainder to the largest
     // fractional parts so the tokens sum exactly.
-    let total_ascii: u64 = parts.iter().map(|(_, s)| s.ascii).sum();
+    let total_ascii: u64 = parts.iter().map(|(_, s)| s.ascii_bytes).sum();
     let total_non_ascii: u64 = parts.iter().map(|(_, s)| s.non_ascii_chars).sum();
     let total_tokens = total_ascii.div_ceil(bpt) + total_non_ascii + image_tokens;
 
     let mut floors: Vec<u64> = parts
         .iter()
-        .map(|(_, s)| s.ascii / bpt + s.non_ascii_chars)
+        .map(|(_, s)| s.ascii_bytes / bpt + s.non_ascii_chars)
         .collect();
     floors[images_index] = image_tokens;
     let floor_sum: u64 = floors.iter().sum();
     let mut remainder = total_tokens.saturating_sub(floor_sum) as usize;
     let mut order: Vec<usize> = (0..parts.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(parts[i].1.ascii % bpt));
+    order.sort_by_key(|&i| std::cmp::Reverse(parts[i].1.ascii_bytes % bpt));
     let mut tokens = floors;
     for i in order {
         if remainder == 0 {
             break;
         }
         // Only categories with a fractional part can take from the remainder.
-        if !parts[i].1.ascii.is_multiple_of(bpt) {
+        if !parts[i].1.ascii_bytes.is_multiple_of(bpt) {
             tokens[i] += 1;
             remainder -= 1;
         }
@@ -545,7 +409,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     if remainder > 0 {
         let target = parts
             .iter()
-            .position(|(_, s)| s.ascii > 0 || s.non_ascii_chars > 0)
+            .position(|(_, s)| s.ascii_bytes > 0 || s.non_ascii_chars > 0)
             .unwrap_or(0);
         tokens[target] += remainder as u64;
     }
@@ -583,24 +447,24 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         let sizes: Vec<Size> = input
             .context_blocks
             .iter()
-            .map(|block| size_of_str(&block.block))
+            .map(|block| Size::of_str(&block.block))
             .collect();
-        let total_ascii: u64 = sizes.iter().map(|s| s.ascii).sum();
+        let total_ascii: u64 = sizes.iter().map(|s| s.ascii_bytes).sum();
         let total_non: u64 = sizes.iter().map(|s| s.non_ascii_chars).sum();
         let total = total_ascii.div_ceil(bpt) + total_non;
         let floors: Vec<u64> = sizes
             .iter()
-            .map(|s| s.ascii / bpt + s.non_ascii_chars)
+            .map(|s| s.ascii_bytes / bpt + s.non_ascii_chars)
             .collect();
         let mut rem = total.saturating_sub(floors.iter().sum::<u64>()) as usize;
         let mut ord: Vec<usize> = (0..sizes.len()).collect();
-        ord.sort_by_key(|&i| std::cmp::Reverse(sizes[i].ascii % bpt));
+        ord.sort_by_key(|&i| std::cmp::Reverse(sizes[i].ascii_bytes % bpt));
         let mut toks = floors;
         for i in ord {
             if rem == 0 {
                 break;
             }
-            if !sizes[i].ascii.is_multiple_of(bpt) {
+            if !sizes[i].ascii_bytes.is_multiple_of(bpt) {
                 toks[i] += 1;
                 rem -= 1;
             }
@@ -636,16 +500,16 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         mcp_size.add_json(&mcp);
         (
             builtin.len(),
-            builtin_size.tokens(bpt),
+            builtin_size.tokens(bpt as u32),
             mcp.len(),
-            mcp_size.tokens(bpt),
+            mcp_size.tokens(bpt as u32),
         )
     };
     let details = Details {
         context_files,
         context_files_tokens,
         skills_count: input.skills_count,
-        skills_tokens: size_of_str(input.skills_section).tokens(bpt),
+        skills_tokens: Size::of_str(input.skills_section).tokens(bpt as u32),
         builtin_tools_count,
         builtin_tools_tokens,
         mcp_servers: input.mcp_server_ids.len(),
@@ -662,11 +526,6 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         buffer_tokens,
         details,
     }
-}
-
-/// The request this breakdown was computed from, for the total-equality test.
-pub fn total_of(request: &ModelRequest, bytes_per_token: u32, count_reasoning: bool) -> u64 {
-    radian_core::budget::estimate_tokens_with(request, bytes_per_token, count_reasoning)
 }
 
 /// Rounds tokens for display, the same rule the plain-text notices use so the
@@ -908,7 +767,7 @@ mod tests {
             assert_eq!(sum, breakdown.total_tokens, "{breakdown:?}");
             assert_eq!(
                 breakdown.total_tokens,
-                total_of(&req, 4, count_reasoning),
+                radian_core::budget::estimate_tokens_with(&req, 4, count_reasoning),
                 "the total is the estimator's total"
             );
         }
@@ -1077,7 +936,10 @@ mod tests {
             threshold: Some(90_000),
         });
         assert_eq!(split.total_tokens, whole.total_tokens);
-        assert_eq!(split.total_tokens, total_of(&req, 4, false));
+        assert_eq!(
+            split.total_tokens,
+            radian_core::budget::estimate_tokens_with(&req, 4, false)
+        );
         let whole_base = whole
             .categories
             .iter()
@@ -1201,7 +1063,7 @@ mod tests {
         assert_eq!(sum, breakdown.total_tokens, "{breakdown:?}");
         assert_eq!(
             breakdown.total_tokens,
-            total_of(&req, 4, false),
+            radian_core::budget::estimate_tokens_with(&req, 4, false),
             "the host total is the estimator's total"
         );
         let lines = notice_lines(&report_of(&breakdown, None));
