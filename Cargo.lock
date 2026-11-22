@@ -3098,6 +3098,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "radian-site"
+version = "0.0.0"
+dependencies = [
+ "pulldown-cmark",
+ "radian-coding",
+ "serde_json",
+]
+
+[[package]]
 name = "radian-tui"
 version = "0.5.1"
 dependencies = [
