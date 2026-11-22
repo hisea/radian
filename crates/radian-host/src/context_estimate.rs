@@ -263,7 +263,6 @@ fn reasoning_fragment_size(reasoning: &[ContentPart]) -> Size {
 /// `count_reasoning` is on.
 pub fn estimate(input: &EstimateInput) -> Breakdown {
     let request = input.request;
-    let bpt = input.bytes_per_token.max(1) as u64;
     let count_reasoning = input.count_reasoning;
 
     // System: two additive string pieces.
@@ -377,42 +376,12 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let images_index = parts.len();
     parts.push(("images", Size::default()));
 
-    // One ceil for the total; distribute the remainder to the largest
-    // fractional parts so the tokens sum exactly.
-    let total_ascii: u64 = parts.iter().map(|(_, s)| s.ascii_bytes).sum();
-    let total_non_ascii: u64 = parts.iter().map(|(_, s)| s.non_ascii_chars).sum();
-    let total_tokens = total_ascii.div_ceil(bpt) + total_non_ascii + image_tokens;
-
-    let mut floors: Vec<u64> = parts
-        .iter()
-        .map(|(_, s)| s.ascii_bytes / bpt + s.non_ascii_chars)
-        .collect();
-    floors[images_index] = image_tokens;
-    let floor_sum: u64 = floors.iter().sum();
-    let mut remainder = total_tokens.saturating_sub(floor_sum) as usize;
-    let mut order: Vec<usize> = (0..parts.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(parts[i].1.ascii_bytes % bpt));
-    let mut tokens = floors;
-    for i in order {
-        if remainder == 0 {
-            break;
-        }
-        // Only categories with a fractional part can take from the remainder.
-        if !parts[i].1.ascii_bytes.is_multiple_of(bpt) {
-            tokens[i] += 1;
-            remainder -= 1;
-        }
-    }
-    // No fractional parts at all (or an empty request): the remainder can only
-    // be the `[]`/`null` framing; put it on the first non-empty category, or
-    // base when everything is empty.
-    if remainder > 0 {
-        let target = parts
-            .iter()
-            .position(|(_, s)| s.ascii_bytes > 0 || s.non_ascii_chars > 0)
-            .unwrap_or(0);
-        tokens[target] += remainder as u64;
-    }
+    // One ceil for the total; the remainder goes to the largest fractional parts, so the
+    // tokens sum exactly (`RequestSize::split_tokens`).
+    parts[images_index].1.image_tokens = image_tokens;
+    let sizes: Vec<Size> = parts.iter().map(|(_, size)| *size).collect();
+    let tokens = Size::split_tokens(&sizes, input.bytes_per_token);
+    let total_tokens: u64 = tokens.iter().sum();
 
     let categories: Vec<Category> = parts
         .into_iter()
@@ -449,26 +418,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
             .iter()
             .map(|block| Size::of_str(&block.block))
             .collect();
-        let total_ascii: u64 = sizes.iter().map(|s| s.ascii_bytes).sum();
-        let total_non: u64 = sizes.iter().map(|s| s.non_ascii_chars).sum();
-        let total = total_ascii.div_ceil(bpt) + total_non;
-        let floors: Vec<u64> = sizes
-            .iter()
-            .map(|s| s.ascii_bytes / bpt + s.non_ascii_chars)
-            .collect();
-        let mut rem = total.saturating_sub(floors.iter().sum::<u64>()) as usize;
-        let mut ord: Vec<usize> = (0..sizes.len()).collect();
-        ord.sort_by_key(|&i| std::cmp::Reverse(sizes[i].ascii_bytes % bpt));
-        let mut toks = floors;
-        for i in ord {
-            if rem == 0 {
-                break;
-            }
-            if !sizes[i].ascii_bytes.is_multiple_of(bpt) {
-                toks[i] += 1;
-                rem -= 1;
-            }
-        }
+        let toks = Size::split_tokens(&sizes, input.bytes_per_token);
         input
             .context_blocks
             .iter()
@@ -500,16 +450,16 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         mcp_size.add_json(&mcp);
         (
             builtin.len(),
-            builtin_size.tokens(bpt as u32),
+            builtin_size.tokens(input.bytes_per_token),
             mcp.len(),
-            mcp_size.tokens(bpt as u32),
+            mcp_size.tokens(input.bytes_per_token),
         )
     };
     let details = Details {
         context_files,
         context_files_tokens,
         skills_count: input.skills_count,
-        skills_tokens: Size::of_str(input.skills_section).tokens(bpt as u32),
+        skills_tokens: Size::of_str(input.skills_section).tokens(input.bytes_per_token),
         builtin_tools_count,
         builtin_tools_tokens,
         mcp_servers: input.mcp_server_ids.len(),
