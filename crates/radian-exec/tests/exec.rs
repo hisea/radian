@@ -1,5 +1,5 @@
-//! `radian exec` and the top-level management commands (ADR 0032): `radian memory`,
-//! `radian login` and `radian exec memory`/`login` must be one code path, the reserved
+//! `radian exec` and the top-level management commands (ADR 0032): `radian login`
+//! and `radian exec login` must be one code path, the reserved
 //! subcommands must refuse, and the TUI's startup refusals must carry the unified exit code
 //! and the `radian:` diagnostics.
 //!
@@ -132,19 +132,6 @@ async fn exec_help_names_the_max_model_calls_default() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("--max-model-calls"), "{out}");
     assert!(out.contains("1000"), "the help names the default: {out}");
-}
-
-#[tokio::test]
-async fn the_top_level_memory_is_the_same_as_radian_exec_memory() {
-    // `radian memory …` and `radian exec memory …` are one code path, so
-    // their output is identical.
-    let env = Env::fresh("exec-memory");
-    let (exec_code, exec_out, exec_err) = run(spawn_in(&["exec", "memory", "list"], &env)).await;
-    let (top_code, top_out, top_err) = run(spawn_in(&["memory", "list"], &env)).await;
-
-    assert_eq!(top_code, exec_code);
-    assert_eq!(top_out, exec_out);
-    assert_eq!(top_err, exec_err);
 }
 
 #[tokio::test]

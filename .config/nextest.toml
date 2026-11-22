@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (234 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (223 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec and
 #    control suites use `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 3 and 4).
@@ -53,7 +53,7 @@ test-group = "pty"
 #    their layer
 #    (`LIMITS.md` "嵌套").
 #
-# 3. `TMPDIR` points inside the repository (12 names). `std::env::temp_dir()` scratch
+# 3. `TMPDIR` points inside the repository (9 names). `std::env::temp_dir()` scratch
 #    trees then sit in the repository: git, the canonical workspace, context files,
 #    skill discovery and project identity see the outer repository, and its
 #    AGENTS.md reaches a test workspace.
@@ -100,7 +100,6 @@ not (
   | test(=a_lower_schema_version_refuses_to_start_without_creating_a_session)
   | test(=a_missing_workspace_is_a_workspace_error_and_leaves_no_session)
   | test(=a_missing_workspace_is_refused_with_the_radian_prefix)
-  | test(=a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds)
   | test(=a_model_error_exits_one)
   | test(=a_new_session_directory_and_file_are_owner_only)
   | test(=a_new_session_writes_a_valid_jsonl)
@@ -192,15 +191,6 @@ not (
   | test(=login_without_a_terminal_refuses_and_points_at_auth_json)
   | test(=mcp_mcp_servers_from_the_user_config_run)
   | test(=mcp_servers_from_the_user_config_run)
-  | test(=memory_relink_after_a_move_finds_the_original_records)
-  | test(=memory_unlinked_workspace_refuses_project_writes_and_lists_global)
-  | test(=an_index_over_the_byte_cap_is_cut_at_a_line_boundary)
-  | test(=an_index_over_the_line_cap_drops_the_last_line_and_warns_once)
-  | test(=an_invalid_utf8_index_warns_and_the_session_starts)
-  | test(=an_unlinked_workspace_injects_only_the_global_index)
-  | test(=a_retired_memory_injection_key_warns_and_the_session_starts)
-  | test(=the_section_freezes_per_process_and_a_resume_reads_again)
-  | test(=two_indexes_reach_the_system_prompt_project_then_global)
   | test(=named_providers_keep_separate_keys_and_config_wins_over_auth)
   | test(=never_turns_ask_into_a_denial)
   | test(=no_config_mcp_ignores_the_config_mcp_section)
@@ -279,7 +269,6 @@ not (
   | test(=the_startup_line_says_ask_user_is_off)
   | test(=the_startup_text_does_not_claim_credential_isolation)
   | test(=the_top_level_login_is_the_same_as_radian_exec_login)
-  | test(=the_top_level_memory_is_the_same_as_radian_exec_memory)
   | test(=the_workspace_flag_turns_the_sandbox_on)
   | test(=the_workspace_system_prompt_unix_socket_sentence_follows_the_backend)
   | test(=tier_names_and_aliases_are_accepted_but_help_lists_only_new_names)
@@ -317,10 +306,7 @@ not (
   | test(=writable_except_exec_protects_worktree_links_and_nested_submodules)
 
   | test(=context::tests::a_workspace_outside_a_repository_reads_only_itself)
-  | test(=memory::identity::tests::only_a_git_identity_is_a_project_workspace)
-  | test(=memory::identity::tests::outside_a_repository_the_canonical_workspace_is_the_key)
-  | test(=memory::service::tests::a_write_outside_a_repository_is_refused_and_creates_nothing)
-  | test(=memory::service::tests::relinking_after_a_move_finds_the_original_records)
+  | test(=project_identity::tests::outside_a_repository_the_canonical_workspace_is_the_key)
   | test(=pty_reasoning_is_not_sent_back_to_the_provider)
   | test(=pty_trust_sandbox_choice_writes_the_access_record)
   | test(=skills::tests::a_trusted_project_skill_is_discovered_listed_and_expandable)

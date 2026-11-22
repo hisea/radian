@@ -17,7 +17,6 @@ agent-extensions = { version = "0.2.0", path = "../agent-extensions" }
 agent-provider-openai-compatible = { version = "0.2.0", path = "../agent-provider-openai-compatible" }
 radian-coding = { version = "0.2.0", path = "../radian-coding" }
 radian-host = { version = "0.2.0", path = "../radian-host" }
-radian-memory = { version = "0.2.0", path = "../radian-memory" }
 radian-permissions = { version = "0.2.0", path = "../radian-permissions" }
 radian-runtime = { version = "0.2.0", path = "../radian-runtime" }
 radian-sandbox = { version = "0.2.0", path = "../radian-sandbox" }

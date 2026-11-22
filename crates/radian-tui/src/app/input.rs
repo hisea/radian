@@ -1,5 +1,5 @@
 //! What comes into the app: [`Input`], one interaction intent or host fact, plus the types its
-//! results carry - the picker's [`PickerData`], the `/memory` executor's [`MemoryResult`], and
+//! results carry - the picker's [`PickerData`], and
 //! the `/…`/`@` completion state ([`SlashCompletion`], [`PendingSend`], `PendingExpand`).
 //! [`Effect`] stays in `app.rs` with the entry point that returns it.
 
@@ -75,7 +75,7 @@ pub enum Input {
     /// A scroll of the approval box's body (`↑`/`↓`/PgUp/PgDn). Hardcoded like the answers:
     /// scrolling must never depend on the keymap, and it must never collide with an answer key.
     ApprovalScroll(ApprovalScroll),
-    /// The hardcoded answer to a `/memory` confirmation (`true` = confirmed).
+    /// The hardcoded answer to a `/model` switch confirmation (`true` = confirmed).
     ConfirmCommand(bool),
     /// The streaming text the projection has accumulated (ADR 0023 U2). Deltas never come
     /// through the channel: the loop reads the projection when a `Dirty` notification says so.
@@ -102,8 +102,6 @@ pub enum Input {
         fetch: command::Fetch,
         candidates: Vec<command::Candidate>,
     },
-    /// A `/memory` command finished (the result of [`Effect::RunMemoryCommand`]).
-    MemoryCommandDone(MemoryResult),
     /// A manual `/compact` finished (the result of [`Effect::Compact`]).
     CompactDone(Result<CompactionOutcome, String>),
     /// A `!`/`!!` command finished (the result of [`Effect::RunBash`]).
@@ -308,21 +306,6 @@ pub struct PickerData {
     pub query: Option<String>,
     /// Values to redact from a search snippet (the host's secret list).
     pub secrets: Vec<String>,
-}
-
-/// The result of [`Effect::RunMemoryCommand`]. The executor decides nothing: a command that
-/// writes comes back as [`MemoryResult::NeedsConfirmation`] and `update` arms the prompt.
-#[derive(Debug)]
-pub enum MemoryResult {
-    /// The command ran; these lines are the notices to show.
-    Output(Vec<String>),
-    /// The command writes and needs the user's `y` first.
-    NeedsConfirmation {
-        command: MemoryCommand,
-        prompt: String,
-    },
-    /// The command failed; this is the message to show.
-    Failed(String),
 }
 
 /// The `/…` completion on screen: the char range a chosen candidate replaces, and the

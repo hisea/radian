@@ -6,7 +6,7 @@
 //! determinism (ADR 0021 D6's reason): the same files always produce a byte-identical section,
 //! so the prompt cache is not invalidated by a reshuffle.
 //!
-//! Failures never block startup (the `tui.*` / memory rule): a bad frontmatter file, a missing
+//! Failures never block startup (the `tui.*` rule): a bad frontmatter file, a missing
 //! description, an invalid name or a duplicate name is one warning, and the skill is skipped.
 
 use std::collections::BTreeMap;
@@ -703,7 +703,7 @@ pub fn expand(skill: &Skill, args: &str) -> Result<String, String> {
 }
 
 /// Counts a string the way `radian_core` does, without building a `ModelRequest` (the same
-/// helper as `memory/injection.rs`; ADR 0015 C2's conservative estimate).
+/// way `/context` does; ADR 0015 C2's conservative estimate).
 fn request_size_of(text: &str) -> RequestSize {
     let mut size = RequestSize::default();
     for ch in text.chars() {
@@ -717,7 +717,7 @@ fn request_size_of(text: &str) -> RequestSize {
 }
 
 /// The `Hooks` implementation (ADR 0025 S2/S6): appends the precomputed section to the system
-/// prompt on every request, after the memory section (the tuple order in `session.rs`). It never
+/// prompt on every request, after the base prompt (the tuple order in `session.rs`). It never
 /// fails a turn.
 pub struct SkillsHooks {
     section: String,
@@ -1766,56 +1766,6 @@ mod tests {
         assert!(expanded.contains("&lt;/skill>"), "{expanded}");
         assert!(expanded.contains("&lt;/SKILL>"), "{expanded}");
         assert!(expanded.trim_end().ends_with("</skill>"), "{expanded}");
-    }
-
-    /// The exact tuple shape `session.rs` builds — `((perm, memory), skills)` — puts the skills
-    /// section **after** the memory section (ADR 0025 S6). A different nesting would reverse
-    /// them, so this pins the order rather than the hook alone.
-    #[tokio::test]
-    async fn the_memory_section_precedes_the_skills_section() {
-        struct Section(&'static str);
-        impl Hooks for Section {
-            async fn before_model_call(
-                &self,
-                _cx: &HookContext,
-                request: &mut ModelRequest,
-            ) -> Result<(), HookError> {
-                request
-                    .system_prompt
-                    .get_or_insert_with(String::new)
-                    .push_str(self.0);
-                Ok(())
-            }
-        }
-
-        let scratch = Scratch::new("order");
-        scratch.skill("a", &frontmatter("a", "One."));
-        let skills = discover(&scratch.skills_dir()).skills;
-        let hooks = (
-            ((), Section("\n\n## Memory\nmem\n")),
-            SkillsHooks::new(&skills),
-        );
-        let mut request = ModelRequest {
-            system_prompt: Some("base".to_owned()),
-            messages: Vec::new(),
-            tools: Vec::new(),
-            settings: serde_json::Value::Null,
-        };
-        hooks
-            .before_model_call(
-                &HookContext {
-                    cancellation: CancellationToken::new(),
-                    model_calls: 1,
-                },
-                &mut request,
-            )
-            .await
-            .unwrap();
-        let prompt = request.system_prompt.unwrap();
-        let memory_at = prompt.find("## Memory").unwrap();
-        let skills_at = prompt.find("## Skills").unwrap();
-        assert!(memory_at < skills_at, "{prompt}");
-        assert!(prompt.starts_with("base"), "{prompt}");
     }
 
     #[tokio::test]

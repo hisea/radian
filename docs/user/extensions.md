@@ -11,7 +11,6 @@ from the need, not from the name.
 |---|---|---|
 | Always-on project directions the model must follow | Context files (`AGENTS.md`) | `context-files.md` |
 | A reusable procedure the model can run on demand | Skill | `skills.md` |
-| Facts the model should remember across sessions | Memory | `memory.md` |
 | An extra tool (a local server over stdio) | MCP server | `mcp.md` |
 | Run your own command when a tool runs or the model stops | Hook | `hooks.md` |
 | Change the colors | Theme | `themes.md` |
@@ -23,7 +22,7 @@ the session opens without it.
 ## Where things live
 
 Three layers hold configuration. The user layer is `~/.radian/`: the config
-file, the `themes/` directory, the `skills/` directory, the memory store.
+file, the `themes/` directory, the `skills/` directory.
 The project layer is the workspace: `.agents/skills/`, `.mcp.json`,
 `.radian/hooks.json`, and the context files. The built-in layer is compiled
 in: three skills and three themes. A user skill of the same name wins over a
@@ -64,11 +63,6 @@ Read the current diff. List style problems and missing tests.
 Run `/skills` to see the row, then `/skill:review` to run it. The body plus
 your arguments become one user message. Use skills for procedures the model
 follows on demand, not for always-on directions.
-
-## Memory in one example
-
-Type `/memory add deploy-notes --type project` in the interface, then edit the file it opens. The record persists across sessions; the project's index reaches later turns, and the model reads the body with `read`.
-Use memory for facts, use context files for directions.
 
 ## MCP server in one example
 
@@ -128,7 +122,6 @@ model, cost, context and jobs, not to add behavior.
 At session start radian reads, in this order: the config file, the theme,
 the keymap, the context files (global first, then outer directories to
 inner), the skills (built-in last, so yours win), the MCP servers (project
-only when trusted), the hooks (project first, then user), and the memory
-store. Each step warns and continues on failure. The startup screen shows
+only when trusted), the hooks (project first, then user). Each step warns and continues on failure. The startup screen shows
 the result: theme, context files with sizes, skill count, MCP servers and
 tools, hook counts, and the trust state.

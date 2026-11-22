@@ -36,7 +36,6 @@ radian-permissions = { version = "0.2.0", path = "../radian-permissions" }
 # The session facade (`open_session`) owns the inbox and the driver (ADR 0023 U5).
 radian-runtime = { version = "0.2.0", path = "../radian-runtime" }
 # The memory service (ADR 0021 D2/D8) sits on the storage layer.
-radian-memory = { version = "0.2.0", path = "../radian-memory" }
 radian-sandbox = { version = "0.2.0", path = "../radian-sandbox" }
 # Real display width for short model-brand labels (CJK and fullwidth characters are 2 cells);
 # `config` measures a brand before padding it.

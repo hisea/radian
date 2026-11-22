@@ -40,7 +40,6 @@ pub(super) enum Phase<'a> {
         runtime: &'a tokio::runtime::Runtime,
         session: &'a Arc<dyn radian_host::SessionFacade>,
         host: &'a SessionHost,
-        memory: &'a Option<MemoryService>,
         /// The session's Stop hooks: the loop syncs `/loop` into them after every
         /// update, so the host's intent-stop validator stays off while `/loop` owns
         /// the turn end (backlog `turn-end-continuation.md` §B.5).
@@ -231,7 +230,6 @@ pub(super) fn ui_loop(
             runtime,
             session,
             host,
-            memory,
             command_hooks,
         } => Some(LoopContext {
             startup_route: startup_route.clone(),
@@ -244,7 +242,6 @@ pub(super) fn ui_loop(
             workspace,
             runtime,
             session,
-            memory,
             host,
             tx,
             queue: session.pending(),

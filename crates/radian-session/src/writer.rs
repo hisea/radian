@@ -20,10 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::ReadError;
 use crate::fee::UsageFee;
 use crate::gate::SegmentGate;
-use crate::runtime::{
-    MemoryIndexesData, MemoryInjectedIndex, RuntimeEvent, runtime_data,
-    validate_memory_injected_index,
-};
+use crate::runtime::{RuntimeEvent, runtime_data};
 
 /// The schema version this crate writes and accepts.
 pub(crate) const SCHEMA_VERSION: u64 = 1;
@@ -392,36 +389,8 @@ impl SessionJournal {
         self.append_rendered(name, critical, &data).await
     }
 
-    /// Appends the file store's injected-index record (ADR 0021 D6): one `critical: false`
-    /// `MemoryInjected` line carrying `{ indexes: [{ scope, path, sha256, lines, bytes }] }`.
-    /// This is the writer this build offers for memory injection; it writes only `indexes`,
-    /// never the old `records` shape (kept for reading old journals).
-    pub async fn append_memory_injected_indexes(
-        &self,
-        indexes: Vec<MemoryInjectedIndex>,
-    ) -> Result<(), WriteError> {
-        if indexes.is_empty() {
-            return Err(WriteError::Io {
-                path: self.path.clone(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "MemoryInjected.indexes must not be empty",
-                ),
-            });
-        }
-        for index in &indexes {
-            validate_memory_injected_index(index).map_err(|message| WriteError::Io {
-                path: self.path.clone(),
-                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, message),
-            })?;
-        }
-        let data = raw_data(&MemoryIndexesData { indexes: &indexes })
-            .map_err(|e| invalid_data(&self.path, e))?;
-        self.append_rendered("MemoryInjected", false, &data).await
-    }
-
     /// Writes one already-rendered runtime event under the writer lock, the `seq` counter and
-    /// (when the name says so) the fsync. Shared by the typed path and the memory-index writer.
+    /// (when the name says so) the fsync.
     async fn append_rendered(
         &self,
         name: &str,

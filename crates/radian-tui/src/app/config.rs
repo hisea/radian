@@ -1,5 +1,5 @@
 //! Building an [`App`] and setting it up: [`App::new`], the `set_*` seams the host and the
-//! tests write through (context window, tier, memory, auto, access source, sandbox note, MCP
+//! tests write through (context window, tier, auto, access source, sandbox note, MCP
 //! counts, projection), the `apply_config` fold of `[tui]`, the display modes a frame lays the
 //! transcript out with, and the herdr state the loop reports.
 
@@ -36,9 +36,6 @@ impl App {
             idle_notified: false,
             last_answered: None,
             layers: vec![Layer::Surface],
-            memory_enabled: false,
-            memory_root: None,
-            memory_records: crate::memory_card::MemoryRecords::default(),
             pending_expand: VecDeque::new(),
             slash_completion: None,
             mention_completion: None,
@@ -146,23 +143,6 @@ impl App {
     /// Records the permission tier's display name, for the status bar.
     pub fn set_tier(&mut self, tier: impl Into<String>) {
         self.session.projection.set_tier(Some(tier.into()));
-    }
-
-    /// Whether this process has a memory root, for `/memory`. Set once at startup; the service
-    /// itself stays on the loop's side (ADR 0023 U3).
-    pub fn set_memory_enabled(&mut self, enabled: bool) {
-        self.memory_enabled = enabled;
-    }
-
-    /// The memory root the transcript resolves a memory card's path against (ADR 0035). Set
-    /// once at startup, beside [`App::set_memory_enabled`].
-    pub fn set_memory_root(&mut self, root: Option<PathBuf>) {
-        // A different root means different files: the record types the transcript established
-        // for the old root no longer name anything.
-        if self.memory_root != root {
-            self.memory_records = crate::memory_card::MemoryRecords::default();
-        }
-        self.memory_root = root;
     }
 
     /// The session's in-session auto state (ADR 0026 D9), set at startup from the resolved

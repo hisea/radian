@@ -47,7 +47,7 @@ grok-mermaid = { version = "0.0.0", path = "../../third_party/grok-mermaid" }
 # `default-features = false` drops the HTML renderer and the SIMD scanner: this crate only
 # walks the event stream, and the build stays dependency-light on the 1.99.1 MSRV.
 pulldown-cmark = { version = "0.12", default-features = false }
-# The slash-command arguments: quoted values like `/memory add "two words"`.
+# The slash-command arguments: quoted values like `/export "my file.md"`.
 shlex = "2"
 # Syntax highlighting (ADR 0028 R2 decision 2): syntect with the **pure-Rust** regex
 # backend (`regex-fancy`, no oniguruma) and the packed default syntax set (`default-syntaxes`).
@@ -76,10 +76,6 @@ serde_json.workspace = true
 # (`radian-host`), so a `[roles]` table and `[tui.colors]` share one value shape
 # (`TuiColorOverride::from_toml`). The crate is already in the tree via `radian-host`.
 toml = "0.8"
-# The memory card's frontmatter parser (ADR 0021, ADR 0035) validates `created`/`modified`
-# with the same `chrono` the memory store uses, so the card and the store agree on RFC 3339
-# UTC. Already in the workspace lock via `radian-memory`.
-chrono = "0.4"
 unicode-width = "0.2.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 
@@ -105,7 +101,6 @@ libc = "0.2"
 # The shared heading-anchored table reader for the manual drift tests.
 radian-coding = { path = "../radian-coding", features = ["testing"] }
 radian-core = { path = "../radian-core" }
-radian-memory = { path = "../radian-memory" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 radian-session = { path = "../radian-session" }

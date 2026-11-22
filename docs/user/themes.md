@@ -159,7 +159,6 @@ the free space and the compaction buffer):
 |---|---|
 | `ctx_system` | The system prompt cell. |
 | `ctx_files` | The context files cell. |
-| `ctx_memory` | The memory cell. |
 | `ctx_tools` | The built-in tools cell. |
 | `ctx_skills` | The skills cell. |
 | `ctx_mcp` | The MCP tools cell. |

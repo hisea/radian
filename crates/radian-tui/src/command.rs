@@ -5,14 +5,11 @@
 //! the rest is sent as an ordinary message.
 //!
 //! [`parse`] only **parses**: running a command is an effect the event loop executes, so the
-//! app stays pure (ADR 0023 U3). `/memory` runs the same `radian-host::memory` command set
-//! `radian memory` uses (one clap grammar, one executor). `/trust` runs the same
+//! app stays pure (ADR 0023 U3). `/trust` runs the same
 //! `radian-host::trust` writes `radian trust` runs (one record, one notice shape). Adding a
 //! command is one arm here.
 
-use radian_host::memory::commands::{self, CommandOutput, MemoryCommand};
-
-/// The `/help` text. Kept short; the full grammar is `radian_host::memory::commands`.
+/// The `/help` text. Kept short.
 pub const HELP: &str = "\
 /help                 list the commands
 /queue <text>          queue a message for the next turn, even while one runs
@@ -44,8 +41,6 @@ pub const HELP: &str = "\
                       at the next tool call, and `full` asks for confirmation
 /export [md|json] [path] [--force]
                       export this session (default md, default <workspace>/radian-<id>.<ext>)
-/memory <command>     durable memory: list, show, stale, add, edit, forget, open, project,
-                      relink, split, merge; `/memory off|on` switches this session
 /skill:<name> [args]  run a skill: read its body into the message
 /skills               list the discovered skills
 /jobs                 open the inspector's jobs page (list) or stop one/all
@@ -64,17 +59,12 @@ pub const HELP: &str = "\
                       out of the model's context
 Ask about radian itself in plain words to read the built in manual";
 
-/// A memory command waiting for the user's confirmation. Only the destructive commands
-/// (`forget`, `purge`, `split`, `merge`) ask (ADR 0021 D7); the rest run immediately. `update`
-/// builds one when the executor reports [`radian_host::memory::commands::CommandOutput::
-/// needs_confirmation`].
+/// A `/model` switch waiting for the user's confirmation (ADR 0026 D7): `y` compacts to the
+/// budget and then queues the route; `n` cancels.
 #[derive(Debug)]
 pub struct PendingCommand {
-    pub command: MemoryCommand,
     pub prompt: String,
-    /// A `/model` switch waiting behind this confirm (ADR 0026 D7): `y` compacts to this
-    /// budget and then queues the route; `n` cancels. `None` for a `/memory` confirm.
-    pub switch: Option<(String, String, u64, Option<String>)>,
+    pub switch: (String, String, u64, Option<String>),
 }
 
 /// What `/jobs` asked for (ADR 0037 decision 4).
@@ -164,11 +154,6 @@ pub enum Outcome {
     /// `/copy [code]`: copy the last committed assistant message — or its last fenced code
     /// block — through the configured clipboard backend.
     Copy { code_only: bool },
-    /// A `/memory` command to run through the shared executor.
-    Memory(MemoryCommand),
-    /// `/memory off|on`: `true` turns this session's memory writes off. The switch is live
-    /// at once and recorded in the session for a resume; the configuration file is untouched.
-    MemorySwitch(bool),
     /// A manual `/compact` (ADR 0018): the host runs it on the runtime, between turns, and
     /// shows the outcome as a notice. `Some(instructions)` is the optional note.
     Compact(Option<String>),
@@ -262,8 +247,6 @@ pub struct Candidate {
 /// [`crate::app::Input::CompletionsReady`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetch {
-    /// `/memory <command> <partial>`: the record ids that command can act on.
-    MemoryRecords { command: String, partial: String },
     /// `/theme <partial>`: the built-in names plus the theme files in `~/.radian/themes/`.
     Themes { partial: String },
     /// `/model <provider>/<model>`: the logged-in providers before the slash, the models of
@@ -286,8 +269,7 @@ impl Fetch {
     /// The partial word the fetched candidates should be ranked against.
     pub fn partial(&self) -> &str {
         match self {
-            Fetch::MemoryRecords { partial, .. }
-            | Fetch::Themes { partial }
+            Fetch::Themes { partial }
             | Fetch::ModelRoute { partial, .. }
             | Fetch::ThinkingLevels { partial }
             | Fetch::LoggedInProviders { partial, .. }
@@ -438,11 +420,6 @@ pub fn tree() -> &'static [Command] {
             levels: &[export_level, export_level],
         },
         Command {
-            name: "memory",
-            description: MEMORY_DESCRIPTION,
-            levels: &[memory_level, memory_level],
-        },
-        Command {
             name: "skills",
             description: "list the discovered skills",
             levels: &[],
@@ -516,60 +493,6 @@ fn logout_level(typed: &[&str], partial: &str) -> Level {
         None => Level::Needs(Fetch::LoggedInProviders {
             partial: partial.to_owned(),
         }),
-        Some(_) => Level::Free,
-    }
-}
-
-/// The `/help` line for `/memory` (kept next to the subcommand table so the two cannot drift).
-const MEMORY_DESCRIPTION: &str = "durable memory: list, show, stale, add, edit, forget, \
-                                  open, project, relink, split, merge; `/memory off|on` \
-                                  switches this session";
-
-/// The `/memory` subcommands and a one-line description each. The list is the authority for
-/// completion; `the_memory_subcommand_table_matches_the_grammar` fails if it drifts from the
-/// clap grammar in `radian_host::memory::commands`.
-const MEMORY_SUBCOMMANDS: &[(&str, &str)] = &[
-    ("list", "list files (Project then Global)"),
-    ("show", "show one file's frontmatter and body"),
-    ("stale", "list files not read for a while"),
-    ("add", "create a file and open it in the editor"),
-    ("edit", "open an existing file in the editor"),
-    (
-        "forget",
-        "delete a file and its index line (needs confirmation)",
-    ),
-    ("open", "open the scope directory"),
-    ("project", "show the project identity, or `project new`"),
-    ("relink", "attach this workspace to an existing project"),
-    ("split", "move files between projects (needs confirmation)"),
-    (
-        "merge",
-        "merge one project into another (needs confirmation)",
-    ),
-];
-
-/// The `/memory` subcommands whose first argument is an existing file name.
-const MEMORY_ID_COMMANDS: &[&str] = &["show", "edit", "forget"];
-
-/// `/memory`: the subcommand, then the record id for the commands that take one.
-fn memory_level(typed: &[&str], partial: &str) -> Level {
-    match typed.first().copied() {
-        None => Level::Ready(
-            MEMORY_SUBCOMMANDS
-                .iter()
-                .map(|(name, description)| Candidate {
-                    insert: (*name).to_owned(),
-                    description: (*description).to_owned(),
-                    current: false,
-                })
-                .collect(),
-        ),
-        Some(command) if MEMORY_ID_COMMANDS.contains(&command) => {
-            Level::Needs(Fetch::MemoryRecords {
-                command: command.to_owned(),
-                partial: partial.to_owned(),
-            })
-        }
         Some(_) => Level::Free,
     }
 }
@@ -847,7 +770,7 @@ pub fn complete_in(tree: &[Command], line: &str, cursor: usize) -> Option<SlashC
     // An exact command name: complete that command's levels one at a time.
     if let Some(command) = tree.iter().find(|command| command.name == name) {
         if trailing {
-            // `/memory `: the *next* level's candidates, with an empty partial.
+            // `/access `: the *next* level's candidates, with an empty partial.
             let typed: Vec<&str> = rest.iter().map(|(word, _)| word.as_str()).collect();
             return argument_level(command, typed.len(), &typed, "", cursor, cursor);
         }
@@ -869,7 +792,7 @@ pub fn complete_in(tree: &[Command], line: &str, cursor: usize) -> Option<SlashC
     }
 
     // A partial command name: chain the levels that each have exactly one fuzzy match, so
-    // `/mem fo` completes to `/memory forget` in one step. A level that needs the host stops the
+    // `/ac wo` completes to `/access workspace` in one step. A level that needs the host stops the
     // chain (its candidates are not known here).
     let matches = rank(command_candidates(tree), name);
     if matches.len() != 1 {
@@ -1124,10 +1047,9 @@ fn skill_command(first: &str, line: &str) -> Outcome {
     Outcome::Skill { name, args }
 }
 
-/// Interprets a trimmed line that starts with `/`. `memory_enabled` says whether this process
-/// has a memory root; without one `/memory` is refused with a notice. Pure: it never runs a
-/// command (ADR 0023 U3).
-pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
+/// Interprets a trimmed line that starts with `/`. Pure: it never runs a command (ADR 0023
+/// U3).
+pub fn parse(line: &str) -> Outcome {
     // ADR 0033: `!`/`!!` comes **before** the `/…` commands, so `!/bin/sh` is a command, not
     // the unknown `/bin/sh`. The rest of the line is the shell command verbatim (never
     // shlexed here: the shell its own quoting); only surrounding whitespace is trimmed.
@@ -1161,7 +1083,6 @@ pub fn parse(line: &str, memory_enabled: bool) -> Outcome {
         Some("/loop") => loop_request(&tokens[1..]),
         Some("/goal") => goal_request(&tokens[1..]),
         Some("/copy") => copy_request(&tokens[1..]),
-        Some("/memory") => memory_command(&tokens[1..], memory_enabled),
         Some("/compact") => Outcome::Compact(compact_instructions(&tokens[1..])),
         Some("/sessions") => Outcome::Sessions(sessions_query(&tokens[1..])),
         Some("/export") => export_request(&tokens[1..]),
@@ -1710,38 +1631,6 @@ fn btw_question(line: &str) -> Option<String> {
     (!rest.is_empty()).then_some(rest)
 }
 
-fn memory_command(args: &[String], memory_enabled: bool) -> Outcome {
-    if !memory_enabled {
-        return Outcome::Notices(vec![
-            "memory is disabled (no RADIAN_HOME or HOME)".to_owned(),
-        ]);
-    }
-    match args {
-        [one] if one == "off" => return Outcome::MemorySwitch(true),
-        [one] if one == "on" => return Outcome::MemorySwitch(false),
-        _ => {}
-    }
-    match commands::parse_args(args) {
-        Ok(command) => Outcome::Memory(command),
-        // clap's own error/help text is shown as a notice; the program does not exit.
-        Err(error) => Outcome::Notices(vec![error.to_string().trim_end().to_owned()]),
-    }
-}
-
-/// The lines one command output becomes: the diagnostics note, then the text's lines. An
-/// output with neither becomes one `(no output)` line.
-pub fn output_notices(output: &CommandOutput) -> Vec<String> {
-    let mut notices = Vec::new();
-    if let Some(note) = &output.note {
-        notices.push(note.clone());
-    }
-    notices.extend(output.text.lines().map(str::to_owned));
-    if notices.is_empty() {
-        notices.push("(no output)".to_owned());
-    }
-    notices
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1751,25 +1640,25 @@ mod tests {
     #[test]
     fn a_leading_bang_is_a_shell_command() {
         assert!(matches!(
-            parse("!echo hi", false),
+            parse("!echo hi"),
             Outcome::Bash { command, exclude_from_context: false } if command == "echo hi"
         ));
         assert!(matches!(
-            parse("!!echo hi", false),
+            parse("!!echo hi"),
             Outcome::Bash { command, exclude_from_context: true } if command == "echo hi"
         ));
         // `!/bin/sh` is the command `/bin/sh`, not the unknown `/bin/sh` command.
         assert!(matches!(
-            parse("!/bin/echo x", false),
+            parse("!/bin/echo x"),
             Outcome::Bash { command, .. } if command == "/bin/echo x"
         ));
         // The shell does its own quoting: the line is not shlexed here.
         assert!(matches!(
-            parse("!echo 'a b' | grep a", false),
+            parse("!echo 'a b' | grep a"),
             Outcome::Bash { command, .. } if command == "echo 'a b' | grep a"
         ));
         for empty in ["!", "!!", "!   "] {
-            match parse(empty, false) {
+            match parse(empty) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: !"), "{notices:?}")
                 }
@@ -1779,7 +1668,7 @@ mod tests {
     }
 
     /// User-facing slash text never names an ADR: the `/help` table, every slash
-    /// command's description, the `/memory --help` text and the `/login` provider
+    /// command's description and the `/login` provider
     /// choices.
     /// Mutation: put `(ADR 0018)` back into one description → this fails.
     #[test]
@@ -1793,12 +1682,6 @@ mod tests {
                 command.description
             );
         }
-        // `/memory --help` is clap's rendered error text, shown as-is.
-        let error = radian_host::memory::commands::parse_args(&["--help".to_owned()]).unwrap_err();
-        assert!(
-            !error.to_string().contains("ADR"),
-            "/memory --help names an ADR: {error}"
-        );
         // The `/login` picker and `radian login`'s numbered list share this text.
         for (_, description) in radian_host::login_choices() {
             assert!(
@@ -1816,51 +1699,30 @@ mod tests {
 
     #[test]
     fn help_and_unknown_commands_are_notices() {
-        match parse("/help", false) {
-            Outcome::Notices(notices) => assert!(notices[0].contains("/memory"), "{notices:?}"),
+        match parse("/help") {
+            Outcome::Notices(notices) => assert!(notices[0].contains("/export"), "{notices:?}"),
             other => panic!("expected notices, got {other:?}"),
         }
-        match parse("/nope", false) {
+        match parse("/nope") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("unknown command /nope"), "{notices:?}")
             }
             other => panic!("expected notices, got {other:?}"),
         }
-        match parse("/memory add \"unbalanced", true) {
+        match parse("/queue \"unbalanced") {
             Outcome::Notices(notices) => assert!(notices[0].contains("unbalanced quotes")),
             other => panic!("expected a quote error, got {other:?}"),
         }
     }
 
-    /// Parsing only: the command comes back untouched, and whether it needs confirmation is
-    /// the executor's answer (ADR 0023 U3), not this layer's.
-    #[test]
-    fn a_memory_write_parses_to_a_command_without_running_it() {
-        match parse("/memory forget abc", true) {
-            Outcome::Memory(command) => {
-                let debug = format!("{command:?}");
-                assert!(debug.contains("Forget"), "{debug}");
-                assert!(debug.contains("abc"), "{debug}");
-            }
-            other => panic!("expected a memory command, got {other:?}"),
-        }
-        // A command that does not parse is a notice, not a panic and not an exit.
-        match parse("/memory forget", true) {
-            Outcome::Notices(notices) => {
-                assert!(!notices.is_empty());
-            }
-            other => panic!("expected a usage notice, got {other:?}"),
-        }
-    }
-
     #[test]
     fn sessions_and_export_parse() {
-        assert!(matches!(parse("/sessions", false), Outcome::Sessions(None)));
-        match parse("/sessions parser bug", false) {
+        assert!(matches!(parse("/sessions"), Outcome::Sessions(None)));
+        match parse("/sessions parser bug") {
             Outcome::Sessions(Some(query)) => assert_eq!(query, "parser bug"),
             other => panic!("expected a sessions query, got {other:?}"),
         }
-        match parse("/export", false) {
+        match parse("/export") {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Markdown);
                 assert!(request.path.is_none());
@@ -1868,7 +1730,7 @@ mod tests {
             }
             other => panic!("expected an export request, got {other:?}"),
         }
-        match parse("/export json out.json --force", false) {
+        match parse("/export json out.json --force") {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Json);
                 assert_eq!(request.path.as_deref(), Some("out.json"));
@@ -1877,14 +1739,14 @@ mod tests {
             other => panic!("expected an export request, got {other:?}"),
         }
         // A bare path is the path, not the format.
-        match parse("/export result.txt", false) {
+        match parse("/export result.txt") {
             Outcome::Export(request) => {
                 assert_eq!(request.format, radian_host::Format::Markdown);
                 assert_eq!(request.path.as_deref(), Some("result.txt"));
             }
             other => panic!("expected an export request, got {other:?}"),
         }
-        match parse("/export a b", false) {
+        match parse("/export a b") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("unexpected extra path"), "{notices:?}")
             }
@@ -1898,8 +1760,8 @@ mod tests {
 
     #[test]
     fn compact_is_a_control_request_with_optional_instructions() {
-        assert!(matches!(parse("/compact", false), Outcome::Compact(None)));
-        match parse("/compact focus on the parser", false) {
+        assert!(matches!(parse("/compact"), Outcome::Compact(None)));
+        match parse("/compact focus on the parser") {
             Outcome::Compact(Some(note)) => assert_eq!(note, "focus on the parser"),
             other => panic!("expected a compact request, got {other:?}"),
         }
@@ -1909,16 +1771,16 @@ mod tests {
     /// empty is a usage notice. It is a command, and it is in `/help`.
     #[test]
     fn queue_parses_to_its_text_and_rejects_an_empty_line() {
-        match parse("/queue do this next", false) {
+        match parse("/queue do this next") {
             Outcome::Queue(text) => assert_eq!(text, "do this next"),
             other => panic!("expected the queued text, got {other:?}"),
         }
-        match parse("/queue \"quoted  words\"", false) {
+        match parse("/queue \"quoted  words\"") {
             Outcome::Queue(text) => assert_eq!(text, "quoted  words"),
             other => panic!("expected the queued text, got {other:?}"),
         }
         for line in ["/queue", "/queue   "] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /queue"), "{line}: {notices:?}")
                 }
@@ -1933,8 +1795,8 @@ mod tests {
     /// and it is in `/help`.
     #[test]
     fn new_takes_no_arguments() {
-        assert!(matches!(parse("/new", false), Outcome::New));
-        match parse("/new now", false) {
+        assert!(matches!(parse("/new"), Outcome::New));
+        match parse("/new now") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /new"), "{notices:?}")
             }
@@ -1948,8 +1810,8 @@ mod tests {
     /// and it is in `/help`.
     #[test]
     fn retry_takes_no_arguments() {
-        assert!(matches!(parse("/retry", false), Outcome::Retry));
-        match parse("/retry now", false) {
+        assert!(matches!(parse("/retry"), Outcome::Retry));
+        match parse("/retry now") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /retry"), "{notices:?}")
             }
@@ -1967,13 +1829,10 @@ mod tests {
     fn loop_parses_toggle_flags_and_prompt() {
         use std::time::Duration;
 
-        assert!(matches!(
-            parse("/loop", false),
-            Outcome::Loop(LoopCommand::Toggle)
-        ));
+        assert!(matches!(parse("/loop"), Outcome::Loop(LoopCommand::Toggle)));
 
         // Flags with a prompt.
-        match parse("/loop --every 5m --times 3 fix the build", false) {
+        match parse("/loop --every 5m --times 3 fix the build") {
             Outcome::Loop(LoopCommand::Enable(options)) => {
                 assert_eq!(options.every, Some(Duration::from_secs(300)));
                 assert_eq!(options.times, Some(3));
@@ -1983,7 +1842,7 @@ mod tests {
             other => panic!("expected the loop options, got {other:?}"),
         }
         // Flags without a prompt arm the loop; the next message becomes the prompt.
-        match parse("/loop --times 2", false) {
+        match parse("/loop --times 2") {
             Outcome::Loop(LoopCommand::Enable(options)) => {
                 assert_eq!(options.times, Some(2));
                 assert_eq!(options.prompt, None);
@@ -1991,7 +1850,7 @@ mod tests {
             other => panic!("expected an armed loop, got {other:?}"),
         }
         // A prompt with no flags.
-        match parse("/loop watch the tests", false) {
+        match parse("/loop watch the tests") {
             Outcome::Loop(LoopCommand::Enable(options)) => {
                 assert_eq!(options.prompt.as_deref(), Some("watch the tests"));
                 assert_eq!(options.every, None);
@@ -2000,7 +1859,7 @@ mod tests {
         }
         // A multi-word prompt may start with a number; a single bare number or bare
         // duration is refused (it needs its flag).
-        match parse("/loop run 5 times", false) {
+        match parse("/loop run 5 times") {
             Outcome::Loop(LoopCommand::Enable(options)) => {
                 assert_eq!(options.prompt.as_deref(), Some("run 5 times"));
             }
@@ -2013,7 +1872,7 @@ mod tests {
             "/loop --times 0",
             "/loop --every",
         ] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
                 }
@@ -2028,7 +1887,7 @@ mod tests {
             "/loop --every 5x fix it",
             "/loop --for two fix it",
         ] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /loop"), "{line}: {notices:?}")
                 }
@@ -2036,7 +1895,7 @@ mod tests {
             }
         }
         // Durations take seconds, minutes and hours; zero is refused.
-        match parse("/loop --every 30s --for 2h go", false) {
+        match parse("/loop --every 30s --for 2h go") {
             Outcome::Loop(LoopCommand::Enable(options)) => {
                 assert_eq!(options.every, Some(Duration::from_secs(30)));
                 assert_eq!(options.for_duration, Some(Duration::from_secs(7200)));
@@ -2054,31 +1913,28 @@ mod tests {
     fn goal_parses_show_set_control_and_budget() {
         use std::time::Duration;
 
-        assert!(matches!(
-            parse("/goal", false),
-            Outcome::Goal(GoalCommand::Show)
-        ));
-        match parse("/goal ship the refactor", false) {
+        assert!(matches!(parse("/goal"), Outcome::Goal(GoalCommand::Show)));
+        match parse("/goal ship the refactor") {
             Outcome::Goal(GoalCommand::Set { objective }) => {
                 assert_eq!(objective, "ship the refactor")
             }
             other => panic!("expected a set, got {other:?}"),
         }
         assert!(matches!(
-            parse("/goal pause", false),
+            parse("/goal pause"),
             Outcome::Goal(GoalCommand::Pause)
         ));
         assert!(matches!(
-            parse("/goal resume", false),
+            parse("/goal resume"),
             Outcome::Goal(GoalCommand::Resume)
         ));
         assert!(matches!(
-            parse("/goal drop", false),
+            parse("/goal drop"),
             Outcome::Goal(GoalCommand::Drop)
         ));
         // A bare number or duration is not an objective (it needs its budget flag).
         for line in ["/goal 5", "/goal 5m"] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /goal"), "{line}: {notices:?}")
                 }
@@ -2086,13 +1942,13 @@ mod tests {
             }
         }
         // Budget pairs, alone and combined; a bare `budget` shows.
-        match parse("/goal budget 2 turns", false) {
+        match parse("/goal budget 2 turns") {
             Outcome::Goal(GoalCommand::Budget { specs }) => {
                 assert_eq!(specs, vec![GoalBudgetSpec::Turns(2)])
             }
             other => panic!("expected a budget, got {other:?}"),
         }
-        match parse("/goal budget 10 turns 2h 50000 tokens", false) {
+        match parse("/goal budget 10 turns 2h 50000 tokens") {
             Outcome::Goal(GoalCommand::Budget { specs }) => {
                 assert_eq!(
                     specs,
@@ -2106,7 +1962,7 @@ mod tests {
             other => panic!("expected a combined budget, got {other:?}"),
         }
         assert!(matches!(
-            parse("/goal budget", false),
+            parse("/goal budget"),
             Outcome::Goal(GoalCommand::Budget { specs }) if specs.is_empty()
         ));
         // Bad pairs, zero caps and extra words after the verbs are usage notices.
@@ -2119,7 +1975,7 @@ mod tests {
             "/goal resume later",
             "/goal drop it",
         ] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /goal"), "{line}: {notices:?}")
                 }
@@ -2127,10 +1983,7 @@ mod tests {
             }
         }
         // The objective limit is enforced at parse time.
-        match parse(
-            &format!("/goal {}", "x".repeat(GOAL_OBJECTIVE_LIMIT + 1)),
-            false,
-        ) {
+        match parse(&format!("/goal {}", "x".repeat(GOAL_OBJECTIVE_LIMIT + 1))) {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("the limit is"), "{notices:?}")
             }
@@ -2144,15 +1997,12 @@ mod tests {
     /// a usage notice. It is a command, and it is in `/help`.
     #[test]
     fn copy_parses_its_optional_code_selector() {
+        assert!(matches!(parse("/copy"), Outcome::Copy { code_only: false }));
         assert!(matches!(
-            parse("/copy", false),
-            Outcome::Copy { code_only: false }
-        ));
-        assert!(matches!(
-            parse("/copy code", false),
+            parse("/copy code"),
             Outcome::Copy { code_only: true }
         ));
-        match parse("/copy everything please", false) {
+        match parse("/copy everything please") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /copy"), "{notices:?}")
             }
@@ -2160,30 +2010,6 @@ mod tests {
         }
         assert!(HELP.contains("/copy"), "{HELP}");
         assert!(tree().iter().any(|command| command.name == "copy"));
-    }
-
-    /// The completion table and the clap grammar must name the same subcommands, in both
-    /// directions: the table is what the UI completes, the grammar is what runs.
-    #[test]
-    fn the_memory_subcommand_table_matches_the_grammar() {
-        let grammar: Vec<String> =
-            <MemoryCommand as clap::Subcommand>::augment_subcommands(clap::Command::new("memory"))
-                .get_subcommands()
-                .filter(|sub| !sub.is_hide_set())
-                .map(|sub| sub.get_name().to_owned())
-                .collect();
-        for (name, _) in MEMORY_SUBCOMMANDS {
-            assert!(
-                grammar.iter().any(|known| known == name),
-                "`{name}` is in the completion table but not in the grammar: {grammar:?}"
-            );
-        }
-        for name in &grammar {
-            assert!(
-                MEMORY_SUBCOMMANDS.iter().any(|(known, _)| known == name),
-                "`{name}` is in the grammar but not in the completion table"
-            );
-        }
     }
 
     #[test]
@@ -2208,31 +2034,31 @@ mod tests {
     /// verbatim args (quotes survive); an empty name and `/skills` with arguments are notices.
     #[test]
     fn skill_commands_parse() {
-        match parse("/skill:greet hello \"big world\"", false) {
+        match parse("/skill:greet hello \"big world\"") {
             Outcome::Skill { name, args } => {
                 assert_eq!(name, "greet");
                 assert_eq!(args, "hello \"big world\"");
             }
             other => panic!("expected the skill command, got {other:?}"),
         }
-        match parse("/skill:greet", false) {
+        match parse("/skill:greet") {
             Outcome::Skill { name, args } => {
                 assert_eq!(name, "greet");
                 assert!(args.is_empty(), "{args:?}");
             }
             other => panic!("expected the skill command, got {other:?}"),
         }
-        match parse("/skill:", false) {
+        match parse("/skill:") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /skill:"), "{notices:?}")
             }
             other => panic!("expected a usage notice, got {other:?}"),
         }
-        match parse("/skills", false) {
+        match parse("/skills") {
             Outcome::Skills => {}
             other => panic!("expected /skills, got {other:?}"),
         }
-        match parse("/skills now", false) {
+        match parse("/skills now") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /skills"), "{notices:?}")
             }
@@ -2244,8 +2070,8 @@ mod tests {
     /// `/help`; anything after it is a usage notice.
     #[test]
     fn usage_is_a_command_with_no_arguments() {
-        assert!(matches!(parse("/usage", false), Outcome::Usage));
-        match parse("/usage now", false) {
+        assert!(matches!(parse("/usage"), Outcome::Usage));
+        match parse("/usage now") {
             Outcome::Notices(notices) => {
                 assert!(notices[0].contains("usage: /usage"), "{notices:?}")
             }
@@ -2261,17 +2087,17 @@ mod tests {
     /// is in `/help`.
     #[test]
     fn btw_parses_its_question_or_reopens() {
-        match parse("/btw what file was that", false) {
+        match parse("/btw what file was that") {
             Outcome::Btw(Some(question)) => assert_eq!(question, "what file was that"),
             other => panic!("expected the side question, got {other:?}"),
         }
         // The remainder is raw, like `/skill:`'s args: quotes survive shlex.
-        match parse("/btw say \"hi there\"", false) {
+        match parse("/btw say \"hi there\"") {
             Outcome::Btw(Some(question)) => assert_eq!(question, "say \"hi there\""),
             other => panic!("expected the raw question, got {other:?}"),
         }
         for line in ["/btw", "/btw   "] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Btw(None) => {}
                 other => panic!("{line:?}: expected a reopen, got {other:?}"),
             }
@@ -2284,16 +2110,13 @@ mod tests {
     /// notice. It is a command, and it is in `/help`.
     #[test]
     fn context_is_a_command_with_an_optional_all() {
+        assert!(matches!(parse("/context"), Outcome::Context { all: false }));
         assert!(matches!(
-            parse("/context", false),
-            Outcome::Context { all: false }
-        ));
-        assert!(matches!(
-            parse("/context all", false),
+            parse("/context all"),
             Outcome::Context { all: true }
         ));
         for line in ["/context now", "/context all now"] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /context [all]"), "{notices:?}")
                 }
@@ -2377,7 +2200,7 @@ mod tests {
     fn fuzzy_matching_is_a_subsequence_with_prefixes_first() {
         // `/cmp` finds `/compact` (c-m-p in order) ...
         assert!(fuzzy_score("/compact", "cmp").is_some());
-        assert!(fuzzy_score("/memory", "cmp").is_none(), "not a subsequence");
+        assert!(fuzzy_score("/export", "cmp").is_none(), "not a subsequence");
         // ... and a prefix beats a scattered match.
         let prefix = fuzzy_score("/compact", "co").unwrap();
         let scattered = fuzzy_score("/compact", "cpt").unwrap();
@@ -2392,7 +2215,7 @@ mod tests {
         let ranked = rank(
             vec![
                 Candidate {
-                    insert: "/memory".into(),
+                    insert: "/export".into(),
                     description: String::new(),
                     current: false,
                 },
@@ -2410,58 +2233,37 @@ mod tests {
 
     #[test]
     fn the_tree_completes_every_level() {
-        // The command name, and the chain: `/mem fo` completes to `/memory forget` in one step.
-        let completion = complete_in(tree(), "/mem fo", 7).expect("a completion");
+        // The command name, and the chain: `/exp js` completes to `/export json` in one step.
+        let completion = complete_in(tree(), "/exp js", 7).expect("a completion");
         match &completion.level_result {
             Level::Ready(candidates) => {
                 assert_eq!(candidates.len(), 1, "{candidates:?}");
-                assert_eq!(candidates[0].insert, "/memory forget");
+                assert_eq!(candidates[0].insert, "/export json");
             }
             other => panic!("expected candidates, got {other:?}"),
         }
         assert_eq!(completion.range, 0..7);
 
         // A bare partial name completes just the name, leaving the arguments for the next Tab.
-        let completion = complete_in(tree(), "/mem fo", 4).expect("a completion");
+        let completion = complete_in(tree(), "/exp js", 4).expect("a completion");
         assert_eq!(completion.range, 0..4);
         match &completion.level_result {
-            Level::Ready(candidates) => assert_eq!(candidates[0].insert, "/memory"),
+            Level::Ready(candidates) => assert_eq!(candidates[0].insert, "/export"),
             other => panic!("expected candidates, got {other:?}"),
         }
 
-        // Level 1: `/memory`'s subcommand, fuzzy (`/memory fo` → forget).
-        let line = "/memory fo";
+        // Level 1: `/export`'s format, fuzzy (`/export js` → json).
+        let line = "/export js";
         let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
         assert_eq!(completion.level, 1);
         assert_eq!(completion.range, 8..10);
         match &completion.level_result {
             Level::Ready(candidates) => {
                 assert_eq!(candidates.len(), 1, "{candidates:?}");
-                assert_eq!(candidates[0].insert, "forget");
+                assert_eq!(candidates[0].insert, "json");
             }
             other => panic!("expected candidates, got {other:?}"),
         }
-
-        // An empty partial after the space lists the whole level.
-        let line = "/memory ";
-        match complete_in(tree(), line, line.chars().count()).map(|c| c.level_result) {
-            Some(Level::Ready(candidates)) => {
-                assert_eq!(candidates.len(), MEMORY_SUBCOMMANDS.len())
-            }
-            other => panic!("expected the subcommand list, got {other:?}"),
-        }
-
-        // Level 2: the record id needs the host (an effect, never I/O in `update`).
-        let line = "/memory forget ab";
-        let completion = complete_in(tree(), line, line.chars().count()).expect("a completion");
-        assert_eq!(completion.level, 2);
-        assert_eq!(
-            completion.level_result,
-            Level::Needs(Fetch::MemoryRecords {
-                command: "forget".into(),
-                partial: "ab".into(),
-            })
-        );
 
         // `/export`'s first level is the format, its second offers `--force`.
         let line = "/export ";
@@ -2514,14 +2316,6 @@ mod tests {
             other => panic!("expected candidates, got {other:?}"),
         }
     }
-
-    #[test]
-    fn memory_is_disabled_without_a_root() {
-        match parse("/memory list", false) {
-            Outcome::Notices(notices) => assert!(notices[0].contains("disabled")),
-            other => panic!("expected a notice, got {other:?}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2530,12 +2324,12 @@ mod theme_tests {
 
     #[test]
     fn theme_parses_one_name_and_rejects_the_rest() {
-        match parse("/theme light", false) {
+        match parse("/theme light") {
             Outcome::Theme(name) => assert_eq!(name, "light"),
             other => panic!("expected Theme, got {other:?}"),
         }
         for line in ["/theme", "/theme light dark"] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert!(notices[0].contains("usage: /theme"), "{line}: {notices:?}")
                 }
@@ -2575,7 +2369,7 @@ mod theme_tests {
     fn trust_parses_bare_status_and_the_three_writes() {
         for line in ["/trust", "/trust status"] {
             assert!(
-                matches!(parse(line, false), Outcome::Trust(TrustRequest::Status)),
+                matches!(parse(line), Outcome::Trust(TrustRequest::Status)),
                 "{line} is the query"
             );
         }
@@ -2585,12 +2379,12 @@ mod theme_tests {
             ("/trust forget", TrustRequest::Forget),
         ] {
             assert!(
-                matches!(parse(line, false), Outcome::Trust(request) if request == expected),
+                matches!(parse(line), Outcome::Trust(request) if request == expected),
                 "{line}"
             );
         }
         for line in ["/trust nope", "/trust on extra", "/trust status x"] {
-            match parse(line, false) {
+            match parse(line) {
                 Outcome::Notices(notices) => {
                     assert_eq!(
                         notices,
@@ -2639,8 +2433,8 @@ mod theme_tests {
     /// notice, and it is in the registry, the completion menu and `/help`.
     #[test]
     fn quit_parses_with_no_argument_and_completes() {
-        assert!(matches!(parse("/quit", false), Outcome::Quit));
-        match parse("/quit extra", false) {
+        assert!(matches!(parse("/quit"), Outcome::Quit));
+        match parse("/quit extra") {
             Outcome::Notices(notices) => {
                 assert_eq!(notices, ["usage: /quit (no arguments)"]);
             }

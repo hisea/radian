@@ -229,12 +229,11 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
     std::fs::write(home.join(".ssh/id_ed25519"), "FAKE-KEY-NOT-A-REAL-SECRET\n")?;
     std::fs::write(home.join("readable.txt"), "plain\n")?;
     // ADR 0020: a fake `~/.radian/` with its subdirectories, so the matrix can assert
-    // sessions/memory/credentials are unreadable and config/cache are readable. The test
+    // sessions/credentials are unreadable and config/cache are readable. The test
     // only ever reads these through the sandbox (redirected to /dev/null) or not at all.
     let radian_home = home.join(".radian");
     for (dir, file) in [
         ("sessions", "s.jsonl"),
-        ("memory", "m.txt"),
         ("config", "c.toml"),
         ("cache", "cache.txt"),
         ("credentials", "auth.json"),
@@ -242,12 +241,6 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         std::fs::create_dir_all(radian_home.join(dir))?;
         std::fs::write(radian_home.join(dir).join(file), "radian-data\n")?;
     }
-    // ADR 0039 decision 4: the file tools reach the two memory scope directories, but the
-    // sandbox (the shell) has no exception and still denies all of `memory/`. The matrix
-    // creates a scope file so the shell case below shows the scope is denied too, not only
-    // the scope's parent.
-    std::fs::create_dir_all(radian_home.join("memory/global"))?;
-    std::fs::write(radian_home.join("memory/global/x.md"), "radian-data\n")?;
     // ADR 0025 ruling 1: `skills/` is deliberately **not** on the deny list — a skill's body is
     // read by the model and its scripts run inside the sandbox.
     std::fs::create_dir_all(radian_home.join("skills/greet"))?;
@@ -272,7 +265,6 @@ pub fn run_matrix() -> Result<Matrix, SandboxError> {
         policy
             .deny_read(home.join(".ssh"))
             .deny_read(radian_home.join("sessions"))
-            .deny_read(radian_home.join("memory"))
             // ADR 0026 D4: the credential store is denied in every enforced tier.
             .deny_read(radian_home.join("credentials"))
             // ADR 0031 T2: the trust store is denied too.
@@ -883,7 +875,7 @@ impl Rig {
         );
     }
 
-    /// ADR 0020: `~/.radian/sessions` and `~/.radian/memory` are not
+    /// ADR 0020: `~/.radian/sessions` and `~/.radian/credentials` are not
     /// readable; `config` and `cache` are. A sessions directory moved by `--session-dir` is
     /// denied as well. Each case carries the transparent control (which can read everything).
     fn radian_home(&mut self, sandbox: &Sandbox, control: &Sandbox) {
@@ -897,78 +889,6 @@ impl Rig {
             Expect::MustFail,
             &format!("cat {} > /dev/null", q(&radian.join("sessions/s.jsonl"))),
         );
-        self.sh_case(
-            sandbox,
-            control,
-            g,
-            "memory_unreadable",
-            Expect::MustFail,
-            &format!("cat {} > /dev/null", q(&radian.join("memory/m.txt"))),
-        );
-        // ADR 0039 decision 4: the memory scope directories are a **file-tool** exception
-        // only. The sandbox has none, so a shell command cannot read a scope file either.
-        self.sh_case(
-            sandbox,
-            control,
-            g,
-            "memory_scope_unreadable",
-            Expect::MustFail,
-            &format!("cat {} > /dev/null", q(&radian.join("memory/global/x.md"))),
-        );
-        // ADR 0021 invariant 5: a sandboxed `shell` cannot change the memory store. The
-        // denylist is unchanged; only the model's own file tools reach it, through the
-        // permission profile and the coding tools' file roots (ADR 0039 decision 4). The
-        // case measures the **real** store seen from this process,
-        // not the command's exit status: on Linux a write into a `deny_read` directory
-        // succeeds inside the sandbox and lands in the masking tmpfs (LIMITS.md), while
-        // macOS refuses it outright. The control (no sandbox) proves the command itself can
-        // create the file; its file is removed before the sandboxed run.
-        let store_write = radian.join("memory/shell-write.txt");
-        let script = format!("printf x > {}", q(&store_write));
-        let _ = std::fs::remove_file(&store_write);
-        let control_run = run_shell(control, &script);
-        let control_succeeded = store_write.is_file();
-        let _ = std::fs::remove_file(&store_write);
-        let sandbox_run = run_shell(sandbox, &script);
-        let reached_store = store_write.is_file();
-        let _ = std::fs::remove_file(&store_write);
-        self.record(
-            g,
-            "memory_write_does_not_reach_store",
-            Expect::MustFail,
-            Outcome {
-                succeeded: reached_store,
-                detail: format!(
-                    "real store changed: {reached_store}; sandbox command succeeded: {}; {}",
-                    sandbox_run.succeeded, sandbox_run.detail
-                ),
-            },
-            Outcome {
-                succeeded: control_succeeded,
-                detail: control_run.detail,
-            },
-            "",
-        );
-        // The model's `write`/`patch` calls are **not** a sandbox matter: the file tools run
-        // in the host process, outside any sandbox. The permission profile allows the two
-        // memory scope directories in both tiers (ADR 0012) and `radian-coding`'s file roots
-        // decide whether a call reaches the file (ADR 0039 §4); the sandbox denylist is
-        // unchanged. Recorded as SKIP so the matrix documents the boundary it does not test.
-        self.record(
-            g,
-            "memory_write_tool_is_not_a_sandbox_matter",
-            Expect::MustSucceed,
-            Outcome {
-                succeeded: true,
-                detail: String::new(),
-            },
-            Outcome {
-                succeeded: true,
-                detail: String::new(),
-            },
-            "the `write`/`patch` tools run in the host process; the permission profile and the coding tools' file roots decide them, not the sandbox",
-        )
-        .skip = Some("the file tools never enter the sandbox".into());
         // ADR 0026 D4: `credentials/auth.json` is denied; the control (FullAccess) reads it,
         // so the denial is the sandbox, not a missing file.
         self.sh_case(
@@ -982,7 +902,7 @@ impl Rig {
                 q(&radian.join("credentials/auth.json"))
             ),
         );
-        // ADR 0031 T2 / ADR 0020: `trust/` is denied like sessions, memory and
+        // ADR 0031 T2 / ADR 0020: `trust/` is denied like sessions and
         // credentials; the control (FullAccess) reads it, so the denial is the sandbox.
         self.sh_case(
             sandbox,
@@ -993,7 +913,7 @@ impl Rig {
             &format!("cat {} > /dev/null", q(&radian.join("trust/trust.json"))),
         );
         // ADR 0025 ruling 1 / ADR 0020: `skills/` joins config and cache on the
-        // readable side; only sessions, memory, credentials and trust are denied.
+        // readable side; only sessions, credentials and trust are denied.
         self.sh_case(
             sandbox,
             control,

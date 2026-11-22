@@ -68,7 +68,6 @@ fn tone_of(name: &str) -> CtxTone {
     match name {
         "system prompt" => CtxTone::System,
         "context files" => CtxTone::Files,
-        "memory" => CtxTone::Memory,
         "tool definitions" => CtxTone::Tools,
         "skills" => CtxTone::Skills,
         "MCP tools" => CtxTone::Mcp,
@@ -408,7 +407,7 @@ fn detail_header(rows: &mut Vec<Row>, title: &str, hint: Option<&str>) {
     rows.push(absolutize(&text, pieces));
 }
 
-/// The detail rows below the grid: context files, MCP, skills, memory, and
+/// The detail rows below the grid: context files, MCP, skills, and
 /// the message/compaction count.
 fn detail_rows(view: &ContextView) -> Vec<Row> {
     let report = &view.report;
@@ -449,10 +448,6 @@ fn detail_rows(view: &ContextView) -> Vec<Row> {
     let line = skills_line(details);
     rows.push(absolutize(&line, vec![(line.clone(), MdStyle::Muted, 0)]));
     rows.push(Row::blank());
-    detail_header(&mut rows, "memory", Some(" · /memory"));
-    let line = memory_line(details);
-    rows.push(absolutize(&line, vec![(line.clone(), MdStyle::Muted, 0)]));
-    rows.push(Row::blank());
     let last = format!(
         "{} messages · {} this session",
         report.message_count,
@@ -476,14 +471,6 @@ fn skills_line(details: &Details) -> String {
         "{} · {}",
         plural(details.skills_count, "skill", "skills"),
         format_tokens(details.skills_tokens)
-    )
-}
-
-fn memory_line(details: &Details) -> String {
-    format!(
-        "{} records · {}",
-        details.memory_records,
-        format_tokens(details.memory_tokens)
     )
 }
 
@@ -807,7 +794,6 @@ mod tests {
         let categories = [
             ("system prompt", 1_900),
             ("context files", 3_600),
-            ("memory", 800),
             ("tool definitions", 2_900),
             ("skills", 700),
             ("MCP tools", 1_400),
@@ -827,10 +813,10 @@ mod tests {
                     share: 0.0,
                 })
                 .collect(),
-            total_tokens: 62_600,
+            total_tokens: 61_800,
             window: Some(200_000),
             threshold: Some(180_000),
-            free_tokens: Some(117_400),
+            free_tokens: Some(118_200),
             buffer_tokens: Some(20_000),
             reported: Some(59_270),
             message_count: 58,
@@ -848,8 +834,6 @@ mod tests {
                 mcp_servers: 1,
                 mcp_tools_count: 16,
                 mcp_tools_tokens: 1_400,
-                memory_records: 4,
-                memory_tokens: 800,
             },
         }
     }
@@ -886,7 +870,7 @@ mod tests {
     #[test]
     fn a_tiny_category_keeps_one_cell() {
         let mut report = sample_report();
-        report.categories[4].tokens = 1; // skills: a single token
+        report.categories[3].tokens = 1; // skills: a single token
         let alloc = allocate(&report).expect("a windowed report allocates");
         let skills = alloc
             .shares
@@ -960,7 +944,6 @@ mod tests {
         let expected = [
             ("system prompt", CtxTone::System),
             ("context files", CtxTone::Files),
-            ("memory", CtxTone::Memory),
             ("tool definitions", CtxTone::Tools),
             ("skills", CtxTone::Skills),
             ("MCP tools", CtxTone::Mcp),

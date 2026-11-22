@@ -15,7 +15,6 @@ members = [
     "crates/radian-sandbox",
     "crates/radian-tui",
     "crates/radian-permissions",
-    "crates/radian-memory",
     "third_party/grok-mermaid",
 ]
 

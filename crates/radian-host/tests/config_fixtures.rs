@@ -391,58 +391,30 @@ fn the_minimal_fixture_mcp_server_is_wired() {
         config.skipped
     );
 }
-/// `memory.toml` (ADR 0021 D6): the five `[memory]` keys are read; the injected
-/// configuration is the documented default for anything the file leaves out.
+/// `memory.toml`: an old config that still carries `[memory]` (persistent memory was removed,
+/// ADR 0021). The table is a retired key: it parses, warns once (`memory`) and is ignored,
+/// never an error, and everything else in the file still reads.
 #[test]
-fn the_memory_keys_are_read() {
+fn an_old_memory_table_warns_once_and_is_ignored() {
     let (path, text) = fixture("memory.toml");
     let config = config::parse(&path, &text).unwrap();
-    assert_eq!(config.memory.enabled, Some(true));
-    assert_eq!(
-        config.memory.scopes.as_deref(),
-        Some(&["project".to_owned(), "global".to_owned()][..])
-    );
-    assert_eq!(config.memory.index_max_lines, Some(200));
-    assert_eq!(config.memory.index_max_bytes, Some(25600));
-    assert_eq!(config.memory.sessions_index_max_lines, Some(1000));
-    let injection = config.memory.injection();
-    assert!(injection.enabled);
-    assert_eq!(injection.scopes, ["project", "global"]);
-    assert_eq!(injection.index_max_lines, 200);
-    assert_eq!(injection.index_max_bytes, 25600);
-    assert_eq!(injection.sessions_index_max_lines, 1000);
-    assert!(config.skipped.is_empty(), "{:?}", config.skipped);
+    assert_eq!(config.skipped, ["memory"], "{:?}", config.skipped);
+    assert_eq!(config.model.model.as_deref(), Some("m-1"));
 }
 
-/// The retired `[memory.injection]` table: every key is named once and ignored (ADR 0008
-/// migration), never refused, and the new keys keep their defaults.
+/// Whatever an old file put under `[memory]` — retired keys, the retired `[memory.injection]`
+/// table, a wrong type, a non-table — is one warning and never a refusal.
 #[test]
-fn the_retired_injection_keys_warn_and_are_ignored() {
+fn no_old_memory_shape_refuses_the_file() {
     let path = PathBuf::from("retired-memory.toml");
-    let config = config::parse(
-        &path,
+    for text in [
         "schema_version = 1\n[memory.injection]\nmax_tokens = 1000\nglobal_budget = 1\n",
-    )
-    .unwrap();
-    assert_eq!(config.memory, config::MemoryConfig::default());
-    assert_eq!(config.skipped.len(), 2, "{:?}", config.skipped);
-    assert!(
-        config
-            .skipped
-            .iter()
-            .any(|line| line.contains("memory.injection.max_tokens")
-                && line.contains("index_max_lines")),
-        "{:?}",
-        config.skipped
-    );
-    assert!(
-        config
-            .skipped
-            .iter()
-            .any(|line| line.contains("memory.injection.global_budget")),
-        "{:?}",
-        config.skipped
-    );
+        "schema_version = 1\n[memory]\nenabled = 3\nscopes = \"x\"\nindex_max_lines = 0\n",
+        "schema_version = 1\nmemory = 3\n",
+    ] {
+        let config = config::parse(&path, text).unwrap_or_else(|error| panic!("{text}: {error}"));
+        assert_eq!(config.skipped, ["memory"], "{text}: {:?}", config.skipped);
+    }
 }
 
 /// The minimal fixture carries the known `tui.mouse` preference (`false`): the reader keeps

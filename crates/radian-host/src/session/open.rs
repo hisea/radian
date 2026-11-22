@@ -15,14 +15,9 @@ use radian_sandbox::{Sandbox, SandboxSlot};
 use super::facade::{DriverEnd, SessionError};
 use super::local::{DriverTask, LocalSession};
 use super::setup_types::{ApprovalRouting, HostBindings, SessionFacts, SessionQueue, SessionSetup};
-use super::support::{
-    FileRoots, build_coding_tools, memory_notice, open_journal, resumed_memory_off, session_hooks,
-};
+use super::support::{FileRoots, build_coding_tools, open_journal, session_hooks};
 use crate::describe::{describe, sandbox_word};
 use crate::home::{agents_skills_dir, radian_home, skills_dir, user_home};
-use crate::memory::{
-    MemoryHooks, MemoryInjection, MemoryService, MemoryTouch, MemoryWriteGuard, settled_calls,
-};
 use crate::pending::{PendingQueue, QueuedApprover, QueuedPrompter};
 use crate::skills::tools::SkillTools;
 use crate::skills::{self, SkillsHooks};
@@ -49,7 +44,7 @@ pub async fn open_session(
         runtime_events,
         driver_stopped,
         before_driver,
-        memory_warning,
+        session_warning,
         hooks_warning,
         wake_warning,
         notice_lost_warning,
@@ -78,13 +73,11 @@ pub async fn open_session(
         access_builder,
         parent,
         subagent: subagent_parts,
-        memory_root,
         skills_extra_paths,
         skills_builtin,
         skills_disabled,
         tools_allow,
         skills_allow,
-        memory_injection,
         subtree_files,
         hooks: hooks_config,
         project_hooks: project_hooks_config,
@@ -109,11 +102,11 @@ pub async fn open_session(
     // ADR 0036: read the startup project context files once, here. They are workspace input, so
     // they never enter the journal; only the loaded paths and sizes go into the snapshot. A
     // subtree file discovered later is read on first use and appended as an ordinary message.
-    // The section is appended after the host's base prompt (layer 1) and before the skills/memory
-    // hooks (layer 3).
+    // The section is appended after the host's base prompt (layer 1) and before the skills
+    // hook (layer 3).
     let context = crate::context::load(&workspace, radian_home().as_deref());
     for warning in &context.warnings {
-        memory_warning(warning);
+        session_warning(warning);
     }
     let mut config_snapshot = config_snapshot;
     if !context.is_empty()
@@ -178,20 +171,6 @@ pub async fn open_session(
             Arc::new(QueuedPrompter::new(Arc::clone(&queue), origin.clone()));
         radian_coding::AskTools::new(prompter)
     });
-    let injection_config = memory_injection;
-    let memory = memory_root
-        .as_ref()
-        .map(|root| MemoryService::open(&workspace, root));
-    // ADR 0021 D5/D6, ADR 0036 1m: the rules block is gated like the index section. Without a
-    // memory root there is no directory to name, so the block stays out too.
-    let memory_rules = crate::prompt::memory_rules(injection_config.enabled && memory.is_some());
-    // ADR 0021 D3/D4: the memory aging hook. It is built whenever memory is on, from the
-    // same scope directories the file tools receive.
-    let memory_touch = memory
-        .as_ref()
-        .map(|service| MemoryTouch::new(service, Arc::clone(&memory_warning)));
-    let memory_notice = memory_notice(&memory, &injection_config);
-    radian_session::trace::took("open/memory", t0);
     let mcp_server_configs = servers.clone();
     let mcp = McpToolProvider::new(servers);
     let mcp_configured = mcp.configured();
@@ -253,16 +232,6 @@ pub async fn open_session(
         )
     };
     radian_session::trace::took("open/journal", t0);
-    // ADR 0021 invariant 4: the write guards. The resume half waits for the MCP session to
-    // open, because only then are the tools it routes known (`HostTools::open_session`); a
-    // name no server provides never counts, whatever its journaled result.
-    let memory_guard = memory
-        .as_ref()
-        .map(|service| MemoryWriteGuard::new(service, false));
-    let resume_calls = parsed
-        .as_ref()
-        .map(|parsed| settled_calls(parsed.events()))
-        .unwrap_or_default();
     // ADR 0027: the journal records each call's fee, computed at the
     // price in force when the call ran, so a resume does not have to re-price history with
     // whatever the catalog says later. The writer asks this closure per usage record; it
@@ -301,7 +270,7 @@ pub async fn open_session(
         subtree_context,
         Arc::clone(&inbox),
         Arc::clone(&journal),
-        Arc::clone(&memory_warning),
+        Arc::clone(&session_warning),
         subtree_files,
     ));
 
@@ -309,8 +278,7 @@ pub async fn open_session(
     // runs before the coding tools are built so their read-only roots include each
     // discovered skill's directory (ADR 0039 decision 4): the same set discovery loads, so an
     // untrusted project's skills are never roots (ADR 0031 T1). The section is appended
-    // after the memory section, so the tuple below is ((perm, memory), skills) and the
-    // prompt order is basic prompt, memory, skills (ADR 0025 S6).
+    // after the base prompt (ADR 0025 S6).
     let skills = {
         // The two user levels first (`$RADIAN_HOME/skills`, then the Agent Skills standard
         // `$HOME/.agents/skills`), then `[skills] extra_paths`, then the trusted project's
@@ -327,7 +295,7 @@ pub async fn open_session(
             &skills_disabled,
         );
         for warning in &discovery.warnings {
-            memory_warning(warning);
+            session_warning(warning);
         }
         // The session's skill allow-list keeps only the named skills in this session's catalog.
         // `None` is every discovered skill.
@@ -365,13 +333,6 @@ pub async fn open_session(
         .map(|skill| skill.dir.clone())
         .collect();
     let file_deny_read = crate::home::file_tool_deny_read(&session_dir);
-    // ADR 0039 decision 4: the two memory scope directories are the file tools' writable
-    // roots. A read never registers a project, so an unlinked workspace passes `global/`
-    // only; the memory deny entry above stays for the sandbox (the shell).
-    let memory_scope_dirs = memory
-        .as_ref()
-        .map(MemoryService::file_tool_roots)
-        .unwrap_or_default();
     let (coding, jobs) = build_coding_tools(
         coding_root.as_deref(),
         sandbox_slot.clone(),
@@ -379,7 +340,6 @@ pub async fn open_session(
         harden_git,
         FileRoots {
             skill_dirs: &skill_dirs,
-            memory_scope_dirs: &memory_scope_dirs,
             deny_read: &file_deny_read,
         },
         image_support,
@@ -392,7 +352,7 @@ pub async fn open_session(
     if resume && let Some(jobs) = jobs.as_ref() {
         let summary = jobs.sweep_unregistered();
         if let Some(error) = summary.first_error.as_deref() {
-            memory_warning(&format!(
+            session_warning(&format!(
                 "could not sweep the jobs directory {}: {error}",
                 jobs_dir.display()
             ));
@@ -453,25 +413,8 @@ pub async fn open_session(
         hooks: Arc::downgrade(&command_hooks),
         inner: runtime_events,
     });
-    // Skills (ADR 0025 S1): discovery is best effort — a bad skill warns and is skipped. The
-    // section is appended after the memory section, so the tuple below is ((perm, memory),
-    // skills) and the prompt order is basic prompt, memory, skills (ADR 0025 S6).
+    // Skills (ADR 0025 S1): the section is appended after the base prompt (ADR 0025 S6).
     let skills_hooks = Arc::new(SkillsHooks::new(&shared_skills));
-    // ADR 0021 D6: one injection object per session. The section is computed once per process
-    // (by whichever of the hook or a read-only host shape runs first), the hook sends any
-    // rewrite notice on the inject lane, and the first call writes the `MemoryInjected` record.
-    let injection = MemoryInjection::new(
-        memory.clone(),
-        injection_config,
-        memory_warning,
-        Some(Arc::clone(&journal)),
-        Some(Arc::clone(&inbox)),
-    );
-    // A resumed `/memory off` starts this process with no section and no memory writes.
-    if parsed.as_ref().is_some_and(resumed_memory_off) {
-        injection.set_off(true);
-    }
-    let memory_hooks = Arc::new(MemoryHooks::from_shared(Arc::clone(&injection)));
     radian_session::trace::took("open/hooks+skills", t0);
     let spec_sink: std::sync::Arc<std::sync::Mutex<Option<Vec<radian_core::ToolSpec>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -484,14 +427,7 @@ pub async fn open_session(
     }
     let mut tools = HostTools::new(coding, mcp.clone())
         .with_tool_allow(tools_allow)
-        .with_spec_sink(std::sync::Arc::clone(&spec_sink))
-        .with_resume_calls(resume_calls);
-    if let Some(touch) = memory_touch {
-        tools = tools.with_memory_touch(touch);
-    }
-    if let Some(guard) = memory_guard {
-        tools = tools.with_memory_guard(guard);
-    }
+        .with_spec_sink(std::sync::Arc::clone(&spec_sink));
     // ADR 0047: the persistent goal. Folded once from the journal at open (a resume parks
     // an active goal as paused); the `goal` tool, the prompt hook and the TUI share the
     // result, and every change is journaled first so the fold always rebuilds it.
@@ -533,7 +469,7 @@ pub async fn open_session(
     }
     // ADR 0036: the system prompt is assembled from layers. 0a <runtime> carries
     // the tier/sandbox facts; 1 <role> is the role
-    // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/memory/goal
+    // prompt (or `--system`); 2 is the context files; 3 is appended by the skills/goal
     // hooks; 0b <session> is appended last by its own hook, so the static prefix stays cacheable.
     let model_name = config_snapshot
         .get("model")
@@ -557,20 +493,17 @@ pub async fn open_session(
     let system_prompt = Some(crate::prompt::assemble(
         &runtime_layer,
         &role_layer,
-        memory_rules,
         &context.section,
     ));
     let role_hooks = Arc::new(crate::prompt::RoleHooks::new(
         &runtime_layer,
-        memory_rules,
         &context.section,
         role_override,
     ));
     let goal_hooks = Arc::new(crate::goal::GoalHooks::new(Arc::clone(&goal_share)));
     // The exact base the hook chain writes (layers 0a, 1 and 2): the side-question
     // shape rebuilds the prompt from it, so the bytes match the formal request.
-    let role_base =
-        crate::prompt::assemble(&runtime_layer, &role_layer, memory_rules, &context.section);
+    let role_base = crate::prompt::assemble(&runtime_layer, &role_layer, &context.section);
     let agent_config = AgentConfig {
         system_prompt,
         context_budget,
@@ -599,7 +532,6 @@ pub async fn open_session(
                 Arc::clone(&role_hooks),
                 Arc::clone(&hooks),
                 Arc::clone(&command_hooks),
-                Arc::clone(&memory_hooks),
                 Arc::clone(&skills_hooks),
                 Arc::clone(&goal_hooks),
                 Arc::clone(&facts_hooks),
@@ -781,8 +713,6 @@ pub async fn open_session(
         profile_line,
         sandbox_facts,
         sandbox_word,
-        memory_notice,
-        memory_enabled: memory.is_some(),
         mcp_configured,
         mcp_open,
         // The **actual** registration, not the host's request: the startup line must not claim
@@ -792,11 +722,11 @@ pub async fn open_session(
         context_files: context.files.clone(),
     };
     // The `/context` estimate inputs: the system layers split so the categories
-    // add up (base is everything except the context section and the memory
-    // index section, which are counted separately), the per-file blocks, the skills
+    // add up (base is everything except the context section, which is counted
+    // separately), the per-file blocks, the skills
     // listing, and the session facts. Read-only; the loop reads them while a
     // turn runs.
-    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, memory_rules, "");
+    let system_base_prefix = crate::prompt::assemble(&runtime_layer, &role_layer, "");
     let skills_section = skills_hooks.section().to_owned();
     let skills_count = shared_skills
         .iter()
@@ -832,7 +762,6 @@ pub async fn open_session(
         idle,
         projection,
         queue,
-        memory,
         skills: shared_skills,
         goal: goal_share,
         job_notifier,
@@ -847,7 +776,6 @@ pub async fn open_session(
         context_blocks,
         skills_section,
         skills_count,
-        memory_injection: Arc::clone(&injection),
         context_budget,
         window_context,
         mcp_servers: mcp_server_configs,

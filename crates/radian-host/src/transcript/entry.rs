@@ -171,7 +171,7 @@ pub enum EntryKind {
     /// The project trust line under the wordmark (ADR 0031 T3).
     TrustHint,
     /// A startup safety line (an unavailable sandbox, an unsandboxed MCP, an unknown window, a
-    /// memory/config warning): it is **never** folded away.
+    /// config warning): it is **never** folded away.
     Warning,
     /// The one-line `Tip: …` under the startup block.
     Tip,

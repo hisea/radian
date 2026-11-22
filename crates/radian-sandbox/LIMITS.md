@@ -94,7 +94,7 @@ Linux VM 验证恢复时一并做。
   沙箱探测失败即拒绝切换，绝不降级**（与启动路径同一条硬规则）。
 - 每次切换写一条 `ConfigChanged {access}`，resume 时恢复会话当时的档位。
 - 按项目记住的档位在 `~/.radian/access/access.json`（以项目身份作键），**沙箱禁读**，
-  与 `trust/`、`sessions/`、`memory/`、`credentials/` 同类。仓库里的任何文件都不能设置它。
+  与 `trust/`、`sessions/`、`credentials/` 同类。仓库里的任何文件都不能设置它。
 
 ## 后端与策略
 
@@ -178,7 +178,7 @@ worktree 指针文件及其共享 common dir 也照旧），成本只多一次 `
 | normal_use | 工作区内写回读；工作区外只读 | ✅ | ✅ |
 | git_readonly | `ReadOnly`（默认，任务 agent 与未点名放宽的宿主）：写 `.git/hooks`、`.git/config`、`.git/info`、`git config core.hooksPath`、`git add`、worktree 指针、共享 gitdir、经符号链接写共享 `.git` 全部被拒；`git status`/`git log` 可用 | 8 拒 + 2 可 | 8 拒 + 2 可 |
 | sensitive_read | 假 `~/.ssh/id_ed25519` 打开失败（只断言 exit，不读内容）；普通文件可读 | ✅ | ✅ |
-| radian_home | `~/.radian/sessions/<file>`、`~/.radian/memory/<file>`、一个 memory scope 目录内的文件、`~/.radian/credentials/auth.json`、与 `~/.radian/trust/trust.json` 读失败；沙箱内的 `shell` 写 `memory/` 不会改变真实目录；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 7 拒 + 3 可（+1 跳过） | 3 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
+| radian_home | `~/.radian/sessions/<file>`、`~/.radian/credentials/auth.json`、与 `~/.radian/trust/trust.json` 读失败；`config/<file>`、`cache/<file>` 与 `skills/<dir>/SKILL.md` 可读；`--session-dir` 指向的目录也读失败 | 7 拒 + 3 可（+1 跳过） | 3 拒 + 2 可（`skills_readable`/`trust_unreadable` 待 VM 恢复后补跑） |
 | deny_inside_workspace | 会话目录在工作区**里面**（如 `--session-dir ./sessions`）允许构建；该子目录读失败，工作区其余部分可读可写 | 1 拒 + 2 可 | 1 拒 + 2 可 |
 | mcp_stdio | 最小 stdio MCP（initialize / tools/list / tools/call echo）可用 | ✅ | ✅ |
 | signals | 给自己的子进程、孙进程发信号可以；给沙箱外同用户进程发信号被拒 | 2 可 + 1 拒 | 2 可 + 1 拒 |

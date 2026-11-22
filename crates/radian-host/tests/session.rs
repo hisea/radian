@@ -165,13 +165,11 @@ async fn open_with_records(
             access_builder: None,
             parent: None,
             subagent: None,
-            memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
             tools_allow: None,
             skills_allow: None,
-            memory_injection: radian_host::memory::InjectionConfig::default(),
             subtree_files: true,
             hooks: Default::default(),
             project_hooks: Default::default(),
@@ -195,7 +193,7 @@ async fn open_with_records(
             driver_stopped: Arc::new(|_| {}),
             ask_user: false,
             before_driver: None,
-            memory_warning: Arc::new(|_message: &str| {}),
+            session_warning: Arc::new(|_message: &str| {}),
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),
@@ -240,18 +238,18 @@ async fn a_local_session_refuses_a_command_it_does_not_declare() {
     drop(scratch);
 }
 
-/// ADR 0021 D5/D6, ADR 0036: the memory rules block is gated on a memory root, not only on
-/// `[memory] enabled`. A session opened without a root (the default here) carries no memory
-/// sentence in its base prompt.
+/// ADR 0021 (removed), ADR 0036: a new session's system prompt has no memory section: neither
+/// the rules block nor an index section.
 #[tokio::test]
-async fn a_session_without_a_memory_root_has_no_memory_block() {
-    let (scratch, session) = observe_only("no-memory-root").await;
+async fn a_new_sessions_system_prompt_has_no_memory_section() {
+    let (scratch, session) = observe_only("no-persistent-notes").await;
     let request = session.next_request_shape().expect("a request shape");
     let system = request.system_prompt.unwrap_or_default();
     assert!(
-        !system.contains("Write a memory file after the user corrects you"),
-        "a session with no memory root carries the rules block: {system}"
+        !system.contains("Write a memory file"),
+        "the base prompt carries the memory rules: {system}"
     );
+    assert!(!system.contains("<memory>"), "{system}");
     assert!(!system.contains("## Memory indexes"), "{system}");
 
     session.stop();
@@ -325,13 +323,11 @@ async fn a_local_session_accepts_a_declared_command() {
             access_builder: None,
             parent: None,
             subagent: None,
-            memory_root: None,
             skills_extra_paths: Vec::new(),
             skills_builtin: true,
             skills_disabled: Vec::new(),
             tools_allow: None,
             skills_allow: None,
-            memory_injection: radian_host::memory::InjectionConfig::default(),
             subtree_files: true,
             hooks: Default::default(),
             project_hooks: Default::default(),
@@ -355,7 +351,7 @@ async fn a_local_session_accepts_a_declared_command() {
             driver_stopped: Arc::new(|_| {}),
             ask_user: false,
             before_driver: None,
-            memory_warning: Arc::new(|_message: &str| {}),
+            session_warning: Arc::new(|_message: &str| {}),
             hooks_warning: Arc::new(|_message: &str| {}),
             wake_warning: Arc::new(|_message: &str| {}),
             notice_lost_warning: Arc::new(|_message: &str| {}),

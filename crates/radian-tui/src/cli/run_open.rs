@@ -27,7 +27,7 @@ pub(super) struct SessionInputs {
     pub(super) runtime_events: std::sync::Arc<dyn radian_runtime::RuntimeEvents>,
     pub(super) driver_stopped: std::sync::Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync>,
     pub(super) before_driver: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-    pub(super) memory_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    pub(super) session_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     pub(super) hooks_warning: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
     /// A wake-budget degrade's notice line: one transcript notice per burst, plus the
     /// herdr `wake budget` block while the notices wait.
@@ -44,9 +44,6 @@ pub(super) struct SessionInputs {
     /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), empty
     /// when untrusted. Loaded once trust is resolved, like the project `.mcp.json`.
     pub(super) project_hooks: radian_host::config::HooksConfig,
-    /// Where the memory service lives (`None` when no RADIAN_HOME/HOME): the session
-    /// shares it with the agent's tools and injection.
-    pub(super) memory_root: Option<PathBuf>,
 }
 
 /// `run()`'s input phase: the sandbox (and its deny-read list), the `/access` rebuild
@@ -75,12 +72,11 @@ pub(super) fn build_session_inputs(
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
     // The tier and its source were resolved above (ADR 0038 decision 3).
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
-    // the memory directory (plus the credential, trust and remembered-tier stores, ADR 0026 D4 / ADR 0031
+    // the other private directories (the credential, trust and remembered-tier stores, ADR 0026 D4 / ADR 0031
     // T2 / ADR 0038 decision 3). The shared helper builds that list — the same list the file tools deny in the
     // `full` tier — so the two can never differ (ADR 0039 decision 4). The directories were
     // created owner-only before the terminal was entered (`ensure_private_dir` above);
     // Linux's bwrap can only mask paths that exist.
-    let memory_root = radian_host::memory_dir();
     let sandbox_deny_read = radian_host::file_tool_deny_read(dir);
     let sandbox = radian_tui::profile::build_sandbox(
         tier,
@@ -104,7 +100,6 @@ pub(super) fn build_session_inputs(
         let deny_read = sandbox_deny_read.clone();
         let sockets = allow_unix_sockets.to_vec();
         let allow_env = config.sandbox.allow_env.clone();
-        let memory_root = memory_root.clone();
         std::sync::Arc::new(move |preset: radian_permissions::Preset| {
             radian_tui::profile::build_access(
                 preset,
@@ -113,7 +108,6 @@ pub(super) fn build_session_inputs(
                 &deny_read,
                 &sockets,
                 &allow_env,
-                memory_root.as_deref(),
             )
         })
     };
@@ -126,7 +120,7 @@ pub(super) fn build_session_inputs(
     // process starts and before a session file exists, so a bad file leaves nothing
     // behind (dogfooding D2). They merge with the project `.mcp.json` below, after trust
     // is resolved (the project file needs the decision). The MCP provider itself, the
-    // memory service and the coding tools are built by `radian_host::open_session`
+    // coding tools are built by `radian_host::open_session`
     // (ADR 0023 U5).
     let mcp_file = match &cli.mcp_config {
         Some(path) => load_mcp_config(path)?,
@@ -175,7 +169,6 @@ pub(super) fn build_session_inputs(
         workspace_path,
         &cli.allow_shell_command,
         sandbox.as_ref(),
-        memory_root.as_deref(),
     )?
     .with_approval(startup_approval.policy);
 
@@ -273,20 +266,19 @@ pub(super) fn build_session_inputs(
     let before_driver: Option<Arc<dyn Fn() + Send + Sync>> = cli
         .panic_in_driver
         .then(|| Arc::new(panic_in_driver) as Arc<dyn Fn() + Send + Sync>);
-    // ADR 0021: a memory line the user must see goes into the transcript as a
-    // notice instead of stderr, which the fullscreen UI would draw over. That rule covers a
-    // warning too: it fires both at startup (a malformed context file, a bad skill) and
-    // mid-turn (a failed memory read), and on the `--pick` path the startup ones would land on
-    // the alternate screen.
-    let memory_warning: Arc<dyn Fn(&str) + Send + Sync> = {
+    // A session warning the user must see goes into the transcript as a notice instead of
+    // stderr, which the fullscreen UI would draw over. It fires both at startup (a malformed
+    // context file, a bad skill) and mid-turn, and on the `--pick` path the startup ones would
+    // land on the alternate screen.
+    let session_warning: Arc<dyn Fn(&str) + Send + Sync> = {
         let tx = tx.clone();
         Arc::new(move |message: &str| {
             let _ = tx.send(UiEvent::Command(AppInput::SessionDone(vec![format!(
-                "radian: [memory] {message}"
+                "radian: [session] {message}"
             )])));
         })
     };
-    // ADR 0045: command-hook warnings ride the same UI channel as memory warnings, with
+    // ADR 0045: command-hook warnings ride the same UI channel as session warnings, with
     // the `[hooks]` prefix (both fire mid-turn, when stderr would draw over the screen).
     let hooks_warning: Arc<dyn Fn(&str) + Send + Sync> = {
         let tx = tx.clone();
@@ -396,7 +388,7 @@ pub(super) fn build_session_inputs(
             runtime_events,
             driver_stopped,
             before_driver,
-            memory_warning,
+            session_warning,
             hooks_warning,
             wake_warning,
             intent_stop_warning,
@@ -404,7 +396,6 @@ pub(super) fn build_session_inputs(
             notice_lost_warning,
             trust_setup,
             project_hooks,
-            memory_root,
         },
         control_guard,
     ))
@@ -442,7 +433,7 @@ pub(super) fn open_session_and_refresh(
         runtime_events,
         driver_stopped,
         before_driver,
-        memory_warning,
+        session_warning,
         hooks_warning,
         wake_warning,
         intent_stop_warning,
@@ -450,7 +441,6 @@ pub(super) fn open_session_and_refresh(
         notice_lost_warning,
         trust_setup,
         project_hooks,
-        memory_root,
         access_builder,
         ..
     } = inputs;
@@ -517,7 +507,6 @@ pub(super) fn open_session_and_refresh(
                 }),
                 tools_allow: None,
                 project_hooks,
-                memory_root,
                 trust: trust_setup,
                 resume: resume.is_some(),
                 // The effective startup route (a `/new` carry resolves here like a flag),
@@ -547,7 +536,7 @@ pub(super) fn open_session_and_refresh(
                 runtime_events,
                 driver_stopped,
                 before_driver,
-                memory_warning,
+                session_warning,
                 hooks_warning,
                 wake_warning,
                 intent_stop_warning,

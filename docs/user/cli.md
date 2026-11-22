@@ -221,40 +221,6 @@ radian logout anthropic
 radian logout opencode-go team
 ```
 
-## `radian memory`
-
-`radian memory` runs the same grammar as the `/memory` slash command.
-Needs no model, no key, no session file, no network.
-`--workspace <DIR>` resolves the project against another directory.
-
-| Command | Arguments and flags | What it does |
-|---|---|---|
-| `list` | `--global`, `--project`, `--json` | One line per file (scope, name, type, source, modified, description), project first then global. `--json` prints the frontmatter objects. An unreadable file is one `unreadable` line with its reason. |
-| `show` | `--global`, `--project`, `--json`, `NAME` | Print one file's frontmatter and body as stored; `--json` prints `frontmatter` and `body`. |
-| `stale` | `--days DAYS` (default `30`), `--global`, `--project`, `--json` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`; `DAYS` is an integer of 1 or more. Reads the memory files only. |
-| `add` | `--global`, `--type user\|feedback\|project\|reference` (default `user`), `NAME` | Create the file (empty body, `source: user`, `created`, `modified`), append its index line, and open it. A git workspace registers itself on first write. A bad or existing name exits 2 and writes nothing. |
-| `edit` | `--global`, `NAME` | Open an existing file. |
-| `forget` | `--global`, `--yes`, `NAME` | Delete the file and its index line, after confirmation. |
-| `open` | `--global`, `--project` | Print the scope directory. |
-| `project` | `--json`, `project new` | Show project identity and state, or register this workspace as a project. |
-| `relink` | `PROJECT_ID` | Attach this workspace identity key to an existing project. |
-| `split` | `--yes`, `FROM`, `TO`, `NAME...` | Move files and their index lines between projects, after confirmation. |
-| `merge` | `--yes`, `INTO`, `FROM` | Merge one project into another, after confirmation. A name in both is renamed `<name>-2` and reported. |
-
-`--global` and `--project` conflict except where both are absent (the default scope).
-`list`, `show`, `stale`, and `project` accept `--json` for machine output.
-`forget`, `split`, and `merge` ask for confirmation unless `--yes` is passed.
-Exit `0` on success, `1` for a missing file or an I/O failure, `2` for bad use, a bad or
-existing `add` name, or a removed command (which names the current set).
-`archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not exist.
-See `memory` for the frontmatter fields, scopes and confirmation rules.
-
-```sh
-radian memory add style --type user
-radian memory open --global
-radian memory list --json
-```
-
 ## `radian trust`
 
 `radian trust` shows or changes a directory's project trust decision.
@@ -351,7 +317,6 @@ hooks: Run your own commands when a tool runs, the model stops, a turn fails, or
 index: What radian is and where every radian manual page lives.
 keybindings: Every key in the full screen interface, by area, and how to rebind it.
 mcp: Add local model servers over standard input and output.
-memory: Save durable memory as Markdown files, and the commands that manage them.
 permissions: Permission tiers, trust, approval, and sandbox behavior.
 pi-migration: Draft a Radian configuration from a Pi agent directory.
 providers: Store keys, choose a provider and model, and control request options.
@@ -404,7 +369,7 @@ panic and without an error line.
 |---|---|
 | `0` | Success: the turn completed, the view printed, the draft saved. |
 | `1` | The run failed: a model or turn error, a failed sandbox probe target, a missing record, a refused write. |
-| `2` | Bad use or refused setup: clap usage errors, a bad configuration, an unknown keybinding, a startup refusal, a reserved subcommand, an unknown `docs` topic or footer preset, a bad `memory` invocation. |
+| `2` | Bad use or refused setup: clap usage errors, a bad configuration, an unknown keybinding, a startup refusal, a reserved subcommand, an unknown `docs` topic or footer preset. |
 | `3` | The budget ran out: `BudgetExceeded` or a exceeded deadline. |
 | `4` | The answer is unfinished: `Incomplete` (a truncated answer that could not continue, a content-filtered answer, an unknown stop reason) or `Refused`. A truncated answer with no tool calls continues the turn after a fixed notice, and ends it here only when two truncated answers in a row already came before it; an answer with tool calls continues without a notice, counts toward that streak, and never ends it by itself. See [a truncated answer](#a-truncated-answer). |
 | `101` | The app panicked. A crash log lands under `~/.radian/cache/diagnostics`. |

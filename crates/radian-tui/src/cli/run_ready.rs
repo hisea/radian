@@ -267,13 +267,11 @@ pub(super) fn wire_post_open(
     }
 }
 
-/// Everything the event loop runs with: the entered terminal, the session's memory
-/// service and the recovered transcript. One struct so `run()` threads a name, not
-/// three locals.
+/// Everything the event loop runs with: the entered terminal, the recovered
+/// transcript. One struct so `run()` threads a name, not several locals.
 pub(super) struct TerminalReady {
     pub(super) guard: radian_tui::terminal::TtyGuard,
     pub(super) terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
-    pub(super) memory_service: Option<radian_host::memory::MemoryService>,
     pub(super) history: Vec<radian_core::Message>,
     /// The queue-change forwarder for this session, aborted when the session ends.
     pub(super) queue_wake: tokio::task::JoinHandle<()>,
@@ -378,7 +376,6 @@ pub(super) fn enter_terminal_and_history(
         }
         panic!("radian: panic path test with a background job in flight");
     }
-    let memory_service = session.memory().cloned();
     // The history of a resumed session is rendered before the first frame, so the transcript
     // shows it from the start. `open_session` already recovered exactly this transcript
     // (`radian_core::recover` over the same journal records `Session::history` folds), so the
@@ -389,7 +386,6 @@ pub(super) fn enter_terminal_and_history(
     Ok(TerminalReady {
         guard,
         terminal,
-        memory_service,
         history,
         queue_wake,
     })

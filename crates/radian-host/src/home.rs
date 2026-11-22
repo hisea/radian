@@ -1,4 +1,4 @@
-//! The `~/.radian/` layout (ADR 0020): one root for config, cache, sessions, memory and
+//! The `~/.radian/` layout (ADR 0020): one root for config, cache, sessions and
 //! themes (ADR 0029 decision 1).
 //!
 //! `RADIAN_HOME` overrides the whole root (tests, special deployments); otherwise it is
@@ -51,9 +51,6 @@ pub fn cache_dir_for(root: &Path) -> PathBuf {
 }
 pub fn sessions_dir_for(root: &Path) -> PathBuf {
     root.join("sessions")
-}
-pub fn memory_dir_for(root: &Path) -> PathBuf {
-    root.join("memory")
 }
 pub fn credentials_dir_for(root: &Path) -> PathBuf {
     root.join("credentials")
@@ -113,11 +110,6 @@ pub fn sessions_dir() -> Option<PathBuf> {
     Some(private(sessions_dir_for(&radian_home()?)))
 }
 
-/// The memory directory for this process, created 0700. **Sandbox-denied** (ADR 0020).
-pub fn memory_dir() -> Option<PathBuf> {
-    Some(private(memory_dir_for(&radian_home()?)))
-}
-
 /// The credentials directory for this process, created 0700. **Sandbox-denied** (ADR 0026
 /// D4): it holds `auth.json`, which the sandbox must not read.
 pub fn credentials_dir() -> Option<PathBuf> {
@@ -162,7 +154,7 @@ pub fn catalog_cache() -> Option<PathBuf> {
 }
 
 /// The list the sandbox policy and the file tools' `full`-tier deny set share (ADR 0039
-/// decision 4): the actual sessions directory plus `memory/`, `credentials/`, `trust/`,
+/// decision 4): the actual sessions directory plus `credentials/`, `trust/`,
 /// `access/` under `$RADIAN_HOME` (ADR 0020's unreadable directories, ADR 0026 D4,
 /// ADR 0031 T2, ADR 0038 decision 3). A host builds its sandbox deny-read list from
 /// this and passes the same list to the coding tools as their file-tool deny set. One
@@ -170,9 +162,6 @@ pub fn catalog_cache() -> Option<PathBuf> {
 /// Each entry is created owner-only first (0700), so Linux's bwrap can mask it.
 pub fn file_tool_deny_read(session_dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![session_dir.to_path_buf()];
-    if let Some(memory) = memory_dir() {
-        out.push(memory);
-    }
     if let Some(credentials) = credentials_dir() {
         out.push(credentials);
     }
@@ -284,10 +273,6 @@ mod tests {
         assert_eq!(
             sessions_dir_for(root),
             PathBuf::from("/home/u/.radian/sessions")
-        );
-        assert_eq!(
-            memory_dir_for(root),
-            PathBuf::from("/home/u/.radian/memory")
         );
         assert_eq!(
             credentials_dir_for(root),

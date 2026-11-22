@@ -807,7 +807,7 @@ fn body_spans(
     first_text: bool,
 ) -> Vec<Span<'static>> {
     let mut out = Vec::with_capacity(4);
-    // A structured notice's **first** line (`profile: …`, `[memory] …`) steps the label up
+    // A structured notice's **first** line (`profile: …`, `[mcp] …`) steps the label up
     // with the accent role and keeps the body on pi's secondary level (ADR 0028,
     // decision). Only the first: a wrapped continuation that happens to contain a colon
     // (`https://…`, `12:30`, a `path:line`) is prose, not a label.
@@ -928,7 +928,6 @@ fn md_style(style: blocks::MdStyle, body_style: Style, theme: &Theme) -> Style {
         blocks::MdStyle::Ctx(tone) => match tone {
             blocks::CtxTone::System => theme.ctx_system,
             blocks::CtxTone::Files => theme.ctx_files,
-            blocks::CtxTone::Memory => theme.ctx_memory,
             blocks::CtxTone::Tools => theme.ctx_tools,
             blocks::CtxTone::Skills => theme.ctx_skills,
             blocks::CtxTone::Mcp => theme.ctx_mcp,

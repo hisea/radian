@@ -52,7 +52,6 @@ pub const DOCS: &[(&str, &str)] = &[
         include_str!("../../../docs/user/keybindings.md"),
     ),
     ("mcp.md", include_str!("../../../docs/user/mcp.md")),
-    ("memory.md", include_str!("../../../docs/user/memory.md")),
     (
         "permissions.md",
         include_str!("../../../docs/user/permissions.md"),

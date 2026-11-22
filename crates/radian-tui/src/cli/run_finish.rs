@@ -60,8 +60,6 @@ pub(super) fn build_startup_screen(
             }
         });
     }
-    // `/memory` runs against the same service the agent's tools and injection use.
-    app.set_memory_enabled(session.facts().memory_enabled);
     // ADR 0047: the TUI shares the host's folded goal (a resume parks an active goal as
     // paused); the `goal` tool and the prompt hook advance the same state.
     app.set_goal(session.goal());
@@ -116,14 +114,9 @@ pub(super) fn build_startup_screen(
         .budget
         .map_or_else(|| "unknown".to_string(), |b| b.to_string());
     let mut summary = format!(
-        "{}{} · {sandbox_word} · context {budget} · memory {} · ask_user {}",
+        "{}{} · {sandbox_word} · context {budget} · ask_user {}",
         tier.as_str(),
         access_source.suffix(),
-        if session.facts().memory_enabled {
-            "on"
-        } else {
-            "off"
-        },
         if session.facts().ask_user {
             "on"
         } else {
@@ -171,7 +164,6 @@ pub(super) fn build_startup_screen(
     if let Some(line) = &workspace_line {
         startup_lines.push(line.clone());
     }
-    startup_lines.push(session.facts().memory_notice.clone());
     startup_lines.push(session.facts().ask_user_line());
     // ADR 0026 D9: the startup line names the auto policy whichever way it was chosen.
     if startup_approval.policy == radian_permissions::ApprovalPolicy::Auto {
@@ -315,7 +307,6 @@ pub(super) fn run_loop_and_teardown(
     session: radian_host::LocalSession,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut guard: radian_tui::terminal::TtyGuard,
-    memory_service: &Option<radian_host::memory::MemoryService>,
     workspace_path: &Path,
     provider_name: &str,
     model_name: &str,
@@ -373,7 +364,6 @@ pub(super) fn run_loop_and_teardown(
             runtime,
             session: &facade,
             host: &session_host,
-            memory: memory_service,
             command_hooks: Some(session.command_hooks()),
         },
         (provider_name.to_owned(), model_name.to_owned()),

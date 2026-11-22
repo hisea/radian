@@ -80,16 +80,12 @@ pub(crate) async fn open_host_session(
     let profile_arg = setup.profile;
     let workspace_path = setup.workspace.clone();
     // ADR 0020 decision 3: the sandbox denies read on the **actual** sessions directory and
-    // the memory directory. Create them owner-only first so Linux's bwrap (which can only mask
-    // paths that exist) can hide them. The shared helper builds that list — the same list
+    // the other private directories. Create them owner-only first so Linux's bwrap (which can
+    // only mask paths that exist) can hide them. The shared helper builds that list — the same list
     // the file tools deny in the `full` tier — so the two can never differ (ADR 0039
     // decision 4).
     let sessions_for_deny = super::inspect::session_dir(cli)?;
     let _ = radian_host::ensure_private_dir(&sessions_for_deny);
-    // ADR 0021: the memory root is under `~/.radian/` (ADR 0020), sandbox-denied, and the
-    // service is the same one `radian memory` uses. `None` only when neither `RADIAN_HOME` nor
-    // `HOME` is set; then memory is simply off for this run.
-    let memory_root = radian_host::memory_dir();
     let sandbox_deny_read = radian_host::file_tool_deny_read(&sessions_for_deny);
     // ADR 0016: the whitelisted Unix sockets (resolved in `setup`).
     let sandbox = profile::build_sandbox(
@@ -106,13 +102,6 @@ pub(crate) async fn open_host_session(
         sandbox.as_ref(),
     )?
     .with_approval(setup.approval.policy);
-    // ADR 0012 / ADR 0021 invariant 5: with memory on, `write` and `patch` reach the two
-    // memory scope directories without a prompt in every tier. `memory_root` is `None` only
-    // when neither `RADIAN_HOME` nor `HOME` is set, and then memory is off.
-    let permission_profile = match &memory_root {
-        Some(root) => permission_profile.with_memory_root(root),
-        None => permission_profile,
-    };
 
     // The audit sink is a channel whose drain task is spawned once the session (and its
     // journal) exists.
@@ -279,7 +268,6 @@ pub(crate) async fn open_host_session(
             subagent: Some(subagent_parts),
             tools_allow,
             project_hooks,
-            memory_root,
             trust: trust_setup,
             resume: cli.resume.is_some(),
             config_snapshot: serde_json::json!({
@@ -318,7 +306,7 @@ pub(crate) async fn open_host_session(
             runtime_events,
             driver_stopped,
             before_driver: None,
-            memory_warning: Arc::new(|message: &str| eprintln!("[memory] {message}")),
+            session_warning: Arc::new(|message: &str| eprintln!("[session] {message}")),
             hooks_warning: Arc::new(|message: &str| eprintln!("[hooks] {message}")),
             wake_warning: Arc::new(|message: &str| eprintln!("[wake] {message}")),
             notice_lost_warning: Arc::new(|message: &str| eprintln!("[lost] {message}")),
@@ -429,7 +417,6 @@ pub(crate) async fn open_host_session(
         ),
         None => eprintln!("[budget] {}; {compaction}", setup.window.describe()),
     }
-    eprintln!("{}", session.facts().memory_notice);
     // ADR 0024 Q5: the line host has no interactive user, so `ask_user` is not registered
     // there; a host with a client (the ACP surface) registers it.
     eprintln!("{}", session.facts().ask_user_line());

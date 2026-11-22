@@ -64,8 +64,6 @@ fn main_does_not_establish_a_session() {
         "Driver::open",
         "Inbox::durable",
         "McpToolProvider::new",
-        "MemoryService::open",
-        "MemoryTools::new",
         "PermissionHooks::new",
         "HostTools::new",
     ] {

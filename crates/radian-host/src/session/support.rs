@@ -1,13 +1,13 @@
 //! Session support (ADR 0022, ADR 0025 S6, ADR 0039 decision 1): the hook chain
-//! ([`session_hooks`]), the journal open, the coding-tool build, the memory notice, and
-//! the resume readers ([`resumed_model_route`], [`resumed_access`]).
+//! ([`session_hooks`]), the journal open, the coding-tool build, and the
+//! resume readers ([`resumed_model_route`], [`resumed_access`]).
 //!
 //! Split from `session/mod.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use radian_coding::{CodingTools, DenySet, MemoryRoots, ReadRoots};
+use radian_coding::{CodingTools, DenySet, ReadRoots};
 use radian_core::Hooks;
 use radian_permissions::{PermissionHooks, Preset};
 #[cfg(test)]
@@ -17,39 +17,33 @@ use radian_session::{ForkParent, SessionCreatedData, SessionJournal};
 
 use super::facade::SessionError;
 use super::ids::SessionId;
-use crate::memory::{InjectionConfig, MemoryHooks, MemoryService, ProjectState};
 use crate::skills::SkillsHooks;
 use crate::trust;
 
 /// The agent's hook chain (ADR 0025 S6, ADR 0045, ADR 0047): the role hook writes layers
 /// 0a, 1 and 2 first, then the permission rules run, then the user-level command hooks (which
-/// can only narrow what permissions already allowed), then the memory section is appended,
-/// then the skills section, then the goal block (the context area's deterministic goal state),
+/// can only narrow what permissions already allowed), then the skills section, then the goal block (the context area's deterministic goal state),
 /// and finally the volatile `<session>` facts. The order is a promise — the role layer comes
-/// first, and the sections must be deterministic with memory before skills before goal — so it
+/// first, and the sections must be deterministic with skills before goal — so it
 /// lives in this one function, which `open_session` calls; `tests/skills_order.rs` pins it and
-/// `tests/command_hooks.rs` pins the command hooks after permissions. Swapping `memory` and
-/// `skills` here is the mutation that `skills_order` catches; moving `commands` before
+/// `tests/command_hooks.rs` pins the command hooks after permissions. Swapping `skills` and
+/// `goal` here is the mutation that `skills_order` catches; moving `commands` before
 /// `permissions` is the one `command_hooks` catches.
 #[allow(clippy::too_many_arguments)]
 pub fn session_hooks(
     role: Arc<crate::prompt::RoleHooks>,
     permissions: Arc<PermissionHooks>,
     commands: Arc<crate::CommandHooks>,
-    memory: Arc<MemoryHooks>,
     skills: Arc<SkillsHooks>,
     goal: Arc<crate::goal::GoalHooks>,
     facts: Arc<crate::prompt::SessionFactsHooks>,
     context: Arc<crate::context::ContextHooks>,
 ) -> impl Hooks {
-    // The order is the promise: the role layers, permissions, commands, memory, skills,
+    // The order is the promise: the role layers, permissions, commands, skills,
     // goal, then the volatile <session> facts, then the subtree context hook (ADR 0025 S6,
     // ADR 0036, ADR 0045, ADR 0047).
     (
-        (
-            (((((role, permissions), commands), memory), skills), goal),
-            facts,
-        ),
+        (((((role, permissions), commands), skills), goal), facts),
         context,
     )
 }
@@ -103,14 +97,12 @@ pub(super) fn open_journal(
 }
 
 /// The host inputs that decide which paths outside the workspace the file tools reach
-/// (ADR 0039 decision 4): the skill roots, the memory scope directories, and the deny-read
+/// (ADR 0039 decision 4): the skill roots and the deny-read
 /// list the sandbox policy shares. One struct keeps [`build_coding_tools`]'s parameter list
 /// inside the lint's bound.
 pub(super) struct FileRoots<'a> {
     /// The discovered skill directories (project skills only when trusted).
     pub(super) skill_dirs: &'a [PathBuf],
-    /// The memory scopes this session may read and write.
-    pub(super) memory_scope_dirs: &'a [PathBuf],
     /// The sandbox's deny-read list, shared with the file tools' `full`-tier deny set.
     pub(super) deny_read: &'a [PathBuf],
 }
@@ -125,21 +117,16 @@ pub(super) fn build_coding_tools(
 ) -> Result<(Option<CodingTools>, Option<Arc<radian_coding::Jobs>>), SessionError> {
     let FileRoots {
         skill_dirs,
-        memory_scope_dirs,
         deny_read,
     } = roots;
     match workspace {
         Some(dir) => {
             // ADR 0039 decision 4: the file tools' read-only roots are the cargo and toolchain
             // sources plus each discovered skill's directory (project skills only when
-            // trusted — the same set discovery loads); their writable roots are the memory
-            // scopes the service passed. Their `full`-tier deny set is the host's deny-read
-            // list, the same source the sandbox policy uses, with the memory scopes as its one
-            // documented exception — the sandbox itself keeps denying all of `memory/`.
+            // trusted — the same set discovery loads). Their `full`-tier deny set is the
+            // host's deny-read list, the same source the sandbox policy uses.
             let read_roots = ReadRoots::from_env_and_skills(skill_dirs);
-            let memory_roots = MemoryRoots::from_dirs(memory_scope_dirs);
-            let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read)
-                .allowing(&memory_roots);
+            let deny = DenySet::from_home_and_extra(crate::home::user_home(), deny_read);
             // The slot decides whether `shell` exists: an empty slot means no shell
             // advertised, a non-empty one is a sandbox the shell can run under. The
             // tool set is fixed here at `open_session`; a later switch to a *narrower* tier
@@ -148,22 +135,15 @@ pub(super) fn build_coding_tools(
             // except the deny set at every call, `workspace` keeps outside paths to the
             // roots (ADR 0039 decision 4).
             let tools = if sandbox.is_some() {
-                CodingTools::with_sandbox_slot_and_roots(
-                    dir,
-                    sandbox,
-                    read_roots,
-                    memory_roots,
-                    deny,
-                )
-                .map_err(|error| {
-                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
-                })?
-            } else {
-                CodingTools::with_roots_and_deny(dir, read_roots, memory_roots, deny).map_err(
+                CodingTools::with_sandbox_slot_and_access(dir, sandbox, read_roots, deny).map_err(
                     |error| {
                         SessionError::Message(format!("--workspace {}: {error}", dir.display()))
                     },
                 )?
+            } else {
+                CodingTools::with_read_roots_and_deny(dir, read_roots, deny).map_err(|error| {
+                    SessionError::Message(format!("--workspace {}: {error}", dir.display()))
+                })?
             };
             // ADR 0039 decision 1: the jobs directory is the **session's own** directory, in
             // the sessions dir the sandbox already denies reading. It is created 0700 with the
@@ -191,44 +171,6 @@ pub(super) fn build_coding_tools(
         }
         None => Ok((None, None)),
     }
-}
-
-pub(super) fn memory_notice(memory: &Option<MemoryService>, config: &InjectionConfig) -> String {
-    let budget = format!(
-        "index caps {} lines / {} bytes",
-        config.index_max_lines, config.index_max_bytes
-    );
-    match memory {
-        Some(_) if !config.enabled => {
-            "[memory] injection off ([memory] enabled = false)".to_owned()
-        }
-        Some(service) => match service.state() {
-            Ok(ProjectState::Known(project)) => {
-                format!("[memory] project {project}; {budget}")
-            }
-            Ok(ProjectState::Unlinked { .. }) => format!(
-                "[memory] no project linked; global memory only (run `radian memory project new` \
-                 or `radian memory relink <ProjectId>`); {budget}"
-            ),
-            Err(error) => format!("[memory] unavailable: {error}"),
-        },
-        None => "[memory] disabled (no RADIAN_HOME or HOME)".to_owned(),
-    }
-}
-
-/// The `/memory off` switch a **resume** restores (ADR 0021 D7): the last `ConfigChanged`
-/// whose change carries `memory.off`. `false` when the journal has none.
-pub(super) fn resumed_memory_off(parsed: &radian_session::Session) -> bool {
-    let mut off = false;
-    for event in parsed.events() {
-        if let radian_session::EventData::ConfigChanged { change, .. } = &event.data
-            && let Some(value) = change.get("memory").and_then(|memory| memory.get("off"))
-            && let Some(value) = value.as_bool()
-        {
-            off = value;
-        }
-    }
-    off
 }
 
 /// The model route a **resume** would restore (ADR 0026 D8): the journal's last model
@@ -306,7 +248,6 @@ mod tests {
             false,
             FileRoots {
                 skill_dirs: &[],
-                memory_scope_dirs: &[],
                 deny_read: &[],
             },
             radian_coding::images_allowed(),

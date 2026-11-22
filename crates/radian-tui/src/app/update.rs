@@ -169,7 +169,6 @@ impl App {
             Input::CompletionsReady { fetch, candidates } => {
                 self.completions_ready(fetch, candidates)
             }
-            Input::MemoryCommandDone(result) => self.memory_command_done(result),
             Input::CompactDone(result) => self.compact_done(result),
             Input::BashDone {
                 command,
@@ -764,7 +763,7 @@ impl App {
                 }
                 _ => None,
             },
-            // The `/logout` confirmation is hardcoded like the `/memory` one (ADR 0023 U4).
+            // The `/logout` confirmation is hardcoded like the `/model` one (ADR 0023 U4).
             Modal::ConfirmLogout(_) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Some(Input::ConfirmLogout(true)),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -1003,13 +1002,6 @@ impl App {
                 // An image attachment alone is a message too (`@` needs text, a dropped path
                 // does not).
                 if text.trim().is_empty() && self.composer_images.is_empty() {
-                    // ADR 0035: with nothing to send, `Enter` opens the newest memory card.
-                    // Never while a turn runs, and never for a `read` line (it has no card).
-                    if self.turn() != TurnState::Running
-                        && let Some(path) = self.newest_memory_card()
-                    {
-                        return UpdateResult::effect(Effect::OpenMemory { path });
-                    }
                     return UpdateResult::dirty();
                 }
                 // Every submitted line (messages and `//` escapes and `/…` commands) joins the

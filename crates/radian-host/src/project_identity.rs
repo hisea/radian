@@ -1,11 +1,11 @@
-//! Project identity (ADR 0021 D2): the **git common dir** of the repository containing the
-//! workspace, or the workspace's canonical path when it is not in a repository. Pure Rust:
-//! no `git` process is ever spawned.
+//! Project identity: the **git common dir** of the repository containing the workspace, or the
+//! workspace's canonical path when it is not in a repository. Pure Rust: no `git` process is
+//! ever spawned. The `/access` record is keyed by it (ADR 0038 decision 3).
 //!
-//! The rule is what makes two worktrees of one repository share a `ProjectId`: a normal
-//! repository's `.git` is a directory and *is* the common dir; a worktree's `.git` is a file
-//! whose `gitdir:` points at `<common>/worktrees/<name>`, and the `commondir` file there
-//! names the common dir. Both resolve to the same canonical path.
+//! The rule is what makes two worktrees of one repository share a key: a normal repository's
+//! `.git` is a directory and *is* the common dir; a worktree's `.git` is a file whose `gitdir:`
+//! points at `<common>/worktrees/<name>`, and the `commondir` file there names the common dir.
+//! Both resolve to the same canonical path.
 
 use std::path::{Path, PathBuf};
 
@@ -25,52 +25,21 @@ use std::path::{Path, PathBuf};
 /// The workspace is canonicalized first, so a symlinked workspace and its target share one
 /// key. This function never fails: an unreadable path falls back rather than erroring.
 pub fn project_identity_key(workspace: &Path) -> PathBuf {
-    resolve(workspace).0
+    resolve(workspace)
 }
 
-/// The repository root that contains `workspace`: the directory holding the nearest `.git`
-/// (a directory or a linked-worktree file), canonicalized. `None` outside a repository. The
-/// session index's workspace column is relative to this root (ADR 0021 D3).
-///
-/// Unlike [`project_identity_key`], a linked worktree's root is the worktree directory itself,
-/// not the shared common dir: the index records the workspace the session ran in.
-pub fn repository_root(workspace: &Path) -> Option<PathBuf> {
-    let start = canonical(workspace);
-    let mut dir = start.as_path();
-    loop {
-        let dot_git = dir.join(".git");
-        if let Ok(meta) = std::fs::symlink_metadata(&dot_git)
-            && (meta.is_dir() || meta.is_file())
-        {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-/// Whether the identity key comes from a git repository rather than the workspace path. This
-/// is what makes a directory a **project workspace** (ADR 0021): only such a
-/// workspace has a project a default-scope write may register. `false` for the fallbacks of
-/// [`project_identity_key`] — no `.git` above the workspace, or a `.git` file with no usable
-/// `gitdir:` pointer — because there the key is the workspace path itself.
-pub fn is_git_identity(workspace: &Path) -> bool {
-    resolve(workspace).1
-}
-
-/// `(identity key, key comes from git)`: the shared body of [`project_identity_key`] and
-/// [`is_git_identity`], so the two cannot disagree about what was found.
-fn resolve(workspace: &Path) -> (PathBuf, bool) {
+fn resolve(workspace: &Path) -> PathBuf {
     let start = canonical(workspace);
     let mut dir = start.as_path();
     loop {
         let dot_git = dir.join(".git");
         match std::fs::symlink_metadata(&dot_git) {
             // A normal repository: `.git` itself is the common dir.
-            Ok(meta) if meta.is_dir() => return (canonical(&dot_git), true),
+            Ok(meta) if meta.is_dir() => return canonical(&dot_git),
             // A worktree (or a submodule): the pointer names the common dir.
             Ok(meta) if meta.is_file() => {
                 if let Some(common) = common_dir_from_gitfile(&dot_git) {
-                    return (common, true);
+                    return common;
                 }
                 break;
             }
@@ -81,29 +50,7 @@ fn resolve(workspace: &Path) -> (PathBuf, bool) {
             None => break,
         }
     }
-    (start, false)
-}
-
-/// The name two identity keys are compared by when looking for candidate projects
-/// (ADR 0021 D2: "同名仓库"). It is the final path component, except that a git common dir
-/// (the final component `.git`) is named by its parent directory — the repository name. So a
-/// moved repository still matches its old project, and all worktrees of one repository match
-/// each other, while the key itself stays the full common-dir path.
-pub fn candidate_name(identity_key: &str) -> String {
-    let path = Path::new(identity_key);
-    let last = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if last == ".git" {
-        path.parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or(last)
-            .to_owned()
-    } else {
-        last.to_owned()
-    }
+    start
 }
 
 fn common_dir_from_gitfile(dot_git: &Path) -> Option<PathBuf> {
@@ -154,7 +101,7 @@ mod tests {
     use super::*;
 
     fn scratch(label: &str) -> crate::test_support::TempDir {
-        crate::test_support::TempDir::with_label("radian-memory-id", label)
+        crate::test_support::TempDir::with_label("radian-project-identity", label)
     }
 
     fn git_available() -> bool {
@@ -368,41 +315,6 @@ mod tests {
             let reported = std::fs::canonicalize(reported.trim()).unwrap();
             assert_eq!(project_identity_key(workspace), reported);
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn candidate_names_use_the_repository_directory_for_a_common_dir() {
-        assert_eq!(candidate_name("/x/y/radian/.git"), "radian");
-        assert_eq!(candidate_name("/x/y/other/.git"), "other");
-        assert_eq!(candidate_name("/x/y/plain"), "plain");
-    }
-
-    /// Only a key that came from git marks a **project workspace** (ADR 0021): the
-    /// workspace path itself is the fallback, and there no write may register a project.
-    #[test]
-    fn only_a_git_identity_is_a_project_workspace() {
-        let dir = scratch("git-identity");
-        let repo = dir.join("repo");
-        let nested = repo.join("a");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        assert!(is_git_identity(&repo));
-        assert!(
-            is_git_identity(&nested),
-            "a subdirectory is in the repository"
-        );
-
-        let plain = dir.join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-        assert!(!is_git_identity(&plain));
-
-        // A `.git` file without a usable `gitdir:` pointer falls back to the workspace path,
-        // so the key is not a git identity either.
-        let broken = dir.join("broken");
-        std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(broken.join(".git"), "not a pointer\n").unwrap();
-        assert!(!is_git_identity(&broken));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

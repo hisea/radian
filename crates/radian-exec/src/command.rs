@@ -1,18 +1,14 @@
-//! The management commands (`radian memory`, `radian config import-pi`): the
+//! The management commands (`radian trust`, `radian config import-pi`, `radian login`): the
 //! subcommand grammar and the dispatch that runs before any model, key, session file or
-//! network exists (ADR 0008, ADR 0021 D7).
+//! network exists (ADR 0008).
 //!
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use radian_host::memory::MemoryService;
-use radian_host::memory::commands::{self, CommandError, MemoryCommand};
 use radian_host::resolve_workspace;
 
-use super::trust::confirm_or_refuse;
-use super::{Cli, OutputError, finish};
+use super::{Cli, CommandError, OutputError, finish};
 
 /// The `--format` value for `--export`. `Default` is the clap default (`markdown`), so the
 /// library's `Cli::default()` matches what the parser produces when the flag is absent.
@@ -28,11 +24,6 @@ pub(crate) enum ExportFormat {
 /// variant, not the field that stores it.
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
-    /// Manage durable memory.
-    Memory {
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
     /// Show or change a directory's project trust decision. Needs no model, no key, no
     /// session file, no network.
     Trust {
@@ -120,10 +111,6 @@ pub enum ConfigCommand {
         #[arg(long)]
         write: bool,
     },
-}
-
-pub(crate) fn run_memory(cli: &Cli, command: MemoryCommand) -> i32 {
-    finish(memory_command(cli, command))
 }
 
 pub(crate) fn run_trust(cli: &Cli, command: TrustCommand) -> i32 {
@@ -339,47 +326,4 @@ fn trust_command(cli: &Cli, command: TrustCommand) -> Result<(), OutputError> {
             Ok(())
         }
     }
-}
-
-/// Runs one `radian memory` subcommand. Deliberately before `setup`: no model, no key, no
-/// session file, no network. The grammar and the execution live in
-/// `radian_host::memory::commands`, shared byte-for-byte with the TUI's `/memory`.
-fn memory_command(cli: &Cli, command: MemoryCommand) -> Result<(), OutputError> {
-    let workspace = resolve_workspace(cli.workspace.as_deref().map(std::path::Path::new))
-        .map_err(CommandError::usage)?;
-    let root = radian_host::memory_dir()
-        .ok_or_else(|| CommandError::usage("no RADIAN_HOME or HOME to place memory under"))?;
-    let service = MemoryService::open(&workspace, root);
-
-    let edits = matches!(
-        command,
-        MemoryCommand::Add { .. } | MemoryCommand::Edit { .. }
-    );
-    let json = command.json();
-    let confirmed = command.yes();
-    let first = commands::execute(&service, command.clone(), confirmed, json)?;
-    let output = match (&first.needs_confirmation, confirmed) {
-        (Some(prompt), false) => {
-            confirm_or_refuse(prompt)?;
-            commands::execute(&service, command, true, json)?
-        }
-        _ => first,
-    };
-    if let Some(note) = &output.note {
-        eprintln!("{note}");
-    }
-    radian_host::write_stdout(&output.text)?;
-    if let Some(path) = &output.open {
-        if edits && std::io::stdin().is_terminal() {
-            radian_host::memory::open_path(path, true).map_err(|error| {
-                CommandError::failure(format!("cannot open {}: {error}", path.display()))
-            })?;
-        } else if edits {
-            radian_host::write_stdout(&format!(
-                "not a terminal: no editor was opened; the file is {}\n",
-                path.display()
-            ))?;
-        }
-    }
-    Ok(())
 }

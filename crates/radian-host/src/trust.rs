@@ -574,7 +574,7 @@ pub fn has_project_resources(workspace: &Path) -> bool {
 
 /// The canonical form of `path`: symlinks resolved, `.`/`..` removed. Falls back to the path
 /// as given when it cannot be canonicalized (a path that does not exist yet), matching
-/// `memory::identity`'s rule. Public so the trigger and a caller's own display agree.
+/// `project_identity`'s rule. Public so the trigger and a caller's own display agree.
 pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

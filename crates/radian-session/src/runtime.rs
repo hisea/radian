@@ -535,11 +535,6 @@ pub(crate) struct SessionForkedData<'a> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct MemoryIndexesData<'a> {
-    pub indexes: &'a [MemoryInjectedIndex],
-}
-
-#[derive(Serialize)]
 pub(crate) struct ContextFileAppendedData<'a> {
     pub path: &'a str,
     pub bytes: usize,

@@ -51,7 +51,7 @@ fn open_fold(label: &str, id: &str, lines: &[String]) -> (Scratch, PathBuf, Atta
     let scratch = Scratch::new(label);
     let path = scratch.file(&format!("{id}.jsonl"));
     std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
-    let fold = AttachFold::open(&path, None).expect("the fold opens");
+    let fold = AttachFold::open(&path).expect("the fold opens");
     (scratch, path, fold)
 }
 

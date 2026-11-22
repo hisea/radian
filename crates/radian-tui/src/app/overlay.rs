@@ -14,7 +14,7 @@ pub enum Tier {
     /// Never above a [`Modal`].
     Overlay,
     /// A prompt that needs an explicit answer before it goes away: the approval prompt, the
-    /// `/memory` confirmation, and (extension point, not implemented) a structured question.
+    /// `/model` confirmation, and (extension point, not implemented) a structured question.
     /// Always above every [`Overlay`].
     Modal,
 }
@@ -88,7 +88,7 @@ pub enum Modal {
     /// A tool call waiting for `y`/`a`/`n`. The keys are hardcoded (ADR 0023 U4, invariant 2).
     /// Boxed, like the question: the two payloads are much larger than the confirmation's.
     Approval(Box<PendingApproval>),
-    /// A `/memory` write waiting for `y`/`n`. Also hardcoded.
+    /// A `/model` switch waiting for `y`/`n`. Also hardcoded.
     ConfirmCommand(PendingCommand),
     /// A structured question (ADR 0024 Q7). Its keys are the rebindable `form` layer, so it is
     /// the one modal whose input goes through the keymap. Boxed: the form is much larger than
@@ -99,7 +99,7 @@ pub enum Modal {
     /// question.
     Login(Box<LoginWizard>),
     /// A `/logout` confirmation: the provider whose stored credential would be removed.
-    /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/memory` confirmation.
+    /// `y` removes, `n`/`Esc` keeps — hardcoded, like the `/model` confirmation.
     ConfirmLogout(String),
     /// A `/logout` choice among several keys (ADR 0026 D3): each key named and masked, plus
     /// `all`.

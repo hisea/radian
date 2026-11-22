@@ -1,11 +1,6 @@
-//! The startup trust question and the management-command confirmation (ADR 0031 T3,
-//! ADR 0021 D7): the one-line terminal shapes around trust and destructive commands.
+//! The startup trust question (ADR 0031 T3): the one-line terminal shape around trust.
 //!
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
-
-use std::io::{IsTerminal, Write};
-
-use radian_host::memory::commands::CommandError;
 
 use super::ui::LineHub;
 
@@ -92,27 +87,6 @@ pub(crate) fn trust_choice_from_answer(answer: &str) -> radian_host::trust::Choi
         "4" => Choice::TrustSession,
         "6" => Choice::UntrustSession,
         _ => Choice::UntrustHere,
-    }
-}
-
-/// The confirmation for `forget`/`purge`/`split`/`merge` (ADR 0021 D7). A terminal asks;
-/// without a terminal and without `--yes` the command refuses (exit 2) and does nothing.
-pub(crate) fn confirm_or_refuse(message: &str) -> Result<(), CommandError> {
-    if !std::io::stdin().is_terminal() {
-        return Err(CommandError::usage(format!(
-            "{message}: refusing without a terminal; pass --yes to confirm"
-        )));
-    }
-    eprint!("{message} [y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .map_err(|e| CommandError::failure(format!("cannot read the answer: {e}")))?;
-    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
-        Ok(())
-    } else {
-        Err(CommandError::failure("cancelled"))
     }
 }
 

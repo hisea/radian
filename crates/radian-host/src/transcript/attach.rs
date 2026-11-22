@@ -29,7 +29,7 @@
 //! and draws those.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use radian_core::{Message, ToolResult};
 use radian_session::EventData;
@@ -38,7 +38,6 @@ use serde_json::Value;
 use crate::observer::{JournalObserver, SessionObserver};
 
 use super::entry::{Card, CompactionInfo, Entry, EntryKind, EntryList};
-use super::memory::MemoryRecords;
 use super::parts::{bash_entry_from_context, display_parts, image_parts, text_of};
 use super::tool::{ToolCard, body_line_count, call_text, result_display_text};
 
@@ -71,10 +70,6 @@ pub struct AttachFold {
     /// Every declared tool call seen so far, `call_id -> (name, arguments)`, for an open
     /// call's line. Maintained as committed messages are pushed.
     calls: HashMap<String, (String, Value)>,
-    /// The record types the transcript's settled calls established, in message order (ADR 0035).
-    memory: MemoryRecords,
-    /// The memory root a settled call resolves against. `None` when this process has none.
-    memory_root: Option<PathBuf>,
     /// The `queued`/`running` lines currently at the transcript's tail (a live session's open
     /// calls), in call order: kept so a no-op read can be told from a change and the block
     /// rebuilt.
@@ -88,7 +83,7 @@ pub struct AttachFold {
 impl AttachFold {
     /// Opens `path` read-only and folds its committed prefix. The file must exist; the caller
     /// reports a missing session before entering a terminal.
-    pub fn open(path: &Path, memory_root: Option<PathBuf>) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, String> {
         let observer = JournalObserver::open(path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         let mut fold = Self {
@@ -96,8 +91,6 @@ impl AttachFold {
             entries: EntryList::new(),
             pushed: 0,
             calls: HashMap::new(),
-            memory: MemoryRecords::default(),
-            memory_root,
             pending: Vec::new(),
             live: false,
             working: false,
@@ -131,12 +124,6 @@ impl AttachFold {
         self.observer.projection().turn() == crate::projection::TurnState::Running
     }
 
-    /// Sets the memory root a later settle resolves against. The view passes the same root the
-    /// recording session used (ADR 0035).
-    pub fn set_memory_root(&mut self, root: Option<PathBuf>) {
-        self.memory_root = root;
-    }
-
     /// Rebuilds every entry from the observer's history: the initial load and the rare case
     /// where the history is **replaced** (a compaction commits a `TranscriptReplaced` segment,
     /// ADR 0019), shrinks, or the session's live state flips (a live session's open calls are
@@ -146,7 +133,6 @@ impl AttachFold {
         // A rebuild is a fresh start for a consumer too: it must re-read every entry and may
         // reset its own scroll state (the frame the view drew no longer applies).
         self.entries.mark_reset();
-        self.memory = MemoryRecords::default();
         self.calls.clear();
         self.pending.clear();
         self.working = false;
@@ -266,10 +252,9 @@ impl AttachFold {
                 //
                 // The pairing is a **single** scan from the back: the call is the most recent
                 // matching card, and the index it found is reused for the insertion below.
-                let mut paired: Option<(String, Value, Option<super::memory::MemoryRef>)> = None;
+                let mut paired: Option<(String, Value)> = None;
                 let mut call_index: Option<usize> = None;
-                // The result's own text, read once: the memory card resolves from it, and the
-                // body's display text and the head both use it.
+                // The result's own text, read once: the body's display text and the head both use it.
                 let tool_text = result.text();
                 let len = self.entries.len();
                 for (rev, entry) in self.entries.iter_mut().rev().enumerate() {
@@ -283,21 +268,6 @@ impl AttachFold {
                         if let Some(card) = entry.tool.as_mut() {
                             card.structured = result.structured.clone();
                             card.is_error = result.is_error;
-                            // ADR 0035: a settled call into a memory scope carries the
-                            // record's type and path, so the renderer draws the memory card
-                            // (or the read line) instead of the ordinary tool card. The ref
-                            // comes from the recorded call and result alone, never from the
-                            // file, so a resume redraws it exactly.
-                            card.memory = if result.is_error {
-                                None
-                            } else {
-                                self.memory.settle(
-                                    self.memory_root.as_deref(),
-                                    &card.name,
-                                    &card.arguments,
-                                    &tool_text,
-                                )
-                            };
                             // The head's title can only be final now, so the entry's text -
                             // what renders and copies - is regenerated from the same function
                             // the layout uses. The result's own row count is part of the head's
@@ -312,11 +282,7 @@ impl AttachFold {
                             } else {
                                 call_text(card, &tool_text)
                             };
-                            paired = Some((
-                                card.name.clone(),
-                                card.arguments.clone(),
-                                card.memory.clone(),
-                            ));
+                            paired = Some((card.name.clone(), card.arguments.clone()));
                         }
                         let index = len - 1 - rev;
                         call_index = Some(index);
@@ -324,14 +290,10 @@ impl AttachFold {
                         break;
                     }
                 }
-                let (name, arguments, memory) = paired.unwrap_or_default();
+                let (name, arguments) = paired.unwrap_or_default();
                 let mut card = ToolCard::new(result.call_id.clone(), name, arguments);
                 card.structured = result.structured.clone();
                 card.is_error = result.is_error;
-                // The result entry carries the same ref as its call: it closes a merged card
-                // and draws nothing (the call entry draws the box), and a torn result whose
-                // call is gone has neither name nor arguments, so it carries none.
-                card.memory = memory;
                 // The body's text **is** the entry's text (the mapping/search invariant): a
                 // `patch` shows the synthesized diff, a `write` the content written, every
                 // other tool its own result text.

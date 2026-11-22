@@ -29,7 +29,7 @@ pub(crate) fn schema() -> serde_json::Value {
                 "type": "string",
                 "description": "File, directory or image. Workspace-relative or absolute inside \
                                 the workspace; absolute or `~` reads roots (registry, \
-                                toolchain, skill dirs, memory scopes) in both tiers; `full` reads \
+                                toolchain, skill dirs) in both tiers; `full` reads \
                                 other paths except the deny set. \
                                 Manual: `radian://docs/<page>.md`."
             },

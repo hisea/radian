@@ -191,7 +191,6 @@ pub enum Role {
     /// below (ADR 0029 decision 4).
     CtxSystem,
     CtxFiles,
-    CtxMemory,
     CtxTools,
     CtxSkills,
     CtxMcp,
@@ -245,7 +244,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 83] = [
+    pub const ALL: [Role; 82] = [
         Role::Reasoning,
         Role::ReasoningOff,
         Role::ReasoningMinimal,
@@ -285,7 +284,6 @@ impl Role {
         Role::StatusError,
         Role::CtxSystem,
         Role::CtxFiles,
-        Role::CtxMemory,
         Role::CtxTools,
         Role::CtxSkills,
         Role::CtxMcp,
@@ -373,7 +371,6 @@ impl Role {
             Role::StatusError => "status_error",
             Role::CtxSystem => "ctx_system",
             Role::CtxFiles => "ctx_files",
-            Role::CtxMemory => "ctx_memory",
             Role::CtxTools => "ctx_tools",
             Role::CtxSkills => "ctx_skills",
             Role::CtxMcp => "ctx_mcp",
@@ -467,7 +464,6 @@ impl Role {
             Role::StatusError => &mut theme.status_error,
             Role::CtxSystem => &mut theme.ctx_system,
             Role::CtxFiles => &mut theme.ctx_files,
-            Role::CtxMemory => &mut theme.ctx_memory,
             Role::CtxTools => &mut theme.ctx_tools,
             Role::CtxSkills => &mut theme.ctx_skills,
             Role::CtxMcp => &mut theme.ctx_mcp,
@@ -574,12 +570,11 @@ pub struct Theme {
     /// A tool head's `×`, ADR 0029.
     pub status_error: Style,
     /// The `/context` grid's per-category cell colors (spec `tui-context-grid`):
-    /// system prompt, context files, memory, built-in tool definitions, skills,
+    /// system prompt, context files, built-in tool definitions, skills,
     /// MCP tools, user messages, assistant text, reasoning, tool results, images,
     /// free space and the compaction buffer.
     pub ctx_system: Style,
     pub ctx_files: Style,
-    pub ctx_memory: Style,
     pub ctx_tools: Style,
     pub ctx_skills: Style,
     pub ctx_mcp: Style,
@@ -647,7 +642,7 @@ pub struct Theme {
     pub syntax_type: Style,
     pub syntax_operator: Style,
     pub syntax_punctuation: Style,
-    /// A structured notice's label (`profile:`, `[memory]`) — pi's `accent` (ADR 0028
+    /// A structured notice's label (`profile:`, `[mcp]`) — pi's `accent` (ADR 0028
     /// decision: 强调 = 名字、标签).
     pub notice_label: Style,
     /// The rest of a structured notice — pi's `muted` (次). In the built-in themes it stays
@@ -857,13 +852,12 @@ impl Theme {
             status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
             status_error: spec(pi::RED, Modifier::empty(), truecolor),
             // The `/context` grid's category colors (spec `tui-context-grid`): system
-            // prompt = muted, tool definitions = dim, context files = gold, memory =
-            // red-orange, skills = yellow, MCP = green, user = accent, assistant =
+            // prompt = muted, tool definitions = dim, context files = gold,
+            // skills = yellow, MCP = green, user = accent, assistant =
             // blue, tool results = cyan, reasoning = the thinking channel, images =
             // gold (input attachments), free = the frame line color, buffer = yellow.
             ctx_system: muted,
             ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
-            ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
             ctx_tools: dim,
             ctx_skills: spec(pi::YELLOW, Modifier::empty(), truecolor),
             ctx_mcp: spec(pi::GREEN, Modifier::empty(), truecolor),
@@ -980,13 +974,12 @@ impl Theme {
             status_warn: spec(pi::YELLOW, Modifier::empty(), truecolor),
             status_error: spec(pi::RED, Modifier::empty(), truecolor),
             // The `/context` grid's category colors (spec `tui-context-grid`): system
-            // prompt = muted, tool definitions = dim, context files = gold, memory =
-            // red-orange, skills = yellow, MCP = green, user = accent, assistant =
+            // prompt = muted, tool definitions = dim, context files = gold,
+            // skills = yellow, MCP = green, user = accent, assistant =
             // blue, tool results = cyan, reasoning = the thinking channel, images =
             // gold (input attachments), free = the frame line color, buffer = yellow.
             ctx_system: muted,
             ctx_files: spec(pi::SYNTAX_STRING, Modifier::empty(), truecolor),
-            ctx_memory: spec(pi::RED, Modifier::empty(), truecolor),
             ctx_tools: dim,
             ctx_skills: spec(pi::YELLOW, Modifier::empty(), truecolor),
             ctx_mcp: spec(pi::GREEN, Modifier::empty(), truecolor),
@@ -1062,7 +1055,6 @@ impl Theme {
             // categories, so the roles stay plain.
             ctx_system: style(None, Modifier::empty()),
             ctx_files: style(None, Modifier::empty()),
-            ctx_memory: style(None, Modifier::empty()),
             ctx_tools: style(None, Modifier::empty()),
             ctx_skills: style(None, Modifier::empty()),
             ctx_mcp: style(None, Modifier::empty()),
@@ -1151,7 +1143,7 @@ impl Theme {
     }
 
     /// Every style this theme defines, for the "mono has no colors" test.
-    pub fn styles(&self) -> [Style; 56] {
+    pub fn styles(&self) -> [Style; 55] {
         [
             self.reasoning,
             self.interrupted,
@@ -1191,7 +1183,6 @@ impl Theme {
             self.status_error,
             self.ctx_system,
             self.ctx_files,
-            self.ctx_memory,
             self.ctx_tools,
             self.ctx_skills,
             self.ctx_mcp,

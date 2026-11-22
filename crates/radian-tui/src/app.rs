@@ -3,11 +3,11 @@
 //! `update` is **pure**: it never does I/O, never touches the runtime, never reads a file or a
 //! directory, and never calls into a service. Everything that needs the outside world comes
 //! back as an [`Effect`], which the event loop in `cli.rs` runs; the result returns as another
-//! [`Input`]. `tests/purity.rs` asserts the structure (no `std::fs`, no `MemoryService`, no
+//! [`Input`]. `tests/purity.rs` asserts the structure (no `std::fs`, no
 //! `tokio`, no `mention::expand`/`complete` call in this file).
 //!
 //! A key press is resolved to an [`Input`] by [`App::key_input`] (the keymap plus the current
-//! layer: approval prompt, `/memory` confirmation, find box), and [`App::on_key`] is the thin
+//! layer: approval prompt, `/model` confirmation, find box), and [`App::on_key`] is the thin
 //! wrapper that resolves and updates.
 
 use std::collections::{HashSet, VecDeque};
@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use radian_coding::PromptError;
 use radian_core::{AgentEvent, BudgetReport, CompactionOutcome, Message, MessageId, UsageSource};
-use radian_host::memory::commands::MemoryCommand;
 use radian_host::{PendingRequest, PendingResponse, PendingView};
 use radian_permissions::{ApprovalOutcome, ApprovalRequest};
 use radian_session::RuntimeEvent;
@@ -65,7 +64,7 @@ mod state;
 mod transcript;
 mod update;
 
-pub use input::{Input, LogoutPick, MemoryResult, PickerData, SlashCompletion};
+pub use input::{Input, LogoutPick, PickerData, SlashCompletion};
 use input::{PendingExpand, PendingSend};
 pub use mouse::{AUTO_SCROLL_TICK, DOUBLE_CLICK_WINDOW, MOUSE_WHEEL_LINES, MouseScrollDirection};
 use mouse::{LastClick, SelectDrag};
@@ -155,11 +154,6 @@ pub enum Effect {
     /// List one level's candidates in the host (I/O): the loop answers with
     /// [`Input::CompletionsReady`].
     FetchCompletions(command::Fetch),
-    /// Run a `/memory` command through the shared executor (`confirmed` skips the prompt).
-    RunMemoryCommand {
-        command: MemoryCommand,
-        confirmed: bool,
-    },
     /// Run a manual `/compact` on the runtime, between turns.
     Compact { instructions: Option<String> },
     /// A `/model` target to vet: the loop resolves the credential and the new model's budget
@@ -224,12 +218,6 @@ pub enum Effect {
     /// facade, which flips the hooks' live policy, audits the switch and queues the durable
     /// `ConfigChanged` record for the next resume.
     SetApprovalPolicy { on: bool },
-    /// `/memory off|on` (ADR 0021 D7): the loop calls the facade, which flips the live switch
-    /// and queues the durable `ConfigChanged` for the next resume. `true` = off.
-    SetMemory { off: bool },
-    /// Open a memory file with the host's opener (ADR 0035): `Enter` on the newest memory card.
-    /// The loop calls `radian_host::memory::open_path`; `update` never spawns a process.
-    OpenMemory { path: PathBuf },
     /// Switch the session's permission tier (ADR 0038 slice 2). The loop calls the facade
     /// (`set_access`), which rebuilds the profile and the sandbox through the host's builder;
     /// a failed probe is a refusal. `remember` also writes the per-project record. The answer
@@ -328,8 +316,7 @@ pub enum Effect {
     CancelBash,
 }
 
-/// Effects are compared by **meaning** in the tests. `MemoryCommand` (a clap enum) has no
-/// `PartialEq`, so two memory effects are equal when their parsed form is identical.
+/// Effects are compared by **meaning** in the tests.
 impl PartialEq for Effect {
     fn eq(&self, other: &Self) -> bool {
         use Effect::*;
@@ -338,7 +325,6 @@ impl PartialEq for Effect {
             (Cancel, Cancel) | (CloseInbox, CloseInbox) | (Quit, Quit) => true,
             (CancelSideQuestion, CancelSideQuestion) => true,
             (SetApprovalPolicy { on: a }, SetApprovalPolicy { on: b }) => a == b,
-            (SetMemory { off: a }, SetMemory { off: b }) => a == b,
             (
                 SetAccess {
                     tier: at,
@@ -370,16 +356,6 @@ impl PartialEq for Effect {
                     cursor: bc,
                 },
             ) => a == b && ac == bc,
-            (
-                RunMemoryCommand {
-                    command: a,
-                    confirmed: ac,
-                },
-                RunMemoryCommand {
-                    command: b,
-                    confirmed: bc,
-                },
-            ) => ac == bc && format!("{a:?}") == format!("{b:?}"),
             (Compact { instructions: a }, Compact { instructions: b }) => a == b,
             (FetchCompletions(a), FetchCompletions(b)) => a == b,
             (OpenPicker { query: a }, OpenPicker { query: b }) => a == b,
@@ -804,17 +780,6 @@ pub struct App {
     /// above it. Only [`App::push_overlay`]/[`App::push_modal`] and the matching removals
     /// change it, so the tier rules hold by construction.
     layers: Vec<Layer>,
-    /// Whether this process has a memory root. `/memory` runs through the loop, which owns the
-    /// service; without one the command is refused with the same notice as before.
-    pub memory_enabled: bool,
-    /// The memory root (ADR 0021): what a memory path in the transcript is relative to, and
-    /// where [`crate::memory_card::MemoryRecords`] resolves a record. `None` when this process
-    /// has no memory root. The service stays on the loop's side (ADR 0023 U3).
-    pub memory_root: Option<PathBuf>,
-    /// The record types the transcript's settled calls established, in message order (ADR 0035).
-    /// A `patch` card reads it; a resume rebuilds it from the same messages, so the two paths
-    /// draw the same card. It is never filled from the file.
-    pub memory_records: crate::memory_card::MemoryRecords,
     /// The sends waiting for their `@` expansion, in submit order (see
     /// [`Effect::ExpandMentions`]): one entry per submitted send, so two rapid submits —
     /// `/queue a` then `/queue b`, or two fast Enters — cannot overwrite each other and drop

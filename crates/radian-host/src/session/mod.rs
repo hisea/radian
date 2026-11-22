@@ -7,8 +7,8 @@
 //! facade does not declare is refused, and `LocalSession` checks again when it runs one — the
 //! host does not trust the UI's copy of the capability list.
 //!
-//! `open_session` is the one place that establishes a session: the journal, the permission and
-//! memory hooks, the combined tools, the driver, the inbox and the projection. `radian-exec` and
+//! `open_session` is the one place that establishes a session: the journal, the permission
+//! hooks, the combined tools, the driver, the inbox and the projection. `radian-exec` and
 //! `radian-tui` differ only in what they inject (their approver, audit sink, event sink,
 //! runtime-event handler, wording and startup lines), which is [`HostBindings`].
 

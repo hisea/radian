@@ -43,7 +43,7 @@ and its default keys.
 
 | Action | Default keys | What it does |
 |---|---|---|
-| `send` | `enter` | Send the message. Idle, it opens a turn at once. While a turn runs, it steers the turn. While a completion menu is up, it accepts the highlighted row instead. With an empty message box it opens the newest memory card's file instead (see [memory](memory.md)). |
+| `send` | `enter` | Send the message. Idle, it opens a turn at once. While a turn runs, it steers the turn. While a completion menu is up, it accepts the highlighted row instead. |
 | `newline` | `ctrl-j`, `alt-enter`, `shift-enter` | Insert a newline. `shift-enter` needs the keyboard-enhancement protocol; `ctrl-j` works everywhere. |
 | `cursor_left` | `left` | Move the cursor one character left. |
 | `cursor_right` | `right` | Move the cursor one character right. |
@@ -145,7 +145,7 @@ do not reach the message box.
 
 | Key | What it does |
 |---|---|
-| `y` (or `Y`) | Confirm: run the `/memory` write (`forget`, `split`, `merge`), remove the `/logout` credential. |
+| `y` (or `Y`) | Confirm: run the `/model` switch that needs a compaction first, remove the `/logout` credential. |
 | `n` (or `N`), `esc` | Cancel it. |
 
 ### Trust prompt

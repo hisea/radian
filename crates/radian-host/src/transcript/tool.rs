@@ -13,8 +13,6 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::memory::MemoryRef;
-
 /// One tool call's card data. `structured` and `duration_ms` may legitimately be absent
 /// (`None`): a tool that reports none, and the timing no source carries at all.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -39,11 +37,6 @@ pub struct ToolCard {
     /// Whether the paired result is an error. A failed `patch` changed nothing, so its card
     /// shows the tool's own error text instead of the call's edits, and no `+N −M`.
     pub is_error: bool,
-    /// The memory file this call settled on (ADR 0035): present only after a successful
-    /// `read`, `write` or `patch` whose path is a record under the memory root. Host-side
-    /// display data; never serialized (a client draws the entry text instead).
-    #[serde(skip_serializing)]
-    pub memory: Option<MemoryRef>,
 }
 
 impl ToolCard {
@@ -56,7 +49,6 @@ impl ToolCard {
             duration_ms: None,
             result_lines: None,
             is_error: false,
-            memory: None,
         }
     }
 
@@ -94,16 +86,6 @@ pub fn head_for(name: &str) -> fn(&ToolCard, &str) -> String {
 /// The head text of a tool **call** entry (ADR 0028): the tool name and the renderer's title,
 /// `shell $ make test` — the text the head row draws and copies.
 pub fn call_text(card: &ToolCard, text: &str) -> String {
-    // ADR 0035: a memory read's one line is the memory, not the read tool's own head; the
-    // write/patch card's text is its body row, so search and copy still see the title, the type
-    // and the path.
-    if let Some(memory) = &card.memory {
-        return if memory.read {
-            format!("memory used: {}", memory.title)
-        } else {
-            memory.line()
-        };
-    }
     let title = head_text(card, text);
     if title.is_empty() {
         return card.name.clone();

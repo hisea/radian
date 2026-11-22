@@ -16,14 +16,13 @@ use std::time::Duration;
 
 use clap::Parser;
 use radian_core::{AgentEvent, ContextBudget, EventSink, TurnOptions};
-use radian_host::memory::MemoryService;
 use radian_host::{
     DEFAULT_MAX_TOKENS, ModelArgs, SessionFacade, Thinking, build_model, check_context_window_flag,
     check_provider_flags, is_local_base_url, load_mcp_config, parse_headers, validate_session_id,
 };
 use radian_permissions::AuditSink;
 use radian_session::SessionJournal;
-use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, MemoryResult, PickerData};
+use radian_tui::app::{AUTO_SCROLL_TICK, App, Effect, Input as AppInput, PickerData};
 use radian_tui::clip::{ClipboardMode, osc52};
 use radian_tui::events::{InputEvent, ProjectionSink, UiEvent};
 use ratatui::Terminal;
@@ -48,8 +47,7 @@ use attach::run_attach;
 use herdr::{HerdrReporter, herdr_reporter};
 use loop_context::LoopContext;
 use models::{
-    mark_current_route, memory_record_candidates, model_refresh_targets, model_route_candidates,
-    refresh_provider_models,
+    mark_current_route, model_refresh_targets, model_route_candidates, refresh_provider_models,
 };
 use session::{
     JournalAudit, SessionHost, coding_root, handle_session_request, list_sessions, load_picker,
@@ -269,7 +267,7 @@ struct Cli {
     flood_facts: Option<u64>,
 
     /// A non-TUI mode: `radian exec` runs one turn or an interactive line session, and the
-    /// management commands (`radian memory`/`login`/`config`) run the same library dispatch.
+    /// management commands (`radian trust`/`login`/`config`) run the same library dispatch.
     /// Absent: the full-screen TUI.
     #[command(subcommand)]
     command: Option<RadianCommand>,
@@ -340,15 +338,6 @@ enum RadianCommand {
         provider: String,
         /// The key's name: remove that one without asking.
         name: Option<String>,
-    },
-    /// Manage durable memory: the same grammar as `radian exec memory` and the
-    /// TUI's `/memory`.
-    Memory {
-        /// The workspace project memory is resolved against, like `radian exec --workspace`.
-        #[arg(long, value_name = "DIR")]
-        workspace: Option<PathBuf>,
-        #[command(subcommand)]
-        command: radian_host::memory::commands::MemoryCommand,
     },
     /// Show or change a directory's project trust decision: the same grammar as
     /// `radian exec trust` and the TUI's `/trust`.
@@ -479,12 +468,6 @@ fn run_subcommand(command: RadianCommand) -> ExitCode {
         RadianCommand::Logout { provider, name } => run_radian_exec(radian_exec::Cli::for_command(
             radian_exec::Command::Logout { provider, name },
         )),
-        RadianCommand::Memory { workspace, command } => {
-            run_radian_exec(radian_exec::Cli::for_memory(
-                workspace.map(|path| path.to_string_lossy().into_owned()),
-                command,
-            ))
-        }
         RadianCommand::Trust { workspace, command } => {
             run_radian_exec(radian_exec::Cli::for_trust(
                 workspace.map(|path| path.to_string_lossy().into_owned()),
@@ -1129,7 +1112,7 @@ fn run_one_session(
             runtime_events,
             driver_stopped,
             before_driver,
-            memory_warning,
+            session_warning,
             hooks_warning,
             wake_warning,
             intent_stop_warning,
@@ -1137,7 +1120,6 @@ fn run_one_session(
             notice_lost_warning,
             trust_setup,
             project_hooks,
-            memory_root,
         },
         _control_guard,
     ) = run_open::build_session_inputs(
@@ -1177,7 +1159,7 @@ fn run_one_session(
             runtime_events,
             driver_stopped,
             before_driver,
-            memory_warning,
+            session_warning,
             hooks_warning,
             wake_warning,
             intent_stop_warning,
@@ -1185,7 +1167,6 @@ fn run_one_session(
             notice_lost_warning,
             trust_setup,
             project_hooks,
-            memory_root,
             access_builder,
             startup_approval: startup_approval.clone(),
             inherited_sandbox,
@@ -1246,7 +1227,6 @@ fn run_one_session(
     let run_ready::TerminalReady {
         guard,
         mut terminal,
-        memory_service,
         history,
         queue_wake,
     } = run_ready::enter_terminal_and_history(
@@ -1300,7 +1280,6 @@ fn run_one_session(
         session,
         &mut terminal,
         guard,
-        &memory_service,
         workspace_path,
         &provider_name,
         &model_name,
@@ -1325,7 +1304,6 @@ fn run_one_session(
             *term = Some((new.guard, terminal));
             let mut app = App::new(String::new(), String::new());
             app.set_workspace(workspace_path.to_path_buf());
-            app.set_memory_root(radian_host::memory_dir());
             let apply_warnings = app
                 .apply_config(config, radian_tui::theme::Theme::no_color_env())
                 .map_err(|error| format!("config: {error}"))?;
@@ -1732,7 +1710,7 @@ mod tests {
             let rows = rows_with_flag(&tables, flag);
             if rows.is_empty() {
                 // Prose-documented flags (attach, footer export, theme import, config
-                // import, memory `--workspace`): presence only, no value set to check.
+                // import): presence only, no value set to check.
                 assert!(
                     cli_md.contains(flag.as_str()),
                     "{flag} is missing from docs/user/cli.md"
@@ -1825,7 +1803,6 @@ mod tests {
         "### MCP options",
         "### Permission options",
         "## `radian exec`",
-        "## `radian memory`",
         "## `radian trust`",
     ];
 

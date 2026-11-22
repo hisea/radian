@@ -140,7 +140,7 @@ See `configuration` for the file format and `environment` for every variable.
 
 ## Next steps
 
-- Read `commands` to learn the slash commands: `/help`, `/compact`, `/model`, `/sessions`, `/memory`.
+- Read `commands` to learn the slash commands: `/help`, `/compact`, `/model`, `/sessions`.
 - Read `permissions` before you run in an unfamiliar repository: `full` is the default tier, `workspace` sandboxes the run.
 - Read `cli` when you need a flag you have not seen here.
 - Read `troubleshooting` when a request fails with an auth error or a tool refuses a path.

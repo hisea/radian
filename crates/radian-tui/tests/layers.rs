@@ -244,7 +244,7 @@ fn app_has_no_four_option_fields() {
     );
 }
 
-/// ADR 0023 U4 with **two** modals up (an approval that arrives while a `/memory` confirmation
+/// ADR 0023 U4 with **two** modals up (an approval that arrives while a `/model` confirmation
 /// or, later, a question is open): an overlay goes below both, never between them.
 #[test]
 fn an_overlay_never_lands_between_two_modals() {

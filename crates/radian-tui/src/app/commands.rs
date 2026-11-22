@@ -55,7 +55,7 @@ impl App {
     /// everything that touches the world becomes an effect, and its result comes back as
     /// another [`Input`]. The line is not sent anywhere.
     pub(super) fn run_slash_command(&mut self, line: &str) -> UpdateResult {
-        match command::parse(line, self.memory_enabled) {
+        match command::parse(line) {
             command::Outcome::Notices(notices) => {
                 for notice in notices {
                     self.push_notice(notice);
@@ -75,18 +75,6 @@ impl App {
             // stored objective is re-sent verbatim every turn). Changes journal through
             // the loop; `Show` only reads.
             command::Outcome::Goal(command) => self.goal_command(command),
-            command::Outcome::Memory(command) => UpdateResult::effect(Effect::RunMemoryCommand {
-                command,
-                confirmed: false,
-            }),
-            command::Outcome::MemorySwitch(off) => {
-                self.push_notice(if off {
-                    "memory off: this session records no memory, and memory writes are refused"
-                } else {
-                    "memory on: memory writes are allowed again"
-                });
-                UpdateResult::effect(Effect::SetMemory { off })
-            }
             // `/compact` is asynchronous: the loop runs it on the runtime between turns and the
             // result comes back as `Input::CompactDone`.
             command::Outcome::Compact(instructions) => {
@@ -391,18 +379,9 @@ impl App {
                      over the new model's budget {b}. compact and switch? [y] compact and switch \
                      [n] cancel"
                 );
-                // The payload's `command` is unused on this path: `confirm_command` routes
-                // on `switch` first, so `y` can never run a memory command. `Purge` is the
-                // one variant a refusal can never reach.
-                let command = radian_host::memory::commands::MemoryCommand::List {
-                    global: false,
-                    project: false,
-                    json: false,
-                };
                 self.push_modal(Modal::ConfirmCommand(PendingCommand {
-                    command,
                     prompt,
-                    switch: Some((provider, model, b, route)),
+                    switch: (provider, model, b, route),
                 }));
                 UpdateResult::dirty()
             }

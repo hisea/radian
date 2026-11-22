@@ -1,8 +1,5 @@
-//! The `/model` and `/memory` completion candidates: the provider/model list built from the
-//! descriptors, the config and `auth.json`, its sort order, and the memory record ids with
-//! their one-line snippets. Local reads only; the background refresh owns the cache.
-
-use super::*;
+//! The `/model` completion candidates: the provider/model list built from the
+//! descriptors, the config and `auth.json`, and its sort order. Local reads only; the background refresh owns the cache.
 
 /// The providers the background refresh covers: the same set `/model` would offer (ADR 0026
 /// D0), read fresh from `auth.json`. A provider without a usable key is included here and
@@ -84,9 +81,6 @@ async fn refresh_one(
         }
     }
 }
-/// The record ids a `/memory` command can act on, as completion candidates. A read failure is
-/// an empty list, never a turn failure (ADR 0021 invariant 2).
-///
 /// The `/model` completion candidates (ADR 0026 D5): the logged-in providers before the
 /// slash, or one provider's models after it — the descriptor's built-in list plus the cached
 /// `/v1/models` list. Reads local files only; the background refresh (D0) writes that cache.
@@ -125,45 +119,6 @@ pub(super) fn mark_current_route(
             candidate
         })
         .collect()
-}
-
-pub(super) fn memory_record_candidates(
-    memory: &Option<MemoryService>,
-    _command: &str,
-) -> Vec<radian_tui::command::Candidate> {
-    let Some(service) = memory else {
-        return Vec::new();
-    };
-    let Ok(entries) = service.list(radian_host::memory::ScopeSelection::Default) else {
-        return Vec::new();
-    };
-    entries
-        .into_iter()
-        .filter_map(|entry| match entry {
-            radian_host::memory::ScopedEntry::Record { frontmatter, .. } => {
-                Some(radian_tui::command::Candidate {
-                    insert: frontmatter.name.clone(),
-                    description: format!(
-                        "{} {}",
-                        frontmatter.record_type,
-                        record_snippet(&frontmatter.description)
-                    ),
-                    current: false,
-                })
-            }
-            radian_host::memory::ScopedEntry::Unreadable { .. } => None,
-        })
-        .collect()
-}
-
-/// One line of a record's content, cut for a single completion row.
-fn record_snippet(content: &str) -> String {
-    let first = content.lines().next().unwrap_or_default();
-    let mut text: String = first.chars().take(40).collect();
-    if first.chars().count() > 40 {
-        text.push('…');
-    }
-    text
 }
 
 #[cfg(test)]

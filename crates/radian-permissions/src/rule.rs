@@ -53,19 +53,6 @@ pub enum ResourceMatcher {
     Any,
     /// A file path, matched after resolution against the canonical prefix.
     PathUnder(PathBuf),
-    /// Like [`ResourceMatcher::PathUnder`], but the resolved path must lie at least two
-    /// components below the prefix: a directory and then an entry inside it. A path
-    /// directly in the prefix directory does not match. The memory project scope uses it,
-    /// so `<memory root>/projects/<ProjectId>/<name>.md` matches but
-    /// `<memory root>/projects/<name>.md` (no project-id directory) does not.
-    PathUnderNested(PathBuf),
-    /// Like [`ResourceMatcher::PathUnder`], but a path whose file name equals the given name
-    /// is not matched. The memory scope uses it for `SESSIONS.md`, which the host maintains
-    /// and the model may not write (ADR 0021 D3).
-    PathUnderExceptName(PathBuf, String),
-    /// Like [`ResourceMatcher::PathUnderNested`], but a path whose file name equals the given
-    /// name is not matched (the project scope's `SESSIONS.md`).
-    PathUnderNestedExceptName(PathBuf, String),
     /// A `.git` executable entry under one discovered git directory (ADR 0038 decision 3):
     /// matches when the resolved path is `config`, `config.worktree`, `hooks/...`, a
     /// submodule's `config` or `hooks/...`, or a linked worktree's `gitdir`/`commondir`/
@@ -112,11 +99,6 @@ pub enum Resource {
     Path(String),
     Command(String),
     Name(String),
-}
-
-/// Whether `path`'s final component is exactly `name`.
-fn has_file_name(path: &Path, name: &str) -> bool {
-    path.file_name().and_then(|found| found.to_str()) == Some(name)
 }
 
 impl Resource {
@@ -175,21 +157,6 @@ pub fn evaluate(rules: &[Rule], workspace: &Path, call: &ToolCall) -> Evaluated 
             (ResourceMatcher::PathUnder(prefix), Resource::Path(raw)) => {
                 resolve(workspace, raw).starts_with(prefix)
             }
-            (ResourceMatcher::PathUnderExceptName(prefix, name), Resource::Path(raw)) => {
-                let path = resolve(workspace, raw);
-                path.starts_with(prefix) && !has_file_name(&path, name)
-            }
-            (ResourceMatcher::PathUnderNested(prefix), Resource::Path(raw)) => {
-                resolve(workspace, raw)
-                    .strip_prefix(prefix)
-                    .is_ok_and(|rest| rest.components().count() >= 2)
-            }
-            (ResourceMatcher::PathUnderNestedExceptName(prefix, name), Resource::Path(raw)) => {
-                let path = resolve(workspace, raw);
-                path.strip_prefix(prefix)
-                    .is_ok_and(|rest| rest.components().count() >= 2)
-                    && !has_file_name(&path, name)
-            }
             (ResourceMatcher::GitExec(git_dir), Resource::Path(raw)) => {
                 radian_sandbox::is_git_exec_entry(git_dir, &resolve(workspace, raw))
             }
@@ -236,7 +203,7 @@ pub(crate) fn resolve(workspace: &Path, raw: &str) -> PathBuf {
 
 /// Resolves an **already joined** path the way [`resolve`] does: symlinks in the existing
 /// part are resolved and `.`/`..` are removed lexically. A rule prefix is resolved with this
-/// too, so a prefix such as a memory root matches the same spelling a call's path takes.
+/// too, so a prefix matches the same spelling a call's path takes.
 pub(crate) fn resolve_path(path: &Path) -> PathBuf {
     match canonicalize_existing_prefix(path) {
         Some(resolved) => lexical_normalize(&resolved),

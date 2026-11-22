@@ -26,7 +26,7 @@ Planning, task orchestration, gates and review live in [operad](https://operad.i
 - `radian` opens a full-screen terminal UI. `rad` is an alias.
 - `radian exec` runs headless. `radian exec -p "<task>"` runs one task and exits. `--output jsonl` prints each step as one JSON line, and the exit code tells how the turn ended.
 - Each session is one JSONL journal file. Both modes can resume a session, fork it at a turn boundary, or watch it read-only with `radian attach`.
-- Providers: OpenAI-compatible Chat Completions and the Anthropic Messages API. Tools: built-in file, search, shell and job tools, MCP stdio servers, skills, memory, and a one-shot `subagent`.
+- Providers: OpenAI-compatible Chat Completions and the Anthropic Messages API. Tools: built-in file, search, shell and job tools, MCP stdio servers, skills, and a one-shot `subagent`.
 - It reads what you already have: `AGENTS.md` and `CLAUDE.md`, skills in `~/.agents/skills`, MCP servers in the `mcpServers` format, Claude and Codex style hooks, and pi themes.
 - Inside [herdr](https://github.com/ogulcancelik/herdr), radian reports its state (working, idle, blocked) by itself.
 

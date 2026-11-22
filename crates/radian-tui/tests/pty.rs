@@ -892,8 +892,6 @@ async fn pty_mounts_only_the_builtin_tools() {
     // The built-ins a workspace session mounts are exactly these, and nothing else. The
     // removed names (`git_diff`, `list`, `git_status`, `job_output`, `job_list`,
     // `job_kill`, `shell_output`) are never advertised: a call to one is an unknown tool.
-    // `memory_search` mounts only past the injection budget (ADR 0021 D7),
-    // so this workspace — with an empty memory — does not list it.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
@@ -912,9 +910,6 @@ async fn pty_mounts_only_the_builtin_tools() {
         "job_list",
         "job_kill",
         "shell_output",
-        "memory_search",
-        "memory_save",
-        "memory_revise",
     ] {
         assert!(
             !names.iter().any(|name| name == gone),
@@ -5613,378 +5608,6 @@ fn pty_a_zero_context_window_flag_is_a_usage_error() {
     assert_session_dir_empty(&session_dir);
 }
 
-/// ADR 0021 D2/D6: the TUI shows the memory project state and the injection budget at
-/// startup. The `HOME` is private to the pty, so this never reads the real `~/.radian`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_the_memory_notice_names_the_project_state_and_the_budget() {
-    let dir = TempDir::new("memory-notice");
-    let ws = dir.path().join("ws");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&ws).unwrap();
-    let server = MockServer::start(vec![text_reply("never")]).await;
-    let mut pty = Pty::spawn(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "mem-notice",
-            "--workspace",
-            ws.to_str().unwrap(),
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    // The memory notice is one of the folded startup lines. Wait for the
-    // text itself: `expand_startup` returns on the first expanded frame it sees, and under load
-    // the pty can hold only part of that frame. The notice wraps across lines, so compare the
-    // screen with its whitespace normalized; the bound only fails a missing notice.
-    pty.expand_startup();
-    assert!(
-        pty.wait_until(wait_positive(), |screen| {
-            let notice = screen.split_whitespace().collect::<Vec<_>>().join(" ");
-            notice.contains("[memory]")
-                && notice.contains("no project linked")
-                && notice.contains("index caps 200 lines / 25600 bytes")
-        }),
-        "the memory startup notice is missing:\n{}",
-        pty.screen()
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
-/// ADR 0021: `/memory add` in a git workspace registers the project
-/// itself, and the TUI shows the one notice line naming it. It must reach the transcript (a
-/// `Notice` entry), not stderr, which the fullscreen UI draws over.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_a_memory_add_shows_the_created_project_notice() {
-    let dir = TempDir::new("memory-auto-create");
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(ws.join(".git")).unwrap();
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    // A `.git` directory is enough: the identity key comes from the repository, so the write
-    // registers the project. No `git` process, no real repository content.
-    let server = MockServer::start(vec![text_reply("never")]).await;
-    let mut pty = Pty::spawn_with_env(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            sessions.to_str().unwrap(),
-            "--session-id",
-            "mem-auto-create",
-            "--workspace",
-            ws.to_str().unwrap(),
-        ],
-        &[
-            ("RADIAN_HOME", home.to_str().unwrap()),
-            ("EDITOR", "/usr/bin/true"),
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-
-    pty.send(b"/memory add hello-world\r");
-    assert!(
-        pty.wait_for_screen("created project", wait_positive()),
-        "the notice names the new project: {}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("identity key", wait_positive()),
-        "the notice names the identity key: {}",
-        pty.screen()
-    );
-    pty.send(b"/memory list\r");
-    assert!(
-        pty.wait_for_screen("hello-world", wait_positive()),
-        "the record is in the new project: {}",
-        pty.screen()
-    );
-    assert!(
-        server.requests().is_empty(),
-        "a /memory command must not reach the model"
-    );
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
-/// ADR 0021 D6/D7: `/memory` commands run in the TUI without a model request, and the
-/// file store's global index is injected into the next request's system prompt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_memory_commands_run_without_a_model_request() {
-    let dir = TempDir::new("memory-commands");
-    let home = dir.path().join("radian");
-    std::fs::create_dir_all(home.join("memory/global")).unwrap();
-    std::fs::write(
-        home.join("memory/global/MEMORY.md"),
-        "- [hello](hello.md) — hello world from the index\n",
-    )
-    .unwrap();
-    let server = MockServer::start(vec![text_reply("REPLY-AFTER-MEMORY")]).await;
-    let mut pty = Pty::spawn_with_env(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "memcmd",
-        ],
-        &[
-            ("RADIAN_HOME", home.to_str().unwrap()),
-            ("EDITOR", "/usr/bin/true"),
-        ],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-
-    pty.send(b"/memory project new\r");
-    assert!(
-        pty.wait_for_screen("now owns", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"/memory add hello-world\r");
-    assert!(
-        pty.wait_for_screen("added", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"/memory list\r");
-    assert!(
-        pty.wait_for_screen("hello-world", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    assert!(
-        server.requests().is_empty(),
-        "a /memory command must not reach the model"
-    );
-
-    // A normal message still works, and the memory is in its system prompt.
-    pty.send(b"what do you remember?\r");
-    assert!(
-        pty.wait_for_screen("REPLY-AFTER-MEMORY", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    let body = server.requests()[0].json();
-    let system = body["messages"][0]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(
-        system.contains("hello world from the index"),
-        "system prompt: {system}"
-    );
-
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
-/// ADR 0035: a successful model `write` into a memory scope draws the memory card, and `Enter`
-/// with an empty input opens the record through the host's opener. The opener is `$EDITOR`,
-/// stubbed here with a script that records the path it was given.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_enter_on_a_memory_card_opens_the_file() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = TempDir::new("memory-card");
-    let home = TempDir::new("memory-card-home");
-    let ws = dir.path().join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    std::fs::create_dir_all(home.path().join("memory/global")).unwrap();
-    // The opener log is outside the memory scope: the script appends the path it received.
-    let opened = dir.path().join("opened.txt");
-    let editor = dir.path().join("editor.sh");
-    std::fs::write(
-        &editor,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$1\" >> {}\n", opened.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let record = home.path().join("memory/global/x.md");
-    let content = "---\nname: x\ndescription: a fact\ntype: feedback\nsource: model\n\
-                   created: 2026-10-31T00:00:00Z\nmodified: 2026-10-31T00:00:00Z\n---\nbody\n";
-    let arguments = json!({
-        "path": record.display().to_string(),
-        "content": content,
-    });
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "write", &arguments.to_string()),
-        text_reply("REMEMBERED-IT"),
-    ])
-    .await;
-    let config = format!(
-        "schema_version = 1\n[model]\nprovider = \"openai-compatible\"\nmodel = \"m\"\n\
-         base_url = \"{}\"\n",
-        server.base_url
-    );
-    let mut pty = Pty::spawn_with_config(
-        &[
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--session-dir",
-            dir.path().join("sessions").to_str().unwrap(),
-            "--session-id",
-            "memory-card",
-        ],
-        &[
-            ("RADIAN_HOME", home.path().to_str().unwrap()),
-            ("OPENAI_API_KEY", "sk-test"),
-            ("EDITOR", editor.to_str().unwrap()),
-        ],
-        &config,
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"remember this\r");
-    assert!(
-        pty.wait_for_screen("REMEMBERED-IT", wait_positive()),
-        "the turn did not finish:\n{}",
-        pty.screen()
-    );
-    assert!(
-        pty.wait_for_screen("· feedback · global/x.md", wait_positive()),
-        "the memory card is missing:\n{}",
-        pty.screen()
-    );
-    assert!(record.exists(), "the memory write did not land");
-    assert!(
-        !std::fs::read_to_string(&opened).is_ok_and(|text| !text.is_empty()),
-        "the file was opened before Enter"
-    );
-
-    // An empty input: Enter opens the newest memory card.
-    pty.send(b"\r");
-    let deadline = Instant::now() + wait_positive();
-    while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(&opened)
-            && text.contains(&record.display().to_string())
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let text = std::fs::read_to_string(&opened).unwrap_or_default();
-    assert!(
-        text.contains(&record.display().to_string()),
-        "the opener did not receive the record path: {text:?}\n{}",
-        pty.screen()
-    );
-
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
-/// A `/memory` read command runs while a turn is stuck on a hanging model call and does not
-/// interrupt it (ADR 0021 D6: memory takes effect at the next request, not mid-turn).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_a_memory_command_does_not_interrupt_a_running_turn() {
-    let dir = TempDir::new("memory-running");
-    let server = MockServer::start(vec![Reply::SseThenHang { pieces: Vec::new() }]).await;
-    let mut pty = Pty::spawn_with_env(
-        &[
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--session-dir",
-            dir.path().to_str().unwrap(),
-            "--session-id",
-            "memrun",
-        ],
-        // `add` opens the file after writing it. A no-op editor keeps the command from failing
-        // on a host with no platform opener (`xdg-open`) and never hides a write failure.
-        &[("EDITOR", "true")],
-        30,
-        110,
-    );
-    assert!(
-        pty.wait_for_screen("message", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"/memory project new\r");
-    assert!(
-        pty.wait_for_screen("now owns", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    pty.send(b"/memory add --global remembered\r");
-    assert!(
-        pty.wait_for_screen("added", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-
-    // Start a turn whose reply never completes; the status bar shows `running`.
-    pty.send(b"start a long turn\r");
-    assert!(
-        pty.wait_for_screen("running", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    // `running` is shown at `TurnStarted`, before the request reaches the server; wait for
-    // the request itself (polling, like `wait_for_screen`) instead of asserting at once.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while server.requests().is_empty() && std::time::Instant::now() < deadline {
-        pty.pump();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(server.requests().len(), 1);
-
-    pty.send(b"/memory list --global\r");
-    assert!(
-        pty.wait_for_screen("remembered", wait_positive()),
-        "{}",
-        pty.screen()
-    );
-    assert!(
-        pty.screen().contains("running"),
-        "the turn is still running:\n{}",
-        pty.screen()
-    );
-    assert_eq!(server.requests().len(), 1, "the command sent no request");
-
-    pty.quit();
-    assert_eq!(pty.app_exit_code(), Some(0));
-}
-
 /// ADR 0018: `/compact` runs without a model request and shows its result as a notice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pty_compact_shows_its_result_without_a_model_request() {
@@ -9276,17 +8899,16 @@ async fn pty_pick_prints_no_startup_diagnostics_into_the_alternate_screen() {
     assert_eq!(pty.app_exit_code(), Some(0));
 }
 
-/// The same rule, for the runtime half of the startup diagnostics: a memory warning (a malformed
-/// context file, a bad skill, a failed memory read) is a line the user must see, so it becomes a
-/// transcript notice rather than stderr, which the fullscreen UI draws over — ADR 0021's
-/// rule for the memory *notice*, applied to the warning. On the `--pick` path the startup
+/// The same rule, for the runtime half of the startup diagnostics: a session warning (a malformed
+/// context file, a bad skill) is a line the user must see, so it becomes a transcript notice
+/// rather than stderr, which the fullscreen UI draws over. On the `--pick` path the startup
 /// ones would otherwise land on the alternate screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
-    let dir = TempDir::new("memory-warning");
-    let home = TempDir::new("memory-warning-home");
+async fn pty_a_session_warning_is_a_transcript_notice_not_stderr() {
+    let dir = TempDir::new("session-warning");
+    let home = TempDir::new("session-warning-home");
     // A user skill whose frontmatter declares `allowed-tools`: discovery warns once through the
-    // host's memory-warning seam while the session opens.
+    // host's session-warning seam while the session opens.
     std::fs::create_dir_all(home.path().join("skills/warny")).unwrap();
     std::fs::write(
         home.path().join("skills/warny/SKILL.md"),
@@ -9303,7 +8925,7 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
             "--session-dir",
             dir.path().to_str().unwrap(),
             "--session-id",
-            "memory-warning",
+            "session-warning",
         ],
         &[("RADIAN_HOME", home.path().to_str().unwrap())],
         24,
@@ -9313,8 +8935,8 @@ async fn pty_a_memory_warning_is_a_transcript_notice_not_stderr() {
     // then covered: the notice is what makes it visible at all. The `allowed-tools`
     // declarations of every skill arrive as one merged line per session.
     assert!(
-        pty.wait_for_screen("radian: [memory] 1 skill declares", wait_positive()),
-        "the memory warning is not in the transcript:\n{}",
+        pty.wait_for_screen("radian: [session] 1 skill declares", wait_positive()),
+        "the session warning is not in the transcript:\n{}",
         pty.screen()
     );
     pty.quit();
@@ -10654,28 +10276,28 @@ async fn pty_the_slash_completion_walks_the_command_tree() {
         pty.screen()
     );
 
-    pty.send(b"/mem");
+    pty.send(b"/exp");
     assert!(
-        pty.wait_for_screen("/memory", wait_positive()),
+        pty.wait_for_screen("/export", wait_positive()),
         "the command list did not appear:\n{}",
         pty.screen()
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory ", wait_positive()),
+        pty.wait_for_screen("❯ /export ", wait_positive()),
         "Tab did not complete the command name:\n{}",
         pty.screen()
     );
     // The next level's list is already up; a partial is fuzzy-matched and completed.
-    pty.send(b"fo");
+    pty.send(b"js");
     assert!(
-        pty.wait_for_screen("forget", wait_positive()),
+        pty.wait_for_screen("json", wait_positive()),
         "the subcommand list did not appear:\n{}",
         pty.screen()
     );
     pty.send(b"\t");
     assert!(
-        pty.wait_for_screen("❯ /memory forget", wait_positive()),
+        pty.wait_for_screen("❯ /export json", wait_positive()),
         "Tab did not complete the subcommand:\n{}",
         pty.screen()
     );
@@ -13942,7 +13564,7 @@ async fn pty_a_remembered_full_applies_at_start_with_the_project_marker() {
     std::fs::create_dir_all(&ws).unwrap();
     // The store is keyed by the ADR 0021 project identity, and `RADIAN_HOME` is the root the
     // app reads (not `<root>/.radian`): `$RADIAN_HOME/access/access.json`.
-    let key = radian_host::memory::project_identity_key(&ws)
+    let key = radian_host::project_identity::project_identity_key(&ws)
         .to_string_lossy()
         .into_owned();
     let home = dir.path().join("home");
