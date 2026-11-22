@@ -2866,6 +2866,8 @@ Each mutation was applied by hand, backed up under `.radian/` and restored from 
 3/3 caught.
 ## the docs site's `arc/` pages (2026-10-24, branch `work/TK0089-arc-docs-subdir`)
 
+> The site generator moved out of the TUI (T-0016): `src/site_docs.rs` is now `crates/radian-site/src/site_docs.rs` and `--test site_docs` is now `-p radian-site --test site_docs`. The commands below are the historical ones; rerun them with the new paths.
+
 Base: the branch's move commit. The mutation was applied by hand to
 `crates/radian-tui/src/site_docs.rs`, backed up under `.radian/site_docs.rs.bak` and restored
 from that copy (never `git checkout`); the named test ran alone with
@@ -2878,6 +2880,8 @@ from that copy (never `git checkout`); the named test ran alone with
 1/1 caught.
 
 ## TK0097: the site links the moved arc manual pages (2026-10-24, branch `work/TK0097-site-arc-doc-links`)
+
+> The site generator moved out of the TUI (T-0016): `src/site_docs.rs` is now `crates/radian-site/src/site_docs.rs` and `--test site_docs` is now `-p radian-site --test site_docs`. The commands below are the historical ones; rerun them with the new paths.
 
 `site/arc.html` still linked the flat `/docs/arc.html` and `/docs/arc-*.html` paths that the
 manual's move into `docs/user/arc/` replaced. The new test renders the manual and checks every
@@ -3391,6 +3395,8 @@ confirmed byte-identical with `shasum -a 256`; the named test ran with
 | TK0248-M6 | the `arc: ...` line is deleted from the documented `radian docs` listing in `docs/user/cli.md` | ✅ 1 failed (rc=100) | `the_manual_states_the_exact_radian_docs_output` (the documented block no longer matched stdout) |
 
 ## TK0254: manual-split follow-ups (2026-10-30, branch `work/TK0254-manual-split-followups`)
+
+> The site generator moved out of the TUI (T-0016): `src/site_docs.rs` is now `crates/radian-site/src/site_docs.rs` and `--test site_docs` is now `-p radian-site --test site_docs`. The commands below are the historical ones; rerun them with the new paths.
 
 The hand-rolled anchor check in `crates/radian-coding/tests/docs.rs` is gone: it reimplemented
 the site slug, counted H1 titles and `#` lines inside fenced blocks as ids, and duplicated
