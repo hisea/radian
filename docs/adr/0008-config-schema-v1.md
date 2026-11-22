@@ -59,6 +59,7 @@ This check is a heuristic, not a security boundary. The true boundary is "plaint
 - Unknown `permissions.approval` values fail closed. `auto` under the `full` tier warns and is ignored. Command-line `--approval`/`--yes` always win.
 - `[model] retries` is a non-negative integer. A negative or non-integer value is rejected. `[shell]` holds no effective key. An old `auto_background_secs` (any value) warns one line and is ignored. It is never an error. `[compaction] thinking` is one of seven levels or `"current"`. An unknown tier name is a configuration error.
 - `[tui] bell` is `"off" | "attention" | "all"` (default `off`; terminal bell). An unknown value is a display-class key: ignore and warn, never refuse.
+- `[tui.display] mermaid` is a retired key (the Mermaid renderer was removed): one warning line, then ignored, whatever the value; it never refuses the file.
 - `[providers.<name>]` names must not collide with built-in descriptors or `openai-compatible`. `kind` allows only `openai-compatible` and `anthropic`.
 - `[model.smol]` `provider` and `model` carry the same meaning as the `[model]` route keys. It is the cheap-model slot. Only `explore` reads it today. Only one of the two set is a configuration warning and ignored (`explore` follows the parent). A project-level occurrence is ignored as an unknown key with the name stated.
 - `[sandbox] allow_unix_sockets` and `[sandbox] allow_env` belong only in the user-level configuration. A project-level occurrence is a configuration error.

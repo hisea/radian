@@ -828,10 +828,6 @@ pub struct App {
     /// How tool card bodies fold (ADR 0028 R4, `tui.display.tool_output` +
     /// `tool_preview_lines`). Also part of the layout cache keys.
     pub tool_display: crate::tools::ToolDisplay,
-    /// `tui.display.mermaid` (ADR 0028 R8), default true: draw a closed ```mermaid block as a
-    /// diagram. `false` renders every code block as source. Part of `DisplayModes`, so it is
-    /// in the layout cache key.
-    pub mermaid_enabled: bool,
     /// `tui.display.highlight` (ADR 0028 R2), default true: highlight a closed code block whose
     /// info string names a common language. `false` renders every code block as plain text.
     /// Part of `DisplayModes`, so it is in the layout cache key.

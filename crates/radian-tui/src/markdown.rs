@@ -6,7 +6,7 @@
 //!
 //! Every piece of displayed text that exists in the source keeps its **byte offset** in the
 //! entry's display text, so the selection mapping can point at the real characters and a copy
-//! yields the source the selection covers (the same rule the Mermaid block follows). Text the
+//! yields the source the selection covers. Text the
 //! renderer synthesizes — a list bullet, a quote bar, a rule, a table border, a link's
 //! ` (url)` — has no offset: it selects the block's start.
 //!

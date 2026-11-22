@@ -1015,13 +1015,9 @@ throwaway terminal, not your working one.
    `· N lines` (the body is not
    silently cut); the thinking block is separated from its neighbour by the container's one
    blank line (not hugged). *Fail*: record the fold state after each press and the config value.
-7. **Mermaid** (ADR 0042; merge `aedc23f`). *Steps*: ask for a small ` ```mermaid `
-   flowchart, then a `subgraph` one and a 4-participant `sequenceDiagram`; widen then narrow
-   the terminal past the `TooWide` threshold, then widen again.
-   *Expect*: wide → a Unicode diagram at the body width; narrow → the **source** plus one dim
-   `mermaid: needs N columns, have W` line (never half a diagram); widening re-renders it.
-   *Look*: node/edge colors from the theme (`mermaid_node`/`mermaid_edge`/`mermaid_text`), and
-   `mono`. *Fail*: record the reason line and the widths.
+7. **Mermaid block** (ADR 0035). *Steps*: ask for a small ` ```mermaid ` flowchart.
+   *Expect*: an ordinary code block (open line box titled `mermaid`, source shown, no
+   diagram). *Fail*: record what was drawn.
 8. **Code blocks** (ADR 0028; merge `0f5a302`). *Steps*: get a long single-line code block,
    then a block with CJK characters.
    *Expect*: code **never wraps**; a line wider than the body ends in `…`; CJK code lines
@@ -1446,7 +1442,7 @@ before it stays on screen.
 A **closed** fenced code block whose info string names a common language is highlighted with the
 pure-Rust `syntect` (the `regex-fancy` backend; no oniguruma). While the fence is open
 (streaming) the block is plain; it is highlighted when the closing fence arrives — the same
-"only the fixed blocks are rendered" rule as Mermaid. An unknown language, or no info string,
+"only the fixed blocks are rendered" rule. An unknown language, or no info string,
 stays the code block's uniform style. Highlighting changes **colors only**, never the text:
 selection, copy, `Ctrl-F` and the line count all see the same characters (ADR 0028 R9's
 no-wrap and `…` truncation are unchanged).
@@ -1670,28 +1666,8 @@ transcript and the TUI renders it like any other `System` message (the same shap
 ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
 result are the card). A pending question's result arrives as the `ask_user` card.
 
-## Mermaid blocks (ADR 0042)
+## Mermaid blocks
 
-A fenced code block whose info string is `mermaid` (ASCII case-insensitive) and which is
-**closed** is drawn as a Unicode diagram, at the transcript body width, through
-`grok_mermaid::render` — the one entry point (ADR 0042 decision 3), the vendored
-`third_party/grok-mermaid` (grok-build's `mermaid.rs`: flowchart with `subgraph`, sequence,
-state, class and ER diagrams). While the fence is open (streaming) the source shows; the diagram
-appears when the closing fence arrives. `tui.display.mermaid = false` (config) renders every code
-block as source.
-
-A diagram the renderer cannot draw keeps the **source** and puts one dim
-`mermaid: <reason>` line first — never a half diagram. The reason is
-`needs N columns, have W` when the drawing is wider than the body (ADR 0042 decision 5: it is
-never compressed or turned), and `unsupported syntax` or `too large` otherwise. Widening the
-terminal re-renders: the diagram cache is keyed by `(width, text_len)`, so a `TooWide` failure
-can succeed on a wider screen.
-
-The vendored renderer's five roles collapse onto the theme's three (ADR 0029, ADR 0042
-decision 4): box drawing is `mermaid_node` (pi's `accent`), a connector and its head is
-`mermaid_edge` (pi's `dim`), and every label — a node's, a connector's — is `mermaid_text`
-(pi's `text`). `mono` uses modifiers only; `[tui.colors]` overrides each like any other role.
-
-Selecting a diagram selects its block (the diagram has no source offsets of its own), so a copy
-yields the Mermaid **source** — the text that actually exists. Ctrl-F searches the diagram's
-rendered lines (node labels included) because `body_text_lines` returns what is drawn.
+The Mermaid renderer is removed (ADR 0042). A `mermaid` fence is an ordinary code block.
+`tui.display.mermaid` is a retired key (one warning, then ignored) and the `mermaid_node`,
+`mermaid_edge` and `mermaid_text` theme roles are inert.

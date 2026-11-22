@@ -1,6 +1,8 @@
 # ADR 0042: Mermaid Box-Line Graph Renderer (grok-build `mermaid.rs`)
 
-Status: accepted
+Status: removed
+
+Removed: the Mermaid renderer is removed from radian, code and docs: `third_party/grok-mermaid`, the TUI drawing of `mermaid` blocks, and the `tui.display.mermaid` switch. A `mermaid` code block is an ordinary code block (ADR 0035). `tui.display.mermaid` is a retired key (ADR 0008), and the `mermaid_node`, `mermaid_edge` and `mermaid_text` theme roles are inert (ADR 0029). No part of the text below is in force. It is kept only as history. Do not build on it.
 
 ## Decisions
 

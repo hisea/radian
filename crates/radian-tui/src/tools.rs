@@ -374,16 +374,12 @@ impl Default for ToolDisplay {
 
 /// Everything the layout cache key depends on besides the width and the text length.
 ///
-/// `mermaid` (ADR 0028 R8) is here rather than beside the layout call: a rendered diagram is
-/// part of what a laid-out line is, so toggling it must invalidate the same caches the folds
-/// do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayModes {
     pub reasoning: ReasoningMode,
     pub tools: ToolDisplay,
-    pub mermaid: bool,
     /// Code-block syntax highlighting (ADR 0028 R2, `tui.display.highlight`). In the layout
-    /// cache key for the same reason as `mermaid`: highlighted lines are what is drawn.
+    /// cache key: highlighted lines are what is drawn.
     pub highlight: bool,
     /// The footer's glyph set (ADR 0027 C2): the tool card's frame characters follow it
     /// (ADR 0028, `ascii` draws `+ - |`), and so do the Markdown elements that have
@@ -394,12 +390,9 @@ pub struct DisplayModes {
 
 impl Default for DisplayModes {
     fn default() -> Self {
-        // The config default (`tui.display.mermaid`) is on, so a default set of modes draws
-        // diagrams too.
         Self {
             reasoning: ReasoningMode::default(),
             tools: ToolDisplay::default(),
-            mermaid: true,
             highlight: true,
             glyphs: crate::footer::Glyphs::default(),
         }

@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
 | `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |
 | `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |
 | `hooks-split-and-trim.md` | idea | 0045、0008、0047、0031 | 拆模块已落地；async、StopFailure、Notification 等按使用证据再定是否瘦身 |

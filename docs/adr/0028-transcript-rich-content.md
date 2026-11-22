@@ -66,16 +66,6 @@ Ctrl-F searches **complete content**, including folded parts. A hit in a folded 
 
 With 50 thousand entries of mixed content (Markdown, code, and diff): a normal frame still costs below 1 ms; P95 costs below 30 ms; the first frame after a global fold switch costs below 100 ms; streaming key response never degrades. Results go into `benchmarks/perf-baseline.md`.
 
-### R8 Charts (mermaid)
-
-The renderer is grok-build `mermaid.rs`; details live in **ADR 0042**. This ADR only fixes display-layer behavior:
-
-- It renders only **closed** mermaid code blocks. Pre-close shows source.
-- Render is a `(source, width, theme)` pure function. Results enter the block cache. Colors take node, edge, and text roles from ADR 0029.
-- On failure (unsupported syntax, over limits, short width) it **keeps the source** with one dim reason line before it. It never shows a half-drawn graph.
-- Configuration `tui.display.mermaid = true | false`, default `true`.
-- The model side has no mermaid prompt, tool, or skill: the model still writes ```` ```mermaid ```` blocks, and render happens only at display.
-
 ### R9 Code blocks and character art
 
 - **Code blocks never wrap**: over-wide parts truncate and row ends show `…`. Full content comes from select and copy.
@@ -107,4 +97,4 @@ The renderer is grok-build `mermaid.rs`; details live in **ADR 0042**. This ADR 
 
 ## Verification
 
-`blocks.rs` and `markdown.rs` row-count and window tests. Full-screen snapshots in `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, `tests/render.rs`, and `tests/thin.rs`. `tests/highlight.rs`. `tests/find.rs`. `tests/perf_render.rs` plus `benchmarks/perf-baseline.md`. The visual hand-test list in `crates/radian-tui/README.md`. Mermaid `tests/mermaid.rs`, see ADR 0042. Image rows and folds: `tests/images.rs` and `tests/image_render.rs`; the merged probe: `terminal.rs` unit tests and the pty startup query count.
+`blocks.rs` and `markdown.rs` row-count and window tests. Full-screen snapshots in `tests/card.rs`, `tests/diff.rs`, `tests/thinking.rs`, `tests/question.rs`, `tests/render.rs`, and `tests/thin.rs`. `tests/highlight.rs`. `tests/find.rs`. `tests/perf_render.rs` plus `benchmarks/perf-baseline.md`. The visual hand-test list in `crates/radian-tui/README.md`. Image rows and folds: `tests/images.rs` and `tests/image_render.rs`; the merged probe: `terminal.rs` unit tests and the pty startup query count.

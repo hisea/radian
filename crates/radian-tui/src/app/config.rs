@@ -10,7 +10,6 @@ use super::*;
 pub(crate) const DEFAULT_MOUSE: bool = true;
 pub(crate) const DEFAULT_TIPS: bool = true;
 pub(crate) const DEFAULT_BANNER: bool = true;
-pub(crate) const DEFAULT_MERMAID: bool = true;
 pub(crate) const DEFAULT_HIGHLIGHT: bool = true;
 pub(crate) const DEFAULT_TOOL_PREVIEW_LINES: usize = 5;
 
@@ -53,7 +52,6 @@ impl App {
             // ADR 0028 R3's default: thinking collapsed to one line.
             reasoning_mode: ReasoningMode::Collapsed,
             tool_display: crate::tools::ToolDisplay::default(),
-            mermaid_enabled: true,
             highlight_enabled: true,
             inspector_last: None,
             session: SessionView {
@@ -125,7 +123,6 @@ impl App {
         crate::tools::DisplayModes {
             reasoning: self.reasoning_mode,
             tools: self.tool_display,
-            mermaid: self.mermaid_enabled,
             highlight: self.highlight_enabled,
             glyphs: self.footer_glyphs(),
         }
@@ -252,8 +249,6 @@ impl App {
                 .map(|lines| lines as usize)
                 .unwrap_or(DEFAULT_TOOL_PREVIEW_LINES),
         };
-        // `tui.display.mermaid` (ADR 0028 R8, default true).
-        self.mermaid_enabled = config.tui.display_mermaid.unwrap_or(DEFAULT_MERMAID);
         self.highlight_enabled = config.tui.display_highlight.unwrap_or(DEFAULT_HIGHLIGHT);
         // `tui.clipboard` (default OSC 52). An unknown spelling never reaches here (the host
         // config reader skips it with a warning); `pbcopy` off macOS does: warn once and fall

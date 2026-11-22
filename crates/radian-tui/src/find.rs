@@ -191,7 +191,6 @@ mod tests {
             fold: crate::tools::ToolFold::Expanded,
             preview_lines: 5,
         },
-        mermaid: true,
         highlight: true,
         glyphs: crate::footer::Glyphs::Unicode,
     };

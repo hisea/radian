@@ -148,9 +148,6 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         Role::NoticeLabel => Some("accent"),
         Role::NoticeBody => Some("muted"),
         // A diagram's roles (ADR 0028 R8): node = accent, edge = dim, text = primary.
-        Role::MermaidNode => Some("accent"),
-        Role::MermaidEdge => Some("dim"),
-        Role::MermaidText => Some("text"),
         Role::MdHeading => Some("mdHeading"),
         Role::MdHeadingMark => Some("dim"),
         Role::MdLink => Some("mdLink"),
