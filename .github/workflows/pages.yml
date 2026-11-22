@@ -7,9 +7,9 @@ on:
     paths:
       - "site/**"
       - "docs/user/**"
-      - "crates/radian-tui/examples/site-docs.rs"
-      - "crates/radian-tui/src/site_docs.rs"
-      - "crates/radian-tui/tests/site_docs.rs"
+      - "crates/radian-site/src/main.rs"
+      - "crates/radian-site/src/site_docs.rs"
+      - "crates/radian-site/tests/site_docs.rs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -40,7 +40,7 @@ jobs:
           mkdir -p _site
           cp site/404.html site/robots.txt site/favicon.svg site/docs.css site/analytics.js _site/
           cp -r site/media _site/media
-          cargo run -p radian-tui --example site-docs --locked -- _site
+          cargo run -p radian-site --locked -- _site
           printf 'getrad.dev' > _site/CNAME
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5

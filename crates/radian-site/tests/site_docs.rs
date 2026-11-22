@@ -1,9 +1,9 @@
-//! The web manual (`site-docs` example) renders every `DOCS` page, resolves every
+//! The web manual (`radian-site` generator) renders every `DOCS` page, resolves every
 //! inter-page link and fragment, lists exactly the manual pages in its sidebar, emits no
 //! inline JavaScript (a `TechArticle` JSON-LD record and the external analytics file), names its canonical URL on every page,
 //! and lists every page once in `llms.txt`, `sitemap.xml` and in full in `llms-full.txt`.
 
-use radian_tui::site_docs::{
+use radian_site::site_docs::{
     HAND_WRITTEN_PAGES, HandPage, Lang, RenderedSite, render_site, split_page,
 };
 use std::collections::HashSet;
@@ -71,7 +71,7 @@ fn every_docs_page_renders() {
 #[test]
 fn every_link_resolves_to_a_page_and_heading() {
     let site = site();
-    let by_stem: std::collections::HashMap<&str, &radian_tui::site_docs::RenderedPage> =
+    let by_stem: std::collections::HashMap<&str, &radian_site::site_docs::RenderedPage> =
         site.pages.iter().map(|p| (p.stem.as_str(), p)).collect();
     for page in &site.pages {
         for href in hrefs(&page.body) {
@@ -120,7 +120,7 @@ fn the_sidebar_lists_exactly_the_docs_pages() {
         })
         .collect();
     for (index, page) in site.pages.iter().enumerate() {
-        let html = radian_tui::site_docs::page_html(&site, index);
+        let html = radian_site::site_docs::page_html(&site, index);
         let sidebar = html
             .split_once("<nav class=\"side\"")
             .expect("a sidebar")
@@ -153,7 +153,7 @@ fn the_sidebar_lists_exactly_the_docs_pages() {
 fn the_docs_pages_hold_no_script() {
     let site = site();
     for (index, page) in site.pages.iter().enumerate() {
-        let html = radian_tui::site_docs::page_html(&site, index);
+        let html = radian_site::site_docs::page_html(&site, index);
         let scripts = html.to_lowercase().matches("<script").count();
         assert_eq!(scripts, 2, "{} has two script elements", page.name);
         assert!(
@@ -179,7 +179,7 @@ fn the_docs_pages_hold_no_script() {
 const JSON_LD_OPEN: &str = "<script type=\"application/ld+json\">";
 
 /// The one external script element every page holds.
-const ANALYTICS_SCRIPT: &str = radian_tui::site_docs::ANALYTICS_SCRIPT;
+const ANALYTICS_SCRIPT: &str = radian_site::site_docs::ANALYTICS_SCRIPT;
 
 /// The JSON-LD element's content.
 fn json_ld(html: &str) -> serde_json::Value {
@@ -194,7 +194,7 @@ fn json_ld(html: &str) -> serde_json::Value {
 fn every_docs_page_carries_a_tech_article_record() {
     let site = site();
     for (index, page) in site.pages.iter().enumerate() {
-        let html = radian_tui::site_docs::page_html(&site, index);
+        let html = radian_site::site_docs::page_html(&site, index);
         let record = json_ld(&html);
         assert_eq!(record["@context"], "https://schema.org", "{}", page.name);
         assert_eq!(record["@type"], "TechArticle", "{}", page.name);
@@ -207,7 +207,7 @@ fn every_docs_page_carries_a_tech_article_record() {
         );
         assert_eq!(
             record["url"],
-            radian_tui::site_docs::page_url(&page.stem).as_str(),
+            radian_site::site_docs::page_url(&page.stem).as_str(),
             "{}",
             page.name
         );
@@ -218,15 +218,15 @@ fn every_docs_page_carries_a_tech_article_record() {
         );
     }
     assert_eq!(
-        radian_tui::site_docs::page_url("index"),
+        radian_site::site_docs::page_url("index"),
         "https://getrad.dev/docs/"
     );
     assert_eq!(
-        radian_tui::site_docs::page_url("sub/index"),
+        radian_site::site_docs::page_url("sub/index"),
         "https://getrad.dev/docs/sub/"
     );
     assert_eq!(
-        radian_tui::site_docs::page_url("sub/loop"),
+        radian_site::site_docs::page_url("sub/loop"),
         "https://getrad.dev/docs/sub/loop.html"
     );
 }
@@ -243,7 +243,7 @@ fn a_description_cannot_close_the_json_ld_element() {
     ];
     let site = render_site(pages).expect("renders");
     let index = site.pages.iter().position(|p| p.stem == "evil").unwrap();
-    let html = radian_tui::site_docs::page_html(&site, index);
+    let html = radian_site::site_docs::page_html(&site, index);
     assert_eq!(
         html.matches("</script>").count(),
         2,
@@ -258,8 +258,8 @@ fn a_description_cannot_close_the_json_ld_element() {
 #[test]
 fn the_llms_files_list_every_page_once() {
     let site = site();
-    let index = radian_tui::site_docs::llms_txt(&site);
-    let full = radian_tui::site_docs::llms_full_txt(&site);
+    let index = radian_site::site_docs::llms_txt(&site);
+    let full = radian_site::site_docs::llms_full_txt(&site);
     assert!(
         index.starts_with("# radian\n"),
         "llms.txt starts with the title"
@@ -282,7 +282,7 @@ fn the_llms_files_list_every_page_once() {
         "the full file is listed"
     );
     for page in &site.pages {
-        let url = radian_tui::site_docs::page_url(&page.stem);
+        let url = radian_site::site_docs::page_url(&page.stem);
         let line = format!("- [{}]({url})", page.title);
         assert_eq!(
             index.matches(&line).count(),
@@ -429,10 +429,10 @@ fn a_link_to_a_missing_heading_fails_the_build() {
 #[test]
 fn the_hand_written_pages_only_link_generated_docs() {
     let site = site();
-    let by_output: std::collections::HashMap<String, &radian_tui::site_docs::RenderedPage> = site
+    let by_output: std::collections::HashMap<String, &radian_site::site_docs::RenderedPage> = site
         .pages
         .iter()
-        .map(|page| (radian_tui::site_docs::output_path(&page.stem), page))
+        .map(|page| (radian_site::site_docs::output_path(&page.stem), page))
         .collect();
     let root = repo_root();
     let _ = root;
@@ -512,10 +512,10 @@ fn hrefs(html: &str) -> Vec<&str> {
 fn every_docs_page_names_its_canonical_url() {
     let site = site();
     for (index, page) in site.pages.iter().enumerate() {
-        let html = radian_tui::site_docs::page_html(&site, index);
+        let html = radian_site::site_docs::page_html(&site, index);
         let link = format!(
             "<link rel=\"canonical\" href=\"{}\">",
-            radian_tui::site_docs::page_url(&page.stem)
+            radian_site::site_docs::page_url(&page.stem)
         );
         assert_eq!(
             html.matches(&link).count(),
@@ -783,7 +783,7 @@ fn a_source_without_its_chinese_title_fails_the_build() {
 #[test]
 fn the_sitemap_lists_every_page_once() {
     let site = site();
-    let xml = radian_tui::site_docs::sitemap_xml(&site);
+    let xml = radian_site::site_docs::sitemap_xml(&site);
     assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset "));
     assert!(xml.ends_with("</urlset>\n"));
     let locs: Vec<&str> = xml
@@ -799,7 +799,7 @@ fn the_sitemap_lists_every_page_once() {
     expected.extend(
         site.pages
             .iter()
-            .map(|p| radian_tui::site_docs::page_url(&p.stem)),
+            .map(|p| radian_site::site_docs::page_url(&p.stem)),
     );
     assert_eq!(
         locs, expected,
