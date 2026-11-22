@@ -92,7 +92,8 @@ struct TestFunction {
 }
 
 impl TestFunction {
-    /// Whether this function is the test named by `full` (`name` or `module::tests::name`).
+    /// Whether this function is the test named by `full` (`name`, `module::tests::name`, or
+    /// `file::module::name` for a test in a module file of its own).
     fn matches(&self, full: &str) -> bool {
         let mut segments: Vec<&str> = full.split("::").collect();
         let Some(name) = segments.pop() else {
@@ -103,6 +104,11 @@ impl TestFunction {
         }
         if segments.is_empty() {
             // An integration test, or a unit test at a crate root.
+            return true;
+        }
+        // A test in a file module of its own (`hooks/tests/stop_gate.rs` is
+        // `hooks::tests::stop_gate`): the whole path is that file's module path.
+        if self.module.as_deref() == Some(segments.join("::").as_str()) {
             return true;
         }
         if segments.last() != Some(&"tests") {

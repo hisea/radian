@@ -3,7 +3,7 @@
 //!
 //! Both tests compose the chain through [`radian_host::session_hooks`] — the one function
 //! `open_session` uses — with stub role/memory/skills/facts layers, so a reorder inside it
-//! fails here (the unit tests in `hooks.rs` cover each hook behavior on its own).
+//! fails here (the unit tests in `src/hooks/tests/` cover each hook behavior on its own).
 
 mod common;
 

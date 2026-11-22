@@ -37,7 +37,7 @@
 | `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
 | `site-docs-out-of-tui.md` | decided | 0032 | 网站手册生成器移出 TUI crate，产物逐字节不变 |
 | `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |
-| `hooks-split-and-trim.md` | decided（1）；idea（2） | 0045、0008、0047、0031 | `hooks.rs`（296 KB）先按职责拆模块；async、StopFailure、Notification 等按使用证据再定 |
+| `hooks-split-and-trim.md` | idea | 0045、0008、0047、0031 | 拆模块已落地；async、StopFailure、Notification 等按使用证据再定是否瘦身 |
 | `test-suite-dedupe.md` | decided | 0023、0032 | pty（548 KB/31 测试）与 exec `cli.rs`（421 KB）去掉与帧断言、其它套件重复的测试 |
 | `context-report-reuse-budget.md` | decided | 0015 | `/context` 估算改用 `radian_core::budget` 的计数，删掉重复实现 |
 | `turn-end-continuation.md` | A item 4 open；B 已落地 | 0036、0037、0008、0045、0011、0021、0034、0005、0017 | 轮末「只说不做」（`Now X.` 后无工具调用）：A 部分落地（删掉无效的结束回合规则、工作区外可见加任务文本例外、通知以 omp 形状收尾并修少换行、显式转后台返回文本按 opencode 形状、取消自动转后台即后台只走显式 `background: true` 且前台缺省 300 s），只剩查 lead 记忆漏进 worker（第 4 项）；B `Stop` 路径内建续跑已落地（保守规则粗筛 + 一条 System 续跑交模型判断，每回合一次、连续两次后 herdr `blocked`，计入唤醒闸门，stdin 加 `last_assistant_message`）；研究笔记已归档，不在本仓库 |
