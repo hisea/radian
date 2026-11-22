@@ -1062,7 +1062,7 @@ fn journal_with_a_tool_call() -> Vec<String> {
 
 /// **Edge case 1.** One journal, folded by the host's shared fold and by the TUI's attach path,
 /// gives the same entries — and those entries are the expected ones (ADR 0023 U1). The view
-/// mirrors the fold, so a frame can never show something the hub would not.
+/// mirrors the fold, so a frame can never show something the fold would not.
 ///
 /// Mutation: drop one entry kind's mapping in the moved fold — the assistant text, or the tool
 /// call — and this FAILS: the expected kinds no longer match (and the view would draw the same
@@ -1181,7 +1181,7 @@ fn journal_with_an_image() -> Vec<String> {
 /// ADR 0023 U1: the resume mapping's entry data is exactly the shared fold's entry, image
 /// facts included. The wrapper's decoded images are extra render state; the folded
 /// `data.images` must still be there, or a journal with an annotated image folds differently
-/// in a resumed TUI and in the hub.
+/// in a resumed TUI and in the fold.
 #[test]
 fn the_resume_mapping_keeps_the_folded_image_facts() {
     let lines = journal_with_an_image();

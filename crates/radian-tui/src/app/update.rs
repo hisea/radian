@@ -156,27 +156,7 @@ impl App {
                 effects: self.apply_event(&event),
             },
             Input::Runtime(event) => self.apply_runtime_event(&event),
-            Input::Pending {
-                head,
-                len,
-                answered_from_hub,
-            } => self.sync_pending(head, len, &answered_from_hub),
-            // The owner closed this session through the control port (ADR 0043): one host
-            // notice, the typed draft dropped the way an idle Ctrl-C quit drops it (the first
-            // press clears the input into the in-process history), then the same quit action
-            // as the second Ctrl-C — after a running turn is cancelled (ADR 0043: a close
-            // cancels "through the same path as `cancel`").
-            Input::RemoteClose => {
-                self.push_notice("session closed remotely");
-                self.clear_input_into_history();
-                // The notice is a durable transcript fact (ADR 0006 §5.14). It journals with
-                // the quit, so it stays the last record before the process leaves.
-                self.pending_close_notice = Some("session closed remotely".into());
-                // The notice must reach the screen even when the close sets no other state.
-                let mut result = self.quit_cancelling_first();
-                result.dirty = true;
-                result
-            }
+            Input::Pending { head, len } => self.sync_pending(head, len),
             Input::Form(key) => self.form_key(key),
             Input::MentionsExpanded(result) => self.mentions_expanded(result),
             Input::DroppedLoaded {
@@ -970,8 +950,7 @@ impl App {
         }
     }
 
-    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`], an idle `/quit` and an idle
-    /// remote close share: close the inbox, then leave through the ordinary clean-exit path.
+    /// The quit action a second Ctrl-C inside [`QUIT_WINDOW`] and an idle `/quit` share: close the inbox, then leave through the ordinary clean-exit path.
     /// The close runs first, so a followup that arrives between the quit and the teardown's
     /// `session.stop()` is refused instead of opening a turn the stop would drop mid-flight;
     /// the teardown restores the terminal and stops the driver. A running turn is cancelled
@@ -984,7 +963,7 @@ impl App {
         }
     }
 
-    /// `/quit` and a remote close: leave at once when no turn runs; otherwise close the
+    /// `/quit`: leave at once when no turn runs; otherwise close the
     /// inbox and cancel the turn through the session's own path, and let [`Input::Runtime`]'s
     /// `TurnFinished` run the quit ([`App::leave`]). Leaving at once would let
     /// `session.stop()` drop the live turn, and the journal would read `TurnStarted` with no
@@ -1002,16 +981,10 @@ impl App {
         self.leave()
     }
 
-    /// The last step of every `/quit` and remote close: close the inbox, journal the close's
-    /// `HostNotice`, if any, then leave. The notice's effect runs before the quit effect, and
-    /// the journal append is synchronous, so a resume reads it.
+    /// The last step of every `/quit`: close the inbox, then leave.
     pub(super) fn leave(&mut self) -> UpdateResult {
         let mut result = self.quit_now();
         result.dirty = true;
-        if let Some(text) = self.pending_close_notice.take() {
-            // After the inbox close, before the quit effect.
-            result.effects.insert(1, Effect::HostNotice { text });
-        }
         result
     }
 

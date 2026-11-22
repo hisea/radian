@@ -38,7 +38,6 @@ fn prompt(app: &mut App) {
     app.update(Input::Pending {
         head: Some(Box::new(view())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
 }
 
@@ -61,50 +60,6 @@ fn answer(app: &mut App, key: KeyEvent) -> (u64, ApprovalOutcome) {
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-#[test]
-fn a_popup_answered_from_the_hub_closes_with_a_weak_line() {
-    let mut app = App::new("m", "s");
-    prompt(&mut app);
-    let result = app.update(Input::Pending {
-        head: None,
-        len: 0,
-        answered_from_hub: vec![1],
-    });
-    assert!(
-        app.pending_approval().is_none(),
-        "the queue already completed it"
-    );
-    assert!(
-        result.effects.is_empty(),
-        "the TUI must not apply a second answer: {:?}",
-        result.effects
-    );
-    let entry = app.session.entries.last().expect("the hub line");
-    assert_eq!(entry.kind, radian_tui::app::EntryKind::Notice);
-    assert!(entry.dim, "the line is the weak (dim) level");
-    assert_eq!(entry.text, "answered from the hub");
-}
-
-/// Edge 3's negative half: a late hub answer (the TUI answered first, so the queue recorded
-/// nothing from the hub) adds no line.
-#[test]
-fn a_late_hub_answer_adds_no_line() {
-    let mut app = App::new("m", "s");
-    prompt(&mut app);
-    app.on_key(key(KeyCode::Char('y')));
-    let before = app.session.entries.len();
-    app.update(Input::Pending {
-        head: None,
-        len: 0,
-        answered_from_hub: vec![1],
-    });
-    assert_eq!(
-        app.session.entries.len(),
-        before,
-        "no line for a late answer"
-    );
 }
 
 #[test]
@@ -174,11 +129,7 @@ fn the_queue_head_drives_the_prompt_not_the_turn() {
         "the turn ending does not by itself clear the modal"
     );
 
-    app.update(Input::Pending {
-        head: None,
-        len: 0,
-        answered_from_hub: Vec::new(),
-    });
+    app.update(Input::Pending { head: None, len: 0 });
     assert!(app.pending_approval().is_none(), "the queue's head is gone");
     assert_eq!(app.pending, 0);
 }
@@ -213,7 +164,6 @@ fn a_second_approval_does_not_supersede_the_first() {
     app.update(Input::Pending {
         head: Some(Box::new(view())),
         len: 2,
-        answered_from_hub: Vec::new(),
     });
     assert_eq!(
         app.pending_approval().map(|r| r.request_id.as_str()),
@@ -226,7 +176,6 @@ fn a_second_approval_does_not_supersede_the_first() {
     let result = app.update(Input::Pending {
         head: Some(Box::new(second)),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert!(app.pending_approval().is_some());
@@ -339,7 +288,6 @@ fn shell_app(lines: usize) -> App {
             request: PendingRequest::Approval(shell_request(&long_command(lines))),
         })),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     app
 }
@@ -533,7 +481,6 @@ fn a_new_pending_request_resets_the_scroll() {
     app.update(Input::Pending {
         head: Some(Box::new(second)),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     let screen = draw(&mut app, 80, 24);
     let total = render::wrap(

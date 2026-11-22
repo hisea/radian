@@ -364,7 +364,7 @@ pub fn output_path(stem: &str) -> String {
 }
 
 /// The page's absolute URL: `https://getrad.dev/docs/` for the landing page, the directory
-/// URL for a subdirectory index (`docs/arc/`), `https://getrad.dev/docs/<stem>.html` otherwise.
+/// URL for a subdirectory index (`docs/sub/`), `https://getrad.dev/docs/<stem>.html` otherwise.
 pub fn page_url(stem: &str) -> String {
     if stem == "index" {
         format!("{SITE_URL}/docs/")
@@ -491,13 +491,13 @@ pub fn llms_full_txt(site: &RenderedSite) -> String {
     out
 }
 
-/// The directory that holds a page's output (`arc` for `arc/loop`), empty at the root.
+/// The directory that holds a page's output (`sub` for `sub/loop`), empty at the root.
 fn page_dir(stem: &str) -> &str {
     stem.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
 }
 
 /// `to`'s output path relative to the directory that holds `from`'s page: `gate.html` from
-/// `arc/loop` to `arc/gate`, `../configuration.html` from `arc/loop` to `configuration`.
+/// `sub/loop` to `sub/gate`, `../configuration.html` from `sub/loop` to `configuration`.
 fn relative_href(from: &str, to: &str) -> String {
     let from_dir: Vec<&str> = page_dir(from)
         .split('/')
@@ -524,7 +524,7 @@ fn relative_href(from: &str, to: &str) -> String {
 }
 
 /// The `../` prefix that reaches the site root's assets (`docs.css`, `favicon.svg`) from a
-/// page: root pages need one, `arc/` pages two.
+/// page: root pages need one, `sub/` pages two.
 fn asset_prefix(stem: &str) -> String {
     let depth = page_dir(stem)
         .split('/')
@@ -1028,7 +1028,7 @@ fn resolve_link(dest: &str, ctx: &mut Ctx<'_>) -> Result<String, SiteError> {
     let source = stem_of(ctx.page);
     let source_dir = page_dir(source);
     // A page link is written relative to its source page, as GitHub renders it
-    // (`gate.md` and `../configuration.md` from `arc/loop.md`).
+    // (`gate.md` and `../configuration.md` from `sub/loop.md`).
     if path.ends_with(".md")
         && let Some(resolved) = join_docs_user(source_dir, path)
         && let Some(stem) = resolved.strip_suffix(".md")
@@ -1055,7 +1055,7 @@ fn resolve_link(dest: &str, ctx: &mut Ctx<'_>) -> Result<String, SiteError> {
         return Ok(href);
     }
     // A path under `docs/user/` that is not in the table is a missing page, never a repo
-    // link: `missing.md` from `arc/loop.md` names `docs/user/arc/missing.md`.
+    // link: `missing.md` from `sub/loop.md` names `docs/user/sub/missing.md`.
     if path.ends_with(".md")
         && let Some(resolved) = join_docs_user(source_dir, path)
         && repo_has(&format!("docs/user/{resolved}"))

@@ -44,7 +44,6 @@ fn show(app: &mut App, questions: Vec<Question>) {
             request: PendingRequest::Question(radian_coding::QuestionRequest::new(questions)),
         })),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
 }
 
@@ -210,7 +209,6 @@ fn drafts_are_kept_between_questions() {
     app.update(Input::Pending {
         head: Some(Box::new(head)),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     assert_eq!(form(&app).answers[0].text.text(), "first");
     assert_eq!(form(&app).answers[1].text.text(), "second");
@@ -375,11 +373,7 @@ fn the_pending_count_follows_the_queue() {
         vec![question("one", QuestionKind::Text, Vec::new(), false)],
     );
     assert_eq!(app.pending, 1);
-    app.update(Input::Pending {
-        head: None,
-        len: 0,
-        answered_from_hub: Vec::new(),
-    });
+    app.update(Input::Pending { head: None, len: 0 });
     assert_eq!(app.pending, 0);
     assert!(
         app.layers()

@@ -84,19 +84,12 @@ pub enum Input {
     Event(AgentEvent),
     /// A runtime event (ADR 0017's turn failure).
     Runtime(RuntimeEvent),
-    /// The pending queue's head changed (ADR 0023 U7): the request to show, how many are
-    /// queued, and the request ids the control port answered since the last wake (the hub's
-    /// answer; the transcript gets one weak line for a popup it was showing). `head` is
-    /// `None` when nothing is pending.
+    /// The pending queue's head changed (ADR 0023 U7): the request to show, and how many are
+    /// queued. `head` is `None` when nothing is pending.
     Pending {
         head: Option<Box<PendingView<PendingRequest>>>,
         len: usize,
-        answered_from_hub: Vec<u64>,
     },
-    /// The owner closed this session through the control port's `close` verb (ADR 0043):
-    /// one host notice, the typed draft dropped as a Ctrl-C quit drops it, then the same
-    /// quit action as a second Ctrl-C.
-    RemoteClose,
     /// One key inside the question form (ADR 0024 Q7).
     Form(FormKey),
     /// An `@` expansion finished (the result of [`Effect::ExpandMentions`]).

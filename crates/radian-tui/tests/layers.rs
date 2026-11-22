@@ -63,7 +63,6 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
     app.update(Input::Pending {
         head: Some(Box::new(approval_view())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     assert!(app.pending_approval().is_some());
     assert_tiers(&app);
@@ -84,11 +83,7 @@ fn ctrl_c_cancels_while_an_approval_modal_is_open() {
         app.pending_approval().is_some(),
         "the queue's head still stands until the waiter is gone"
     );
-    app.update(Input::Pending {
-        head: None,
-        len: 0,
-        answered_from_hub: Vec::new(),
-    });
+    app.update(Input::Pending { head: None, len: 0 });
     assert!(app.pending_approval().is_none());
 }
 
@@ -110,7 +105,6 @@ fn the_approval_keys_survive_a_keymap_that_rebinds_y() {
         app.update(Input::Pending {
             head: Some(Box::new(approval_view())),
             len: 1,
-            answered_from_hub: Vec::new(),
         });
         let result = app.on_key(key(KeyCode::Char('y')));
         assert_eq!(
@@ -133,7 +127,6 @@ fn an_overlay_pushed_while_a_modal_is_up_stays_below_it() {
     app.update(Input::Pending {
         head: Some(Box::new(approval_view())),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     // A push that ignores the rule would land on top; `push_overlay` must not.
     app.push_overlay(Overlay::Find(FindState::open(0)));

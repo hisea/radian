@@ -1020,7 +1020,7 @@ fn a_composer_attachment_starts_in_the_text_column() {
 #[test]
 fn a_composer_attachment_wider_than_the_input_is_cut_with_an_ellipsis() {
     use radian_tui::render::InputStyle;
-    let name = "arc-one-task-from-request-to-merge.webp";
+    let name = "run-one-task-from-request-to-merge.webp";
     for style in [InputStyle::Lines, InputStyle::Box] {
         let mut app = App::new("m", "s");
         app.input_style = style;
@@ -3322,7 +3322,6 @@ fn the_question_keys_stay_visible_with_a_long_option_list() {
             }),
         })),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     let text = screen(&render(&mut app, 60, 18));
     assert!(
@@ -3766,30 +3765,5 @@ fn an_interrupted_reply_with_no_text_still_shows_the_marker() {
         marker,
         thought + 2,
         "one blank row between the thinking block and the marker:\n{text}"
-    );
-}
-
-/// ADR 0035: a user message whose `origin.via` is `hub` carries the weak ` · hub` suffix at
-/// the end of its last row; a typed message carries none. The suffix is render-only: it is
-/// not part of the entry's text, so a copy or a search never sees it.
-#[test]
-fn a_hub_message_carries_the_weak_marker_and_a_typed_one_does_not() {
-    let mut app = App::new("m", "s");
-    classic_footer(&mut app);
-    let mut hub = Message::user("from-the-phone");
-    if let Message::User { meta, .. } = &mut hub {
-        meta.origin = Some(
-            radian_core::OpaqueJson::parse(serde_json::json!({"via": "hub"}).to_string())
-                .expect("valid origin JSON"),
-        );
-    }
-    app.push_message(&hub);
-    app.push_message(&Message::user("typed-here"));
-    let text = screen(&render(&mut app, 60, 12));
-    assert!(text.contains("from-the-phone · hub"), "{text}");
-    assert!(!text.contains("typed-here · hub"), "{text}");
-    assert_eq!(
-        app.session.entries[0].text, "from-the-phone",
-        "the suffix is render-only"
     );
 }

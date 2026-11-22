@@ -140,7 +140,6 @@ fn the_approval_keys_cannot_be_taken_over_by_the_keymap() {
             ),
         })),
         len: 1,
-        answered_from_hub: Vec::new(),
     });
     // The hardcoded prompt key wins over the keymap: it answers, it does not cancel.
     assert_eq!(
