@@ -112,33 +112,8 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         (Arc::new(sink), slot)
     };
 
-    // ADR 0043: the process control port. Bound before the session so its fan-out can
-    // wrap the host's own sinks; a bind failure is a warning, never a startup refusal, so a
-    // session always opens. The startup line names the path (a client finds it by pid too).
-    let control = match radian_host::ControlServer::bind_if(
-        setup.control_enabled,
-        radian_host::radian_home().as_deref(),
-    ) {
-        Ok(server) => server,
-        Err(error) => {
-            eprintln!("[control] disabled: {error}");
-            None
-        }
-    };
-    if let Some(server) = &control {
-        eprintln!("[control] {}", server.path().display());
-    }
-    // Held for the whole session: the socket is removed on the normal return and on a panic
-    // unwind, even while the driver task still holds a reference to the server (ADR 0043).
-    let _control_guard = control.as_ref().map(|server| server.guard());
-    let events: Arc<dyn EventSink> = match &control {
-        Some(server) => server.events(Arc::clone(&ui) as Arc<dyn EventSink>),
-        None => Arc::clone(&ui) as Arc<dyn EventSink>,
-    };
-    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = match &control {
-        Some(server) => server.runtime_events(runtime_events_inner),
-        None => runtime_events_inner,
-    };
+    let events: Arc<dyn EventSink> = Arc::clone(&ui) as Arc<dyn EventSink>;
+    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = runtime_events_inner;
 
     // The trust question requires a real terminal. Piped stdin is **not** an interactive
     // user: its first line could be a message (or even a stray `y`) and must never be read as
@@ -172,14 +147,6 @@ pub(crate) async fn chat(setup: Setup, mut cli: Cli) -> Result<i32, SetupError> 
         secrets,
         images,
     } = opened;
-
-    // ADR 0043: start accepting control requests for this session.
-    if let Some(server) = &control {
-        server.serve(
-            &tokio::runtime::Handle::current(),
-            radian_host::ControlTarget::of(&session),
-        );
-    }
 
     // The approval prompt and the prompt loop share stdin. While approval may read, the loop
     // must not compete for a line; with `--yes` (or nobody to ask) it may.

@@ -44,7 +44,7 @@ fn scratch(label: &str) -> common::TempDir {
 fn isolated_home() -> PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        // /tmp, not $TMPDIR: on macOS the latter can push <home>/run/<pid>.sock past SUN_LEN (104).
+        // /tmp, not $TMPDIR: the sandbox only writes inside the workspace.
         let dir = common::process_dir_at(PathBuf::from("/tmp").join(format!(
             "radian-subagent-explore-home-{}",
             std::process::id()

@@ -25,8 +25,7 @@ pub fn process_dir(prefix: &str) -> PathBuf {
     process_dir_in(&std::env::temp_dir(), prefix)
 }
 
-/// [`process_dir`] under an explicit base (a short `/tmp` keeps the control socket path under
-/// `SUN_LEN` on macOS).
+/// [`process_dir`] under an explicit base (a short `/tmp`).
 pub fn process_dir_in(base: &Path, prefix: &str) -> PathBuf {
     let n = DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
     let path = base.join(format!("{prefix}-{}-{n}", std::process::id()));

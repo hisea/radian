@@ -7,9 +7,7 @@
 use super::*;
 
 /// Everything `run()`'s input phase builds for `open_session`: the sandbox and its
-/// rebuild builder, the approval policy, the control port, the event sinks and the
-/// trust setup. The control socket guard is returned separately so `run()` holds it
-/// for the whole session (ADR 0043).
+/// rebuild builder, the approval policy, the event sinks and the trust setup.
 pub(super) struct SessionInputs {
     pub(super) sandbox: Option<radian_sandbox::Sandbox>,
     pub(super) inherited_sandbox: bool,
@@ -19,7 +17,6 @@ pub(super) struct SessionInputs {
     pub(super) startup_approval: radian_host::StartupApproval,
     pub(super) profile: radian_permissions::Profile,
     pub(super) projection: std::sync::Arc<radian_host::SessionProjection>,
-    pub(super) control: Option<std::sync::Arc<radian_host::ControlServer>>,
     pub(super) live: std::sync::Arc<dyn EventSink>,
     pub(super) approvals: radian_host::ApprovalRouting,
     pub(super) audit:
@@ -48,8 +45,7 @@ pub(super) struct SessionInputs {
 
 /// `run()`'s input phase: the sandbox (and its deny-read list), the `/access` rebuild
 /// builder, the MCP servers, the approval policy, the panic log, the projection, the
-/// control port, the event sinks and the project trust. Returns the inputs plus the
-/// control socket guard, which the caller holds for the whole session.
+/// event sinks and the project trust.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_session_inputs(
     cli: &Cli,
@@ -66,7 +62,7 @@ pub(super) fn build_session_inputs(
     session_id: &str,
     secrets: &radian_tui::terminal::SharedSecrets,
     startup_log: &mut StartupLog,
-) -> Result<(SessionInputs, Option<radian_host::SocketGuard>), RunError> {
+) -> Result<SessionInputs, RunError> {
     // The permission tier and the sandbox. For an enforced tier a probe failure is an error
     // here, never a fallback to an unsandboxed run (ADR 0012 P5). Still before
     // the session file exists, so a refusal leaves nothing behind (dogfooding D2).
@@ -188,35 +184,8 @@ pub(super) fn build_session_inputs(
     // The renderer reads the session facts from the host's projection, not a private copy
     // (ADR 0023 U5). Set here because the app is created before the session exists (`--pick`).
     app.set_projection(Arc::clone(&projection));
-    // ADR 0043: the process control port. Bound before the session so its fan-out can
-    // wrap the host's own sinks; the startup line names the path. A bind failure is a warning,
-    // never a startup refusal. The bind creates a tokio listener, and this setup runs outside
-    // the async `run` (sessions are opened with `runtime.block_on`), so enter the runtime first.
-    let control = {
-        let _guard = runtime.enter();
-        match radian_host::ControlServer::bind_if(
-            config.control.enabled,
-            radian_host::radian_home().as_deref(),
-        ) {
-            Ok(server) => server,
-            Err(error) => {
-                startup_log.line(format!("[control] disabled: {error}"));
-                None
-            }
-        }
-    };
-    if let Some(server) = &control {
-        startup_log.line(format!("[control] {}", server.path().display()));
-    }
-    // Held for the whole session: the socket is removed on the normal return and on the panic
-    // unwind, even while the driver task still holds a reference to the server (ADR 0043).
-    let control_guard = control.as_ref().map(|server| server.guard());
-    let live_inner: Arc<dyn EventSink> =
+    let live: Arc<dyn EventSink> =
         Arc::new(ProjectionSink::new(tx.clone(), Arc::clone(&projection)));
-    let live: Arc<dyn EventSink> = match &control {
-        Some(server) => server.events(live_inner),
-        None => live_inner,
-    };
     // ADR 0023 U7: approvals go through the session's pending queue, so the UI shows one
     // arrival order and never supersedes a request. An `auto` policy (ADR 0026 D9) answers
     // an `ask` before any approver is consulted, so nothing reaches the queue under it.
@@ -232,7 +201,7 @@ pub(super) fn build_session_inputs(
             })
         })
     };
-    let runtime_events_inner = {
+    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = {
         let tx = tx.clone();
         let secrets = Arc::clone(secrets);
         Arc::new(move |event: &radian_session::RuntimeEvent| {
@@ -248,10 +217,6 @@ pub(super) fn build_session_inputs(
             };
             let _ = tx.send(UiEvent::Runtime(redacted));
         })
-    };
-    let runtime_events: Arc<dyn radian_runtime::RuntimeEvents> = match &control {
-        Some(server) => server.runtime_events(runtime_events_inner),
-        None => runtime_events_inner,
     };
     let driver_stopped: Arc<dyn Fn(radian_host::DriverEnd) + Send + Sync> = {
         let tx = tx.clone();
@@ -371,38 +336,34 @@ pub(super) fn build_session_inputs(
     for line in &project_hooks_lines {
         startup_log.line(format!("[hooks] {line}"));
     }
-    Ok((
-        SessionInputs {
-            sandbox,
-            inherited_sandbox,
-            access_builder,
-            bash_sandbox,
-            servers,
-            startup_approval,
-            profile,
-            projection,
-            control,
-            live,
-            approvals,
-            audit,
-            runtime_events,
-            driver_stopped,
-            before_driver,
-            session_warning,
-            hooks_warning,
-            wake_warning,
-            intent_stop_warning,
-            hook_stop_warning,
-            notice_lost_warning,
-            trust_setup,
-            project_hooks,
-        },
-        control_guard,
-    ))
+    Ok(SessionInputs {
+        sandbox,
+        inherited_sandbox,
+        access_builder,
+        bash_sandbox,
+        servers,
+        startup_approval,
+        profile,
+        projection,
+        live,
+        approvals,
+        audit,
+        runtime_events,
+        driver_stopped,
+        before_driver,
+        session_warning,
+        hooks_warning,
+        wake_warning,
+        intent_stop_warning,
+        hook_stop_warning,
+        notice_lost_warning,
+        trust_setup,
+        project_hooks,
+    })
 }
 
 /// `run()`'s session-opening phase (ADR 0023 U5): the one place a session is
-/// established, then the control port starts serving it and the provider catalog
+/// established, then the provider catalog
 /// refresh is spawned. Takes the input and route structs by value (the fields the later
 /// phases still need are cloned at the call site) and returns the open session.
 #[allow(clippy::too_many_arguments)]
@@ -426,7 +387,6 @@ pub(super) fn open_session_and_refresh(
         servers,
         profile,
         projection,
-        control,
         live,
         approvals,
         audit,
@@ -546,10 +506,6 @@ pub(super) fn open_session_and_refresh(
         ))
         .map_err(|error| error.to_string())?;
     mark("open-session-done");
-    // ADR 0043: start accepting control requests for this session.
-    if let Some(server) = &control {
-        server.serve(runtime.handle(), radian_host::ControlTarget::of(&session));
-    }
     // ADR 0026 D0/D10: every provider `/model` would offer refreshes in the background, each
     // from its own base URL (a named provider's declaration or its `auth.json` entry's env; a
     // built-in descriptor keeps its own models URL). It never blocks startup and its failures

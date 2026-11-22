@@ -72,9 +72,6 @@ pub(crate) struct Setup {
     /// `[sandbox] allow_env` (ADR 0034): environment variable names
     /// added to the sandbox whitelist. Names only.
     pub(crate) allow_env: Vec<String>,
-    /// `[control] enabled` (ADR 0043): whether this process binds its control
-    /// socket at `$RADIAN_HOME/run/<pid>.sock`.
-    pub(crate) control_enabled: bool,
     /// The endpoint a subagent child is told to use (`--base-url`): the parent's effective base
     /// URL, only for a provider that takes an override. `None` lets the child resolve it from
     /// the config, the auth entry or the provider default, exactly as the parent did.
@@ -656,7 +653,6 @@ pub(crate) async fn setup(
         approval: startup_approval,
         config_path: config.source.clone(),
         config_skipped: config.skipped.clone(),
-        control_enabled: config.control.enabled,
         base_url: provider_ref
             .takes_base_url_override()
             .then(|| route.base_url.clone()),

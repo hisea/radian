@@ -31,8 +31,8 @@ use radian_coding::image::{self, ImageError, LoadedImage};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-// The composer's message shape and file caps are shared with the control port (ADR 0018):
-// both ends of a send build the same parts and enforce the same limits.
+// The composer's message shape and file caps live in `radian_host::compose` (ADR 0018):
+// one place builds the parts and enforces the limits.
 pub use radian_host::compose::{Attachment, MAX_FILE_BYTES, MAX_TOTAL_BYTES, user_message};
 
 /// How many completions are offered at most.

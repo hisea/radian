@@ -237,7 +237,7 @@ session has none: the first call that needs an approval asks again.
   multi-selection are not representable.
 - The hand-written wire layer covers the methods above; an unimplemented method is a
   JSON-RPC method-not-found error, never a silent success.
-- The ACP host binds no control socket: its client is the only control surface.
+- The ACP host binds no control socket (no Radian process does, ADR 0043): its client is the only control surface.
 
 ## Verification
 

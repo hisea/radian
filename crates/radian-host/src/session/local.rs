@@ -335,31 +335,16 @@ impl LocalSession {
         Arc::clone(&self.command_hooks)
     }
 
-    /// The switchable model, for a caller that reads the route without holding the session
-    /// (the control port's `list_sessions`/`models`/`config`). The clone keeps only the model
-    /// alive, never the session.
-    pub(crate) fn model_handle(&self) -> Arc<crate::model::SwitchableModel> {
-        Arc::clone(&self.side_model)
-    }
-
     /// Whether a turn is running right now (the driver's flag). `false` before the first turn and
     /// between turns.
     pub fn turn_running(&self) -> bool {
         self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The driver's turn flag as a shared handle, for a caller that must decide on it without
-    /// holding the session (the control port checks it before it touches the turn source).
-    /// The clone keeps only the atomic alive, never the session.
-    pub(crate) fn turn_running_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        Arc::clone(&self.turn_running)
-    }
-
     /// Applies a facade input's source to the permission layer (ADR 0011 L2). Only a turn
     /// already in flight matters: a `steer`/`inject` joins it and can only lower its source,
     /// while a `followup` belongs to a later turn and leaves it alone. An idle input sets
-    /// nothing: its own turn does not exist yet, and the claim applies its source. This is the
-    /// same rule the control port applies.
+    /// nothing: its own turn does not exist yet, and the claim applies its source.
     fn note_input_source(&self, followup: bool) {
         if (self.turn_running() || self.inbox.inflight_turns() > 0) && !followup {
             self.hooks

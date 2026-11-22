@@ -20,7 +20,6 @@ pub mod config;
 pub mod context;
 pub mod context_estimate;
 pub mod contrib;
-pub mod control;
 pub mod cost;
 mod describe;
 mod diagnostics;
@@ -124,8 +123,8 @@ pub use config::model_write::{ModelWriteError, write_model_route};
 pub use config::providers_write::{ProviderRuleOutcome, ProviderWriteError, write_protocol_rule};
 pub use config::theme_write::{ThemeWriteError, write_theme};
 pub use config::{
-    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ControlConfig, ModelConfig,
-    PermissionsConfig, RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
+    CONFIG_FILE_NAME, CompactionConfig, Config, ConfigError, ModelConfig, PermissionsConfig,
+    RADIAN_CONFIG_ENV, SUPPORTED_SCHEMA_VERSION, TuiConfig, load as load_config,
     parse as parse_config, resolve_allow_unix_sockets, resolve_path as resolve_config_path,
     resolved_path as resolved_config_path, unix_sockets_ignored_warning,
 };
@@ -138,7 +137,6 @@ pub use contrib::{
     SegmentRole, StatusContributor, Tick, spawn as spawn_contributor,
     spawn_gated as spawn_contributor_gated, spawn_once as spawn_contributor_once,
 };
-pub use control::{ControlServer, ControlTarget, SUBSCRIBER_BUFFER, SocketGuard};
 pub use describe::{CLI_WORDING, TUI_WORDING, Wording, budget_exceeded_line, describe};
 pub use diagnostics::{
     CleanReport, MAX_TOTAL_BYTES, RETENTION, append, cache_dir, clean, clean_startup, clean_with,
@@ -161,8 +159,8 @@ pub use home::{
     catalog_cache, catalog_cache_for, config_dir, config_dir_for, credentials_dir,
     credentials_dir_for, diagnostics_dir_for, ensure_private_dir, file_tool_deny_read,
     legacy_sessions_dirs_for, legacy_sessions_hint, legacy_sessions_hint_for, radian_home,
-    radian_home_for, run_dir_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for,
-    themes_dir, themes_dir_for, trust_dir, trust_dir_for, user_home,
+    radian_home_for, sessions_dir, sessions_dir_for, skills_dir, skills_dir_for, themes_dir,
+    themes_dir_for, trust_dir, trust_dir_for, user_home,
 };
 pub use hooks::{
     CommandHooks, HOOK_RUN_END_CANCELLED, HOOK_RUN_END_FAILED_TO_START, HOOK_RUN_END_STATUS,

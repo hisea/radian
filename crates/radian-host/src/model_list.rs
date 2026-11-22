@@ -1,8 +1,8 @@
 //! The `/model` list (ADR 0026 D5): the logged-in providers' models, in the order the TUI
 //! shows them.
 //!
-//! One implementation for the TUI and the control port's `models` verb, so the list a client
-//! can see and the route a `config` change can name cannot drift. Local reads only: `auth.json`
+//! One implementation for the TUI's `/model` list and the route a `config` change can name,
+//! so the two cannot drift. Local reads only: `auth.json`
 //! and the per-provider model cache (the background refresh writes that cache).
 
 use std::collections::BTreeMap;

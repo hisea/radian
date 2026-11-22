@@ -1,9 +1,8 @@
 //! The one user-message composer (ADR 0018, ADR 0005): text, attached files and images into
 //! the message's [`ContentPart`]s.
 //!
-//! The TUI's send path (a dropped image, an `@` file) and the process control port both end
-//! in [`user_message`], so a message typed at the keyboard and one sent through the control port
-//! carry the same parts. The caps are the composer's own: one file at most [`MAX_FILE_BYTES`], all files
+//! The TUI's send path (a dropped image, an `@` file) ends in [`user_message`], which builds
+//! the message's parts. The caps are the composer's own: one file at most [`MAX_FILE_BYTES`], all files
 //! together at most [`MAX_TOTAL_BYTES`].
 
 use radian_coding::image::LoadedImage;
@@ -15,8 +14,7 @@ pub const MAX_FILE_BYTES: usize = 100 * 1024;
 /// The largest total of attached file contents (400 KiB).
 pub const MAX_TOTAL_BYTES: usize = 400 * 1024;
 
-/// One attached file: its path (workspace-relative in the TUI, the client's name over the
-/// control port) and its text.
+/// One attached file: its path (workspace-relative in the TUI) and its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub path: String,

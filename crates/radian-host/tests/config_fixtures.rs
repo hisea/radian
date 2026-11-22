@@ -213,21 +213,14 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
     }
 }
 
-/// `control.toml` (ADR 0043): `[control] enabled` is carried, defaulting to true.
+/// `control.toml`: the retired `[control]` table (ADR 0008, ADR 0043). An old config that
+/// still sets `enabled = false` parses, names `control` once as an ignored key, and is never
+/// refused.
 #[test]
-fn the_control_enabled_flag_is_carried() {
+fn an_old_control_table_is_a_retired_key() {
     let (path, text) = fixture("control.toml");
-    let config = config::parse(&path, &text).unwrap();
-    assert!(!config.control.enabled);
-    assert!(
-        !config.skipped.iter().any(|key| key.starts_with("control")),
-        "{:?}",
-        config.skipped
-    );
-    // The default, with no `[control]` table at all, is on.
-    let (path, text) = fixture("minimal.toml");
-    let config = config::parse(&path, &text).unwrap();
-    assert!(config.control.enabled);
+    let config = config::parse(&path, &text).expect("an old [control] table is never refused");
+    assert_eq!(config.skipped, vec!["control".to_owned()]);
 }
 
 /// The `providers.toml` fixture (ADR 0026 D10) carries named providers; the names are the

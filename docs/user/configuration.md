@@ -238,13 +238,13 @@ that directory by hand if you do not need its files.
 
 ## `[control]`
 
-| Key | Type | Default | What it does |
-|---|---|---|---|
-| `control.enabled` | boolean | `true` | Every hosting process binds `$RADIAN_HOME/run/<pid>.sock`. `false` turns the port off for the process. A non-boolean is refused. |
+Retired. The local process control port was removed, so the `[control]` table and every key
+under it (`enabled`) are inert. A file that sets any of them starts normally and gets one
+warning line naming `control` as an ignored key. A wrong value under `[control]` is ignored
+too, never a refusal of the file.
 
-Every hosting process on that socket serves the JSON-lines protocol on
-[`control`](control.md): the input verbs, the owner token and its five verbs, the event stream,
-attachments, and the line limit. This key only turns the port on or off.
+Radian no longer binds `$RADIAN_HOME/run/<pid>.sock`, and it never creates `run/`. Delete a
+`run/` directory an older version left behind if you like.
 
 ## `[context]`
 

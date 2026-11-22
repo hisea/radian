@@ -1077,8 +1077,7 @@ impl SwitchableModel {
     }
 
     /// The config's `[providers.<name>]` declarations this session resolved with (ADR 0026
-    /// D10). The control port's `models` and `config` read the same set the TUI's `/model`
-    /// does, including a `--config` path the process environment does not carry.
+    /// D10). The TUI's `/model` reads this set, including a `--config` path the process environment does not carry.
     pub fn config_providers(
         &self,
     ) -> &std::collections::BTreeMap<String, crate::provider::ProviderDecl> {

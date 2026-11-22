@@ -106,8 +106,7 @@ fn every_test_temp_directory_is_removed_when_its_test_ends() {
     let before = temp_entries();
     let mut pids = Vec::new();
     let mut ran = Vec::new();
-    // The exec suite's harness uses a short `/tmp` base (a control socket would exceed
-    // `SUN_LEN` under the workspace sandbox's long TMPDIR), so it cannot run from inside the
+    // The exec suite's harness uses a short `/tmp` base, so it cannot run from inside the
     // sandbox; the gate's full Verify runs this test unconfined.
     let confined = radian_sandbox::confined_by_outer_sandbox();
 

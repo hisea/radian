@@ -1,5 +1,5 @@
-# ADR 0043 decision 1: the process control port. On by default; `enabled = false` turns
-# the `$RADIAN_HOME/run/<pid>.sock` socket off for this process.
+# Retired `[control]` (ADR 0008, ADR 0043): the process control port was removed. An old
+# config that still sets it parses, warns once (`control`) and is ignored, never refused.
 schema_version = 1
 
 [control]

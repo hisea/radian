@@ -20,7 +20,6 @@ Each line names one page and what it covers.
 
 - `acp`: serve radian to an editor over the Agent Client Protocol.
 - `commands`: every slash command and `!` shell escape in the full-screen interface.
-- `control`: the local process control port: its socket, every verb and the event stream.
 - `keybindings`: every key in the full-screen interface, by area, and how to rebind it.
 - `sessions`: resume, list, search, fork, export, and attach to sessions.
 - `tools`: the built-in file tools: `read`'s text, directory and image branches and its limits, and `grep`'s arguments, defaults and caps.
