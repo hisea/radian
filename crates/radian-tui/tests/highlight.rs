@@ -22,7 +22,6 @@ fn modes(highlight: bool) -> DisplayModes {
             fold: ToolFold::Expanded,
             preview_lines: 5,
         },
-        mermaid: true,
         highlight,
         glyphs: radian_tui::footer::Glyphs::Unicode,
     }

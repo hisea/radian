@@ -33,7 +33,6 @@
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
 | `remove-footer-command-items.md` | decided | 0027、0008、0013 | 删 footer `command` 项这个公开扩展点；内部 contributor 保留 |
-| `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
 | `provider-shared-crate.md` | decided | 0026、0017 | 三个 provider 的 SSE、`Retry-After`、`usage_limit`、测试工具抽到 `agent-provider-common` |
 | `hooks-split-and-trim.md` | idea | 0045、0008、0047、0031 | 拆模块已落地；async、StopFailure、Notification 等按使用证据再定是否瘦身 |
 | `test-suite-dedupe.md` | decided | 0023、0032 | pty（548 KB/31 测试）与 exec `cli.rs`（421 KB）去掉与帧断言、其它套件重复的测试 |

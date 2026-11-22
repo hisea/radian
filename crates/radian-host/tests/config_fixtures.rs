@@ -45,6 +45,7 @@ fn the_reader_matches_the_reference_checker() {
         ("memory.toml", "accept"),
         ("integrations-herdr.toml", "accept"),
         ("control.toml", "accept"),
+        ("tui-display-mermaid.toml", "accept"),
         ("context-subtree-files.toml", "accept"),
         ("hooks.toml", "accept"),
         ("v1-unknown-fields.toml", "accept"),
@@ -82,8 +83,8 @@ fn skills_extra_paths_are_carried_raw() {
     );
 }
 
-/// `tui-display.toml` (ADR 0028 R2/R3/R4/R8): the display preferences are carried, including
-/// `highlight` (R2) and `mermaid` (R8).
+/// `tui-display.toml` (ADR 0028 R2/R3/R4): the display preferences are carried, including
+/// `highlight` (R2).
 #[test]
 fn tui_display_preferences_are_carried() {
     let (path, text) = fixture("tui-display.toml");
@@ -91,7 +92,6 @@ fn tui_display_preferences_are_carried() {
     assert_eq!(config.tui.display_reasoning.as_deref(), Some("collapsed"));
     assert_eq!(config.tui.display_tool_output.as_deref(), Some("errors"));
     assert_eq!(config.tui.display_tool_preview_lines, Some(8));
-    assert_eq!(config.tui.display_mermaid, Some(true));
     assert_eq!(config.tui.display_highlight, Some(false));
 }
 
@@ -211,6 +211,17 @@ fn the_hooks_fixture_parses_the_subset_and_skips_the_rest() {
             config.skipped
         );
     }
+}
+
+/// `tui-display-mermaid.toml`: an old config that sets the removed `tui.display.mermaid`
+/// (ADR 0008) still loads, names the key once, and keeps its other display keys.
+#[test]
+fn an_old_display_mermaid_key_is_a_retired_key() {
+    let (path, text) = fixture("tui-display-mermaid.toml");
+    let config = config::parse(&path, &text).expect("an old mermaid key is never refused");
+    assert_eq!(config.skipped, vec!["tui.display.mermaid".to_owned()]);
+    assert_eq!(config.tui.display_reasoning.as_deref(), Some("collapsed"));
+    assert_eq!(config.tui.display_highlight, Some(false));
 }
 
 /// `control.toml`: the retired `[control]` table (ADR 0008, ADR 0043). An old config that

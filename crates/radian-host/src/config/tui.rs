@@ -154,10 +154,6 @@ pub struct TuiConfig {
     /// (default 5). `None` means the default; a non-positive or non-integer value is skipped
     /// with a warning.
     pub display_tool_preview_lines: Option<u64>,
-    /// `tui.display.mermaid` (ADR 0028 R8): draw a closed ```` ```mermaid ```` block as a
-    /// Unicode diagram. `None` means the default (`true`); an unknown value is ignored with a
-    /// warning.
-    pub display_mermaid: Option<bool>,
     /// `tui.display.highlight` (ADR 0028 R2): syntax-highlight a closed code block whose info
     /// string names a common language. `None` means the default (`true`); an unknown value is
     /// ignored with a warning.
@@ -319,9 +315,9 @@ pub(super) fn parse_tui(
                         ("tool_preview_lines", Value::Integer(lines)) if *lines > 0 => {
                             config.tui.display_tool_preview_lines = Some(*lines as u64);
                         }
-                        ("mermaid", Value::Boolean(on)) => {
-                            config.tui.display_mermaid = Some(*on);
-                        }
+                        // Retired (ADR 0008): the Mermaid renderer was removed. One
+                        // warning line, whatever the value, then ignored.
+                        ("mermaid", _) => config.skipped.push("tui.display.mermaid".into()),
                         ("highlight", Value::Boolean(on)) => {
                             config.tui.display_highlight = Some(*on);
                         }

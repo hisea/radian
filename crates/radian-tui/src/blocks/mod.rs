@@ -34,11 +34,9 @@ pub(crate) use layout::parse_blocks_for;
 pub use layout::{blocks_for, body_text_lines, layout, layout_with, line_count, line_count_cached};
 #[cfg(test)]
 pub(crate) use layout::{body_text_lines_for_test, layout_for_test};
-pub(crate) use markdown::DiagramOutcome;
 use markdown::{
-    MdGlyphs, code_body, code_frame_bottom, code_frame_top, code_line_count, code_lines,
-    code_text_lines, diagram_for, diagram_outcome, fill_md_count_cache, is_mermaid,
-    md_line_count_cached, md_lines_cached, mermaid_sources, prose_lines, syntax_lines_cached,
+    MdGlyphs, code_frame_bottom, code_frame_top, code_line_count, code_lines, code_text_lines,
+    fill_md_count_cache, md_line_count_cached, md_lines_cached, prose_lines, syntax_lines_cached,
 };
 #[cfg(test)]
 use markdown::{md_line_count, md_lines};
@@ -356,13 +354,6 @@ pub struct BodyLine {
     pub role: tools::LineRole,
     /// A synthesized tool hint (no source characters: it neither copies nor matches).
     pub hint: bool,
-    /// A rendered Mermaid diagram line (ADR 0028 R8): per-piece text and role. `None` for
-    /// every other line; `text` still holds the concatenation, so search and the line count
-    /// agree with what is drawn.
-    pub diagram: Option<Vec<(String, DiagramRole)>>,
-    /// A weak one-line explanation (a Mermaid block that could not be drawn): the renderer
-    /// styles it with the theme's `truncation` (dim) role.
-    pub reason: bool,
     /// A Markdown line (ADR 0028 R2): per-piece text, role and source offset. `None` for
     /// every other line; `text` still holds the concatenation, so search and the line count
     /// agree with what is drawn.
@@ -479,8 +470,6 @@ impl BodyLine {
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
-            diagram: None,
-            reason: false,
             md: None,
             syntax: None,
             image: None,
@@ -498,8 +487,6 @@ impl BodyLine {
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
-            diagram: None,
-            reason: false,
             md: None,
             syntax: None,
             image: Some(image),
@@ -527,30 +514,6 @@ impl BodyLine {
             frame: Frame::Body,
             role: tools::LineRole::Normal,
             hint: true,
-            diagram: None,
-            reason: false,
-            md: None,
-            syntax: None,
-            image: None,
-        }
-    }
-
-    /// A diagram line: every cell maps to the block's start (the diagram has no source
-    /// offsets of its own), so selecting it selects the block — a copy yields the Mermaid
-    /// source, the content that actually exists in the text.
-    fn diagram(end: usize, offset: usize, spans: Vec<(String, DiagramRole)>) -> Self {
-        let text: String = spans.iter().map(|(piece, _)| piece.as_str()).collect();
-        let cells = text.chars().count();
-        Self {
-            chars: vec![Some(offset); cells],
-            end,
-            text,
-            code: true,
-            frame: Frame::None,
-            role: tools::LineRole::Normal,
-            hint: false,
-            diagram: Some(spans),
-            reason: false,
             md: None,
             syntax: None,
             image: None,
@@ -568,40 +531,11 @@ impl BodyLine {
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
-            diagram: None,
-            reason: false,
             md: Some(pieces),
             syntax: None,
             image: None,
         }
     }
-
-    fn reason(end: usize, offset: usize, text: String) -> Self {
-        Self {
-            chars: vec![Some(offset)],
-            end,
-            text,
-            code: false,
-            frame: Frame::None,
-            role: tools::LineRole::Normal,
-            hint: false,
-            diagram: None,
-            reason: true,
-            md: None,
-            syntax: None,
-            image: None,
-        }
-    }
-}
-
-/// A diagram piece's semantic role (ADR 0042 decision 4): the vendored renderer's five roles
-/// collapse to these three, so `radian-tui` does not expose the dependency's type in its own API
-/// and the theme keeps its three mermaid roles (ADR 0029).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagramRole {
-    Node,
-    Edge,
-    Text,
 }
 
 /// The display modes the search matches with (ADR 0028 R6): **everything expanded**, so a
@@ -614,9 +548,7 @@ pub fn search_modes(modes: DisplayModes) -> DisplayModes {
             fold: crate::tools::ToolFold::Expanded,
             preview_lines: modes.tools.preview_lines,
         },
-        // A diagram is drawn (or not) the same way while searching: its lines are what the
-        // search matches. The same for syntax highlighting.
-        mermaid: modes.mermaid,
+        // Syntax highlighting is the same while searching.
         highlight: modes.highlight,
         glyphs: modes.glyphs,
     }

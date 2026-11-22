@@ -16,7 +16,6 @@ members = [
     "crates/radian-tui",
     "crates/radian-site",
     "crates/radian-permissions",
-    "third_party/grok-mermaid",
 ]
 
 [workspace.package]

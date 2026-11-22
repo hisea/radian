@@ -1,0 +1,9 @@
+# Retired `tui.display.mermaid` (ADR 0008): the Mermaid renderer was removed. An old config that
+# still sets it parses, warns once (`tui.display.mermaid`) and is ignored, never refused. The
+# other display keys still apply.
+schema_version = 1
+
+[tui.display]
+reasoning = "collapsed"
+mermaid = false
+highlight = false

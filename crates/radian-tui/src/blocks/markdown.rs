@@ -5,85 +5,9 @@
 use super::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// One Mermaid block's render result. `Failed` keeps the reason for the dim line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DiagramOutcome {
-    Rendered(Vec<Vec<(String, DiagramRole)>>),
-    Failed(String),
-}
-
-/// Renders `source` at `width` (ADR 0042): a pure function of the two, so the cache key is
-/// exactly that pair. No partial diagram: the renderer either returns every line or a reason.
-/// `grok_mermaid::render` is the one entry point (the vendored grok-build renderer); a failure
-/// keeps the source and names the reason.
-pub(crate) fn diagram_for(source: &str, width: usize) -> DiagramOutcome {
-    let t = std::time::Instant::now();
-    let rendered = grok_mermaid::render(source, Some(width));
-    radian_session::trace::took("first-frame/mermaid", t);
-    match rendered {
-        Ok(art) => DiagramOutcome::Rendered(
-            art.lines
-                .into_iter()
-                .map(|line| {
-                    line.into_iter()
-                        .map(|(role, text)| {
-                            // The vendored renderer's five roles collapse to three (ADR 0042
-                            // decision 4); a run with no role (leading spaces) is plain text.
-                            let role = match role {
-                                Some(grok_mermaid::Role::Node) => DiagramRole::Node,
-                                Some(grok_mermaid::Role::Edge) => DiagramRole::Edge,
-                                Some(grok_mermaid::Role::Text) | None => DiagramRole::Text,
-                            };
-                            (text, role)
-                        })
-                        .collect()
-                })
-                .collect(),
-        ),
-        Err(reason) => DiagramOutcome::Failed(reason_line(reason, width)),
-    }
-}
-
-/// The failure line's reason (ADR 0042 decision 4) — the caller prefixes `mermaid: `. A drawing
-/// that is merely too wide says so honestly; everything else is named.
-fn reason_line(reason: grok_mermaid::Reason, width: usize) -> String {
-    match reason {
-        grok_mermaid::Reason::TooWide { needed } => format!("needs {needed} columns, have {width}"),
-        grok_mermaid::Reason::Unsupported => "unsupported syntax".to_string(),
-        grok_mermaid::Reason::TooLarge => "too large".to_string(),
-    }
-}
-
-/// Whether a code block is a Mermaid diagram this renderer should draw: the info string is
-/// `mermaid` (ASCII case-insensitive — CommonMark keeps info strings case-sensitive, but
-/// every fence a model writes is lowercase; accepting any case is more forgiving and never
-/// changes a non-mermaid block), the block is closed, and `tui.display.mermaid` is on.
-pub(super) fn is_mermaid(lang: &str, closed: bool, mermaid: bool) -> bool {
-    mermaid && closed && lang.eq_ignore_ascii_case("mermaid")
-}
-
-/// The outcome for one Mermaid block, from the entry's cache when the `(width, text_len)` key
-/// matches, else rendered fresh (the immutable paths — selection, search, the reference
-/// renderer — may not have run the mutable measure pass).
-pub(super) fn diagram_outcome(
-    entry: &Entry,
-    index: usize,
-    source: &str,
-    width: usize,
-) -> DiagramOutcome {
-    if let Some((cached_width, cached_len, outcomes)) = &entry.diagram_cache
-        && *cached_width == width
-        && *cached_len == entry.text.len()
-        && let Some(outcome) = outcomes.get(index)
-    {
-        return outcome.clone();
-    }
-    diagram_for(source, width)
-}
-
-/// A fenced code block's **body** (the fences are markup), joined by newlines — what a
-/// renderer (Mermaid) sees. Mirrors [`code_lines`]'s skipping.
-pub(super) fn code_body(raw: &str, closed: bool) -> String {
+/// A fenced code block's **body** (the fences are markup), joined by newlines — what the
+/// highlighter sees. Mirrors [`code_lines`]'s skipping.
+fn code_body(raw: &str, closed: bool) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     let body = match (lines.first(), lines.last()) {
         (Some(first), Some(last))
@@ -100,24 +24,6 @@ pub(super) fn code_body(raw: &str, closed: bool) -> String {
     body.join("\n")
 }
 
-/// The Mermaid block sources of an entry's parsed blocks, in order — the index a
-/// [`diagram_outcome`] lookup uses.
-pub(super) fn mermaid_sources(blocks: &[Block], text: &str, mermaid: bool) -> Vec<String> {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            Block::Code {
-                start,
-                end,
-                closed,
-                lang,
-            } if is_mermaid(lang, *closed, mermaid) => {
-                Some(code_body(&text[*start..*end], *closed))
-            }
-            _ => None,
-        })
-        .collect()
-}
 /// How many display lines a fenced code block lays out to: its body's line count plus the
 /// frame lines (the fences are markup). Mirrors [`code_lines`]'s skipping exactly.
 pub(super) fn code_line_count(raw: &str, closed: bool) -> usize {
@@ -304,8 +210,6 @@ fn frame_line(text: String, start: usize) -> BodyLine {
         role: tools::LineRole::Normal,
         // `hint: true` so `strip_edge_blanks` never treats a frame as a blank edge line.
         hint: true,
-        diagram: None,
-        reason: false,
         md: Some(vec![MdPiece {
             text,
             style: MdStyle::Frame,
@@ -380,8 +284,6 @@ pub(super) fn code_lines(
             frame: Frame::None,
             role: tools::LineRole::Normal,
             hint: false,
-            diagram: None,
-            reason: false,
             md: Some(vec![MdPiece {
                 text: glyphs.rail.to_owned(),
                 style: MdStyle::Frame,

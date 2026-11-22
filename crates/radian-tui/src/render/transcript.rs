@@ -797,7 +797,7 @@ pub(super) fn apply_selection(
 }
 
 /// The body spans of one row: a structured notice's label split, a Markdown line's pieces, a
-/// syntax-highlighted code line, a diagram, a weak reason, or the plain body. Shared by the
+/// syntax-highlighted code line, or the plain body. Shared by the
 /// unframed path and a tool block's `│ ` body rows, so both render identically.
 fn body_spans(
     entry: &Entry,
@@ -844,19 +844,6 @@ fn body_spans(
         // style; `Plain` keeps the code block's own style. The text is unchanged, so
         // selection, copy and search are unaffected.
         push_syntax(&mut out, syntax, body_style, theme);
-    } else if let Some(diagram) = &row.diagram {
-        // A rendered diagram (ADR 0028 R8): each piece takes its own role's style.
-        for (piece, role) in diagram {
-            let style = match role {
-                blocks::DiagramRole::Node => theme.mermaid_node,
-                blocks::DiagramRole::Edge => theme.mermaid_edge,
-                blocks::DiagramRole::Text => theme.mermaid_text,
-            };
-            out.push(Span::styled(piece.clone(), style));
-        }
-    } else if row.reason {
-        // A weak one-line reason (`mermaid: …`, ADR 0028 R8): the dim/truncation role.
-        out.push(Span::styled(row.text.clone(), theme.truncation));
     } else if entry.kind == EntryKind::Compaction && row.hint {
         // The folded compaction one-liner is structural (ADR 0035 /
         // ADR 0028): the `frame` role, from column 1. The expanded body
