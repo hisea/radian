@@ -9,10 +9,10 @@
   builds, the Verify block in order, then the provider contract suites. Runs every
   step even after a failure; one `rc=<n> <seconds>s <command>` line per step.
   `AGENTS.md` and its `run_step` lines are kept in sync by a docs drift test.
-- `arc-gate.sh quick|full`: the arc gate. `quick` is fmt, clippy, the two builds,
+- `gate.sh quick|full`: the gate. `quick` is fmt, clippy, the two builds,
   and nextest for the crates changed since `origin/main` plus `radian-tui`; `full`
-  is `verify.sh`, here or on `$ARC_GATE_HOST` inside `$ARC_GATE_TREE`. Both are
-  documented in `docs/user/arc/gate.md`, including the absolute-path trust rule.
+  is `verify.sh`, here or on `$RADIAN_GATE_HOST` inside `$RADIAN_GATE_TREE`
+  (the old `ARC_GATE_*` names still work). Call it by the main checkout's absolute path, never a relative one, so a task cannot change its own gate.
 - `temp-check.sh`: the temp file system check, sourced by both scripts (it is not
   a step). It reads the file system that holds `${TMPDIR:-/tmp}` with `df` and
   fails, before any build, when fewer than 50,000 inodes or fewer than 2 GiB are

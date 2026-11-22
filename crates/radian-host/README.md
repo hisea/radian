@@ -299,8 +299,9 @@ turn it off. The file's presence also counts as a project resource for the trust
 
 `radian-host::transcript` owns the transcript entry and the fold that produces it. The front
 ends that read it (`radian attach` and the TUI's resume) share one home for the folding rules,
-the tool-title text and the memory card resolution, so they cannot drift. The crate is ratatui-free: a headless reader needs no renderer, and `radian-tui` draws
-the entries (its own `Entry` wraps this one and adds the render state).
+the tool-title text and the memory card resolution, so they cannot drift. The crate is
+ratatui-free: a headless reader needs no renderer, and `radian-tui` draws the entries (its own
+`Entry` wraps this one and adds the render state).
 
 | Module | What it folds |
 |---|---|

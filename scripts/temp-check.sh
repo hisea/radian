@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The temp file system check shared by scripts/verify.sh and scripts/arc-gate.sh.
+# The temp file system check shared by scripts/verify.sh and scripts/gate.sh.
 #
 # Sourced, not run. The caller calls `radian_check_temp_fs <program-name>`
 # before its first step. The check reads the file system that holds

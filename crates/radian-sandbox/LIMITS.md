@@ -451,9 +451,9 @@ macOS 本机与 Linux VM 各自重跑 **42/42 PASS**，两份 evidence 已更新
 对照先证明同一条命令能建文件，然后删掉它再跑沙箱）与 `memory_write_tool_is_not_a_sandbox_matter`
 1 条 SKIP（文件工具不进沙箱，由权限档与 `radian-coding` 的文件根决定，与沙箱无关）。
 
-**2026-11-01 重跑（memory scope 与 hub 禁读）**：`radian_home` 组新增
-`memory_scope_unreadable`（scope 目录内的文件读失败）与 `hub_unreadable`
-（`~/.radian/hub/` 读失败）。macOS 本机重跑 **51 cases, 0 failed, 1 skipped**（50 PASS + 1
+**2026-11-01 重跑（memory scope 禁读）**：`radian_home` 组新增
+`memory_scope_unreadable`（scope 目录内的文件读失败）。当时还新增过一个 hub 目录禁读的用例，
+hub 随后被移除，该用例已从 harness.rs 删除（下面的数字是当时的记录）。macOS 本机重跑 **51 cases, 0 failed, 1 skipped**（50 PASS + 1
 SKIP），`escape-macos.{txt,json}` 已更新。重跑时须给进程一个排在 `PWD` 前的未白名单变量
 （如 `AAA_MATRIX_SECRET=...`），否则 harness 会挑到 `PWD`，其值随 cwd 改变而让 control 失败；
 这是 harness 的选择逻辑，与沙箱结果无关。**Linux 未跑**（VM 暂停中）：Linux 上沙箱内写
@@ -488,7 +488,7 @@ cargo nextest run --profile sandbox -p radian-host -p radian-tui \
 
 | 组 | 原因 | 条数 | 对应限制 |
 |---|---|---|---|
-| 1 | 在 `/tmp` 下建测试目录（`create_dir_all` 被拒，`EPERM`）：工作区外不可写 | 231 | 本文“表述约束”（工作区外不可写）；这些 harness 用 `/tmp` 是因为工作区内的 `TMPDIR` 太长，会让 Unix socket 路径越过 `SUN_LEN`（第 5 组） |
+| 1 | 在 `/tmp` 下建测试目录（`create_dir_all` 被拒，`EPERM`）：工作区外不可写 | 234 | 本文“表述约束”（工作区外不可写）；这些 harness 用 `/tmp` 是因为工作区内的 `TMPDIR` 太长，会让 Unix socket 路径越过 `SUN_LEN`（第 5 组） |
 | 2 | `ps -o lstart=` 被拒（exit 126），取不到进程启动时间；harness 把“没有启动时间”当成进程已死 | 3 | 本节；`ps` 的进程信息读取不在当前放开清单里 |
 | 3 | 嵌套 Seatbelt：外层已约束时 `sandbox-exec` 无法再套一层，探测失败、后端退化为 `inherited`（只有外层规则） | 13 | 本文“嵌套：已在沙箱内的 radian 沿用外层” |
 | 4 | `TMPDIR` 在仓库里：`std::env::temp_dir()` 的临时目录落在仓库内，git/规范工作区/上下文文件/skill 发现会看到外层仓库，外层 `AGENTS.md` 也会进入测试工作区 | 12 | 本文“在沙箱内跑测试”本节 |

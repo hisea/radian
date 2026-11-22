@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
-# The arc gate for this repository.
+# The gate for this repository.
 #
 # Usage:
-#   scripts/arc-gate.sh quick
-#   scripts/arc-gate.sh full
+#   scripts/gate.sh quick
+#   scripts/gate.sh full
 #
 # quick: cargo fmt, workspace clippy, the two binaries, then nextest for every
 # crate under crates/ that the checkout changed since its merge base with
 # origin/main, plus radian-tui (its integration tests exercise the rest). It
 # stops at the first failing step.
 #
-# full: scripts/verify.sh here, or on ARC_GATE_HOST when that is set.
+# full: scripts/verify.sh here, or on RADIAN_GATE_HOST when that is set.
 #
-# Trust: arc runs a gate's `commands` in a checkout of the task's own commit, so
-# a script read from that checkout would let a task change its own gate. The arc
+# Trust: the runner runs a gate's `commands` in a checkout of the task's own commit, so
+# a script read from that checkout would let a task change its own gate. The runner
 # configuration must therefore call this script by the *main checkout's absolute
-# path* (/abs/path/to/repo/scripts/arc-gate.sh), never a relative `scripts/...`
-# path. The same rule is in docs/user/arc/gate.md. full runs the verify.sh next to
+# path* (/abs/path/to/repo/scripts/gate.sh), never a relative `scripts/...`
+# path. full runs the verify.sh next to
 # this script, so the command list comes from the trusted checkout too.
 #
 # CARGO_TARGET_DIR is the caller's business: this script never sets it.
 set -uo pipefail
 
-PROG="arc-gate.sh"
+PROG="gate.sh"
+# The old ARC_GATE_* names are still read when the RADIAN_GATE_* ones are unset.
+RADIAN_GATE_HOST="${RADIAN_GATE_HOST:-${ARC_GATE_HOST:-}}"
+RADIAN_GATE_TREE="${RADIAN_GATE_TREE:-${ARC_GATE_TREE:-}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 . "$SCRIPT_DIR/temp-check.sh"
 
@@ -35,26 +38,25 @@ quick  cargo fmt, workspace clippy, the radian and mcp-fixture builds, then
        nextest for every crate this checkout changed since its merge base with
        origin/main, plus radian-tui. Stops at the first failure.
 
-full   scripts/verify.sh (the full Verify of AGENTS.md). With ARC_GATE_HOST
+full   scripts/verify.sh (the full Verify of AGENTS.md). With RADIAN_GATE_HOST
        set, runs it on that ssh host instead:
-         ARC_GATE_HOST  the ssh host, unset by default (run here)
-         ARC_GATE_TREE  the gate checkout on that host, a path relative to the
-                        remote home; required when ARC_GATE_HOST is set
+         RADIAN_GATE_HOST  the ssh host, unset by default (run here)
+         RADIAN_GATE_TREE  the gate checkout on that host, a path relative to the
+                        remote home; required when RADIAN_GATE_HOST is set
        The host receives HEAD as a git bundle, takes a blocking lock on
-       ~/.arc-gate.lock, checks HEAD out detached inside ARC_GATE_TREE, and
+       ~/.radian-gate.lock, checks HEAD out detached inside RADIAN_GATE_TREE, and
        runs that checkout's scripts/verify.sh.
 
 Before the first step, quick, and full when it runs here, check the temp file
 system: fewer than RADIAN_VERIFY_MIN_FREE_INODES inodes (default 50000) or
 fewer than RADIAN_VERIFY_MIN_FREE_GIB GiB (default 2) free fails the gate; 0
-turns a check off. With ARC_GATE_HOST set, full checks nothing here: the
+turns a check off. With RADIAN_GATE_HOST set, full checks nothing here: the
 remote verify.sh checks the host's temp file system in the host's environment.
-See docs/user/arc/gate.md.
 EOF
 }
 
 # The repository root of the current checkout (not of this script: full runs
-# against the checkout the gate is verifying, which arc may have made elsewhere).
+# against the checkout the gate is verifying, which the runner may have made elsewhere).
 enter_root() {
     if ! ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
         echo "$PROG: not inside a git working tree" >&2
@@ -134,11 +136,11 @@ NAME="$3"
 
 # One gate at a time, and wait for it instead of failing.
 if command -v flock >/dev/null 2>&1; then
-    exec 9>"$HOME/.arc-gate.lock"
+    exec 9>"$HOME/.radian-gate.lock"
     flock 9
 else
-    while ! mkdir "$HOME/.arc-gate.lock.d" 2>/dev/null; do sleep 2; done
-    trap 'rmdir "$HOME/.arc-gate.lock.d" 2>/dev/null' EXIT
+    while ! mkdir "$HOME/.radian-gate.lock.d" 2>/dev/null; do sleep 2; done
+    trap 'rmdir "$HOME/.radian-gate.lock.d" 2>/dev/null' EXIT
 fi
 
 BUNDLE=""
@@ -146,17 +148,17 @@ if [ -n "$NAME" ]; then
     BUNDLE="$HOME/$NAME"
 fi
 
-cd "$TREE" || { echo "arc-gate: cannot enter $TREE" >&2; exit 1; }
+cd "$TREE" || { echo "radian-gate: cannot enter $TREE" >&2; exit 1; }
 if [ -n "$BUNDLE" ]; then
-    git fetch --quiet "$BUNDLE" '+HEAD:refs/arc-gate/candidate' \
-        || { echo "arc-gate: cannot fetch the bundle" >&2; exit 1; }
+    git fetch --quiet "$BUNDLE" '+HEAD:refs/radian-gate/candidate' \
+        || { echo "radian-gate: cannot fetch the bundle" >&2; exit 1; }
     rm -f "$BUNDLE"
 fi
 if ! git cat-file -e "$SHA^{commit}" 2>/dev/null; then
-    git fetch --quiet origin || { echo "arc-gate: cannot fetch origin" >&2; exit 1; }
+    git fetch --quiet origin || { echo "radian-gate: cannot fetch origin" >&2; exit 1; }
 fi
 git checkout --force --detach "$SHA" \
-    || { echo "arc-gate: cannot check out $SHA" >&2; exit 1; }
+    || { echo "radian-gate: cannot check out $SHA" >&2; exit 1; }
 git clean -fdq || true
 
 LOG_DIR="$TREE/.radian/verify-full"
@@ -171,7 +173,7 @@ for LOG in "$LOG_DIR"/*.log; do
     grep -E '^test .* \.\.\. FAILED$' "$LOG" \
         | sed -E 's/^test (.*) \.\.\. FAILED$/\1/'
 done | while IFS= read -r TEST; do
-    printf 'arc-gate: failing test: %s\n' "$TEST"
+    printf 'radian-gate: failing test: %s\n' "$TEST"
 done
 
 exit "$RC"
@@ -186,9 +188,9 @@ quote() {
 full() {
     enter_root
 
-    if [ -z "${ARC_GATE_HOST:-}" ]; then
+    if [ -z "${RADIAN_GATE_HOST:-}" ]; then
         # Before any step: a temp file system out of inodes or space fails a
-        # thousand unrelated tests in milliseconds. With ARC_GATE_HOST set the
+        # thousand unrelated tests in milliseconds. With RADIAN_GATE_HOST set the
         # steps run on the host, whose verify.sh checks its own temp file
         # system in its own environment, so checking here would fail a gate
         # over a laptop the gate never uses.
@@ -204,10 +206,10 @@ full() {
         exit "$RC"
     fi
 
-    HOST="$ARC_GATE_HOST"
-    TREE="${ARC_GATE_TREE:-}"
+    HOST="$RADIAN_GATE_HOST"
+    TREE="${RADIAN_GATE_TREE:-}"
     if [ -z "$TREE" ]; then
-        echo "$PROG: ARC_GATE_HOST is set; ARC_GATE_TREE (the gate checkout on that host, relative to its home) is required" >&2
+        echo "$PROG: RADIAN_GATE_HOST is set; RADIAN_GATE_TREE (the gate checkout on that host, relative to its home) is required" >&2
         exit 2
     fi
 
@@ -227,7 +229,7 @@ full() {
     case $? in
         0) BUNDLE="" ;;
         1)
-            SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/arc-gate.XXXXXX")" || exit 1
+            SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/radian-gate.XXXXXX")" || exit 1
             BUNDLE="$SCRATCH/head.bundle"
             if ! git bundle create "$BUNDLE" HEAD --not refs/remotes/origin/main; then
                 echo "$PROG: cannot create the git bundle" >&2
@@ -243,15 +245,15 @@ full() {
 
     REMOTE_BUNDLE=""
     if [ -n "$BUNDLE" ]; then
-        REMOTE_BUNDLE=".arc-gate/bundle.$$"
+        REMOTE_BUNDLE=".radian-gate/bundle.$$"
         # shellcheck disable=SC2029 # $REMOTE_BUNDLE is built here, on purpose
-        if ! ssh "$HOST" "mkdir -p .arc-gate && cat > $REMOTE_BUNDLE" <"$BUNDLE"; then
+        if ! ssh "$HOST" "mkdir -p .radian-gate && cat > $REMOTE_BUNDLE" <"$BUNDLE"; then
             echo "$PROG: cannot send the bundle to $HOST" >&2
             exit 1
         fi
     fi
 
-    REMOTE="$(mktemp "${TMPDIR:-/tmp}/arc-gate-remote.XXXXXX")" || exit 1
+    REMOTE="$(mktemp "${TMPDIR:-/tmp}/radian-gate-remote.XXXXXX")" || exit 1
     trap '[ -n "$SCRATCH" ] && rm -rf "$SCRATCH"; rm -f "$REMOTE"' EXIT
     remote_script >"$REMOTE"
 

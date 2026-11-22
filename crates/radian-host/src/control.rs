@@ -444,8 +444,8 @@ impl ControlServer {
     }
 
     /// `followup`/`steer`/`inject` (ADR 0011 L1's four ops minus `cancel`): fix the source the
-    /// port decides (the client's declared `Scheduler`/`Subagent`/`Mcp`), build the message through the shared composer, then
-    /// enqueue on the async inbox.
+    /// port decides (the client's declared `Scheduler`/`Subagent`/`Mcp`), build the message
+    /// through the shared composer, then enqueue on the async inbox.
     async fn input(
         &self,
         verb: &str,
@@ -494,7 +494,8 @@ impl ControlServer {
     }
 
     /// `list_sessions`: the hosting session (ADR 0043). The port serves one process, so this
-    /// is one `main` row: the workspace, the model route in force, the turn state (ADR 0034 H2) and the pending count.
+    /// is one `main` row: the workspace, the model route in force, the turn state (ADR 0034 H2)
+    /// and the pending count.
     fn sessions(&self, target: &ControlTarget) -> Vec<Value> {
         let pending = target.queue().map_or(0, |queue| queue.len());
         let turn = target.turn_state();

@@ -52,7 +52,6 @@ One request is one JSON line of at most 16 MiB (16 777 216 bytes), excluding the
 longer line is discarded through its newline and answered with
 `the request line is over the 16 MiB limit`; the connection stays usable.
 
-
 ## Sources
 
 `followup`, `steer` and `inject` carry an input whose source the port decides, never the
