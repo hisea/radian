@@ -85,7 +85,10 @@ fn main() {
     }
     for (file, text) in [
         ("llms.txt", radian_site::site_docs::llms_txt(&site)),
-        ("llms-full.txt", radian_site::site_docs::llms_full_txt(&site)),
+        (
+            "llms-full.txt",
+            radian_site::site_docs::llms_full_txt(&site),
+        ),
         ("sitemap.xml", radian_site::site_docs::sitemap_xml(&site)),
     ] {
         if let Err(error) = std::fs::write(out.join(file), text) {
