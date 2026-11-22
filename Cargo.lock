@@ -3132,7 +3132,6 @@ dependencies = [
  "radian-core",
  "radian-exec",
  "radian-host",
- "radian-memory",
  "radian-permissions",
  "radian-runtime",
  "radian-sandbox",

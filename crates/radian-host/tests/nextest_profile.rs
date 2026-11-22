@@ -277,8 +277,8 @@ fn the_cause_comments_count_their_groups() {
     }
 }
 
-/// The default profile still runs every test outside the sandbox (ADR 0048 §7: this is not a
-/// loosening of the gate).
+/// The default profile still runs every test outside the sandbox (this is not a loosening of
+/// the gate).
 #[test]
 fn the_default_profile_excludes_nothing() {
     let doc = config();

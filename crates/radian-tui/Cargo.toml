@@ -105,7 +105,6 @@ libc = "0.2"
 # The shared heading-anchored table reader for the manual drift tests.
 radian-coding = { path = "../radian-coding", features = ["testing"] }
 radian-core = { path = "../radian-core" }
-radian-memory = { path = "../radian-memory" }
 agent-provider-openai-compatible = { path = "../agent-provider-openai-compatible", features = ["testing"] }
 agent-provider-anthropic = { path = "../agent-provider-anthropic", features = ["testing"] }
 radian-session = { path = "../radian-session" }
