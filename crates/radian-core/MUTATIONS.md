@@ -139,3 +139,11 @@ Branch `work/TK0263-summary-floor-rejects-non-summaries`. Each mutation was appl
 | TK0263-M2 | the heading check removed | ✅ 2 failed | `tests/compaction.rs::a_long_answer_without_a_heading_has_no_heading` (300 tokens of `**Goal**` labels are accepted) and `tests/compaction_flow.rs::two_non_summaries_fall_back_without_too_long` (the second reply is accepted instead of falling back) |
 | TK0263-M3 | `TooShort` routed to `shorten_request` instead of the resend | ✅ 2 failed | `tests/compaction_flow.rs::a_prose_answer_resends_the_original_request_and_the_retry_commits` (the second request carries `<summary-to-shorten>`) and `a_short_summary_of_a_long_history_resends_the_original_request` |
 | TK0263-M4 | `summary_min_tokens` returns the floor for every history | ✅ 2 failed | `tests/compaction_flow.rs::a_manual_compact_of_a_short_history_accepts_a_short_summary` (the 300-token history's 60-token summary is rejected) and `tests/compaction.rs::the_floor_applies_only_at_ten_times_the_minimum` |
+
+## 追加（T-0018，`/context` 估算复用 `RequestSize` 计数）
+
+| id | 变异 | 结果 | 捕获的测试 |
+|---|---|---|---|
+| T-0018-M1 | `RequestSize::remove_unsent_fields` 不再减去 `meta`（`if false && …`） | ✅ 1 failed | `tests/budget.rs::a_large_host_meta_does_not_change_the_request_estimate` |
+
+1/1 caught.

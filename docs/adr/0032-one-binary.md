@@ -26,6 +26,7 @@ radian login | logout | config import-pi | trust | theme | footer | docs   manag
 
 - **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--image <PATH>` (repeatable, with `-p`) whose path the host reads itself, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks, and the `acp` host (ADR 0049), which shares `radian exec`'s conversation flags.
 - **Top level**: `config import-pi`, `login`/`logout`, `trust`, `theme import`, `footer export`, `docs [topic]`. They touch no model. They open no session.
+- **Not in the binary**: the generator of the getrad.dev static manual (`radian-site`, a `publish = false` workspace crate) renders `radian_coding::docs::DOCS` and `site/` to HTML, `llms.txt` and the sitemap. The `radian` binary and `radian-tui` hold none of that code; `radian docs` reads `DOCS` directly.
 - **`exec` and TUI share** `radian_host::open_session`, config read, `~/.radian/` layout, tool set, auth, and session data layer.
 - **Not merged**: line-mode terminal approval (blocking line read) and TUI pending queue plus modal (non-blocking UI queue) are two necessary shapes (ADR 0023 U7). They share only rules and policy (already in `radian-permissions`).
 

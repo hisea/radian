@@ -126,9 +126,72 @@ impl RequestSize {
         self.ascii_bytes.div_ceil(bytes_per_token) + self.non_ascii_chars + self.image_tokens
     }
 
+    /// Field-wise sum, for adding the sizes of separately counted pieces.
+    pub fn plus(self, other: RequestSize) -> RequestSize {
+        RequestSize {
+            ascii_bytes: self.ascii_bytes + other.ascii_bytes,
+            non_ascii_bytes: self.non_ascii_bytes + other.non_ascii_bytes,
+            non_ascii_chars: self.non_ascii_chars + other.non_ascii_chars,
+            image_bytes: self.image_bytes + other.image_bytes,
+            image_tokens: self.image_tokens + other.image_tokens,
+        }
+    }
+
+    /// Field-wise saturating difference (a piece that was counted inside `self`).
+    pub fn saturating_minus(self, other: RequestSize) -> RequestSize {
+        RequestSize {
+            ascii_bytes: self.ascii_bytes.saturating_sub(other.ascii_bytes),
+            non_ascii_bytes: self.non_ascii_bytes.saturating_sub(other.non_ascii_bytes),
+            non_ascii_chars: self.non_ascii_chars.saturating_sub(other.non_ascii_chars),
+            image_bytes: self.image_bytes.saturating_sub(other.image_bytes),
+            image_tokens: self.image_tokens.saturating_sub(other.image_tokens),
+        }
+    }
+
+    /// Counts one string (a system prompt piece).
+    pub fn of_str(text: &str) -> RequestSize {
+        let mut size = RequestSize::default();
+        size.add_str(text);
+        size
+    }
+
+    /// Replaces every image part of `message`'s counted JSON by its pixel estimate
+    /// (ADR 0015 C2).
+    pub fn add_images(&mut self, message: &Message) {
+        for contribution in image_contributions(message) {
+            self.add_image(&contribution);
+        }
+    }
+
+    /// Subtracts what the provider never receives from `message`'s counted JSON: the
+    /// host `meta` (ADR 0005) and, unless `count_reasoning`, an assistant's
+    /// `reasoning` (ADR 0014 R6).
+    pub fn remove_unsent_fields(&mut self, message: &Message, count_reasoning: bool) {
+        let meta = message.meta();
+        if !meta.is_empty() {
+            self.remove_field(&serde_json::json!({ "meta": meta }));
+        }
+        if !count_reasoning
+            && let Message::Assistant { reasoning, .. } = message
+            && !reasoning.is_empty()
+        {
+            self.remove_field(&serde_json::json!({ "reasoning": reasoning }));
+        }
+    }
+
+    /// `serde` emits the field last among the message's fields, so its contribution
+    /// to the serialized message is `,"name":<json>`.
+    fn remove_field(&mut self, object: &serde_json::Value) {
+        let field = object.to_string();
+        if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
+            self.remove_str(",");
+            self.remove_str(inner);
+        }
+    }
+
     /// Removes one image part's serialized JSON and its separator commas from the
     /// text counts, and records its pixel estimate (ADR 0015 C2).
-    fn add_image(&mut self, contribution: &ImageContribution) {
+    pub fn add_image(&mut self, contribution: &ImageContribution) {
         self.remove_str(&contribution.json);
         for _ in 0..contribution.commas {
             self.remove_str(",");
@@ -137,7 +200,7 @@ impl RequestSize {
         self.image_tokens += contribution.tokens;
     }
 
-    fn add_str(&mut self, text: &str) {
+    pub fn add_str(&mut self, text: &str) {
         for ch in text.chars() {
             if ch.is_ascii() {
                 self.ascii_bytes += 1;
@@ -150,7 +213,7 @@ impl RequestSize {
 
     /// The inverse of [`Self::add_str`], for a substring that was added and must not count.
     /// Saturating: the caller computes it from a substring of what was added.
-    fn remove_str(&mut self, text: &str) {
+    pub fn remove_str(&mut self, text: &str) {
         for ch in text.chars() {
             if ch.is_ascii() {
                 self.ascii_bytes = self.ascii_bytes.saturating_sub(1);
@@ -161,7 +224,7 @@ impl RequestSize {
         }
     }
 
-    fn add_json<T: serde::Serialize>(&mut self, value: &T) {
+    pub fn add_json<T: serde::Serialize>(&mut self, value: &T) {
         if let Ok(bytes) = serde_json::to_vec(value) {
             match std::str::from_utf8(&bytes) {
                 Ok(text) => self.add_str(text),
@@ -196,31 +259,8 @@ pub fn request_size_with(request: &ModelRequest, count_reasoning: bool) -> Reque
     }
     size.add_json(&request.messages);
     for message in &request.messages {
-        for contribution in image_contributions(message) {
-            size.add_image(&contribution);
-        }
-        let meta = message.meta();
-        if !meta.is_empty() {
-            // `serde` emits `"meta":<json>` last among the message's fields, so its
-            // contribution to the serialized message is `,"meta":<json>`.
-            let field = serde_json::json!({ "meta": meta }).to_string();
-            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-                size.remove_str(",");
-                size.remove_str(inner);
-            }
-        }
-        // ADR 0014 R6: the provider only sees `reasoning` when the model requires it
-        // replayed, so subtract the field unless the caller says the model does.
-        if !count_reasoning
-            && let crate::message::Message::Assistant { reasoning, .. } = message
-            && !reasoning.is_empty()
-        {
-            let field = serde_json::json!({ "reasoning": reasoning }).to_string();
-            if let Some(inner) = field.strip_prefix('{').and_then(|f| f.strip_suffix('}')) {
-                size.remove_str(",");
-                size.remove_str(inner);
-            }
-        }
+        size.add_images(message);
+        size.remove_unsent_fields(message, count_reasoning);
     }
     size.add_json(&request.tools);
     size.add_json(&request.settings);

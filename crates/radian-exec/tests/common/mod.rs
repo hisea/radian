@@ -121,7 +121,8 @@ fn newest_source_mtime() -> Option<std::time::SystemTime> {
         };
         for entry in entries.flatten() {
             let dir = entry.path();
-            if !dir.is_dir() {
+            // `radian-site` (the web manual generator) is not linked into `radian`.
+            if !dir.is_dir() || dir.file_name().is_some_and(|name| name == "radian-site") {
                 continue;
             }
             // Manifests are deliberately not checked: a comment-only `Cargo.toml` edit does

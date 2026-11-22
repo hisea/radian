@@ -1,6 +1,6 @@
 # getrad.dev
 
-Static site. One source file, `index.html`, holds English and Chinese in one file (`class="en"` / `class="zh"` pairs, an `EN / 中` toggle with a script) so they are written and previewed in one place. The deployed site is two pages: the generator (`crates/radian-tui/src/site_docs.rs`, `split_page`) splits the source into an English page (`/`) and a Chinese page (`/zh/`) that hold one language each, link each other with the toggle, and name `hreflang` alternates (`en`, `zh-Hans`, `x-default` = the English page), their own canonical URL and a JSON-LD record with `inLanguage`. The manual under `/docs/` stays English. There is no redirect by browser language, so a search engine reaches both pages. Next to these, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies beyond `analytics.js` (below). Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
+Static site. One source file, `index.html`, holds English and Chinese in one file (`class="en"` / `class="zh"` pairs, an `EN / 中` toggle with a script) so they are written and previewed in one place. The deployed site is two pages: the generator (`crates/radian-site/src/site_docs.rs`, `split_page`) splits the source into an English page (`/`) and a Chinese page (`/zh/`) that hold one language each, link each other with the toggle, and name `hreflang` alternates (`en`, `zh-Hans`, `x-default` = the English page), their own canonical URL and a JSON-LD record with `inLanguage`. The manual under `/docs/` stays English. There is no redirect by browser language, so a search engine reaches both pages. Next to these, plus `404.html` (GitHub Pages serves it for any missing path; `noindex`, docs chrome) and `robots.txt` (allows everything, names the sitemap). `media/` holds `og-radian.png`, the 1200×630 share card the home page names as `og:image` (the README banner `.github/readme/banner-light.png` on the paper colour; remake it with the same banner when the wordmark changes). No build step, no JavaScript dependencies beyond `analytics.js` (below). Fonts come from Google Fonts (Geist, JetBrains Mono, and Sora for the six letters of the wordmark).
 
 Preview a source file with its toggle: `python3 -m http.server -d site 8000`. Preview the two deployed pages: see "Preview the docs" below.
 
@@ -18,7 +18,7 @@ two hand-written pages), `llms-full.txt` (every manual page's Markdown under its
 `sitemap.xml` (every page's URL) at the site root, and every docs page names its absolute
 URL in a `canonical` link; the two hand-written pages name theirs by hand. All of it comes from the `DOCS` table, so a new manual page is listed
 without any edit here; the two hand-written pages' lines live in
-`crates/radian-tui/src/site_docs.rs` (`HAND_WRITTEN_PAGES`). GitHub Pages sends no custom
+`crates/radian-site/src/site_docs.rs` (`HAND_WRITTEN_PAGES`). GitHub Pages sends no custom
 response headers, so the site has no `Strict-Transport-Security` header; it redirects
 `http://` to `https://` with a 301.
 
@@ -29,7 +29,7 @@ Figure 1 is a frame rendered by the TUI prototype script, pasted into `index.htm
 ```sh
 for t in light dark; do
   # capture the TUI frame at 120 columns, panel off, in theme $t
-  your-capture-command > /tmp/screen-$t.ansi
+  bash site/tools/render-screen.sh --width 120 --panel off --theme $t > /tmp/screen-$t.ansi
 done
 python3 -I site/tools/ansi2html.py /tmp/screen-light.ansi 116,89,180   # paste into <pre class="frame-light">
 python3 -I site/tools/ansi2html.py /tmp/screen-dark.ansi 167,152,215   # paste into <pre class="frame-dark">
@@ -46,7 +46,7 @@ The two numbers are the theme's accent RGB; the script maps it to the page's `va
 
 `getrad.dev` is hosted on GitHub Pages by `.github/workflows/pages.yml`.
 Every push to `main` that changes `site/**`, `docs/user/**`, the generator
-(`crates/radian-tui/examples/site-docs.rs`, `crates/radian-tui/src/site_docs.rs`)
+(`crates/radian-site/src/main.rs`, `crates/radian-site/src/site_docs.rs`)
 or the workflow itself deploys; `workflow_dispatch` deploys on demand. The job
 copies `404.html`, `robots.txt`, `favicon.svg`, `docs.css`, `analytics.js` and `media/` from `site/` into `_site/`,
 runs the generator into `_site/` (it writes `index.html` and `zh/index.html` from the source, `docs/`, and also `_site/llms.txt`,
@@ -62,7 +62,7 @@ Every page (the two hand-written pages, `404.html` and every docs page) loads on
 ## Preview the docs
 
 ```sh
-cargo run -p radian-tui --example site-docs --locked -- /tmp/site
+cargo run -p radian-site --locked -- /tmp/site
 cp site/404.html site/robots.txt site/favicon.svg site/docs.css site/analytics.js /tmp/site/
 cp -r site/media /tmp/site/media
 python3 -m http.server -d /tmp/site 8000
@@ -74,7 +74,7 @@ then open `http://localhost:8000/`, `http://localhost:8000/zh/`, `http://localho
 
 The docs pages are generated from the same `DOCS` table the binary embeds
 (`crates/radian-coding/src/docs.rs`), never from a second copy: the generator
-reads the table through the `radian-tui` library. A broken link between pages
+reads the table through the `radian-coding` library. A broken link between pages
 fails the build, so it fails CI before merge.
 
 ## README images

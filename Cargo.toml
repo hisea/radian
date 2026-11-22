@@ -15,6 +15,7 @@ members = [
     "crates/radian-runtime",
     "crates/radian-sandbox",
     "crates/radian-tui",
+    "crates/radian-site",
     "crates/radian-permissions",
 ]
 
