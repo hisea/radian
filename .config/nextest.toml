@@ -41,7 +41,7 @@ test-group = "pty"
 # here no longer names a test. One comment block per cause group, in the order the
 # filter lists the groups (blank lines in the expression separate them):
 #
-# 1. Scratch trees under `/tmp` (209 names). The sandbox only writes inside the
+# 1. Scratch trees under `/tmp` (210 names). The sandbox only writes inside the
 #    workspace, so `create_dir_all("/tmp/…")` is denied with EPERM. The exec suite
 #    uses `/tmp` on purpose: `$TMPDIR` sits inside the workspace and
 #    its long path breaks the Unix sockets they open (groups 3 and 4).
@@ -156,6 +156,7 @@ not (
   | test(=diagnostics_carry_the_radian_prefix)
   | test(=every_decision_is_audited_once_with_the_right_approver)
   | test(=every_exit_reaps_the_mcp_children)
+  | test(=exec_binds_no_control_socket)
   | test(=exec_help_names_the_max_model_calls_default)
   | test(=exec_help_names_the_output_format_and_dash_p)
   | test(=explore_uses_its_route_while_general_follows_the_parent)
