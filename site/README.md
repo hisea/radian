@@ -29,7 +29,7 @@ Figure 1 is a frame rendered by the TUI prototype script, pasted into `index.htm
 ```sh
 for t in light dark; do
   # capture the TUI frame at 120 columns, panel off, in theme $t
-  your-capture-command > /tmp/screen-$t.ansi
+  bash site/tools/render-screen.sh --width 120 --panel off --theme $t > /tmp/screen-$t.ansi
 done
 python3 -I site/tools/ansi2html.py /tmp/screen-light.ansi 116,89,180   # paste into <pre class="frame-light">
 python3 -I site/tools/ansi2html.py /tmp/screen-dark.ansi 167,152,215   # paste into <pre class="frame-dark">
