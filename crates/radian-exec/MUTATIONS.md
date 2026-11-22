@@ -902,7 +902,7 @@ the `run/` directory at the start of `chat.rs` and the file was restored afterwa
 
 1/1 caught.
 
-T-0020 (test-suite dedupe): `cmd_run.rs` dropped `a_model_error_exits_one` (same scenario as `diagnostics_carry_the_radian_prefix`, which now also asserts `HTTP 401`) and `one_shot_model_error_still_exits_one_and_shows_the_error` (covered by `diagnostics_carry_the_radian_prefix` and `a_context_overflow_error_adds_a_hint`: exit 1, `HTTP <status>` on stderr, empty stdout).
+T-0020 (test-suite dedupe): `cmd_run.rs` dropped `a_model_error_exits_one` (same scenario as `diagnostics_carry_the_radian_prefix`, which now also asserts `HTTP 401`) and `one_shot_model_error_still_exits_one_and_shows_the_error` (covered by `diagnostics_carry_the_radian_prefix` for exit 1 and `HTTP <status>` on stderr, and by `a_context_overflow_error_adds_a_hint` for exit 1 and empty stdout; the overflow test does not assert `HTTP <status>`).
 
 | id | mutation | test that fails | result |
 |---|---|---|---|

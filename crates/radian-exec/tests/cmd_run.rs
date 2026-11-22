@@ -1,4 +1,4 @@
-//! End-to-end tests of `radian exec` itself: streaming, exit codes, usage errors, approval, interactive mode, signals, built-in tools, the sandbox and permission layer.
+//! End-to-end tests of `radian exec` itself: streaming, exit codes, usage errors, approval, interactive mode, signals, built-in tools, the sandbox and permission layer, a headless exec's tool set, the intent-only Stop continuation, and startup refusals that leave no session.
 //! The spawn helpers are in `support/mod.rs`. Every test drives the real `radian` binary
 //! (ADR 0032).
 
@@ -3135,4 +3135,445 @@ async fn an_unknown_context_key_is_skipped_and_the_session_starts() {
         stderr.contains("[config] ignored key `context.other`"),
         "{stderr}"
     );
+}
+
+// ---------- a headless exec's tool set and the intent-only Stop continuation ----------
+
+/// ADR 0043: a headless `radian exec` mounts neither `git_commit` nor any task/lead/
+/// named tool; its list is the built-in tools only.
+#[tokio::test]
+async fn a_headless_exec_mounts_no_orchestration_tools() {
+    let server = MockServer::start(vec![text_reply("hi")]).await;
+    // A private home: the tool set must not depend on the machine's real home.
+    let home = scratch("headless-tools");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &["--model", "m", "--base-url", &server.base_url, "-p", "hi"],
+            &[("RADIAN_HOME", home.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let names = advertised_tools(&server, 0);
+    assert!(
+        !names.iter().any(|name| name == "git_commit"),
+        "`git_commit` must not be mounted: {names:?}"
+    );
+    for gone in [
+        "spawn_task",
+        "wait_task",
+        "wait_any",
+        "list_tasks",
+        "task_status",
+        "cancel_task",
+        "remove_task",
+        "integrate_task",
+        "answer_task",
+        "deny_task_approval",
+        "escalate_approval",
+        "send_agent",
+        "wait_agent",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == gone),
+            "`{gone}` must not be mounted: {names:?}"
+        );
+    }
+    // The exact set: a headless session with no `--workspace` mounts the
+    // built-in `skill` (its `theme-import` skill is compiled in), `subagent` (ADR 0043
+    // decision 1a — a parent mounts it even with no workspace; only `explore` needs one) and
+    // `goal` (ADR 0047 — host-level like `ask_user`, answering `no_active_goal` without one),
+    // and nothing else.
+    let mut got = names.clone();
+    got.sort();
+    assert_eq!(
+        got,
+        ["goal", "skill", "subagent"],
+        "the exact tool set of a fresh headless session: {names:?}"
+    );
+}
+
+/// The intent-stop validator end to end (backlog `turn-end-continuation.md` §B
+/// acceptance): a turn ending with "announcing a next step but no tool call" opens
+/// exactly one more round carrying the fixed continuation text; removing the
+/// validator (or the mock's second reply going unused) fails the request count.
+#[tokio::test]
+async fn intent_stop_continues_an_intent_only_turn_end_once() {
+    let dir = scratch("intent-stop-fire");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        text_reply("Now the docs-only ADR updates."),
+        text_reply("Done."),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one continuation opens exactly one more round"
+    );
+    let second = last_user_text(&messages_of(&server, 1));
+    assert!(
+        second.contains(radian_host::intent_stop::INTENT_STOP_TEXT),
+        "the fixed continuation text rides the new round: {second}"
+    );
+}
+
+/// Ordinary turn ends hold the validator end to end: a done report, a question, and a
+/// long report whose last sentence matches the rule each end the run with no further
+/// round. A validator that fires on any of them adds a request and fails this.
+#[tokio::test]
+async fn ordinary_turn_ends_do_not_continue() {
+    for end in [
+        "Done.".to_owned(),
+        "Is that all you need?".to_owned(),
+        format!("{}\n\nNext: the reviewer decides.", "x".repeat(300)),
+    ] {
+        let dir = scratch("intent-stop-hold");
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let server = MockServer::start(vec![text_reply(&end)]).await;
+        let (code, _, stderr) = feed_and_wait(
+            spawn_radian(
+                &[
+                    "--model",
+                    "m",
+                    "--base-url",
+                    &server.base_url,
+                    "--workspace",
+                    ws.to_str().unwrap(),
+                    "-p",
+                    "hi",
+                ],
+                &[],
+            ),
+            "",
+        )
+        .await;
+        assert_eq!(code, 0, "{end}: {stderr}");
+        assert_eq!(server.requests().len(), 1, "no continuation after {end:?}");
+    }
+}
+
+/// A waiting text holds while its background job runs: the notice — not the validator —
+/// opens the next round. The validator fires within milliseconds of the turn end while
+/// the notice needs the job's two seconds, so a broken suppression shows up as a
+/// fourth request carrying the fixed text (or a run out of mock replies).
+#[tokio::test]
+async fn waiting_on_a_running_job_does_not_continue() {
+    let dir = scratch("intent-stop-waiting");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![
+        tool_reply(
+            "c1",
+            "shell",
+            &json!({"command": "sleep 2", "background": true}).to_string(),
+        ),
+        text_reply("Waiting for the completion notice."),
+        text_reply("Done."),
+    ])
+    .await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let requests = server.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "prompt, post-tool and post-notice rounds, no validator round"
+    );
+    for (index, request) in requests.iter().enumerate() {
+        assert!(
+            !request.json().to_string().contains("announced a next step"),
+            "request {index} must not carry the validator text"
+        );
+    }
+}
+
+/// `[hooks] intent_stop = false` turns the built-in validator off end to end: an
+/// intent-only turn end opens no further round.
+#[tokio::test]
+async fn intent_stop_off_in_config_does_not_continue() {
+    let dir = scratch("intent-stop-off");
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let config = dir.join("radian.toml");
+    std::fs::write(
+        &config,
+        "schema_version = 1\n[hooks]\nintent_stop = false\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![text_reply("Now the docs-only ADR updates.")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[("RADIAN_CONFIG", config.to_str().unwrap())],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        server.requests().len(),
+        1,
+        "the switch turns the validator off"
+    );
+}
+
+// ---------- startup refusals that leave no session ----------
+
+/// Acceptance 1 (CLI): a `--workspace` that does not exist is a workspace error that names
+/// the path, does not blame the sandbox, does not suggest `full-access`, and creates no
+/// session file (dogfooding D1/D2).
+#[tokio::test]
+async fn a_missing_workspace_is_a_workspace_error_and_leaves_no_session() {
+    let dir = scratch("missing-ws");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let missing = dir.join("no-such-workspace");
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                missing.to_str().unwrap(),
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "missing-ws",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(missing.to_str().unwrap()), "{stderr}");
+    assert!(
+        !stderr.contains("sandbox backend"),
+        "a bad workspace must not blame the sandbox: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--profile"),
+        "a bad workspace must not suggest a profile (old or new name): {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_session_dir_empty(&session_dir);
+}
+
+/// ADR 0020: a `--session-dir` that is an ancestor of the workspace refuses at startup with
+/// the same exit code as the other sandbox refusals, names the problem (not the backend), and
+/// leaves no session file.
+#[tokio::test]
+async fn a_session_dir_above_the_workspace_is_refused_and_leaves_no_session() {
+    let dir = scratch("nested-ws");
+    let session_dir = dir.join("sessions");
+    let ws = session_dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--profile",
+                "workspace",
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "nested-ws",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("workspace is inside"), "{stderr}");
+    assert!(
+        !stderr.contains("sandbox backend"),
+        "a nested workspace must not blame the backend: {stderr}"
+    );
+    assert!(
+        !stderr.contains("--profile"),
+        "a nested workspace must not suggest a profile: {stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+    // The workspace lives inside the session dir, so the dir is not empty; the point is that
+    // no session file was created.
+    assert!(
+        !session_dir.join("nested-ws.jsonl").exists(),
+        "a failed start left a session file behind"
+    );
+}
+
+/// Acceptance 2 and 4 (CLI): a failed sandbox probe refuses, leaves no session file, and the
+/// same `--session-id` with corrected parameters then creates the session (dogfooding D2).
+#[tokio::test]
+async fn a_failed_probe_leaves_no_session_and_the_retry_creates_one() {
+    let dir = scratch("probe-no-session");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let server = MockServer::start(vec![text_reply("done")]).await;
+    let base_url = server.base_url.clone();
+    let ws_str = ws.to_str().unwrap().to_owned();
+    let sessions = session_dir.to_str().unwrap().to_owned();
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &base_url,
+                "--workspace",
+                &ws_str,
+                "--profile",
+                "workspace",
+                "--yes",
+                "-p",
+                "hi",
+                "--session-dir",
+                &sessions,
+                "--session-id",
+                "retry",
+            ],
+            &[("RADIAN_SANDBOX_PROBE_FAIL", "1")],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("sandbox backend is unavailable") || stderr.contains("cannot be enforced"),
+        "{stderr}"
+    );
+    assert_session_dir_empty(&session_dir);
+
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &base_url,
+                "--workspace",
+                &ws_str,
+                "--yes",
+                "-p",
+                "hi",
+                "--session-dir",
+                &sessions,
+                "--session-id",
+                "retry",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        session_dir.join("retry.jsonl").exists(),
+        "the corrected retry created the session"
+    );
+}
+
+/// Acceptance 3 (CLI): a malformed `--mcp-config` fails before the session file exists.
+#[tokio::test]
+async fn a_bad_mcp_config_leaves_no_session() {
+    let dir = scratch("bad-mcp");
+    let session_dir = dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let bad = write_file(&dir, "bad.json", "{\"servers\": [], \"bogus\": 1}");
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian_in(
+            &session_dir,
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--mcp-config",
+                bad.to_str().unwrap(),
+                "--session-dir",
+                session_dir.to_str().unwrap(),
+                "--session-id",
+                "bad-mcp",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains(bad.to_str().unwrap()), "{stderr}");
+    assert_session_dir_empty(&session_dir);
 }
