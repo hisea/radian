@@ -14,7 +14,7 @@
 //! The breakdown is a pure data struct the TUI renders:
 //! the grid round only changes the view. It carries the stacking
 //! numbers (`categories` + `free` + `buffer` = `window`) and the per-item
-//! detail (context files, skills, MCP/built-in tools, memory records).
+//! detail (context files, skills, MCP/built-in tools).
 
 use radian_core::budget::{ImageContribution, image_contributions};
 use radian_core::{ContentPart, Message, ModelRequest, ToolSpec};
@@ -54,9 +54,6 @@ pub struct Details {
     pub mcp_servers: usize,
     pub mcp_tools_count: usize,
     pub mcp_tools_tokens: u64,
-    /// Memory index files in the injected section and the section's tokens.
-    pub memory_records: usize,
-    pub memory_tokens: u64,
 }
 
 /// The breakdown of one next request.
@@ -201,13 +198,11 @@ impl Size {
 /// The system layers split for the estimate.
 #[derive(Debug, Clone, Default)]
 pub struct SystemSplit {
-    /// Everything except the context files and the memory block (0a, 1, skills,
+    /// Everything except the context files (0a, 1, skills,
     /// 0b, settings framing).
     pub base: String,
     /// The `<project_instructions>` section (ADR 0036).
     pub context_files: String,
-    /// The injected memory index section (ADR 0021 D6).
-    pub memory: String,
 }
 
 /// One context file's block, in prompt order: the display path and the exact
@@ -232,8 +227,6 @@ pub struct EstimateInput<'a> {
     /// MCP server ids, to tell MCP tools (`<server>__<tool>`) apart from
     /// built-in ones (the inspector's rule).
     pub mcp_server_ids: &'a [String],
-    /// How many memory index files the section carries.
-    pub memory_records: usize,
     pub bytes_per_token: u32,
     pub count_reasoning: bool,
     /// `C` (ADR 0018). `None` when the window is unknown.
@@ -359,7 +352,7 @@ fn reasoning_fragment_size(reasoning: &[ContentPart]) -> Size {
 /// Splits the next request's shape into the spec's categories. `request` is
 /// the request as it would be sent (system prompt with all hooks applied,
 /// transcript messages, tool specs, settings); `system` names which part of
-/// `request.system_prompt` is context files and which is memory, so the three
+/// `request.system_prompt` is context files, so the two
 /// system categories add up to the prompt byte for byte.
 ///
 /// Returns the categories in display order; `reasoning` is listed only when
@@ -369,11 +362,10 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let bpt = input.bytes_per_token.max(1) as u64;
     let count_reasoning = input.count_reasoning;
 
-    // System: three additive string pieces.
+    // System: two additive string pieces.
     let base_size = size_of_str(&input.system.base);
     let context_size = size_of_str(&input.system.context_files);
-    let memory_size = size_of_str(&input.system.memory);
-    // The request's prompt must be exactly these three concatenated; when it
+    // The request's prompt must be exactly these two concatenated; when it
     // is not (a hook rewrote it), the remainder stays in base so nothing is
     // lost and the sum still matches the request.
     let prompt_size = {
@@ -383,7 +375,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         }
         size
     };
-    let pieces = base_size.plus(context_size).plus(memory_size);
+    let pieces = base_size.plus(context_size);
     let base_size = Size {
         ascii: base_size.ascii + prompt_size.ascii.saturating_sub(pieces.ascii),
         non_ascii_chars: base_size.non_ascii_chars
@@ -487,7 +479,7 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let base_size = base_size.plus(settings_size);
 
     // Display order (the `/context` grid legend, spec `tui-context-grid`): system
-    // prompt, context files, memory, tool definitions (built-in), skills, MCP
+    // prompt, context files, tool definitions (built-in), skills, MCP
     // tools, user, assistant, [reasoning], tool results. The skills section is a
     // substring of the base, so the system prompt is the base minus skills; the
     // tool array is split into built-in and MCP specs, its framing (`[` `]` `,`)
@@ -506,7 +498,6 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
     let mut parts: Vec<(&'static str, Size)> = vec![
         ("system prompt", system_size),
         ("context files", context_size),
-        ("memory", memory_size),
         ("tool definitions", builtin_size),
         ("skills", skills_size),
         ("MCP tools", mcp_size),
@@ -629,11 +620,6 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         .find(|c| c.name == "context files")
         .map(|c| c.tokens)
         .unwrap_or(0);
-    let memory_tokens = categories
-        .iter()
-        .find(|c| c.name == "memory")
-        .map(|c| c.tokens)
-        .unwrap_or(0);
     let (builtin_tools_count, builtin_tools_tokens, mcp_tools_count, mcp_tools_tokens) = {
         let mut builtin: Vec<&ToolSpec> = Vec::new();
         let mut mcp: Vec<&ToolSpec> = Vec::new();
@@ -665,8 +651,6 @@ pub fn estimate(input: &EstimateInput) -> Breakdown {
         mcp_servers: input.mcp_server_ids.len(),
         mcp_tools_count,
         mcp_tools_tokens,
-        memory_records: input.memory_records,
-        memory_tokens,
     };
 
     Breakdown {
@@ -777,11 +761,6 @@ pub fn notice_lines(report: &ContextReport) -> Vec<String> {
         details.mcp_servers,
         format_tokens(details.mcp_tools_tokens),
     ));
-    out.push(format!(
-        "memory: {} records, {}",
-        details.memory_records,
-        format_tokens(details.memory_tokens)
-    ));
     out
 }
 
@@ -850,16 +829,14 @@ mod tests {
         let base = "<runtime>rt</runtime>\n\n<role>role</role>\n".to_owned();
         let context_files =
             "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>\n".to_owned();
-        let memory = "\n\n## Memory (ADR 0021)\n- [global] (fact): note\n".to_owned();
         SystemSplit {
             base,
             context_files,
-            memory,
         }
     }
 
     fn request(system: &SystemSplit) -> ModelRequest {
-        let system_prompt = format!("{}{}{}", system.base, system.context_files, system.memory);
+        let system_prompt = format!("{}{}", system.base, system.context_files);
         ModelRequest {
             system_prompt: Some(system_prompt),
             messages: vec![
@@ -897,7 +874,6 @@ mod tests {
             skills_count: 0,
             context_blocks: blocks,
             mcp_server_ids: &[],
-            memory_records: 1,
             bytes_per_token: 4,
             count_reasoning: false,
             window: Some(100_000),
@@ -1050,9 +1026,8 @@ mod tests {
             context_files:
                 "<project_instructions path=\"AGENTS.md\">\nbody\n</project_instructions>\n"
                     .to_owned(),
-            memory: "\n\n## Memory (ADR 0021)\n- [global] (fact): note\n".to_owned(),
         };
-        let prompt = format!("{}{}{}", system.base, system.context_files, system.memory);
+        let prompt = format!("{}{}", system.base, system.context_files);
         let req = ModelRequest {
             system_prompt: Some(prompt),
             messages: vec![Message::user("hello")],
@@ -1071,7 +1046,6 @@ mod tests {
             skills_count: 3,
             context_blocks: &blocks,
             mcp_server_ids: &mcp_ids,
-            memory_records: 1,
             bytes_per_token: 4,
             count_reasoning: false,
             window: Some(100_000),
@@ -1097,7 +1071,6 @@ mod tests {
             skills_count: 0,
             context_blocks: &blocks,
             mcp_server_ids: &[],
-            memory_records: 1,
             bytes_per_token: 4,
             count_reasoning: false,
             window: Some(100_000),
@@ -1119,13 +1092,11 @@ mod tests {
             "{split:?} vs {whole:?}"
         );
         // The report packs the estimate without recomputing.
-        let memory_tokens = tokens("memory");
         let files_tokens = tokens("context files");
         let mcp_tokens = tokens("MCP tools");
         let report = ContextReport::new(split, None, None, None, 1, 0);
         assert_eq!(report.total_tokens, whole.total_tokens);
         assert_eq!(report.category_tokens("reasoning"), 0);
-        assert_eq!(report.details.memory_tokens, memory_tokens);
         assert_eq!(report.details.context_files_tokens, files_tokens);
         assert_eq!(report.category_tokens("MCP tools"), mcp_tokens);
         assert!(mcp_tokens > 0);
@@ -1151,9 +1122,9 @@ mod tests {
     }
 
     /// The detail rows name every context file, the skills listing, the MCP
-    /// split and the memory records.
+    /// split.
     #[test]
-    fn the_notice_details_name_files_skills_mcp_and_memory() {
+    fn the_notice_details_name_files_skills_and_mcp() {
         let system = system();
         let req = request(&system);
         let blocks = [ContextBlock {
@@ -1171,8 +1142,6 @@ mod tests {
         assert_eq!(breakdown.details.mcp_servers, 1);
         assert_eq!(breakdown.details.mcp_tools_count, 1);
         assert_eq!(breakdown.details.builtin_tools_count, 1);
-        assert_eq!(breakdown.details.memory_records, 1);
-        assert!(breakdown.details.memory_tokens > 0, "{breakdown:?}");
         // The skills section and the MCP split are their own display categories
         // now (spec `tui-context-grid`): the order is fixed, reasoning stays
         // conditional, and the tools framing rides on one side so the split
@@ -1183,7 +1152,6 @@ mod tests {
             [
                 "system prompt",
                 "context files",
-                "memory",
                 "tool definitions",
                 "skills",
                 "MCP tools",
@@ -1202,7 +1170,7 @@ mod tests {
         assert!(text.contains("AGENTS.md"), "{text}");
         assert!(text.contains("skills: 3 listed"), "{text}");
         assert!(text.contains("1 MCP in 1 servers"), "{text}");
-        assert!(text.contains("memory: 1 records"), "{text}");
+        assert!(!text.contains("memory"), "{text}");
         assert!(text.contains("free until auto-compact"), "{text}");
         assert!(text.contains("compaction buffer"), "{text}");
         assert!(text.contains("window"), "{text}");

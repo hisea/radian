@@ -95,7 +95,7 @@ pub const HAND_WRITTEN_PAGES: [HandPage; 2] = [
         lang: Lang::En,
         path: "/",
         title: "radian",
-        description: "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks, skills and memory.",
+        description: "A fast, efficient coding agent in one Rust binary: a full-screen terminal interface, a headless `radian exec` command, a journalled session file, sandboxed tools, MCP, hooks and skills.",
     },
     HandPage {
         file: "index.html",

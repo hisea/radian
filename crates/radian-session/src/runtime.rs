@@ -102,25 +102,24 @@ pub enum ApprovalPolicyValue {
     Unknown,
 }
 
-/// One record that was injected before a model request, in the **old** JSONL store's shape
-/// (ADR 0021 D6 before the file store): only the id, revision and scope — never the content.
-/// This build writes only [`MemoryInjectedIndex`]; the type stays so an old journal still reads
-/// and so a transcript addition can carry its `(id, revision, scope)` origin.
+/// One record that was injected before a model request, in the **oldest** shape (ADR 0006
+/// decision 5.12): only the id, revision and scope — never the content. This build writes
+/// neither shape; the type stays so an old journal still reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryInjectedRecord {
     pub id: String,
     pub revision: u64,
-    /// The scope as the tagged value of ADR 0021 D1 (`"global"` or `{"project": "<id>"}`).
+    /// The scope as the tagged value of the old memory store (`"global"` or `{"project": "<id>"}`).
     /// `radian-session` does not depend on the memory crate, so it stays a [`Value`] here;
     /// a future scope shape round-trips without a new event version.
     pub scope: Value,
 }
 
-/// The two scopes a `MemoryInjected` index entry can name (ADR 0021 D6). One closed set,
-/// read by the reader, the writer and the docs drift test.
+/// The two scopes a `MemoryInjected` index entry can name (ADR 0006 decision 5.12). One closed set,
+/// read by the reader and the docs drift test.
 pub const MEMORY_INJECTED_INDEX_SCOPES: &[&str] = &["project", "global"];
 
-/// One memory **index file** injected before a model request (ADR 0021 D6). It names the file
+/// One memory **index file** injected before a model request (ADR 0006 decision 5.12). It names the file
 /// and hashes its text, so an audit and a resume can tell what the prompt held. It never copies
 /// the index text itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,8 +136,8 @@ pub struct MemoryInjectedIndex {
     pub bytes: u64,
 }
 
-/// Checks one [`MemoryInjectedIndex`] against the record contract (ADR 0021 D6). The reader and
-/// the writer share it so a malformed record cannot be written or read.
+/// Checks one [`MemoryInjectedIndex`] against the record contract (ADR 0006 decision 5.12). The reader uses it
+/// so a malformed record is refused at its line.
 pub(crate) fn validate_memory_injected_index(index: &MemoryInjectedIndex) -> Result<(), String> {
     if !MEMORY_INJECTED_INDEX_SCOPES.contains(&index.scope.as_str()) {
         return Err(format!(
@@ -532,11 +531,6 @@ pub(crate) struct ApprovalPolicyChangedData {
 pub(crate) struct SessionForkedData<'a> {
     pub child_session_id: &'a str,
     pub parent_seq: u64,
-}
-
-#[derive(Serialize)]
-pub(crate) struct MemoryIndexesData<'a> {
-    pub indexes: &'a [MemoryInjectedIndex],
 }
 
 #[derive(Serialize)]

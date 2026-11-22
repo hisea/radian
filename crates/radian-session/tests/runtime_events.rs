@@ -9,8 +9,8 @@ use radian_core::{
     InputSource, JournalRecord, Message, MessageId, TranscriptJournal, recover, replay,
 };
 use radian_session::{
-    EventData, ExportOptions, InboxLane, Index, MemoryInjectedIndex, RuntimeEvent, Session,
-    SessionJournal, TurnOutcome, TurnReason, WriteError,
+    EventData, ExportOptions, InboxLane, Index, RuntimeEvent, Session, SessionJournal, TurnOutcome,
+    TurnReason, WriteError,
 };
 use serde_json::json;
 
@@ -190,33 +190,31 @@ async fn runtime_events_round_trip_through_typed_reader_variants() {
     }
 }
 
-/// ADR 0021 D6: `MemoryInjected` carries the injected index files only, is audit (`critical:
-/// false`), never enters the transcript fold, and the exports show it without content.
+/// ADR 0006 decision 5.12: an old `MemoryInjected` line (read only; this build never writes
+/// one) carries the injected index files only, is audit (`critical: false`), never enters the
+/// transcript fold, and the exports show it without content.
 #[tokio::test]
-async fn memory_injected_round_trips_without_content_and_is_not_critical() {
+async fn an_old_memory_injected_line_reads_without_content_and_is_not_critical() {
+    use std::io::Write;
+
     let dir = TempDir::new("memory-injected");
     let path = dir.file("s.jsonl");
     let journal = SessionJournal::create(&path, "sid", created()).unwrap();
+    drop(journal);
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    journal
-        .append_memory_injected_indexes(vec![
-            MemoryInjectedIndex {
-                scope: "project".into(),
-                path: "/home/example/.radian/memory/projects/prj-1/MEMORY.md".into(),
-                sha256: hash.into(),
-                lines: 2,
-                bytes: 80,
-            },
-            MemoryInjectedIndex {
-                scope: "global".into(),
-                path: "/home/example/.radian/memory/global/MEMORY.md".into(),
-                sha256: hash.into(),
-                lines: 1,
-                bytes: 40,
-            },
-        ])
-        .await
+    let line = json!({"schema_version":1,"session_id":"sid","seq":1,
+        "ts":"2026-10-12T13:00:01.000000Z","event":"MemoryInjected","critical":false,
+        "data":{"indexes":[
+            {"scope":"project","path":"/home/example/.radian/memory/projects/prj-1/MEMORY.md",
+             "sha256":hash,"lines":2,"bytes":80},
+            {"scope":"global","path":"/home/example/.radian/memory/global/MEMORY.md",
+             "sha256":hash,"lines":1,"bytes":40}]}});
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
         .unwrap();
+    writeln!(file, "{line}").unwrap();
+    drop(file);
 
     let session = Session::open(&path).unwrap();
     let injected = session
@@ -227,7 +225,7 @@ async fn memory_injected_round_trips_without_content_and_is_not_critical() {
     assert!(!injected.critical);
     match &injected.data {
         EventData::MemoryInjected { records, indexes } => {
-            assert!(records.is_empty(), "this build writes only indexes");
+            assert!(records.is_empty(), "an index record carries no records");
             assert_eq!(indexes.len(), 2);
             assert_eq!(indexes[0].scope, "project");
             assert_eq!(indexes[1].scope, "global");

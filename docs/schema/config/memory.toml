@@ -1,7 +1,7 @@
-# ADR 0021: `[memory]` is the memory index-injection configuration. `enabled` turns the
-# injection off; `scopes` selects the index files; `index_max_lines` and `index_max_bytes`
-# cap each index. The retired `[memory.injection]` keys are ignored with one migration
-# warning per key.
+# `[memory]` is a retired key (persistent memory was removed, ADR 0021). An old config that
+# still carries it parses fine: the table and every key under it warn once on the startup
+# line (`skipped`, as `memory`) and are ignored, never an error. The values below are what
+# the last memory-era radian wrote.
 schema_version = 1
 
 [model]

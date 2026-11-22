@@ -133,41 +133,6 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
-/// `[memory]` (ADR 0021 D6): the index injection configuration. The retired
-/// `[memory.injection]` keys are ignored with one migration warning each.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MemoryConfig {
-    /// `[memory] enabled`: inject the index files. `None` means the default, **on**.
-    pub enabled: Option<bool>,
-    /// `[memory] scopes`: the scopes whose `MEMORY.md` is injected, from
-    /// [`crate::memory::MEMORY_SCOPES`]. `None` means the default, both, in the fixed order.
-    pub scopes: Option<Vec<String>>,
-    /// `[memory] index_max_lines`: the per-index line cap. `None` means the default (200).
-    pub index_max_lines: Option<u64>,
-    /// `[memory] index_max_bytes`: the per-index byte cap. `None` means the default (25600).
-    pub index_max_bytes: Option<u64>,
-    /// `[memory] sessions_index_max_lines`: how many lines a project's session index keeps.
-    /// `None` means the default (1000).
-    pub sessions_index_max_lines: Option<u64>,
-}
-
-impl MemoryConfig {
-    /// The injection configuration this section describes, with the D6 defaults for everything
-    /// the file does not set.
-    pub fn injection(&self) -> crate::memory::InjectionConfig {
-        let defaults = crate::memory::InjectionConfig::default();
-        crate::memory::InjectionConfig {
-            enabled: self.enabled.unwrap_or(defaults.enabled),
-            scopes: self.scopes.clone().unwrap_or(defaults.scopes),
-            index_max_lines: self.index_max_lines.unwrap_or(defaults.index_max_lines),
-            index_max_bytes: self.index_max_bytes.unwrap_or(defaults.index_max_bytes),
-            sessions_index_max_lines: self
-                .sessions_index_max_lines
-                .unwrap_or(defaults.sessions_index_max_lines),
-        }
-    }
-}
-
 /// `[integrations]` (ADR 0034 H6): which local integrations are on. `herdr` defaults to
 /// **true**: it only takes effect inside a herdr pane (ADR 0034 H1), and `RADIAN_HERDR=0`
 /// turns it off for one run.
@@ -241,8 +206,6 @@ pub struct Config {
     pub context: ContextConfig,
     pub compaction: CompactionConfig,
     pub skills: SkillsConfig,
-    /// `[memory]` (ADR 0021): the injection keys this revision adds.
-    pub memory: MemoryConfig,
     /// `[hooks]` (ADR 0045 slice A): user-level external command hooks.
     pub hooks: HooksConfig,
     /// `[shell]` (ADR 0037): kept only for the removed-key warning; there are no live keys.
@@ -396,7 +359,7 @@ pub fn parse(path: &Path, text: &str) -> Result<Config, ConfigError> {
             "compaction" => parse_compaction(value, path, &mut config)?,
             "hooks" => hooks::parse_hooks(value, &mut config)?,
             "skills" => parse_skills(value, path, &mut config)?,
-            "memory" => parse_memory(value, path, &mut config)?,
+            "memory" => parse_memory(&mut config),
             "shell" => parse_shell(value, &mut config)?,
             "tui" => tui::parse_tui(value, path, &mut config)?,
             "providers" => model::parse_providers(value, path, &mut config)?,
@@ -577,92 +540,11 @@ fn parse_shell(value: &Value, config: &mut Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn parse_memory(value: &Value, path: &Path, config: &mut Config) -> Result<(), ConfigError> {
-    let Some(table) = value.as_table() else {
-        return Err(wrong_type(path, "memory", "a table"));
-    };
-    for (key, value) in table {
-        match (key.as_str(), value) {
-            ("enabled", Value::Boolean(on)) => config.memory.enabled = Some(*on),
-            ("enabled", _) => {
-                return Err(wrong_type(path, "memory.enabled", "a boolean"));
-            }
-            ("scopes", Value::Array(items)) => {
-                let mut scopes = Vec::new();
-                for item in items {
-                    match item {
-                        Value::String(scope)
-                            if crate::memory::MEMORY_SCOPES.contains(&scope.as_str()) =>
-                        {
-                            scopes.push(scope.clone());
-                        }
-                        _ => {
-                            return Err(wrong_type(
-                                path,
-                                "memory.scopes",
-                                "an array of `project` or `global`",
-                            ));
-                        }
-                    }
-                }
-                config.memory.scopes = Some(scopes);
-            }
-            ("scopes", _) => {
-                return Err(wrong_type(
-                    path,
-                    "memory.scopes",
-                    "an array of `project` or `global`",
-                ));
-            }
-            ("index_max_lines", Value::Integer(lines)) if *lines >= 1 => {
-                config.memory.index_max_lines = Some(*lines as u64);
-            }
-            ("index_max_lines", _) => {
-                return Err(wrong_type(
-                    path,
-                    "memory.index_max_lines",
-                    "a positive integer",
-                ));
-            }
-            ("index_max_bytes", Value::Integer(bytes)) if *bytes >= 1 => {
-                config.memory.index_max_bytes = Some(*bytes as u64);
-            }
-            ("index_max_bytes", _) => {
-                return Err(wrong_type(
-                    path,
-                    "memory.index_max_bytes",
-                    "a positive integer",
-                ));
-            }
-            ("sessions_index_max_lines", Value::Integer(lines)) if *lines >= 1 => {
-                config.memory.sessions_index_max_lines = Some(*lines as u64);
-            }
-            ("sessions_index_max_lines", _) => {
-                return Err(wrong_type(
-                    path,
-                    "memory.sessions_index_max_lines",
-                    "an integer of 1 or more",
-                ));
-            }
-            // ADR 0008 migration: the old injection table is retired. Every key it sets is
-            // named once and ignored; the startup line prints it under `ignored key`.
-            ("injection", Value::Table(injection)) => {
-                for key in injection.keys() {
-                    config.skipped.push(format!(
-                        "memory.injection.{key} is retired; [memory] index_max_lines and \
-                         index_max_bytes replace it"
-                    ));
-                }
-            }
-            ("injection", _) => config.skipped.push(
-                "memory.injection is retired; [memory] index_max_lines and index_max_bytes \
-                 replace it"
-                    .to_owned(),
-            ),
-            (other, _) => config.skipped.push(format!("memory.{other}")),
-        }
-    }
-    Ok(())
+/// `[memory]` is retired (ADR 0008): persistent memory was removed (ADR 0021). The table and
+/// every key under it, whatever the value, is skipped with one line (`memory`) on the startup
+/// line and otherwise ignored, never a refusal of the file.
+fn parse_memory(config: &mut Config) {
+    config.skipped.push("memory".to_owned());
 }
 
 /// `[skills] extra_paths = ["…"]` (ADR 0025 slice 4). The strings are kept raw; the host
@@ -853,8 +735,8 @@ pub(crate) fn looks_like_secret(text: &str) -> bool {
     secret_prefix(text).is_some() || is_long_random(text)
 }
 
-/// The rule-2 prefix `text` starts with, if any. The memory write guard names this prefix
-/// and never the value (ADR 0021 invariant 4).
+/// The rule-2 prefix `text` starts with, if any. A warning names this prefix and never the
+/// value (ADR 0013).
 pub(crate) fn secret_prefix(text: &str) -> Option<&'static str> {
     SECRET_PREFIXES
         .iter()
@@ -2060,11 +1942,6 @@ future_option = "alpha"
             "skills.extra_paths",
             "skills.builtin",
             "skills.disabled",
-            "memory.enabled",
-            "memory.scopes",
-            "memory.index_max_lines",
-            "memory.index_max_bytes",
-            "memory.sessions_index_max_lines",
             "shell",
             "tui.theme",
             "tui.colors",
@@ -2224,11 +2101,6 @@ future_option = "alpha"
                 "builtin = false\n",
                 "disabled = [\"review\"]\n",
                 "extra_paths = [\"skills\"]\n",
-                "[memory]\n",
-                "enabled = false\n",
-                "scopes = [\"global\"]\n",
-                "index_max_lines = 10\n",
-                "index_max_bytes = 10\n",
                 "[shell]\n",
                 "[tui]\n",
                 "theme = \"mono\"\n",
@@ -2363,7 +2235,6 @@ future_option = "alpha"
         "## `[permissions]`",
         "## `[hooks]`",
         "## `[skills]`",
-        "## `[memory]`",
         "## `[control]`",
         "## `[context]`",
         "## `[integrations]`",
@@ -2431,13 +2302,6 @@ future_option = "alpha"
                 model::PROVIDER_KINDS
                     .iter()
                     .map(|s| s.to_string())
-                    .collect(),
-            ),
-            (
-                "memory.scopes",
-                crate::memory::MEMORY_SCOPES
-                    .iter()
-                    .map(|scope| (*scope).to_string())
                     .collect(),
             ),
             (
@@ -2541,11 +2405,6 @@ future_option = "alpha"
                 row.iter().any(|cell| cell.contains(default))
             }
         }
-        let empty = parse(
-            std::path::Path::new("/tmp/test/config.toml"),
-            "schema_version = 1\n",
-        )
-        .expect("empty config parses");
         let defaults: &[(&str, String)] = &[
             ("schema_version", SUPPORTED_SCHEMA_VERSION.to_string()),
             ("model.provider", GENERIC_ID.to_string()),
@@ -2560,27 +2419,6 @@ future_option = "alpha"
             ),
             ("skills.builtin", DEFAULT_SKILLS_BUILTIN.to_string()),
             ("hooks.intent_stop", DEFAULT_INTENT_STOP.to_string()),
-            (
-                "memory.enabled",
-                empty.memory.injection().enabled.to_string(),
-            ),
-            ("memory.scopes", empty.memory.injection().scopes.join(", ")),
-            (
-                "memory.index_max_lines",
-                empty.memory.injection().index_max_lines.to_string(),
-            ),
-            (
-                "memory.index_max_bytes",
-                empty.memory.injection().index_max_bytes.to_string(),
-            ),
-            (
-                "memory.sessions_index_max_lines",
-                empty
-                    .memory
-                    .injection()
-                    .sessions_index_max_lines
-                    .to_string(),
-            ),
             (
                 "integrations.herdr",
                 IntegrationsConfig::default().herdr.to_string(),
@@ -2611,22 +2449,5 @@ future_option = "alpha"
                 "{key} row misses its default {default}: {lines:?}"
             );
         }
-    }
-
-    /// Edge 10: a session-index cap of 0 is a config error that names the key and the
-    /// minimum of 1.
-    #[test]
-    fn sessions_index_max_lines_zero_is_refused_naming_the_minimum() {
-        let error =
-            parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 0\n").unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("memory.sessions_index_max_lines"),
-            "{message}"
-        );
-        assert!(message.contains("1 or more"), "{message}");
-        let config =
-            parse_str("schema_version = 1\n[memory]\nsessions_index_max_lines = 7\n").unwrap();
-        assert_eq!(config.memory.injection().sessions_index_max_lines, 7);
     }
 }

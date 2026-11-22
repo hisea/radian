@@ -6,7 +6,6 @@ use radian_core::ToolFailure;
 
 use crate::deny::DenySet;
 use crate::docs;
-use crate::memory_roots::{self, MemoryRoots};
 use crate::read_roots::{READ_ROOTS_DESCRIPTION, ReadRoots, normalise_absolute, user_home};
 use crate::safe_fs::{self, EntryKind, OpenMode, RootDir, SafeFsError, Stat};
 use crate::{CODE_OUTSIDE, fail};
@@ -29,13 +28,11 @@ pub enum WorkspaceError {
 /// later open walks from this fd and never re-opens a path string.
 ///
 /// Alongside the workspace it holds the read-only roots (ADR 0039: the cargo
-/// registry and toolchain sources, plus each discovered skill's directory), the writable
-/// memory scope directories (ADR 0039 decision 4: `global/` and the workspace's project
-/// directory), the `full`-tier deny set (ADR 0039 decision 4), and the tier source: the shared
+/// registry and toolchain sources, plus each discovered skill's directory), the `full`-tier deny set (ADR 0039 decision 4), and the tier source: the shared
 /// [`SandboxSlot`] the host swaps on `/access`, so the file tools read the current tier at
 /// every call, not the startup one. `read`/`grep`/`glob` resolve an absolute or `~` path
 /// against the roots in both tiers, and against any other path in the `full` tier except the
-/// deny set; `write`/`patch` also accept the memory scopes. Every other tool uses the
+/// deny set; `write`/`patch` stay in the workspace. Every other tool uses the
 /// workspace only. An absolute path under the workspace root, in either spelling, is the
 /// workspace-relative path (ADR 0039 decision 6).
 #[derive(Clone)]
@@ -48,9 +45,6 @@ pub struct WorkspaceRoot {
     given: Option<PathBuf>,
     dir: Arc<RootDir>,
     read_roots: Arc<ReadRoots>,
-    /// The writable memory scopes (ADR 0039 decision 4). Empty when the host has no memory
-    /// directory; never writable by any other route.
-    memory_roots: Arc<MemoryRoots>,
     /// The `full`-tier deny set: the sandbox's deny-read entries plus the host's denied
     /// `$RADIAN_HOME` paths. Consulted only when the tier is `full`.
     deny: Arc<DenySet>,
@@ -81,7 +75,7 @@ pub(crate) struct OpenedFile {
 }
 
 /// The directory a search tool (`grep`/`glob`) walks: the open fd, the path relative to the
-/// root it was opened from, and, for a read-only or memory root, the prefix to render a
+/// root it was opened from, and, for a read-only root, the prefix to render a
 /// result path the model can pass back to `read`.
 pub(crate) struct ReadBase {
     pub dir: File,
@@ -103,13 +97,6 @@ enum Resolved {
         relative: PathBuf,
         prefix: PathBuf,
     },
-    /// A path under one of the writable memory scopes (ADR 0039 decision 4): the same fd walk
-    /// as a read-only root, but `write`/`patch` open it too.
-    Memory {
-        index: usize,
-        relative: PathBuf,
-        prefix: PathBuf,
-    },
     /// A `full`-tier path outside every other root: `relative` is the `realpath`ed path
     /// without its leading `/`, walked from the filesystem root's fd (ADR 0039 decision 4).
     /// The deny set was already checked on the `realpath`ed path.
@@ -117,14 +104,6 @@ enum Resolved {
     /// A bundled docs page (`radian://docs/`). `None` is the root (a listing);
     /// `Some` is one page by file name.
     Embedded { page: Option<String> },
-}
-
-/// Where a write tool's `path` resolved to (ADR 0039 decisions 4 and 6).
-enum WriteTarget {
-    /// A workspace-relative path.
-    Workspace(PathBuf),
-    /// A path directly in one of the writable memory scopes.
-    Memory { index: usize, relative: PathBuf },
 }
 
 impl WorkspaceRoot {
@@ -145,24 +124,10 @@ impl WorkspaceRoot {
     }
 
     /// The workspace plus the read-only roots, the `full`-tier deny set and the tier source
-    /// (ADR 0039 decision 4). Equivalent to [`WorkspaceRoot::with_roots`] with no memory
-    /// scopes.
+    /// (ADR 0039 decision 4).
     pub fn with_access(
         root: impl AsRef<Path>,
         read_roots: ReadRoots,
-        deny: DenySet,
-        tier: SandboxSlot,
-    ) -> Result<Self, WorkspaceError> {
-        Self::with_roots(root, read_roots, MemoryRoots::none(), deny, tier)
-    }
-
-    /// [`WorkspaceRoot::with_access`] with the writable memory scopes the host passed
-    /// (ADR 0039 decision 4): `read`, `grep` and `glob` read them in both tiers, `write` and
-    /// `patch` write them, and nothing else under the memory directory is reachable.
-    pub fn with_roots(
-        root: impl AsRef<Path>,
-        read_roots: ReadRoots,
-        memory_roots: MemoryRoots,
         deny: DenySet,
         tier: SandboxSlot,
     ) -> Result<Self, WorkspaceError> {
@@ -188,7 +153,6 @@ impl WorkspaceRoot {
             given,
             dir: Arc::new(dir),
             read_roots: Arc::new(read_roots),
-            memory_roots: Arc::new(memory_roots),
             deny: Arc::new(deny),
             tier,
             fs: Arc::new(fs),
@@ -296,7 +260,7 @@ impl WorkspaceRoot {
     /// Opens `user` for reading through the fd walk and reports what it is. A relative path,
     /// and an absolute path inside the workspace in either spelling (ADR 0039 decision 6), is
     /// workspace-relative; any other absolute or `~` path is resolved against the read-only
-    /// roots (ADR 0039) and the writable memory scopes (ADR 0039 decision 4), and refused when
+    /// roots (ADR 0039), and refused when
     /// it is under none of them — except in the `full` tier, where any other absolute or `~`
     /// path reads too, unless the deny set denies it. `radian://docs/` names the bundled manual
     /// and is read from memory. Any symlink component is refused; the caller checks
@@ -307,9 +271,6 @@ impl WorkspaceRoot {
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_file(user, index, &relative),
-            Resolved::Memory {
-                index, relative, ..
-            } => self.open_memory_file(user, index, &relative),
             Resolved::Free { relative } => self.open_free_file(user, &relative),
             Resolved::Embedded { page } => self.open_embedded_file(user, page),
         }
@@ -324,16 +285,13 @@ impl WorkspaceRoot {
             Resolved::Root {
                 index, relative, ..
             } => self.open_root_dir(user, index, &relative),
-            Resolved::Memory {
-                index, relative, ..
-            } => self.open_memory_dir(user, index, &relative),
             Resolved::Free { relative } => self.open_free_dir(user, &relative),
             Resolved::Embedded { page } => Err(docs_dir_failure(user, page)),
         }
     }
 
     /// Opens the base directory a search tool walks, with the path relative to its root and,
-    /// for a read-only root or a memory scope, the prefix to render result paths with. The
+    /// for a read-only root, the prefix to render result paths with. The
     /// ignore matchers for
     /// the directories above the base are loaded here too (outermost first), from the same
     /// root fd the walk descends from, so no path is re-opened (ADR 0039 decision 2).
@@ -357,21 +315,6 @@ impl WorkspaceRoot {
             } => {
                 let dir = self.open_root_dir(user, index, &relative)?;
                 let root_fd = self.read_roots.roots()[index].root_dir().fd();
-                let ancestors = crate::search::ancestor_matchers(root_fd, &relative);
-                Ok(ReadBase {
-                    dir,
-                    relative,
-                    prefix: Some(prefix),
-                    ancestors,
-                })
-            }
-            Resolved::Memory {
-                index,
-                relative,
-                prefix,
-            } => {
-                let dir = self.open_memory_dir(user, index, &relative)?;
-                let root_fd = self.memory_roots.roots()[index].root_dir().fd();
                 let ancestors = crate::search::ancestor_matchers(root_fd, &relative);
                 Ok(ReadBase {
                     dir,
@@ -409,25 +352,20 @@ impl WorkspaceRoot {
             Resolved::Root {
                 relative, prefix, ..
             } => Ok((relative, Some(prefix))),
-            Resolved::Memory {
-                relative, prefix, ..
-            } => Ok((relative, Some(prefix))),
             Resolved::Free { relative } => Ok((relative, Some(PathBuf::from("/")))),
             Resolved::Embedded { .. } => Err(docs_search_failure(user)),
         }
     }
 
     /// Resolves a read tool's `path` to the bundled manual, the workspace, one of the
-    /// read-only roots, one of the writable memory scopes, or — in the `full` tier — any other
+    /// read-only roots, or — in the `full` tier — any other
     /// absolute or `~` path outside the deny set (ADR 0039 decision 4). `radian://docs/` is
     /// checked before the absolute/`~` check. An absolute path under the workspace root in
     /// either spelling is a workspace path and takes the workspace route (ADR 0039 decision 6),
     /// never the outside one. A relative path is workspace-relative and keeps the existing
     /// checks; an absolute path, or one written with `~`, that is under no root is refused in
     /// the `workspace` tier (the refusal lists the readable roots, now including skill
-    /// directories), and `realpath`ed and deny-checked in the `full` tier. A memory scope is
-    /// matched before the deny check: the two scope directories are the deny set's one
-    /// exception.
+    /// directories), and `realpath`ed and deny-checked in the `full` tier.
     fn resolve_read(&self, user: &str) -> Result<Resolved, ToolFailure> {
         if docs::is_root(user) {
             return Ok(Resolved::Embedded { page: None });
@@ -467,18 +405,6 @@ impl WorkspaceRoot {
                 .ok_or_else(|| outside_read_failure(user, &self.skill_dirs()))?;
             if let Some(found) = self.read_roots.lookup(&candidate) {
                 return Ok(Resolved::Root {
-                    index: found.index,
-                    relative: found.relative,
-                    prefix: found.prefix,
-                });
-            }
-            // ADR 0039 decision 4: the two memory scope directories are readable (and
-            // writable) in every tier, and they are the deny set's one documented exception.
-            // The lookup runs before the `full`-tier free path, so a scope directory never
-            // reaches the deny check; every other path under `memory/` has no root and still
-            // does.
-            if let Some(found) = self.memory_roots.lookup(&candidate) {
-                return Ok(Resolved::Memory {
                     index: found.index,
                     relative: found.relative,
                     prefix: found.prefix,
@@ -622,11 +548,10 @@ impl WorkspaceRoot {
 
     /// Resolves a write tool's `path` (ADR 0039 decisions 4 and 6): an absolute path under
     /// the workspace root in either spelling is the workspace-relative path; an absolute or
-    /// `~` path under a memory scope is a memory path; every other absolute or `~` path is
-    /// refused, in both tiers (`write` and `patch` never leave the workspace otherwise). A
+    /// `~` path is refused, in both tiers (`write` and `patch` never leave the workspace otherwise). A
     /// relative path is workspace-relative. An absolute path that holds `..` is refused before
     /// any root is consulted, exactly as the read tools refuse it.
-    fn resolve_write(&self, user: &str) -> Result<WriteTarget, ToolFailure> {
+    fn resolve_write(&self, user: &str) -> Result<PathBuf, ToolFailure> {
         if docs::is_virtual(user) {
             return Err(docs_write_failure(user));
         }
@@ -638,23 +563,14 @@ impl WorkspaceRoot {
                 ));
             }
             if self.workspace_remainder(user).is_some() {
-                return Ok(WriteTarget::Workspace(self.checked_relative(user)?));
-            }
-            if let Some(candidate) = expand_home(user).and_then(|path| normalise_absolute(&path))
-                && let Some(found) = self.memory_roots.lookup(&candidate)
-            {
-                return Ok(WriteTarget::Memory {
-                    index: found.index,
-                    relative: found.relative,
-                });
+                return self.checked_relative(user);
             }
             return Err(self.outside_write_failure(user));
         }
-        Ok(WriteTarget::Workspace(self.checked_relative(user)?))
+        self.checked_relative(user)
     }
 
-    /// The refusal for an absolute or `~` path that is neither in the workspace nor in a
-    /// memory scope (ADR 0039): `write` and `patch` accept no other outside path in any tier.
+    /// The refusal for an absolute or `~` path that is not in the workspace (ADR 0039): `write` and `patch` accept no other outside path in any tier.
     fn outside_write_failure(&self, user: &str) -> ToolFailure {
         let kind = if user.starts_with('~') {
             "a `~` path"
@@ -665,37 +581,10 @@ impl WorkspaceRoot {
             CODE_OUTSIDE,
             format!(
                 "`{user}` is {kind} outside the workspace; use a workspace-relative path, an \
-                 absolute path inside `{}`, or an absolute or `~` path in a memory scope",
+                 absolute path inside `{}`",
                 self.root.display()
             ),
         )
-    }
-
-    /// Opens a path under a memory scope through that scope's fd (ADR 0039 decision 4): the
-    /// same walk as a read-only root, over a directory the file tools may also write.
-    fn open_memory_file(
-        &self,
-        user: &str,
-        index: usize,
-        relative: &Path,
-    ) -> Result<OpenedFile, ToolFailure> {
-        let root = &self.memory_roots.roots()[index];
-        let file = root
-            .file(relative, OpenMode::Read, 0o600)
-            .map_err(|error| self.map_memory_error(index, user, error))?;
-        opened_file(user, file, true)
-    }
-
-    /// Opens a directory inside a memory scope through that scope's fd.
-    fn open_memory_dir(
-        &self,
-        user: &str,
-        index: usize,
-        relative: &Path,
-    ) -> Result<File, ToolFailure> {
-        let root = &self.memory_roots.roots()[index];
-        root.dir(relative)
-            .map_err(|error| self.map_memory_error(index, user, error))
     }
 
     /// Opens `user` for an in-place overwrite: parents walked by fd, the leaf opened with
@@ -705,93 +594,40 @@ impl WorkspaceRoot {
     /// level above's fd and opened by the same `O_NOFOLLOW | O_DIRECTORY` rule (ADR 0039
     /// decision 2), so nothing is created through a link.
     ///
-    /// A memory scope is writable too (ADR 0039 decision 4), but it is flat: a write creates
-    /// no subdirectory and a file it creates is `0600` (ADR 0021 D3). Every other absolute
-    /// path is refused in both tiers.
+    /// Every absolute path outside the workspace is refused in both tiers.
     pub(crate) fn open_write(&self, user: &str, create: bool) -> Result<OpenedFile, ToolFailure> {
-        match self.resolve_write(user)? {
-            WriteTarget::Workspace(relative) => {
-                if relative.as_os_str().is_empty() {
-                    return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
-                }
-                // `write` wants to count the old file's lines on the very fd it truncates, which needs a
-                // read-write open; a file the user may write but not read refuses that with EACCES. The
-                // write is the point and the count is a display nicety, so on that one error fall back
-                // to the write-only create and let `write` skip the count (review fix 1). `patch` edits
-                // an existing file and always reads it.
-                let (file, readable) = if create {
-                    match self
-                        .dir
-                        .file_creating_parents(&relative, OpenMode::WriteCreateReadWrite)
-                    {
-                        Ok(file) => (file, true),
-                        Err(error) if is_permission_denied(&error) => {
-                            let file = self
-                                .dir
-                                .file_creating_parents(&relative, OpenMode::WriteCreate)
-                                .map_err(|error| self.map_error(user, error))?;
-                            (file, false)
-                        }
-                        Err(error) => return Err(self.map_error(user, error)),
-                    }
-                } else {
+        let relative = self.resolve_write(user)?;
+        if relative.as_os_str().is_empty() {
+            return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
+        }
+        // `write` wants to count the old file's lines on the very fd it truncates, which needs a
+        // read-write open; a file the user may write but not read refuses that with EACCES. The
+        // write is the point and the count is a display nicety, so on that one error fall back
+        // to the write-only create and let `write` skip the count (review fix 1). `patch` edits
+        // an existing file and always reads it.
+        let (file, readable) = if create {
+            match self
+                .dir
+                .file_creating_parents(&relative, OpenMode::WriteCreateReadWrite)
+            {
+                Ok(file) => (file, true),
+                Err(error) if is_permission_denied(&error) => {
                     let file = self
                         .dir
-                        .file(&relative, OpenMode::ReadWrite)
+                        .file_creating_parents(&relative, OpenMode::WriteCreate)
                         .map_err(|error| self.map_error(user, error))?;
-                    (file, true)
-                };
-                checked_opened(user, opened_file(user, file, readable)?)
+                    (file, false)
+                }
+                Err(error) => return Err(self.map_error(user, error)),
             }
-            WriteTarget::Memory { index, relative } => {
-                if relative.as_os_str().is_empty() {
-                    return Err(fail(CODE_OUTSIDE, format!("`{user}` does not name a file")));
-                }
-                // ADR 0021 D3: `SESSIONS.md` is the host's own index. The memory permission
-                // rule already leaves it out, so this refusal is what both tiers read once a
-                // switch (auto approval, `full`) let the call through.
-                if relative.file_name().and_then(|name| name.to_str())
-                    == Some(memory_roots::SESSIONS_INDEX_FILE)
-                {
-                    return Err(fail(
-                        "memory_read_only",
-                        "SESSIONS.md is maintained by radian",
-                    ));
-                }
-                let root = &self.memory_roots.roots()[index];
-                if !memory_roots::is_flat(&relative) {
-                    return Err(fail(
-                        "memory_scope_flat",
-                        format!(
-                            "`{user}` is inside the memory scope `{}`; a memory scope holds \
-                             files only (no subdirectory), so write the file directly in `{}`",
-                            root.canonical().display(),
-                            root.canonical().display()
-                        ),
-                    ));
-                }
-                let (file, readable) = if create {
-                    match root.file(&relative, OpenMode::WriteCreateReadWrite, 0o600) {
-                        Ok(file) => (file, true),
-                        Err(error) if is_permission_denied(&error) => {
-                            let file = root
-                                .file(&relative, OpenMode::WriteCreate, 0o600)
-                                .map_err(|error| self.map_memory_error(index, user, error))?;
-                            (file, false)
-                        }
-                        Err(error) => {
-                            return Err(self.map_memory_error(index, user, error));
-                        }
-                    }
-                } else {
-                    let file = root
-                        .file(&relative, OpenMode::ReadWrite, 0o600)
-                        .map_err(|error| self.map_memory_error(index, user, error))?;
-                    (file, true)
-                };
-                checked_opened(user, opened_file(user, file, readable)?)
-            }
-        }
+        } else {
+            let file = self
+                .dir
+                .file(&relative, OpenMode::ReadWrite)
+                .map_err(|error| self.map_error(user, error))?;
+            (file, true)
+        };
+        checked_opened(user, opened_file(user, file, readable)?)
     }
 
     /// A workspace-relative path whose parents exist and hold no symlink (walked by fd) and
@@ -893,13 +729,6 @@ impl WorkspaceRoot {
     fn map_root_error(&self, index: usize, user: &str, error: SafeFsError) -> ToolFailure {
         let root = &self.read_roots.roots()[index];
         self.map_error_at(root.canonical(), "readable root", user, error)
-    }
-
-    /// [`WorkspaceRoot::map_error`] for a path under a memory scope (ADR 0039 decision 4):
-    /// the same failure codes, but "leaving the memory root" and the scope's canonical path.
-    fn map_memory_error(&self, index: usize, user: &str, error: SafeFsError) -> ToolFailure {
-        let root = &self.memory_roots.roots()[index];
-        self.map_error_at(root.canonical(), "memory root", user, error)
     }
 
     fn map_error_at(&self, root: &Path, noun: &str, user: &str, error: SafeFsError) -> ToolFailure {
@@ -1070,8 +899,7 @@ fn opened_file(user: &str, file: File, readable: bool) -> Result<OpenedFile, Too
 }
 
 /// The checks `write` and `patch` run on the fd they obtained, before anything is truncated: a
-/// regular file, with one hard link (a second link could change a file outside the workspace or
-/// the memory scope).
+/// regular file, with one hard link (a second link could change a file outside the workspace).
 fn checked_opened(user: &str, opened: OpenedFile) -> Result<OpenedFile, ToolFailure> {
     let stat = opened.stat;
     if stat.kind != EntryKind::File {

@@ -138,132 +138,22 @@ configured in the config file instead.
 | `load_mcp_config(path)` | The `--mcp-config` file into `McpServerConfig`s. Unknown fields are rejected (`deny_unknown_fields`), so a typo cannot silently drop a setting, and duplicate server ids fail **before any process starts** — the id prefixes every tool alias. |
 | `resolve_workspace(workspace)` | `None` means the current directory. The path must exist, be a directory, be **readable** (`read_dir`, which is what mounting tools there actually needs) and canonicalize. The messages never mention the sandbox or a `full-access` fallback, so a mistyped path fails as a workspace problem, before the sandbox probe and before any session file exists (dogfooding D1/D2). |
 
-## Memory (ADR 0021 D1/D2/D8)
+## Project identity
 
-`radian_host::memory` is the host side of the memory system. It never reads `HOME` (the caller
-passes the root) and never touches the network. It starts no process except `open_path`, which
-`add`, `edit` and `open` use to launch `$EDITOR` or the platform opener.
-
-`MemoryWriteGuard` (ADR 0021 invariant 4) is the host decision in front of `write` and
-`patch`, mounted by `open_session` whenever memory is on. It refuses a call whose canonical
-target is a scope directory in three cases: this session has taken in an MCP tool result (the
-input guard; a resumed session counts a settled call in its committed journal only when the
-opened MCP session routes that name and the result came from the tool — a name no server
-provides, and a result the runtime produced without running it (`cancelled`,
-`skipped_by_steering`, `hook_error`, `denied`, `interrupted`, or an error record with no
-`error_code`), do not count); the target's frontmatter already declares `source: user` (a user
-record); or the content — for `patch`, the content the edit would produce (the inserted
-replacement only when the tool itself would write nothing) — declares `source: user`, or
-matches the ADR 0008 §3.2 rule-2 secret heuristic, naming the prefix and never the value. The
-source checks are invariants 3 and 6: a call whose target declares `source: user` is refused,
-and so is one that would declare `user` or a different source than the file already has, because
-`user` belongs to the user commands and the write that created a file fixed its source. The
-permission profile's memory rule is
-separate and unchanged: these guards can only refuse a write the tools would otherwise allow,
-never grant one.
-
-`project_identity_key(workspace)` is pure Rust and returns the **git common dir** of the
-repository containing the workspace, so all worktrees of one repository share a `ProjectId`;
-outside a repository it returns the workspace's canonical path. A `.git` **directory** is the
-common dir itself; a `.git` **file** is resolved through its `gitdir:` pointer and then
-`<gitdir>/commondir` (falling back to the documented `<common>/worktrees/<name>` layout), and
-the result is canonicalized. A pointer that cannot be resolved falls back to the workspace.
-
-`MemoryService::open(workspace, root)` is a thin layer over the `FileStore` (one Markdown
-file per record, one `MEMORY.md` per scope), the `ProjectRegistry` and the workspace's
-project resolution. Its API is **synchronous** (every operation is local files and short,
-and both hosts call it where blocking on an fsync is fine).
-`state()` returns `ProjectState::{Known, Unlinked { identity_key, candidates }}` and **never
-registers**. `project_for_write()` is the **write** path that may register (ADR 0021):
-a git workspace whose identity key is not in the registry is registered now and returned as
-`ProjectForWrite::Created`, whose `notice()` is the one line the hosts show (with the
-`relink`/`merge` hint when a repository of the same name is already a project); a key that is
-not a git common dir is the `NotAProjectWorkspace` error ("not a project workspace … the memory
-was not saved", pointing at `radian memory project new` and at no other scope). **Reads and
-injection never call it**, so they only ever read Global on an unregistered workspace.
-`create_project()` and `relink()` stay the explicit routes. Reads default to Project then Global
-(`ScopeSelection::Default`); writes default to Project (`WriteScope::Project`). `add` writes a
-`source: user` skeleton and its index line; `forget` deletes the file and its index line;
-`split`/`merge` move record files and their index lines (a merge collision renames `<name>-2`, or
-the first suffix free in both projects; `MEMORY.md` and `SESSIONS.md` stay put). `split`
-refuses a name outside the record rule before it joins it into a path.
-
-`file_tool_roots()` names the two scope directories the file tools may read and write in both
-tiers (ADR 0039 decision 4): `<root>/global/` and, when `state()` is `Known`,
-`<root>/projects/<ProjectId>/`. It resolves through `state()`, so a read never registers a
-project; an unlinked workspace gets the global directory only. Each directory is created 0700
-on first use (ADR 0021 D3).
-
-`candidate_name` is the comparison behind "同名仓库": the identity key's final path component,
-except that a git common dir (`.git`) is named by its parent directory — the repository name —
-so a moved repository still matches its old project.
+`src/project_identity.rs` gives the key the `/access` record uses (ADR 0038 decision 3): the git
+common dir of the repository holding the workspace, or the workspace's canonical path outside a
+repository. Pure Rust, no `git` process. Worktrees of one repository share a key.
 
 | Guarantee | Test | Where |
 |---|---|---|
-| `.git` as a directory is the identity key | `a_directory_git_is_the_identity_key` | `src/memory/identity.rs` |
-| A subdirectory finds the repository above it | `a_subdirectory_finds_the_repository_above_it` | `src/memory/identity.rs` |
-| Outside a repository the canonical workspace is the key (and a symlink shares it) | `outside_a_repository_the_canonical_workspace_is_the_key` | `src/memory/identity.rs` |
-| A relative `gitdir:`/`commondir` is resolved | `a_relative_gitdir_and_commondir_are_resolved` | `src/memory/identity.rs` |
-| A missing `commondir` means the gitdir is the common dir; a submodule is its own project | `a_missing_commondir_means_the_gitdir_is_the_common_dir`, `a_submodule_is_its_own_project_not_the_superprojects` | `src/memory/identity.rs` |
-| A real worktree shares the main repository's key, and matches `git rev-parse --git-common-dir` | `a_worktree_and_its_main_repository_share_one_key`, `the_identity_matches_git_common_dir_when_git_is_available` | `src/memory/identity.rs` |
-| An unlinked workspace refuses a Project write and registers nothing | `an_unlinked_workspace_refuses_a_project_write_and_still_reads_global` | `src/memory/service.rs` |
-| A write registers a git workspace, and a read before it registers nothing | `a_write_registers_a_git_workspace_and_a_read_never_does` | `src/memory/service.rs` |
-| A write outside a repository is refused and creates nothing | `a_write_outside_a_repository_is_refused_and_creates_nothing` | `src/memory/service.rs` |
-| A write still creates when a candidate previous project exists | `a_write_still_creates_when_a_candidate_previous_project_exists` | `src/memory/service.rs` |
-| Only a git identity is a project workspace | `only_a_git_identity_is_a_project_workspace` | `src/memory/identity.rs` |
-| A project write reads back with `source: user` | `a_project_write_reads_back_after_creating_the_project` | `src/memory/service.rs` |
-| A worktree resolves to the main repository's project | `a_worktree_resolves_to_the_main_repositories_project` | `src/memory/service.rs` |
-| Relinking after a move finds the old files | `relinking_after_a_move_finds_the_original_records` | `src/memory/service.rs` |
-| `add` writes the skeleton and the index line | `add_then_list_shows_the_skeleton_and_the_index_line` | `src/memory/service.rs` |
-| `forget` deletes the file and its index line | `forget_deletes_the_file_and_its_index_line` | `src/memory/service.rs` |
-| A model `write` that declares `source: user` is refused | `a_write_that_declares_source_user_is_refused` | `src/memory/guard.rs` |
-| A model `patch` whose result would declare `source: user` is refused | `a_patch_that_would_declare_source_user_is_refused` | `src/memory/guard.rs` |
-| A user record is refused to `write` and to `patch` | `a_write_and_a_patch_of_a_user_record_are_refused` | `src/memory/guard.rs` |
-| A `write` or `patch` that would change an existing record's source is refused | `a_write_or_patch_that_would_change_the_source_is_refused` | `src/memory/guard.rs` |
-| A merge collision renames the moved file | `merge_renames_a_collision_instead_of_overwriting` | `src/memory/service.rs` |
-
-End to end through the CLI: `radian-exec/tests/cli.rs` (`memory_…`), including a real
-`git worktree` sharing a project.
-
-### Memory index injection (ADR 0021 D6)
-
-The model has no memory tool. `memory/injection.rs` reads each scope's `MEMORY.md` through
-the file store at the first model call: the project scope (when the workspace maps to a
-project; reads never create one, D2) then global. `MemoryHooks` appends one fixed section to
-the system prompt: the low-trust header, `## Project memory index`, one line naming the file
-and the index text, then `## Global memory index` likewise. A missing or empty index
-contributes one line; an index that cannot be read contributes one line and one warning
-naming the file, never a failed turn (invariant 2). `[memory] index_max_lines` (default 200)
-and `index_max_bytes` (default 25600) cap each index, keeping whole lines; a dropped line
-sends one `System`-source rewrite notice on the inbox's inject lane before the next call,
-once per session per scope. `MemoryInjection` computes the section once per process and
-reuses it byte for byte (ADR 0036): an index change reaches the prompt at the next session or
-resume. Before an index is capped it is neutralized: every Unicode default-ignorable code
-point is removed, and a line that begins with `<system`, `</system`, `<project_instructions`,
-`</project_instructions`, `<memory` or `</memory` (case-insensitive, leading whitespace
-allowed) gains a leading `\`. The file on disk is never changed. When at least one index was
-injected, the hook writes one `critical: false` `MemoryInjected` record naming each injected
-index (path, sha256 of the capped neutralized text, lines, bytes); with both indexes missing it
-writes nothing.
-`[memory] enabled` (default true) and `[memory] scopes` (default both, in project-then-global
-order) select it. Every `[memory.injection]` key is retired: it gets one migration warning
-naming it and the index caps, and is otherwise ignored.
-
-| Guarantee | Test | Where |
-|---|---|---|
-| The two indexes reach the system prompt project then global, byte for byte, with both paths | `two_indexes_reach_the_system_prompt_project_then_global_byte_for_byte`, `two_indexes_reach_the_system_prompt_project_then_global` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| A 201-line index drops line 201 and sends one notice; a third call gets no second notice | `a_line_over_the_cap_is_dropped_and_one_rewrite_notice_is_sent`, `an_index_over_the_line_cap_drops_the_last_line_and_warns_once` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| The byte cap cuts at the last whole line and sends a notice | `a_byte_cap_drops_whole_lines_and_sends_a_notice`, `an_index_over_the_byte_cap_is_cut_at_a_line_boundary` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| An unlinked workspace injects the global index and names the missing project index; no project is created | `an_unlinked_workspace_injects_global_and_names_the_missing_project_index`, `an_unlinked_workspace_injects_only_the_global_index` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| `enabled = false` injects nothing, sends no notice and writes no record | `memory_disabled_injects_nothing_and_writes_no_event`, `memory_disabled_injects_nothing_and_writes_no_record` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| The section freezes per process and a resume reads the file again | `the_section_freezes_for_the_process_and_a_resume_reads_again`, `the_section_freezes_per_process_and_a_resume_reads_again` | `src/memory/injection.rs`, `radian-exec/tests/cli.rs` |
-| `MemoryInjected` carries the sha256 and line count of the capped text | `memory_injected_carries_the_hash_and_line_count_of_the_injected_text` | `src/memory/injection.rs` |
-| A broken index warns and contributes one line; the turn still runs | `an_index_that_cannot_be_read_warns_and_contributes_one_line`, `a_broken_index_warns_but_does_not_fail_the_turn` | `src/memory/injection.rs`, `tests/memory_injection.rs` |
-| The scopes switch selects the indexes | `the_scopes_switch_selects_the_indexes_in_project_then_global_order` | `src/memory/injection.rs` |
-| A retired `[memory.injection]` key warns and the session starts | `the_retired_injection_keys_warn_and_are_ignored`, `a_retired_memory_injection_key_warns_and_the_session_starts` | `tests/config_fixtures.rs`, `radian-exec/tests/cli.rs` |
-| `memory_save` and `memory_search` are unknown tools and the turn still succeeds | `a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds` | `radian-exec/tests/cli.rs` |
-| `[memory]` carries `enabled`/`scopes`/`index_max_lines`/`index_max_bytes` | `the_memory_keys_are_read` | `tests/config_fixtures.rs` |
-| `write`/`patch` are `allow` in the memory scope directories in both tiers; `..`, a symlink out, the registry, a sibling directory and a file directly in `projects/` are not; no memory root adds no rule; `memory_search` gets the unknown-tool default | `write_to_a_global_memory_file_is_allowed_in_every_tier`, `write_and_patch_to_a_project_memory_file_are_allowed_in_every_tier`, `a_memory_write_outside_the_scope_directories_is_not_matched`, `a_memory_write_that_escapes_with_dotdot_is_not_matched`, `a_symlink_out_of_the_memory_store_is_not_matched`, `a_memory_write_directly_in_the_projects_directory_is_not_matched`, `memory_search_gets_the_default_for_an_unknown_tool`, `a_profile_without_a_memory_root_has_no_memory_rule` | `radian-permissions/src/profile.rs` |
+| `.git` as a directory is the identity key | `a_directory_git_is_the_identity_key` | `src/project_identity.rs` |
+| A subdirectory finds the repository above it | `a_subdirectory_finds_the_repository_above_it` | `src/project_identity.rs` |
+| Outside a repository the canonical workspace is the key (a symlink shares it) | `outside_a_repository_the_canonical_workspace_is_the_key` | `src/project_identity.rs` |
+| A relative `gitdir:`/`commondir` is resolved | `a_relative_gitdir_and_commondir_are_resolved` | `src/project_identity.rs` |
+| A missing `commondir` means the gitdir is the common dir | `a_missing_commondir_means_the_gitdir_is_the_common_dir` | `src/project_identity.rs` |
+| A submodule is its own project | `a_submodule_is_its_own_project_not_the_superprojects` | `src/project_identity.rs` |
+| A worktree shares the main repository's key | `a_worktree_and_its_main_repository_share_one_key` | `src/project_identity.rs` |
+| The key matches `git rev-parse --git-common-dir` | `the_identity_matches_git_common_dir_when_git_is_available` | `src/project_identity.rs` |
 
 ## The startup description
 
@@ -299,7 +189,7 @@ turn it off. The file's presence also counts as a project resource for the trust
 
 `radian-host::transcript` owns the transcript entry and the fold that produces it. The front
 ends that read it (`radian attach` and the TUI's resume) share one home for the folding rules,
-the tool-title text and the memory card resolution, so they cannot drift. The crate is
+the tool-title text, so they cannot drift. The crate is
 ratatui-free: a headless reader needs no renderer, and `radian-tui` draws the entries (its own
 `Entry` wraps this one and adds the render state).
 
@@ -308,7 +198,6 @@ ratatui-free: a headless reader needs no renderer, and `radian-tui` draws the en
 | `transcript::attach` | A session journal's committed facts (`JournalObserver`) into entries: user messages, assistant text, reasoning, tool cards paired by call id, compaction summaries, `!` command blocks, the open-call `queued`/`running` lines and the `working…` line. |
 | `transcript::entry` | The `Entry` itself, its `EntryKind`, the `Card` pairing and `CompactionInfo`, plus the `EntryList` change mark a mirroring consumer reads. |
 | `transcript::tool` | The tool card's data and the head/body **text** the fold writes into an entry (`call_text`, `result_display_text`, `body_line_count`). |
-| `transcript::memory` | The memory reference a settled `read`/`write`/`patch` resolves to (ADR 0035). |
 | `transcript::parts` | A message's display text, its images as facts, the `!` command block, and the row summary of a message. |
 
 ### The JSON shape

@@ -18,11 +18,10 @@ Paths in backticks are from the repository root.
 | `radian-runtime` | The layer above the turn loop: a durable, bounded inbox (`followup`/`steer`/`inject`/`cancel`) and the per-session driver. | `crates/radian-runtime/README.md` |
 | `radian-permissions` | The permission layer: `ApprovalPolicy` + `ToolRuleSet` as one `Hooks` implementation; decides allow / ask / deny. It does not enforce anything. | `crates/radian-permissions/README.md` |
 | `radian-sandbox` | OS sandbox backends (macOS `sandbox-exec`, Linux `bubblewrap`) that build a command under a policy and **refuse to run** without a proven backend. | `crates/radian-sandbox/LIMITS.md` |
-| `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in untrusted projects). A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout, with the two memory scope directories as the one writable exception (ADR 0039 decision 4). | `crates/radian-coding/README.md` |
-| `radian-memory` | The memory storage layer: one Markdown file per record with its frontmatter and body, one `MEMORY.md` index per scope, the name rule, atomic writes, the `projects.jsonl` registry and the one-time old-log migration. Host-free: the caller passes `~/.radian/memory/`. | `crates/radian-memory/README.md` |
-| `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, the memory layer (`MemoryService` over the file store, project identity, index injection, the `/memory off` switch, and the shared `radian memory` / `/memory` commands), and the folded transcript (`transcript`: one `Entry` type with its tool-card data and the fold of a journal's committed facts; ratatui-free, shared by `radian attach` and the TUI's resume). The fold sits here rather than in `radian-tui` or a new crate because the host is the layer both front ends already depend on — no dependency edge is added, reversed or widened. | `crates/radian-host/README.md` |
-| `radian-exec` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian memory` commands. | `crates/radian-exec/README.md` |
-| `radian-tui` | The `radian` binary: a full-screen TUI (full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/memory …`, `/access`, `/jobs`), its own transcript scrolling, and the rendering of the host's folded transcript entries (ADR 0023 U1). | `crates/radian-tui/README.md` |
+| `radian-coding` | Built-in coding tools — `read` (files and directories), `write`, `patch` (single or atomic multi-edit), `glob`, `grep`, when the host supplies a workspace; `shell` and the `job` tool additionally require a sandbox. The model runs git through `shell` (hardened via `GIT_CONFIG_*` in untrusted projects). A truncated foreground result registers under a normal job id; retention additionally requires a session-private output directory. Workspace path confinement applies throughout (ADR 0039 decision 4). | `crates/radian-coding/README.md` |
+| `radian-host` | Host plumbing shared by the TUI and the headless command so they cannot drift: `--header` parsing, session ids, the `--mcp-config` file, model construction, the startup description, the "built-in tools + MCP" provider, the `~/.radian/` layout and diagnostics, the model catalog, the project identity key, and the folded transcript (`transcript`: one `Entry` type with its tool-card data and the fold of a journal's committed facts; ratatui-free, shared by `radian attach` and the TUI's resume). The fold sits here rather than in `radian-tui` or a new crate because the host is the layer both front ends already depend on — no dependency edge is added, reversed or widened. | `crates/radian-host/README.md` |
+| `radian-exec` | The library behind `radian exec`: the line-prompt chat client with optional built-in tools, MCP servers, session-management commands and the `radian trust` and `radian config` commands. | `crates/radian-exec/README.md` |
+| `radian-tui` | The `radian` binary: a full-screen TUI (full screen only, no inline mode) over `radian-runtime`, with a slash-command layer (`/help`, `/access`, `/jobs`), its own transcript scrolling, and the rendering of the host's folded transcript entries (ADR 0023 U1). | `crates/radian-tui/README.md` |
 
 Two more binaries exist but are not part of the product surface: `agent-extensions`'s
 `mcp-fixture` (a hand-written MCP server for its tests) and `radian-sandbox`'s `sandbox-escape`
@@ -31,11 +30,8 @@ Two more binaries exist but are not part of the product surface: `agent-extensio
 ## Status
 
 - **The `~/.radian/` layout** is implemented: `config/` and `cache/` are readable
-  by the sandbox; `sessions/` and `memory/` are denied. `RADIAN_HOME` overrides the
+  by the sandbox; `sessions/`, `credentials/`, `trust/` and `access/` are denied. `RADIAN_HOME` overrides the
   root. (`--session-dir` / `RADIAN_SESSION_DIR` still override only the sessions directory.)
-- **Memory** is implemented: the `radian memory` CLI commands, the TUI `/memory`
-  slash command (same commands), and deterministic injection of the two `MEMORY.md`
-  index files with the `MemoryInjected` audit event. The model has no memory tool.
 - **The configuration file** is implemented read-only: `--config`/`RADIAN_CONFIG`/
   `~/.radian/config/config.toml`, with `model.*`, `permissions.profile` and `compaction.auto`
   wired as defaults (the command line wins). It never contains a secret value.
@@ -80,7 +76,7 @@ the command line — and never print it. See `radian docs providers`. A session 
 `<session-dir>/<session-id>.jsonl` file; the session directory defaults to
 `--session-dir`, else `$RADIAN_SESSION_DIR`, else `~/.radian/sessions` (`$RADIAN_HOME/sessions`
 when `RADIAN_HOME` is set). The same `~/.radian/` root also holds `config/`,
-`cache/` and `memory/`; the sandbox denies read on `sessions/` and `memory/`.
+`cache/`; the sandbox denies read on `sessions/`.
 
 ### `radian exec` (line prompt)
 

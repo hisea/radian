@@ -2321,3 +2321,15 @@ sandbox --lib -E 'test(<name>)'`, and both run in the sandbox (socket pairs, no 
 | TK0323-M2 | `serve_connection` hands the drain a fresh reader state, dropping a half-read request | ✅ 1 failed (rc=100) | `control::tests::a_partial_request_survives_the_closing_watch_in_a_connection` (the remainder was answered alone) |
 
 2/2 caught.
+
+## T-0009: the `[memory]` config table is a retired key (2026-11-21, branch `work/T-0009-remove-memory`)
+
+Persistent memory was removed (ADR 0021). An old config that still carries `[memory]` must parse
+and warn once, never refuse. The mutation was applied to `src/config/mod.rs` (`parse_memory`) and
+the file restored from a copy afterwards.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| T-0009-M1 | `parse_memory` no longer pushes `memory` onto `skipped`, so the retired table is silently ignored with no warning | ✅ 2 failed (rc=100) | `config_fixtures::an_old_memory_table_warns_once_and_is_ignored`, `config_fixtures::no_old_memory_shape_refuses_the_file` |
+
+1/1 caught.

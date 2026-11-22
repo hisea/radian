@@ -15,7 +15,7 @@ radian exec "…" / -p "…"      one-shot: run one turn plus the chain it wakes
 radian exec -p "…" --image PATH  the same, with each image attached to the prompt's user message in order (repeatable)
 radian exec <other flags and subcommands>
 radian acp                    Agent Client Protocol over stdio: one session, prompts and approvals over the protocol (ADR 0049)
-radian login | logout | memory | config import-pi | trust | theme | footer | docs   management commands at top level
+radian login | logout | config import-pi | trust | theme | footer | docs   management commands at top level
 ```
 
 - The default serves only "a human opens a terminal". Line mode needs explicit `exec` (or `-p`/subcommand).
@@ -25,7 +25,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 ### A2 Where each function lives
 
 - **Kept**: fullscreen TUI (default), `exec` line mode and `-p`, `--image <PATH>` (repeatable, with `-p`) whose path the host reads itself, `--list`/`--search`/`--export`/`--fork` and output options, TUI `/…` commands, TUI `--pick` and test hooks, and the `acp` host (ADR 0049), which shares `radian exec`'s conversation flags.
-- **Top level**: `memory`, `config import-pi`, `login`/`logout`, `trust`, `theme import`, `footer export`, `docs [topic]`. They touch no model. They open no session.
+- **Top level**: `config import-pi`, `login`/`logout`, `trust`, `theme import`, `footer export`, `docs [topic]`. They touch no model. They open no session.
 - **`exec` and TUI share** `radian_host::open_session`, config read, `~/.radian/` layout, tool set, auth, and session data layer.
 - **Not merged**: line-mode terminal approval (blocking line read) and TUI pending queue plus modal (non-blocking UI queue) are two necessary shapes (ADR 0023 U7). They share only rules and policy (already in `radian-permissions`).
 
@@ -35,7 +35,7 @@ radian login | logout | memory | config import-pi | trust | theme | footer | doc
 |---|---|---|---|
 | Fullscreen TUI | The terminal itself (alternate screen) | Startup and diagnostic lines, panic recovery | 0 clean, 1 driver error, 101 panic, 128+signal |
 | `exec` line mode and `-p` | **Only model text** (`-p` whole block; line mode streams; `--output jsonl` see ADR 0044 §1) | Status, reasoning, errors | Exit code by outcome, see ADR 0044 §3 (2 usage/setup, 130 second Ctrl-C unchanged) |
-| `--list`/`--search`/`--export`/`memory`/`config`/`trust`/`theme`/`footer`/`docs` | The result itself | Reports and hints | 0; usage 2; real error 1; stdout broken pipe 0, silent |
+| `--list`/`--search`/`--export`/`config`/`trust`/`theme`/`footer`/`docs` | The result itself | Reports and hints | 0; usage 2; real error 1; stdout broken pipe 0, silent |
 
 - Usage and setup errors exit 2 in every mode. This includes TUI startup refusal and a `--image` path that is not a PNG/JPEG/GIF/WebP image, is over 5 MiB, or has a side over 8000 px: the message names the path and the reason. Clap usage errors already exit 2. 0 means normal. 1 means turn failure. 101 means panic. 128+signal stays unchanged.
 - The `-p` stdout contract stays unchanged: only model text. `radian exec -p … > out.txt` stays stable. Status lines use stderr.

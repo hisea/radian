@@ -185,8 +185,8 @@ pub(crate) fn build_sandbox(
     if profile == ProfileArg::WorkspaceWrite {
         policy = policy.git_access(GitAccess::WritableExceptExec);
     }
-    // ADR 0020 decision 3: the actual sessions directory and the memory directory are not
-    // readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
+    // ADR 0020 decision 3: the actual sessions directory and the other private directories are
+    // not readable in the enforced tiers. `full` gets the list too, but its transparent backend ignores it.
     for path in deny_read {
         policy = policy.deny_read(path);
     }

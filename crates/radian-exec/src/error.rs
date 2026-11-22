@@ -3,21 +3,50 @@
 //!
 //! Split from `lib.rs` by pure move (ADR 0043 decision 5): no behaviour change.
 
-use radian_host::memory::commands::CommandError;
-
 use super::USAGE_ERROR;
+
+/// A management command's failure: the message is printed and `code` is the exit code.
+#[derive(Debug)]
+pub(crate) struct CommandError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+}
+
+impl CommandError {
+    pub(crate) fn failure(message: impl Into<String>) -> Self {
+        Self {
+            code: 1,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
+        Self {
+            code: USAGE_ERROR,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
 
 /// Why startup failed. The message must not contain the key.
 #[derive(Debug)]
 pub(crate) struct SetupError(pub(crate) String);
 
-/// Why a "print and exit" command (`--list`, `--search`, `--export`, `radian memory`) stopped.
+/// Why a "print and exit" command (`--list`, `--search`, `--export`, `radian trust`) stopped.
 ///
 /// A closed stdout (`radian exec --list | head`) is a normal way to stop, not a failure
 /// (dogfooding
 /// D21); it is kept apart from a real error so it exits 0 with no message.
 pub(crate) enum OutputError {
-    /// A setup, usage or memory-command failure: the message is printed, this code returned.
+    /// A setup, usage or management-command failure: the message is printed, this code returned.
     Failed { message: String, code: i32 },
     /// stdout's reader went away: stop silently with exit code 0.
     BrokenPipe,

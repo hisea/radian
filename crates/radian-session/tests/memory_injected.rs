@@ -1,16 +1,16 @@
-//! ADR 0021 D6: `MemoryInjected` has two shapes. The old shape carries `{ id, revision, scope }`
-//! records; the new shape carries `{ scope, path, sha256, lines, bytes }` for each injected
-//! `MEMORY.md`. Exactly one shape is present, and this build writes only `indexes`.
+//! ADR 0006 decision 5.12: `MemoryInjected` is read only (memory was removed; this build never
+//! writes it). An old journal has one of two shapes: `{ id, revision, scope }` records, or
+//! `{ scope, path, sha256, lines, bytes }` for each injected `MEMORY.md`. Exactly one shape is
+//! present.
 
 mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{TempDir, created};
+use common::TempDir;
 use radian_session::{
-    EventData, ExportOptions, MEMORY_INJECTED_INDEX_SCOPES, MemoryInjectedIndex, ReadError,
-    Session, SessionJournal, export_json,
+    EventData, ExportOptions, MEMORY_INJECTED_INDEX_SCOPES, ReadError, Session, export_json,
 };
 use serde_json::{Value, json};
 
@@ -48,16 +48,6 @@ fn index(scope: &str) -> Value {
     })
 }
 
-fn one_index(scope: &str) -> MemoryInjectedIndex {
-    MemoryInjectedIndex {
-        scope: scope.to_string(),
-        path: format!("/home/example/.radian/memory/{scope}/MEMORY.md"),
-        sha256: SHA_A.to_string(),
-        lines: 1,
-        bytes: 40,
-    }
-}
-
 /// The row and the ADR name each scope in a backticked list after `marker`; the list is the
 /// constant. A scope added to one side without the other fails here.
 fn documented_values_after(text: &str, marker: &str) -> Vec<String> {
@@ -85,10 +75,10 @@ fn documented_values_after(text: &str, marker: &str) -> Vec<String> {
 fn the_documented_index_scopes_are_the_constant() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let readme = std::fs::read_to_string(root.join("docs/schema/fixtures/README.md")).unwrap();
-    let adr = std::fs::read_to_string(root.join("docs/adr/0021-memory.md")).unwrap();
+    let adr = std::fs::read_to_string(root.join("docs/adr/0006-session-jsonl-v1.md")).unwrap();
     for (name, text, marker) in [
         ("the fixture table", readme, "`scope` 只取 "),
-        ("ADR 0021 D6", adr, "`scope` is one of "),
+        ("ADR 0006 decision 5.12", adr, "`scope` is one of "),
     ] {
         assert_eq!(
             documented_values_after(&text, marker),
@@ -199,26 +189,12 @@ fn an_unknown_scope_is_refused_with_the_allowed_values() {
     );
 }
 
-/// Edge 6: the writer's new-shape record exports through the reader byte-for-byte.
-#[tokio::test]
-async fn a_new_shape_record_exports_byte_for_byte() {
+/// Edge 6: an old new-shape record exports through the reader byte-for-byte.
+#[test]
+fn an_old_index_record_exports_byte_for_byte() {
     let dir = TempDir::new("memory-new-shape-export");
-    let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, SID, created()).unwrap();
-    journal
-        .append_memory_injected_indexes(vec![one_index("project"), one_index("global")])
-        .await
-        .unwrap();
-    drop(journal);
-
-    let raw = std::fs::read_to_string(&path).unwrap();
-    let line: Value = serde_json::from_str(raw.lines().nth(1).unwrap()).unwrap();
-    assert!(line["data"].get("indexes").is_some(), "{line}");
-    assert!(
-        line["data"].get("records").is_none(),
-        "this build writes only indexes: {line}"
-    );
-    let original = serde_json::to_string(&line["data"]).unwrap();
+    let data = json!({"indexes":[index("project"), index("global")]});
+    let path = path_with_memory_data(&dir, data.clone());
 
     let session = Session::open(&path).unwrap();
     let json = export_json(&session, &ExportOptions::new()).unwrap();
@@ -229,45 +205,11 @@ async fn a_new_shape_record_exports_byte_for_byte() {
         .iter()
         .find(|event| event["event"] == "MemoryInjected")
         .expect("the export carries the record");
-    assert_eq!(exported["data"], line["data"]);
+    assert_eq!(exported["data"], data);
     assert_eq!(
         serde_json::to_string(&exported["data"]).unwrap(),
-        original,
-        "the export's data is byte-for-byte the record that was written"
-    );
-}
-
-/// The writer reads the same closed set and hash rule as the reader: it refuses an unknown
-/// scope and a short hash before writing a line.
-#[tokio::test]
-async fn the_index_writer_refuses_an_unknown_scope_or_short_hash() {
-    let dir = TempDir::new("memory-writer-validation");
-    let path = dir.file("s.jsonl");
-    let journal = SessionJournal::create(&path, SID, created()).unwrap();
-
-    let mut bad = one_index("global");
-    bad.scope = "session".to_string();
-    assert!(
-        journal
-            .append_memory_injected_indexes(vec![bad])
-            .await
-            .is_err()
-    );
-
-    let mut short = one_index("global");
-    short.sha256 = "abc".to_string();
-    assert!(
-        journal
-            .append_memory_injected_indexes(vec![short])
-            .await
-            .is_err()
-    );
-
-    assert!(
-        !std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("MemoryInjected"),
-        "a refused record writes no line"
+        serde_json::to_string(&data).unwrap(),
+        "the export's data is byte-for-byte the record that was read"
     );
 }
 

@@ -1,7 +1,7 @@
 //! The remembered permission tier per project (ADR 0038 decision 3).
 //!
 //! `/access` can remember the tier for one project. The record lives under `~/.radian/`, in
-//! the user's own directory, keyed by the ADR 0021 **project identity** (the git common dir,
+//! the user's own directory, keyed by the **project identity** (the git common dir,
 //! so a repository's worktrees share one decision). It is **never** written into the
 //! repository: otherwise a cloned repository could ship a line that opens the sandbox.
 //!
@@ -26,7 +26,7 @@ use radian_permissions::Preset;
 
 use crate::home::access_dir_for;
 
-/// The record: ADR 0021 project identity key → tier name.
+/// The record: project identity key → tier name.
 pub type Store = BTreeMap<String, String>;
 
 /// The file name inside `access/`.
@@ -62,10 +62,10 @@ pub fn access_file() -> Option<PathBuf> {
     Some(access_dir()?.join(FILE_NAME))
 }
 
-/// The identity key for `workspace`: the ADR 0021 project identity (the git common dir, so a
+/// The identity key for `workspace`: the project identity (the git common dir, so a
 /// repository's worktrees share one decision; the canonical workspace otherwise).
 pub fn key_for(workspace: &Path) -> String {
-    crate::memory::project_identity_key(workspace)
+    crate::project_identity::project_identity_key(workspace)
         .to_string_lossy()
         .into_owned()
 }

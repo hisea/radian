@@ -17,7 +17,7 @@ fn screen() -> StartupScreen {
         banner: banner_rows("0.1.0", "mock-model", "~/Code/radian"),
         banner_narrow: "R radian 0.1.0".to_string(),
         trust_hint: None,
-        summary: "workspace · macOS sandbox · context 1000 · memory off · ask_user on".to_string(),
+        summary: "workspace · macOS sandbox · context 1000 · ask_user on".to_string(),
         lines: vec![
             "profile: workspace".to_string(),
             "context: window 2000".to_string(),

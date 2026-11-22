@@ -7,8 +7,7 @@
 //! reader needs no renderer.
 //!
 //! **Where the boundary sits.** This module owns what a transcript entry *is*, the message→entry
-//! mapping, the tool card's data and its title text, the memory reference a settled call
-//! resolves to, and the plain text helpers (a message's display text, a `!` command block, a
+//! mapping, the tool card's data and its title text, and the plain text helpers (a message's display text, a `!` command block, a
 //! row summary). `radian-tui` owns everything a screen needs: layout, themes, scrolling,
 //! ratatui, the decoded images, and the live delta path. The TUI's `Entry` wraps the one here.
 //!
@@ -25,13 +24,11 @@
 
 pub mod attach;
 pub mod entry;
-pub mod memory;
 pub mod parts;
 pub mod tool;
 
 pub use attach::{AttachFold, WORKING_LINE};
 pub use entry::{Card, Change, CompactionInfo, Entry, EntryKind, EntryList, ImagePart};
-pub use memory::{MemoryRecords, MemoryRef};
 pub use parts::{
     bash_context_command, bash_entry_from_context, display_parts, image_parts, text_of,
 };

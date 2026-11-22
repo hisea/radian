@@ -24,7 +24,6 @@ mod ask;
 mod context_grid;
 mod layout;
 pub(crate) mod markdown;
-mod memory;
 mod thinking;
 mod tool_card;
 
@@ -43,7 +42,6 @@ use markdown::{
 };
 #[cfg(test)]
 use markdown::{md_line_count, md_lines};
-use memory::{is_memory_card_entry, memory_card_lines};
 use thinking::{placeholder, reasoning_body_lines, reasoning_header};
 pub use tool_card::{HeadMarker, head_marker};
 use tool_card::{body_plan_lines, diff_line, head_line_count, head_rows};
@@ -388,14 +386,13 @@ pub struct MdPiece {
 }
 
 /// A `/context` grid category's own color (spec `tui-context-grid`): system
-/// prompt, context files, memory, built-in tool definitions, skills, MCP
+/// prompt, context files, built-in tool definitions, skills, MCP
 /// tools, user messages, assistant text, reasoning, tool results, images, free
 /// space and the compaction buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtxTone {
     System,
     Files,
-    Memory,
     Tools,
     Skills,
     Mcp,

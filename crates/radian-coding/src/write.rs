@@ -23,8 +23,7 @@ pub(crate) fn schema() -> serde_json::Value {
             "path": {
                 "type": "string",
                 "description": "File to write. Use a workspace-relative path, an absolute path \
-                                inside the workspace, or an absolute or `~` path under a memory \
-                                scope directory (a memory scope is flat: no subdirectory)."
+                                inside the workspace."
             },
             "content": {
                 "type": "string",

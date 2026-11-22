@@ -205,7 +205,7 @@ pub fn export_markdown(session: &Session, opts: &ExportOptions) -> Result<String
                 out.push_str(&render_message(message, opts));
                 out.push('\n');
             }
-            // ADR 0021 D6: the injected set is audit, not transcript. The Markdown export
+            // ADR 0006 decision 5.12: the injected set is audit, not transcript. The Markdown export
             // shows only its size; the index paths/hashes (or the old ids/revisions/scopes)
             // are in the JSON export.
             EventData::MemoryInjected { records, indexes } => {
@@ -479,7 +479,7 @@ fn event_data_value(
             "reason": reason,
             "policy": policy,
         }),
-        // ADR 0021 D6: one shape is present; the reader leaves the other vector empty.
+        // ADR 0006 decision 5.12: one shape is present; the reader leaves the other vector empty.
         EventData::MemoryInjected { records, indexes } => {
             if indexes.is_empty() {
                 json!({"records": records})

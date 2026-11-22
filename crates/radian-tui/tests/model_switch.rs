@@ -11,7 +11,7 @@ use radian_tui::command::{self, Outcome};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 fn parse(line: &str) -> Outcome {
-    command::parse(line, false)
+    command::parse(line)
 }
 
 fn key(code: KeyCode) -> KeyEvent {

@@ -2,7 +2,7 @@
 //! does to the state. No terminal, no runtime, no files.
 
 use radian_core::CompactionOutcome;
-use radian_tui::app::{App, Effect, Input, MemoryResult, TurnState};
+use radian_tui::app::{App, Effect, Input, TurnState};
 use radian_tui::command::{ExportRequest, SessionOutcome};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -34,7 +34,6 @@ fn notices(app: &App) -> Vec<String> {
 #[test]
 fn every_slash_command_produces_its_effect() {
     let mut app = App::new("m", "s");
-    app.set_memory_enabled(true);
 
     assert_eq!(
         submit(&mut app, "/compact"),
@@ -67,17 +66,6 @@ fn every_slash_command_produces_its_effect() {
     assert_eq!(
         submit(&mut app, "/fork"),
         vec![Effect::Session(SessionOutcome::Fork)]
-    );
-    let memory = submit(&mut app, "/memory list");
-    assert!(
-        matches!(
-            memory.as_slice(),
-            [Effect::RunMemoryCommand {
-                confirmed: false,
-                ..
-            }]
-        ),
-        "{memory:?}"
     );
 }
 
@@ -208,20 +196,6 @@ fn the_result_inputs_change_the_state() {
         notices(&app).iter().any(|note| note == "one")
             && notices(&app).iter().any(|note| note == "two")
     );
-
-    // A `/memory` output, and a failure (including "memory is disabled").
-    app.update(Input::MemoryCommandDone(MemoryResult::Output(vec![
-        "out".into(),
-    ])));
-    assert!(notices(&app).iter().any(|note| note == "out"));
-    app.update(Input::MemoryCommandDone(MemoryResult::Failed(
-        "memory is disabled (no RADIAN_HOME or HOME)".into(),
-    )));
-    assert!(
-        notices(&app)
-            .iter()
-            .any(|note| note.contains("memory is disabled"))
-    );
 }
 
 /// A runtime turn failure is a transcript notice; a recognizable context overflow adds the
@@ -255,7 +229,7 @@ fn a_failed_turn_is_a_notice_and_an_overflow_adds_the_help() {
     );
 }
 
-/// Paste, resize and the `/memory` confirmation answer.
+/// Paste, resize and the confirmation answer.
 #[test]
 fn paste_resize_and_the_confirmation_answer() {
     let mut app = App::new("m", "s");
@@ -337,46 +311,42 @@ fn a_refused_command_is_shown_as_a_notice() {
 #[test]
 fn the_slash_completion_walks_the_command_tree() {
     let mut app = App::new("m", "s");
-    for c in "/mem".chars() {
+    for c in "/exp".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     let rows = app.completion().expect("a list").to_vec();
     assert!(
-        rows.iter().any(|row| row.insert.starts_with("/memory")),
+        rows.iter().any(|row| row.insert.starts_with("/export")),
         "{rows:?}"
     );
 
     // Tab completes the name and does not run anything.
     let result = app.on_key(key(KeyCode::Tab));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert_eq!(app.input, "/memory ");
+    assert_eq!(app.input, "/export ");
     // The next level's list appears without another key.
-    let rows = app.completion().expect("the subcommand list").to_vec();
+    let rows = app.completion().expect("the format list").to_vec();
     assert!(
-        rows.iter().any(|row| row.insert.starts_with("list")),
+        rows.iter().any(|row| row.insert.starts_with("md")),
         "{rows:?}"
     );
 
     // A partial second level is fuzzy-matched, and Tab completes it.
-    app.on_key(key(KeyCode::Char('f')));
-    app.on_key(key(KeyCode::Char('o')));
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('s')));
     let rows = app.completion().expect("the fuzzy list").to_vec();
     assert!(
-        rows.iter().any(|row| row.insert.starts_with("forget")),
+        rows.iter().any(|row| row.insert.starts_with("json")),
         "{rows:?}"
     );
     let result = app.on_key(key(KeyCode::Tab));
-    assert_eq!(app.input, "/memory forget ");
-    assert!(
-        matches!(result.effects.as_slice(), [Effect::FetchCompletions(_)]),
-        "the id level needs the host: {:?}",
-        result.effects
-    );
+    assert_eq!(app.input, "/export json ");
+    assert!(result.effects.is_empty(), "{:?}", result.effects);
 
     // Enter picks the candidate too (it never executes), and Esc closes the list without
     // clearing the text.
     let mut app = App::new("m", "s");
-    for c in "/memory f".chars() {
+    for c in "/export j".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     assert!(app.completion().is_some(), "the list follows the text");
@@ -386,16 +356,16 @@ fn the_slash_completion_walks_the_command_tree() {
         "Enter completed, it did not send: {:?}",
         result.effects
     );
-    assert_eq!(app.input, "/memory forget ");
+    assert_eq!(app.input, "/export json ");
 
     let mut app = App::new("m", "s");
-    for c in "/memory ".chars() {
+    for c in "/export ".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     assert!(app.completion().is_some());
     app.on_key(key(KeyCode::Esc));
     assert!(app.completion().is_none(), "Esc closes the list");
-    assert_eq!(app.input, "/memory ", "and keeps the text");
+    assert_eq!(app.input, "/export ", "and keeps the text");
 }
 
 /// (`pty_model_switches_to_chatgpt_with_an_oauth_login` flaked
@@ -482,10 +452,10 @@ fn candidate(insert: &str, description: &str) -> radian_tui::command::Candidate 
 /// A level whose candidates need the host asks with an effect; the answer becomes the list, and
 /// a stale answer (for a fetch the line has moved past) is dropped.
 #[test]
-fn the_id_level_asks_the_host_and_shows_the_answer() {
+fn a_host_level_asks_the_host_and_shows_the_answer() {
     let mut app = App::new("m", "s");
     let mut effects = Vec::new();
-    for c in "/memory forget ".chars() {
+    for c in "/theme ".chars() {
         effects = app.on_key(key(KeyCode::Char(c))).effects;
     }
     let fetch = match effects.as_slice() {
@@ -497,30 +467,29 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
     let result = app.update(Input::CompletionsReady {
         fetch: fetch.clone(),
         candidates: vec![radian_tui::command::Candidate {
-            insert: "m-1".into(),
-            description: "fact note".into(),
+            insert: "midnight".into(),
+            description: "theme file".into(),
             current: false,
         }],
     });
     assert!(result.dirty);
-    let rows = app.completion().expect("the id list").to_vec();
+    let rows = app.completion().expect("the theme list").to_vec();
     assert!(
-        rows.iter().any(|row| row.insert.starts_with("m-1")),
+        rows.iter().any(|row| row.insert.starts_with("midnight")),
         "{rows:?}"
     );
     let result = app.on_key(key(KeyCode::Tab));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
-    assert_eq!(app.input, "/memory forget m-1 ");
+    assert_eq!(app.input, "/theme midnight ");
 
     // A stale answer is dropped: ask for `ab`, then answer with a *different* fetch.
     let mut app = App::new("m", "s");
-    for c in "/memory show ab".chars() {
+    for c in "/theme ab".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     let result = app.update(Input::CompletionsReady {
-        fetch: radian_tui::command::Fetch::MemoryRecords {
-            command: "forget".into(),
-            partial: "ab".into(),
+        fetch: radian_tui::command::Fetch::Themes {
+            partial: "zz".into(),
         },
         candidates: vec![radian_tui::command::Candidate {
             insert: "stale".into(),
@@ -538,29 +507,29 @@ fn the_id_level_asks_the_host_and_shows_the_answer() {
 #[test]
 fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
     let mut app = App::new("m", "s");
-    for c in "/memory ".chars() {
+    for c in "/export ".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     let rows = app.completion().expect("a list").to_vec();
     assert!(rows.len() >= 2, "need at least two rows: {rows:?}");
     assert_eq!(app.completion_cursor, 0, "the first row is highlighted");
-    assert_eq!(rows[0].insert, "list", "the first row is `list`");
+    assert_eq!(rows[0].insert, "md", "the first row is `md`");
 
     app.on_key(key(KeyCode::Down));
     assert_eq!(app.completion_cursor, 1);
-    // Back to `list`, whose level takes no further host answer, so Enter accepts it here.
+    // Back to `md`, whose level takes no further host answer, so Enter accepts it here.
     app.on_key(key(KeyCode::Up));
     assert_eq!(app.completion_cursor, 0);
     let result = app.on_key(key(KeyCode::Enter));
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(
-        app.input, "/memory list ",
+        app.input, "/export md ",
         "Enter accepts the highlighted row"
     );
 
     // Up from the first row wraps to the last.
     let mut app = App::new("m", "s");
-    for c in "/memory ".chars() {
+    for c in "/export ".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     let last = app.completion().unwrap().last().unwrap().insert.clone();
@@ -569,7 +538,7 @@ fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
     assert!(result.effects.is_empty(), "{:?}", result.effects);
     assert_eq!(
         app.input,
-        format!("/memory {last} ").as_str(),
+        format!("/export {last} ").as_str(),
         "up wraps to the last row"
     );
 }
@@ -578,18 +547,18 @@ fn the_slash_menu_moves_its_highlight_and_enter_accepts_it() {
 #[test]
 fn typing_filters_the_slash_menu_and_resets_the_highlight() {
     let mut app = App::new("m", "s");
-    for c in "/memory ".chars() {
+    for c in "/export ".chars() {
         app.on_key(key(KeyCode::Char(c)));
     }
     assert!(app.completion().is_some());
     app.on_key(key(KeyCode::Down));
     assert_eq!(app.completion_cursor, 1);
-    // `f` narrows the level; the highlight is back on the first row.
-    app.on_key(key(KeyCode::Char('f')));
+    // `j` narrows the level; the highlight is back on the first row.
+    app.on_key(key(KeyCode::Char('j')));
     assert_eq!(app.completion_cursor, 0);
     let rows = app.completion().expect("the filtered list").to_vec();
     assert!(
-        rows.iter().any(|row| row.insert.starts_with("forget")),
+        rows.iter().any(|row| row.insert.starts_with("json")),
         "the list follows the new text: {rows:?}"
     );
 }

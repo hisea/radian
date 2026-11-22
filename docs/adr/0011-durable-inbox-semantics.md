@@ -83,7 +83,7 @@ Configuration switches "what to run with" at the turn boundary. Input decides "w
 
 TUI `/loop` resends the same prompt each turn until `--times`/`--for` either reaches its cap:
 
-- Each iteration is a `followup` with fixed source `User` (L2: only a `User` turn receives this session approval grants and memory injection). The message `origin` carries `{"continuation": "loop", "iteration": n}` (ADR 0005 G1: audit data lives in meta, and the journal shows which turns a machine sent).
+- Each iteration is a `followup` with fixed source `User` (L2: only a `User` turn receives this session approval grants). The message `origin` carries `{"continuation": "loop", "iteration": n}` (ADR 0005 G1: audit data lives in meta, and the journal shows which turns a machine sent).
 - The single turn-end decision point sits on journaled `TurnFinished` (the continuation third step `goal-mode` adds input at the same place). `--every D` waiting also decides here: replay starts only when D has passed since the **start** of the last iteration at turn end. A mid-turn deadline never interrupts (it waits for turn end). Multiple due points merge into one.
 - Loop replays bypass the ADR 0037 wake rate gate (no `note_wake` call, no rejection by it). The loop's own cap is the gate: `--times`/`--for` either stops it. When neither is given, the default is **20 times or 1 hour, whichever comes first**. Esc/cancellation pauses (drops the prompt, keeps the mode). A model error pauses (keeps the prompt, never retries; `/retry` or a new prompt resumes).
 - State stays in-process only: TUI exit ends it. Nothing enters the session or the journal. `radian exec` has no loop. `/loop … prompt` while a turn runs is allowed; the prompt queues to turn end as with `/queue`.

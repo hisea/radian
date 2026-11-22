@@ -876,3 +876,17 @@ identical.
 |---|---|---|---|
 | TK0301-M4 | the in-flight arm ignores `between_turns` and never moves the anchor | ✅ 3 failed (rc=100) | `metrics::tests::a_between_turns_record_moves_the_anchor` (`left: 60000`, `right: 5000`), `metrics::tests::a_range_that_begins_at_a_turn_finished_has_an_anchor` (`left: 11000`, `right: 1000`) and `metrics::tests::a_turn_after_a_between_turns_record_excludes_in_flight_records_again` (`left: 2000`, `right: 1000`) |
 | TK0301-M5 | `TurnStarted` does not clear `between_turns`, so the in-flight exclusion stays off inside the next turn | ✅ 1 failed (rc=100) | `metrics::tests::a_turn_after_a_between_turns_record_excludes_in_flight_records_again` (`left: 1000`, `right: 9000`) |
+
+## T-0009: an old journal with memory records still opens (2026-11-21, branch `work/T-0009-remove-memory`)
+
+Persistent memory was removed (ADR 0021), so this build never writes `MemoryInjected` or a
+`memory_addition` message, but old journals hold them. The mutation was applied to
+`radian-session/src/runtime.rs` (`validate_memory_injected_index`, the reader's check of an old
+index record) and the file restored from a copy afterwards. The `radian` binary was rebuilt for
+the run: `cargo nextest run -p radian-exec --no-fail-fast an_old_journal_with_memory`.
+
+| # | Mutation | Result | Test that caught it |
+|---|---|---|---|
+| T-0009-M2 | `validate_memory_injected_index` always returns `Err`, so the reader refuses every old `MemoryInjected` index record | ✅ 1 failed (rc=100) | `cli::an_old_journal_with_memory_records_lists_exports_and_resumes` |
+
+1/1 caught.

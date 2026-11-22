@@ -159,7 +159,6 @@ the free space and the compaction buffer):
 |---|---|
 | `ctx_system` | The system prompt cell. |
 | `ctx_files` | The context files cell. |
-| `ctx_memory` | The memory cell. |
 | `ctx_tools` | The built-in tools cell. |
 | `ctx_skills` | The skills cell. |
 | `ctx_mcp` | The MCP tools cell. |
@@ -170,6 +169,8 @@ the free space and the compaction buffer):
 | `ctx_images` | The images cell. |
 | `ctx_free` | The free space. |
 | `ctx_buffer` | The compaction buffer. |
+
+The old `ctx_memory` role (the removed memory cell) is an unknown role now: a theme file that still sets it loads, with one warning, and the role is ignored.
 
 Footer:
 

@@ -7,7 +7,7 @@ description: Every slash command, shell command, and what happens while a turn r
 A line whose first non-space character is `/` is a command. It never reaches
 the model, the transcript, or the session journal. `//` is the escape: one
 `/` is dropped and the rest is sent as an ordinary message. Arguments split
-with shell quoting, so `/memory add "two words"` is one argument. Unbalanced
+with shell quoting, so `/export "my notes.md"` is one argument. Unbalanced
 quotes are an error notice. An unknown command is an error notice, never a
 message to the model.
 
@@ -20,8 +20,7 @@ Some arguments come from host data, not fixed words. `tab` completes them:
 `custom` names a new endpoint and asks for its protocol: `openai-compatible`, `anthropic` or `openai-responses` (pi's `openai-completions` and `anthropic-messages` are accepted).
 `/logout` offers the providers with a stored credential; `/theme` offers the
 built-ins plus your theme files; `/skill:<name>` offers the discovered skill
-names (`/skills` lists them with descriptions); `/memory` name arguments offer the
-memory file names. When nothing matches, `tab` does nothing.
+names (`/skills` lists them with descriptions). When nothing matches, `tab` does nothing.
 
 While a turn runs, `/queue` still works and `Enter` steers the turn. Everything
 else waits or is refused. See "While a turn runs" below.
@@ -111,39 +110,6 @@ The estimate counts ASCII bytes divided by 4, rounded up, plus one token per non
 | `/mcp` | `/mcp` (no arguments) | Open the inspector's MCP page. It lists the servers and their tools. Applies at once. Related: `mcp.md`. |
 | `/hooks` | `/hooks` (no arguments) | Open the inspector's hooks page. It lists each configured entry, whether its matcher compiles, and the session's recent hook runs (newest first, the last 50). Applies at once. Related: `hooks.md`. |
 | `/panel` | `/panel` (no arguments) | Open the inspector on the last used page. Applies at once. |
-
-## Memory
-
-`/memory` runs the same grammar as `radian memory` outside the interface
-(`cli.md` holds the flags). One grammar, one executor: the TUI adds only the
-framework and the notices. A read command runs while a turn is running and
-does not interrupt it. A write takes effect at the next model request.
-`forget`, `split` and `merge` ask first: a notice shows the prompt,
-`y` runs it and `n` or `esc` cancels. While the prompt is up, keys do not
-type into the message box.
-
-| Command | Syntax | What it does |
-|---|---|---|
-| `/memory list` | `/memory list [--global\|--project] [--json]` | One line per file: scope, name, type, source, modified time and description; project first, then global. `--json` prints the frontmatter objects. An unreadable file is one line marked `unreadable` with its reason. |
-| `/memory show` | `/memory show [--global\|--project] [--json] <name>` | Print one file's frontmatter and body as stored; `--json` prints `frontmatter` and `body`. |
-| `/memory stale` | `/memory stale [--days <N>] [--global\|--project] [--json]` | List memory files not used for a while. A file is stale when its `last_used` is older than `--days`, or it was never read and its `created` is older than `--days`. `--days` is an integer of 1 or more; the default is 30, and `--days 0` is a usage error. One line per file: `scope  name  last_used-or-never  description`; `--json` gives an array of objects with the frontmatter fields, plus one object with `path` and `unreadable` for a file whose frontmatter cannot be read. Reads the memory files only. |
-| `/memory add` | `/memory add [--global] [--type user\|feedback\|project\|reference] <name>` | Create the file (empty body, `source: user`, `created`, `modified`), append its index line, and open it in the editor. `--type` defaults to `user`; project scope by default. A bad or existing name exits 2 and writes nothing. Example: `/memory add deploy-notes --type project`. |
-| `/memory edit` | `/memory edit [--global] <name>` | Open an existing file in the editor. |
-| `/memory forget` | `/memory forget [--global] [--yes] <name>` | Delete the file and its index line. Asks first; off a terminal without `--yes` it refuses. |
-| `/memory open` | `/memory open [--global\|--project]` | Print the scope directory, or (in the interface) open it with the editor or the platform opener. |
-| `/memory project` | `/memory project [--json] [new]` | Show this workspace's identity key and project state, or register it with `new`. |
-| `/memory relink` | `/memory relink <project-id>` | Attach this workspace's identity key to an existing project. |
-| `/memory split` | `/memory split [--yes] <from> <to> <name>...` | Move files and their index lines between projects. A name outside the record rule (including `SESSIONS`, `MEMORY`, an absolute name or `..`) is a usage error and moves nothing. Asks first. |
-| `/memory merge` | `/memory merge [--yes] <into> <from>` | Move every record file from one project into another; `MEMORY.md` and `SESSIONS.md` stay in their own project. A name in both is renamed `<name>-2` (then `-3`, …) and reported. Asks first. |
-| `/memory off` | `/memory off` (no arguments) | Refuse the model's `write` and `patch` calls into a memory scope until `/memory on` in the same process, and record the switch so a resume starts without the index section. Takes effect at once; never written to the config file. |
-| `/memory on` | `/memory on` (no arguments) | Allow those memory writes again in this process. |
-
-`archive`, `restore`, `confirm`, `purge`, `export`, `import` and `search` do not
-exist; a call to one exits 2 with the current command set.
-
-`radian memory` outside the interface adds `--workspace <dir>` to resolve the
-project against another directory. Full detail, including every frontmatter
-field, is in `memory.md`.
 
 ## View
 
@@ -266,6 +232,6 @@ quits too, cancelling a running turn first and leaving a queued followup
 unstarted (see `/quit` above). A draft typed at that moment is
 lost the way a `ctrl-c` quit loses it. A side
 question (`/btw`) and a read command (`/context`,
-`/usage`, `/memory list`, `/memory show`, `/memory stale`, `/memory open`, `/memory project`) run while a turn
+`/usage`) run while a turn
 runs without interrupting it. Writes take effect at the next turn boundary:
-`/model`, `/thinking`, `/access`, `/compact`, `/memory` writes.
+`/model`, `/thinking`, `/access`, `/compact`.

@@ -76,15 +76,6 @@ fn closed_pipe_footer_export_exits_zero_without_panic() {
     assert_quiet_stop("footer export deck", code, &stderr);
 }
 
-/// `radian memory list` against an empty `RADIAN_HOME` with a closed stdout:
-/// exit 0, no panic.
-#[test]
-fn closed_pipe_memory_list_exits_zero_without_panic() {
-    let base = scratch("memory-list");
-    let (code, stderr) = run_closed(&["memory", "list"], &base, &base);
-    assert_quiet_stop("memory list", code, &stderr);
-}
-
 /// `radian exec --list` over a session directory holding one session, with a closed
 /// stdout: exit 0, no panic.
 #[test]

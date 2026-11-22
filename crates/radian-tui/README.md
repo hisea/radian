@@ -23,14 +23,14 @@ App::update(input: Input) -> UpdateResult { dirty: bool, effects: Vec<Effect> }
   `AgentEvent`, a runtime event, an approval request, and the result of an effect).
 - **`Effect`** is everything that needs the outside world: `SendFollowup`/`Steer`/`Cancel`/
   `Quit`, `AnswerApproval`/`AbandonApproval`, `ExpandMentions` (the `@` expansion reads
-  files), `CompleteMention` (reads a directory), `RunMemoryCommand`, `Compact`, `Session`
+  files), `CompleteMention` (reads a directory), `Compact`, `Session`
   (`/export`, `/fork`), and `OpenPicker` (reads the session index for `/sessions`).
 - The event loop in `cli.rs` runs the effects and feeds their results back as inputs. A key
   press is resolved by `App::key_input` (the keymap plus the current layer) and `App::on_key`
   is the thin wrapper around it.
-- **`update` never** does I/O, touches the runtime, reads a file or a directory, or calls the
-  memory service. `tests/purity.rs` asserts that structurally (it greps `src/app.rs` for
-  `std::fs`, `MemoryService`, `tokio`, and the `@` calls).
+- **`update` never** does I/O, touches the runtime, reads a file or a directory, or or calls
+  the host. `tests/purity.rs` asserts that structurally (it greps `src/app.rs` for
+  `std::fs`, `tokio`, and the `@` calls).
 - `dirty` says whether the renderer's input may have changed, so the loop can skip a frame;
   an input that changes nothing (an unbound key, cancel, quit) is not dirty.
 
@@ -49,7 +49,7 @@ session view exists: `app.session`.
   modals), the shared pending-request count and the queue head (`pending`, `last_answered`),
   the process/terminal flags (`quit`, `quit_pending`, `mouse_enabled`, `clipboard`, `startup`
   and the pre-session picker outcome), the display modes, the footer facts read once at
-  startup (`hostname`, `auto_compact`, `now`), and `memory_enabled`.
+  startup (`hostname`, `auto_compact`, `now`).
 - **`App.session: SessionView`** holds everything that belongs to one session: the
   transcript (`entries` and the `live_count` cache), the projection read handle, the scroll
   and follow state, the selection and mouse gesture, the history, the pending turn state
@@ -98,7 +98,7 @@ projection handle, now reached through `app.session.projection`.
 
 | Tier | Layers | Rule |
 |---|---|---|
-| `Modal` | the approval prompt, the `/memory` confirmation (a structured question is the documented extension point) | must be answered; always above every overlay |
+| `Modal` | the approval prompt, the `/model` budget-switch and `/logout` confirmations (a structured question is the documented extension point) | must be answered; always above every overlay |
 | `Overlay` | the find box, the `@` completion list, the session picker | temporary; never above a modal |
 | `Surface` | the transcript and the message box | always at index 0 |
 
@@ -564,17 +564,15 @@ and the index only read `*.jsonl`, so a draft is never a session.
 
 A `/…` line is a command: it never reaches the model, the transcript or the journal. Typing `/`
 shows the command tree's candidates above the input area; **every level completes**, with one
-fuzzy match (a subsequence, prefix matches first): `/mem` → `/memory`, then `/memory fo` →
-`forget`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
+fuzzy match (a subsequence, prefix matches first): `/exp` → `/export`, then `/export j` →
+`json`. The menu highlights its first row; `Up`/`Down` move the highlight, `Tab` or `Enter`
 accepts the highlighted row (it completes the line, it never runs it) and `Esc` closes the menu
-keeping the line. `/mem fo` completes both levels at once. The `/theme`, `/model` and
+keeping the line. `/exp j` completes both levels at once. The `/theme`, `/model` and
 `/thinking` rows mark the value in effect with ` ✓` right after its name (ASCII ` *`), and each
 `/thinking` row names the wire value it sends (`enabled:4096` for Anthropic, `high` for
 openai-compatible).
 
-The levels are data (`command.rs`): the command names from their `/help` lines, `/memory`'s
-subcommands, the file names of `show`/`edit`/`forget` (listed by the host — `update` never
-the host — `update` never does I/O), `/export`'s `md|json` and `--force`, `/copy`'s `code`
+The levels are data (`command.rs`): the command names from their `/help` lines, `/export`'s `md|json` and `--force`, `/copy`'s `code`
 selector, and free text for `/sessions`, `/compact` and `/queue`. A future `/model` (provider → model, ADR 0026) or `/login` is one
 more entry in the same tree.
 
@@ -591,8 +589,6 @@ the rest is sent as an ordinary message.
 | `/theme <name>` | switch the color theme immediately and write `tui.theme` back to the config file (ADR 0008): a built-in (`dark`/`light`/`mono`) or a `*.json` file in `~/.radian/themes/`. `NO_COLOR` wins, so it does not switch; a read-only config (a newer `schema_version`) applies for the session but is never written |
 | `/sessions [query]` | open the session **picker overlay** for this workspace (the `--pick` screen); type to filter, `Tab` full-text search, Enter shows the copyable `--resume <id>` line |
 | `/export [md\|json] [path] [--force]` | export **this** session (default `md`, default `<workspace>/radian-<id>.<ext>`) |
-| `/memory <command> …` | the same durable-memory commands as `radian memory` (ADR 0021 D7): `list`, `show`, `add`, `edit`, `forget`, `open`, `project` / `project new`, `relink`, `split`, `merge` |
-| `/memory off\|on` | refuse the model's `write` and `patch` calls into memory scopes for the rest of this process (`off`) or allow them again (`on`); the switch is recorded in the session for a resume and never written to the config file |
 | `/jobs [kill <id\|all>]` | list this session's running background `shell` jobs (id, state, elapsed, command) as notices, or stop one/all (ADR 0037 decision 4). `kill <id>` sends SIGTERM to the whole session, then SIGKILL after 3 s; `kill all` sends SIGKILL at once; the model gets a completion message on the busy/idle lane |
 | `/usage` | print the current provider's usage snapshot, **every** window, as notices (ADR 0027). The footer's `usage` line is the short form of the same snapshot; no usage source, or no snapshot yet, is one line saying so |
 | `/queue <text>` | queue a message for the next turn as an `Inbox::followup`, even while a turn runs (Enter steers then; idle it opens a turn at once). The footer's `queued` item shows the waiting count |
@@ -621,8 +617,6 @@ the rest is sent as an ordinary message.
   refused while a turn is running, and it does **not** switch this window: the notice names
   the child and how to open it (`radian --resume <child>`).
 - An unknown command is an error notice, never a message to the model.
-- The grammar and the execution are `radian_host::memory::commands`, shared byte-for-byte with
-  the CLI; the TUI only adds the framework and the notices.
 
 ## What the screen shows
 
@@ -812,12 +806,9 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   `match i/N` readable? Press Enter / Ctrl-G a few times: does moving between matches feel
   like a terminal's scrollback search, and does Esc leave you where you were? pty automation
   asserts the jump and the status, not the feel.
-- **`/help` and a `/memory` write**: type `/help` (a notice, no model request), then
-  `/memory forget note` — is the `[y/N]` prompt obvious and does `n` feel like a cancel? pty
+- **`/help` and a confirm**: type `/help` (a notice, no model request), then `/logout <provider>` —
+  is the confirm prompt obvious and does `n` feel like a cancel? pty
   automation asserts the notices and the keys, not the readability.
-- **a model memory write**: ask the model to remember something. Is the memory card's title,
-  type and path readable, and does `Enter` on an empty input open the file? Ask it to read a
-  memory record: is `memory used: <title>` clear, and does `Ctrl-O` still show the content?
 - **the composer's feel**: type a paragraph and edit in the middle — does Left/Right/Home/End
   (Ctrl-A/Ctrl-E) land where you expect, does a word jump (Ctrl-Left) feel right, and do
   Ctrl-W / Ctrl-U / Ctrl-K delete the amount you meant? Press Up/Down at the first/last line:
@@ -1281,8 +1272,7 @@ by one is resumable by the other:
 
 - `--session-dir DIR`, else `RADIAN_SESSION_DIR`, else `~/.radian/sessions`
   (`$RADIAN_HOME/sessions` when `RADIAN_HOME` is set; ADR 0020). Never a cache or temp path: a
-  session is a durable record (ADR 0013 T4); the sandbox denies read on it and on
-  `~/.radian/memory` (ADR 0020).
+  session is a durable record (ADR 0013 T4); the sandbox denies read on it (ADR 0020).
 - The session file is `<session-dir>/<session-id>.jsonl`; `--session-id VALUE` names it, and
   a generated `time-pid` id is used when neither `--session-id` nor `--resume` is given.
 - `--resume ID` opens an existing session: its stored history is rendered into the transcript
@@ -1359,19 +1349,6 @@ untrusted projects, ADR 0039 decision 5). This is the same wiring `radian-exec` 
 - Two startup notices state what was chosen and what it means. The meaning line follows ADR
   0012 decision 4 and does **not** claim credential isolation: the macOS backend leaves
   `mach-lookup` open, so the IPC boundary is not tightened.
-- A `[memory]` startup notice names the project state (the linked project id, or "no project
-  linked" with the `radian memory project new`/`relink` hint) and the per-index caps
-  (ADR 0021 D2/D6). The two index files are injected into the system prompt once per process;
-  a line past a cap sends one rewrite notice before the next call. The permission profile
-  allows `write` and `patch` in the memory scope directories in both tiers (ADR 0012; ADR
-  0021 invariant 5); no model memory tool exists (ADR 0021 D7). A successful memory
-  `write`/`patch` draws the memory card and a memory `read` draws the `memory used:` line
-  (ADR 0035); `Enter` with an empty input opens the newest card. A
-  default-scope `/memory add` that **registers** this workspace as a project (ADR 0021
-  ) is shown as a `Notice` transcript entry — one line naming the new project and
-  its identity key — because stderr would be drawn over by the fullscreen UI. Tested by
-  `pty_the_memory_notice_names_the_project_state_and_the_budget` and
-  `pty_a_memory_add_shows_the_created_project_notice`.
 
 Every call goes through `radian-permissions` (ADR 0012) as a `Hooks` implementation:
 
@@ -1705,10 +1682,8 @@ match`; the other entries stay folded. The override is dropped by the next globa
 (`Ctrl-T` / `Ctrl-O`); closing the search box keeps it, so the text the user searched for does
 not disappear again. The jump centers the match's **display** line, not its expanded one.
 
-Already a Notice-style one-liner (verified, R5): the memory **fixed block** never enters the
-transcript (the hook appends to the system prompt) and its only transcript trace is the startup
-`[memory] …` notice. A later turn's addition **does** enter it, as a `System`-source message
-(ADR 0021), which the TUI renders like any other `System` message (the same shape as
+Already a Notice-style one-liner (verified, R5): a host-added `System`-source message enters the
+transcript and the TUI renders it like any other `System` message (the same shape as
 ADR 0037's completion notice); an approval is a modal, not a transcript entry (the call and its
 result are the card). A pending question's result arrives as the `ask_user` card.
 

@@ -3,7 +3,7 @@
 //!
 //! It is deliberately narrow and honest about what it is: it reads one file's source and greps
 //! it. It cannot prove purity (a pure-looking call could still do I/O); it catches the obvious
-//! regressions — a `std::fs` import, a `MemoryService` field, a `tokio` handle, an `@`
+//! regressions — a `std::fs` import, a `tokio` handle, an `@`
 //! expansion call — which is what the ADR asks for.
 
 /// The file, with comment lines removed so the prose that *describes* the rule does not trip
@@ -34,8 +34,7 @@ fn app_rs_is_pure() {
         // the frame buffer and bypass the `tui.clipboard` modes.
         "io::stdout",
         "io::stderr",
-        // No service and no async runtime handle.
-        "MemoryService",
+        // No async runtime handle.
         "tokio",
         // The `@` work reads files and directories, so it lives in the loop.
         "mention::expand",

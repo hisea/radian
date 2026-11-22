@@ -32,15 +32,14 @@ mod ui;
 
 pub use acp::{ACP_MAX_INPUT_LINE_BYTES, ACP_OUTBOX_CAPACITY};
 pub use command::{Command, ConfigCommand, TrustCommand};
-pub(crate) use command::{ExportFormat, run_config, run_memory, run_trust};
-pub(crate) use error::{OutputError, SetupError, finish};
+pub(crate) use command::{ExportFormat, run_config, run_trust};
+pub(crate) use error::{CommandError, OutputError, SetupError, finish};
 pub(crate) use redact::redact;
 pub(crate) use setup::Setup;
 
 use std::path::PathBuf;
 
 use clap::Parser;
-use radian_host::memory::commands::MemoryCommand;
 
 /// Exit code for usage and configuration errors, matching clap's own usage failures.
 const USAGE_ERROR: i32 = 2;
@@ -226,7 +225,7 @@ pub struct CommonArgs {
     name = "radian",
     version,
     about = "Chat with a model, with optional MCP tools",
-    // A subcommand (`radian memory …`) is a mode of its own, like `--list`: it must not need
+    // A subcommand (`radian trust …`) is a mode of its own, like `--list`: it must not need
     // `--model`. `--model` is not clap-required at all now (the config file may supply it),
     // so this is a no-op today; it stays so a future required argument cannot leak into the
     // subcommand modes.
@@ -292,11 +291,8 @@ pub struct Cli {
     #[arg(long, value_name = "SEQ", requires = "fork")]
     at: Option<u64>,
 
-    /// A mode of its own: `radian memory …` or `radian config …`.
-    /// Neither
-    /// needs `--model`, reads a key, creates a session file or touches the network. Memory is
-    /// shared across sessions and resolved per project (a git repository, shared by its
-    /// worktrees).
+    /// A mode of its own: `radian trust …` or `radian config …`. Neither needs `--model`,
+    /// reads a key, creates a session file or touches the network.
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -352,24 +348,11 @@ pub struct AcpCli {
 
 impl Cli {
     /// A `Cli` carrying only one management command, everything else at its default. The
-    /// top-level `radian memory`/`login`/`config` build this so they run the **same** dispatch
+    /// top-level `radian trust`/`login`/`config` build this so they run the **same** dispatch
     /// the parser feeds (ADR 0032).
     pub fn for_command(command: Command) -> Self {
         Self {
             command: Some(command),
-            ..Self::default()
-        }
-    }
-
-    /// [`Cli::for_command`] with the workspace `radian exec --workspace DIR memory …` would
-    /// carry.
-    pub fn for_memory(workspace: Option<String>, command: MemoryCommand) -> Self {
-        Self {
-            command: Some(Command::Memory { command }),
-            common: CommonArgs {
-                workspace,
-                ..CommonArgs::default()
-            },
             ..Self::default()
         }
     }
@@ -450,7 +433,7 @@ pub fn run_acp_blocking(cli: AcpCli) -> i32 {
 }
 
 pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i32 {
-    // `radian memory` and `radian config` are modes of their own: no model, no key, no session
+    // `radian trust` and `radian config` are modes of their own: no model, no key, no session
     // file, no network. They are handled before `setup`, like the session-management commands.
     if cli.command.is_some() {
         if cli.list
@@ -463,7 +446,6 @@ pub async fn run(mut cli: Cli, child_headers: Result<Vec<String>, String>) -> i3
             return USAGE_ERROR;
         }
         match cli.command.take() {
-            Some(Command::Memory { command }) => return run_memory(&cli, command),
             Some(Command::Trust { command }) => return run_trust(&cli, command),
             Some(Command::Config { command }) => return run_config(&cli, command),
             // D3: the credential commands are modes of their own — no model, no session
@@ -697,11 +679,7 @@ mod tests {
 
     /// The `cli.md` headings whose tables list `radian exec` flags. Each heading is an
     /// anchor: a table elsewhere on the page is never read.
-    const CLI_FLAG_HEADINGS: &[&str] = &[
-        "## `radian exec`",
-        "## `radian memory`",
-        "## `radian trust`",
-    ];
+    const CLI_FLAG_HEADINGS: &[&str] = &["## `radian exec`", "## `radian trust`"];
 
     /// Every closed `radian exec` value set appears in its option's rows of
     /// `docs/user/cli.md`, and every defaulted option's default appears in its row.
@@ -725,7 +703,7 @@ mod tests {
             .flatten()
             .collect();
         // The flag's rows, from any table under the anchored headings. The flag column differs
-        // per table: the `radian exec` table lists the flag first, and the `radian memory`
+        // per table: the `radian exec` table lists the flag first, and the `radian trust`
         // table lists the subcommand first and the flags in its second cell. Every table here
         // ends with a prose cell ("What it does"), so a flag named in any cell but the last
         // matches; a flag another row's prose merely mentions never joins its set.
@@ -739,7 +717,7 @@ mod tests {
                 .collect()
         }
         // The default must sit in the row's Default cell (the Allowed/Value cells would
-        // mask a changed default). A table without a Default column (`radian memory`'s)
+        // mask a changed default). A table without a Default column (`radian trust`'s)
         // names the default in its flag cell, as ``(default `30`)``; only the text after the
         // word `default` counts, so the same value in the set above it never passes.
         fn default_in_row(row: &[String], default: &str) -> bool {
@@ -786,14 +764,6 @@ mod tests {
                     } else {
                         Vec::new()
                     };
-                    // `--type` parses through `parse_type`, not a `ValueEnum`; its arg id is
-                    // `record_type` (the field name; `long = "type"` only sets the flag).
-                    if id == "record_type" {
-                        values = radian_host::memory::commands::TYPE_NAMES
-                            .iter()
-                            .map(|name| name.to_string())
-                            .collect();
-                    }
                     // `--include-usage` takes an optional boolean: both spellings work.
                     if id == "include_usage" {
                         values = vec!["true".to_string(), "false".to_string()];
@@ -811,7 +781,7 @@ mod tests {
         for (flag, _id, values, defaults) in &options {
             let table = table_rows(&rows, flag);
             if table.is_empty() {
-                // Prose-documented flags (config import, memory `--workspace`): presence
+                // Prose-documented flags (config import): presence
                 // only, no value set to check.
                 assert!(
                     cli_md.contains(flag.as_str()),

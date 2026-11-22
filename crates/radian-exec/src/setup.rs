@@ -41,7 +41,7 @@ pub(crate) struct Setup {
     /// The window and where it came from (ADR 0018), for the startup line.
     pub(crate) window: radian_host::Window,
     /// The settings the CLI and the TUI resolve from the config the same way (ADR 0032 slice 5):
-    /// the retries, the compaction settings, the skills, the memory injection and the shell
+    /// the retries, the compaction settings, the skills and the shell
     /// auto-background.
     pub(crate) settings: radian_host::SessionSettings,
     /// The session id this process uses: the file name, and the `{session_id}` header value.
@@ -430,8 +430,8 @@ pub(crate) async fn setup(
     );
     // ADR 0032 slice 5: the settings both hosts read from the config the same way — the retries,
     // the compaction settings (ADR 0018: `[compaction] thinking` converted
-    // to this route's wire value, `low` by default; a clamped level is said once), the skills, the
-    // memory injection and the shell auto-background.
+    // to this route's wire value, `low` by default; a clamped level is said once), the skills and
+    // the shell auto-background.
     let (settings, compaction_notice) = radian_host::SessionSettings::from_config(
         &config,
         &provider_ref,

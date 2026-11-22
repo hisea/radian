@@ -197,7 +197,6 @@ pub(crate) fn fg_source(role: Role) -> Option<&'static str> {
         // anything else falls back to the built-in palette.
         Role::CtxSystem
         | Role::CtxFiles
-        | Role::CtxMemory
         | Role::CtxTools
         | Role::CtxSkills
         | Role::CtxMcp

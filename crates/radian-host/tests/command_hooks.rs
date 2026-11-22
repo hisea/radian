@@ -20,7 +20,6 @@ use radian_core::{
     ToolContext, ToolDecision, ToolError, ToolFailure, ToolOutput, ToolProvider, ToolSession,
     ToolSpec, TurnOptions,
 };
-use radian_host::memory::InjectionConfig;
 use radian_host::{CommandHooks, session_hooks};
 use radian_permissions::{
     Action, ApprovalError, ApprovalOutcome, ApprovalPolicy, ApprovalRequest, Approver, NoopAudit,
@@ -114,14 +113,7 @@ fn production_chain(
         )
         .unwrap(),
     );
-    let role = Arc::new(radian_host::RoleHooks::new("", "", "", None));
-    let memory = Arc::new(radian_host::memory::MemoryHooks::new(
-        None,
-        InjectionConfig::default(),
-        Arc::new(|_message: &str| {}),
-        Some(Arc::clone(&journal)),
-        None,
-    ));
+    let role = Arc::new(radian_host::RoleHooks::new("", "", None));
     let skills = Arc::new(radian_host::SkillsHooks::new(&[]));
     // ADR 0047: the goal block rides between skills and the session facts; empty here, so
     // it writes nothing and the permission/command order this test pins is unaffected.
@@ -136,16 +128,7 @@ fn production_chain(
         Arc::new(|_message: &str| {}),
         true,
     ));
-    session_hooks(
-        role,
-        permissions,
-        commands,
-        memory,
-        skills,
-        goal,
-        facts,
-        context,
-    )
+    session_hooks(role, permissions, commands, skills, goal, facts, context)
 }
 
 /// Edge case 5 + 7: a `permission_prompt` hook fires once, with the tool name and without its

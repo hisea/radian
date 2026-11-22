@@ -3000,7 +3000,6 @@ dependencies = [
  "radian-coding",
  "radian-core",
  "radian-host",
- "radian-memory",
  "radian-permissions",
  "radian-runtime",
  "radian-sandbox",
@@ -3027,7 +3026,6 @@ dependencies = [
  "radian-coding",
  "radian-core",
  "radian-host",
- "radian-memory",
  "radian-permissions",
  "radian-runtime",
  "radian-sandbox",
@@ -3043,17 +3041,6 @@ dependencies = [
  "toml_edit",
  "tracing",
  "unicode-width",
-]
-
-[[package]]
-name = "radian-memory"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "fs2",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3120,7 +3107,6 @@ dependencies = [
  "agent-provider-openai-compatible",
  "arboard",
  "base64 0.22.1",
- "chrono",
  "clap",
  "futures-util",
  "grok-mermaid",

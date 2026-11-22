@@ -1,19 +1,15 @@
-//! ADR 0025 S6: the composed hook chain appends the **memory** section before the
-//! **skills** section.
+//! ADR 0025 S6, ADR 0047, ADR 0036: the composed hook chain appends the **skills** section, then
+//! the `<goal>` block, then the volatile `<session>` facts.
 //!
-//! `the_memory_section_precedes_the_skills_section` in `skills/mod.rs` composes its own hooks,
-//! so it does not prove the production order. This test builds the three **real** hooks and
-//! calls [`radian_host::session_hooks`] — the one function `open_session` uses — so swapping
-//! `memory` and `skills` inside it fails here.
+//! This test builds the **real** hooks and calls [`radian_host::session_hooks`] — the one
+//! function `open_session` uses — so reordering the hooks inside it fails here.
 
 mod common;
 
 use std::sync::Arc;
 
 use radian_core::{CancellationToken, HookContext, Hooks, Message, ModelRequest};
-use radian_host::memory::{InjectionConfig, MemoryHooks, MemoryService};
 use radian_host::{Skill, SkillsHooks, session_hooks};
-use radian_memory::{FileStore, Scope};
 use radian_permissions::{NoopAudit, PermissionHooks, Profile};
 use radian_session::{SessionCreatedData, SessionJournal};
 use serde_json::json;
@@ -43,31 +39,15 @@ fn context() -> HookContext {
     }
 }
 
-/// The same three-hook composition `open_session` uses, with a memory record and one skill, so
-/// both sections are non-empty.
+/// The same hook composition `open_session` uses, with one skill and an active goal, so every
+/// section is non-empty.
 #[tokio::test]
-async fn the_production_hook_chain_puts_memory_before_skills() {
+async fn the_production_hook_chain_orders_skills_goal_and_session() {
     let dir = scratch("order");
     let ws = dir.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    // A real memory service with one index line: the section only renders the store's index.
-    let service = MemoryService::open(&ws, dir.join("memory"));
-    let project = service.create_project().unwrap();
-    FileStore::open(dir.join("memory"))
-        .write_index(
-            &Scope::Project(project),
-            "- [style](style.md) — tabs over spaces\n",
-        )
-        .unwrap();
     let journal = journal(&dir);
-    let memory = Arc::new(MemoryHooks::new(
-        Some(service),
-        InjectionConfig::default(),
-        Arc::new(|_message: &str| {}),
-        None,
-        None,
-    ));
 
     // One skill, constructed directly: the section needs only a name, a description and paths.
     let skill_dir = dir.join("skills/greet");
@@ -100,7 +80,6 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     let role = Arc::new(radian_host::RoleHooks::new(
         "<runtime>\n</runtime>",
         "",
-        "",
         None,
     ));
 
@@ -110,7 +89,7 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
     ));
 
     // The production function, called exactly as `open_session` calls it (with an empty
-    // command-hooks layer: this test is about the memory/skills order, and `commands`
+    // command-hooks layer: this test is about the section order, and `commands`
     // neither writes the prompt nor decides tools when unconfigured).
     let commands = Arc::new(radian_host::CommandHooks::new(
         &Default::default(),
@@ -138,7 +117,6 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         role,
         permissions,
         commands,
-        memory,
         skills_hooks,
         goal,
         facts,
@@ -156,17 +134,13 @@ async fn the_production_hook_chain_puts_memory_before_skills() {
         .unwrap();
     let prompt = request.system_prompt.expect("the hooks set the prompt");
 
-    let memory_at = prompt
-        .find("## Memory indexes")
-        .unwrap_or_else(|| panic!("no memory section in {prompt}"));
     let skills_at = prompt
         .find("## Skills (ADR 0025)")
         .unwrap_or_else(|| panic!("no skills section in {prompt}"));
     assert!(
-        memory_at < skills_at,
-        "the memory section must come before the skills section:\n{prompt}"
+        prompt.find("<role>").unwrap() < skills_at,
+        "the skills section must come after the base prompt:\n{prompt}"
     );
-    assert!(prompt.contains("tabs over spaces"), "{prompt}");
     assert!(prompt.contains("Say hello."), "{prompt}");
     // The `<session>` layer is last, after skills (ADR 0036: the static prefix stays
     // cacheable).

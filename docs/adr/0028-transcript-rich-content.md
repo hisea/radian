@@ -37,7 +37,7 @@ Status: accepted
   - **Head**: `• <tool> <title> · <meta> <state>`. `•` sits in the marker column in `frame` color. The tool name uses the `tool_name` role. The title uses text color. Meta is one level weak, separated by `·`, and shows only present data (`shell`: `exit 0 · 12.4s`, plus `timeout 600s` on timeout; other tools only duration; `patch` and `write` add `+N −M`). The state symbol sits at **row end**: success `✓` (`status_ok`), failure `×` (`status_error`), running pulse frame, cancelled writes `cancelled` (one level weak, no symbol).
   - A `shell` title is `$ <command>`. Multi-line commands fold with the block (see ADR 0035). Other tools use their own head-function summaries (`read path 100-160`, `patch path`, `list dir`, and more).
   - **Body**: each row is `│ ` (marker column, `frame` color) plus content. Output text is one level weak (`tool_result`). Error body text uses `tool_result_error` with `×` in the head.
-- **Built-in renderers** register at compile time (`crates/radian-tui/src/tools.rs` `renderer_for`): `shell`, `read`, `write` and `patch` (diff colors), `ask_user` (question record), memory files (ADR 0035: one card for a successful `write` or `patch` into a memory scope, one `memory used:` line for a `read`), MCP and other tools (JSON summary, else plain text). Deleted tools (`git_diff` and similar) use the generic renderer for old entries.
+- **Built-in renderers** register at compile time (`crates/radian-tui/src/tools.rs` `renderer_for`): `shell`, `read`, `write` and `patch` (diff colors), `ask_user` (question record), MCP and other tools (JSON summary, else plain text). Deleted tools (`git_diff` and similar) use the generic renderer for old entries.
 - **Three fold levels**: `tui.display.tool_output = "expanded" | "errors" | "collapsed"`, default `errors`. `tui.display.tool_preview_lines` default 5. `expanded` expands all. `errors` expands all failures and shows only the last `tool_preview_lines` rows for the rest. `collapsed` still expands all failures and shows only the head row for the rest, with `· N lines` added in meta. Global switch action is `toggle_tool_output`, default `Ctrl-O`.
 - **Small tools take one row**: successful `read`, `grep`, `glob`, and `list` show only the head row. `Ctrl-O` or a failing call draws the body.
 - No per-item fold exists: only the global switch plus R6 "auto-expand on search hit".
@@ -54,7 +54,7 @@ Status: accepted
 ### R5 Other entries
 
 - **Compaction summary message** (`origin.kind = "compaction_summary"`): collapsed shows one row `── context compacted (rev N, T_before → T_after) ──` and can expand to show summary content. The line starts at column 1 in `frame` color. Expanded summary text never changes.
-- Approval records, pending-request results, and memory index notices show as one `Notice`-style row.
+- Approval records and pending-request results show as one `Notice`-style row.
 - **User messages**: `❯ text`. `❯` and text are both accent (`user` is the foreground role). No background, no half-cell padding, no `▌` exists. They show as plain text with no Markdown render. `@` attachments still fold as `[file: P, N lines]`. **An image part shows one placeholder line `[image: <source name>, W×H, N KB]`** (name from the part's `annotations.name`, dimensions and size from its annotations, `N` in KiB rounded up). A pasted clipboard image has the source name `clipboard`; the action is `paste_image`, default `Ctrl-V`, rebindable. Journal replay shows the same
 line unchanged; `--export` keeps its `[<mime> image omitted]` text.
 

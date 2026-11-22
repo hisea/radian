@@ -155,7 +155,7 @@ impl App {
         })
     }
 
-    /// The `/memory` confirmation on screen, if any.
+    /// The `/model` confirmation on screen, if any.
     pub fn pending_command(&self) -> Option<&PendingCommand> {
         self.layers.iter().rev().find_map(|layer| match layer {
             Layer::Modal(Modal::ConfirmCommand(command)) => Some(command),

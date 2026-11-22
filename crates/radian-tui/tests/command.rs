@@ -1,15 +1,14 @@
-//! The slash-command layer in `App::update`: `/help`, `/memory`, the `//` escape, confirmations
-//! and unknown commands (ADR 0021 D7). No process is started.
+//! The slash-command layer in `App::update`: `/help`, the `//` escape and unknown commands. No
+//! process is started.
 //!
-//! The app is pure (ADR 0023 U3), so a `/memory` command becomes an effect; these tests run it
+//! The app is pure (ADR 0023 U3), so a command becomes an effect; these tests run the effects
 //! the way the event loop does and feed the result back in.
 
 use std::collections::VecDeque;
 
 mod common;
 
-use radian_host::memory::{MemoryService, ScopeSelection, WriteScope};
-use radian_tui::app::{App, Effect, EntryKind, Input, MemoryResult, TurnState};
+use radian_tui::app::{App, Effect, EntryKind, Input, TurnState};
 use radian_tui::mention::Expansion;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -21,16 +20,11 @@ fn scratch(label: &str) -> common::TempDir {
     common::TempDir::named(&format!("radian-tui-command-{label}"))
 }
 
-/// An `App` wired to a fresh project memory service.
-fn app_with_memory(label: &str) -> (common::TempDir, App, MemoryService) {
+/// An `App` and a scratch directory whose `ws` child is the session workspace.
+fn app_with_scratch(label: &str) -> (common::TempDir, App) {
     let dir = scratch(label);
-    let ws = dir.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    let service = MemoryService::open(&ws, dir.join("memory"));
-    service.create_project().unwrap();
-    let mut app = App::new("m", "s");
-    app.set_memory_enabled(true);
-    (dir, app, service)
+    std::fs::create_dir_all(dir.join("ws")).unwrap();
+    (dir, App::new("m", "s"))
 }
 
 fn notices(app: &App) -> Vec<String> {
@@ -43,33 +37,9 @@ fn notices(app: &App) -> Vec<String> {
 }
 
 /// Runs one effect the way the event loop does, for the arms these tests need, and returns the
-/// inputs its result produces. A `/memory` command runs through the shared executor, and a
-/// confirmation comes back as a `MemoryResult`.
-fn run_effect(
-    _workspace: &std::path::Path,
-    effect: &Effect,
-    service: &MemoryService,
-) -> Vec<Input> {
+/// inputs its result produces.
+fn run_effect(_workspace: &std::path::Path, effect: &Effect) -> Vec<Input> {
     match effect {
-        Effect::RunMemoryCommand { command, confirmed } => {
-            let json = command.json();
-            let result = match radian_host::memory::commands::execute(
-                service,
-                command.clone(),
-                *confirmed,
-                json,
-            ) {
-                Ok(output) => match output.needs_confirmation {
-                    Some(prompt) => MemoryResult::NeedsConfirmation {
-                        command: command.clone(),
-                        prompt,
-                    },
-                    None => MemoryResult::Output(radian_tui::command::output_notices(&output)),
-                },
-                Err(error) => MemoryResult::Failed(error.message),
-            };
-            vec![Input::MemoryCommandDone(result)]
-        }
         // A message with no `@` reference: the expansion is the identity.
         Effect::ExpandMentions { text } => vec![Input::MentionsExpanded(Ok(Expansion {
             text: text.clone(),
@@ -84,19 +54,14 @@ fn run_effect(
 /// Submits a line, runs its effects like the loop, and returns **every** effect it produced
 /// (the key's own, plus the ones the results produced). `dir` is the scratch root whose `ws`
 /// child is the session workspace the loop resolves relative import paths against.
-fn submit(
-    app: &mut App,
-    service: &MemoryService,
-    dir: &std::path::Path,
-    line: &str,
-) -> Vec<Effect> {
+fn submit(app: &mut App, dir: &std::path::Path, line: &str) -> Vec<Effect> {
     let workspace = dir.join("ws");
     app.input = line.into();
     let mut seen = Vec::new();
     let mut queue: VecDeque<Effect> = app.on_key(key(KeyCode::Enter)).effects.into();
     while let Some(effect) = queue.pop_front() {
         seen.push(effect.clone());
-        for input in run_effect(&workspace, &effect, service) {
+        for input in run_effect(&workspace, &effect) {
             queue.extend(app.update(input).effects);
         }
     }
@@ -105,15 +70,15 @@ fn submit(
 
 #[test]
 fn help_and_unbalanced_quotes_are_notices_and_send_nothing() {
-    let (dir, mut app, service) = app_with_memory("help");
-    assert!(submit(&mut app, &service, &dir, "/help").is_empty());
+    let (dir, mut app) = app_with_scratch("help");
+    assert!(submit(&mut app, &dir, "/help").is_empty());
     assert!(
-        notices(&app).iter().any(|n| n.contains("/memory")),
+        notices(&app).iter().any(|n| n.contains("/export")),
         "{:?}",
         notices(&app)
     );
 
-    assert!(submit(&mut app, &service, &dir, "/unknown").is_empty());
+    assert!(submit(&mut app, &dir, "/unknown").is_empty());
     assert!(
         notices(&app)
             .iter()
@@ -122,7 +87,7 @@ fn help_and_unbalanced_quotes_are_notices_and_send_nothing() {
         notices(&app)
     );
 
-    assert!(submit(&mut app, &service, &dir, "/memory add \"unbalanced").is_empty());
+    assert!(submit(&mut app, &dir, "/queue \"unbalanced").is_empty());
     assert!(
         notices(&app)
             .iter()
@@ -135,10 +100,10 @@ fn help_and_unbalanced_quotes_are_notices_and_send_nothing() {
 
 #[test]
 fn a_double_slash_sends_the_message_with_one_slash() {
-    let (dir, mut app, service) = app_with_memory("escape");
+    let (dir, mut app) = app_with_scratch("escape");
     // Two steps: the `@` expansion, then the send it turns into.
     assert_eq!(
-        submit(&mut app, &service, &dir, "//hi"),
+        submit(&mut app, &dir, "//hi"),
         vec![
             Effect::ExpandMentions { text: "/hi".into() },
             Effect::SendFollowup(radian_core::Message::user("/hi"))
@@ -146,7 +111,7 @@ fn a_double_slash_sends_the_message_with_one_slash() {
     );
     app.session.projection.set_turn(TurnState::Running);
     assert_eq!(
-        submit(&mut app, &service, &dir, "//steer me"),
+        submit(&mut app, &dir, "//steer me"),
         vec![
             Effect::ExpandMentions {
                 text: "/steer me".into()
@@ -154,140 +119,6 @@ fn a_double_slash_sends_the_message_with_one_slash() {
             Effect::Steer(radian_core::Message::user("/steer me"))
         ]
     );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_memory_read_runs_and_is_never_sent() {
-    let (dir, mut app, service) = app_with_memory("list");
-    service
-        .add(WriteScope::Project, "hello-world", "feedback")
-        .unwrap();
-    let effects = submit(&mut app, &service, &dir, "/memory list");
-    assert_eq!(effects.len(), 1, "{effects:?}");
-    match &effects[0] {
-        Effect::RunMemoryCommand { command, confirmed } => {
-            assert!(!confirmed);
-            assert!(format!("{command:?}").contains("List"), "{command:?}");
-        }
-        other => panic!("expected a memory command, got {other:?}"),
-    }
-    assert!(
-        notices(&app).iter().any(|n| n.contains("hello-world")),
-        "{:?}",
-        notices(&app)
-    );
-
-    // While a turn runs a read command still runs and does not steer the turn.
-    app.session.projection.set_turn(TurnState::Running);
-    let effects = submit(&mut app, &service, &dir, "/memory list");
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::RunMemoryCommand {
-                confirmed: false,
-                ..
-            }]
-        ),
-        "{effects:?}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_confirmed_forget_waits_for_y_and_n_keeps_the_record() {
-    let (dir, mut app, service) = app_with_memory("forget");
-    service.add(WriteScope::Project, "keep-me", "user").unwrap();
-
-    let effects = submit(&mut app, &service, &dir, "/memory forget keep-me");
-    assert!(
-        matches!(
-            effects.as_slice(),
-            [Effect::RunMemoryCommand {
-                confirmed: false,
-                ..
-            }]
-        ),
-        "{effects:?}"
-    );
-    assert!(app.pending_command().is_some(), "the command waits for y/n");
-    assert!(
-        notices(&app).iter().any(|n| n.contains("[y/N]")),
-        "{:?}",
-        notices(&app)
-    );
-
-    // `n` cancels; the record is untouched and nothing is run.
-    let cancel = app.on_key(key(KeyCode::Char('n')));
-    assert!(cancel.effects.is_empty(), "{:?}", cancel.effects);
-    assert!(app.pending_command().is_none());
-    assert_eq!(service.list(ScopeSelection::ProjectOnly).unwrap().len(), 1);
-
-    // `y` asks the loop to run it, and the result is the notice.
-    submit(&mut app, &service, &dir, "/memory forget keep-me");
-    let run = app.on_key(key(KeyCode::Char('y')));
-    assert!(
-        matches!(
-            run.effects.as_slice(),
-            [Effect::RunMemoryCommand {
-                confirmed: true,
-                ..
-            }]
-        ),
-        "{:?}",
-        run.effects
-    );
-    for effect in run.effects {
-        for input in run_effect(&dir.join("ws"), &effect, &service) {
-            app.update(input);
-        }
-    }
-    assert!(app.pending_command().is_none());
-    assert!(
-        notices(&app).iter().any(|n| n.contains("forgot")),
-        "{:?}",
-        notices(&app)
-    );
-    assert!(
-        service
-            .list(ScopeSelection::ProjectOnly)
-            .unwrap()
-            .is_empty()
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_memory_write_takes_effect_through_the_executor() {
-    let (dir, mut app, service) = app_with_memory("add");
-    let effects = submit(&mut app, &service, &dir, "/memory add note --type feedback");
-    assert!(
-        matches!(effects.as_slice(), [Effect::RunMemoryCommand { .. }]),
-        "{effects:?}"
-    );
-    let entries = service.list(ScopeSelection::ProjectOnly).unwrap();
-    assert_eq!(entries.len(), 1, "{entries:?}");
-    assert!(
-        notices(&app).iter().any(|n| n.contains("added note")),
-        "{:?}",
-        notices(&app)
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
-    let (dir, mut app, service) = app_with_memory("keys");
-    service.add(WriteScope::Project, "keep", "user").unwrap();
-    submit(&mut app, &service, &dir, "/memory forget keep");
-    app.on_key(key(KeyCode::Char('x')));
-    assert!(
-        app.input.is_empty(),
-        "a pending confirmation swallows typing"
-    );
-    assert!(app.pending_command().is_some());
-    app.on_key(key(KeyCode::Esc));
-    assert!(app.pending_command().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -299,35 +130,32 @@ fn a_pending_confirmation_keeps_keys_out_of_the_input_box() {
 #[test]
 fn trust_commands_become_effects_and_the_answers_become_notices() {
     use radian_host::trust::TrustWrite;
-    let (dir, mut app, service) = app_with_memory("trust");
+    let (dir, mut app) = app_with_scratch("trust");
+    assert_eq!(submit(&mut app, &dir, "/trust"), vec![Effect::TrustStatus]);
     assert_eq!(
-        submit(&mut app, &service, &dir, "/trust"),
+        submit(&mut app, &dir, "/trust status"),
         vec![Effect::TrustStatus]
     );
     assert_eq!(
-        submit(&mut app, &service, &dir, "/trust status"),
-        vec![Effect::TrustStatus]
-    );
-    assert_eq!(
-        submit(&mut app, &service, &dir, "/trust on"),
+        submit(&mut app, &dir, "/trust on"),
         vec![Effect::WriteTrust {
             write: TrustWrite::On
         }]
     );
     assert_eq!(
-        submit(&mut app, &service, &dir, "/trust off"),
+        submit(&mut app, &dir, "/trust off"),
         vec![Effect::WriteTrust {
             write: TrustWrite::Off
         }]
     );
     assert_eq!(
-        submit(&mut app, &service, &dir, "/trust forget"),
+        submit(&mut app, &dir, "/trust forget"),
         vec![Effect::WriteTrust {
             write: TrustWrite::Forget
         }]
     );
     // Anything else is a usage notice, never an effect.
-    assert!(submit(&mut app, &service, &dir, "/trust nope").is_empty());
+    assert!(submit(&mut app, &dir, "/trust nope").is_empty());
     assert!(
         notices(&app)
             .iter()
@@ -363,9 +191,9 @@ fn trust_commands_become_effects_and_the_answers_become_notices() {
 /// answer becomes one user message — or a steer while a turn runs. An error is a notice.
 #[test]
 fn a_skill_command_expands_through_the_host_then_sends() {
-    let (dir, mut app, service) = app_with_memory("skill");
+    let (dir, mut app) = app_with_scratch("skill");
     assert_eq!(
-        submit(&mut app, &service, &dir, "/skill:greet hi there"),
+        submit(&mut app, &dir, "/skill:greet hi there"),
         vec![Effect::ExpandSkill {
             name: "greet".into(),
             args: "hi there".into(),
@@ -386,7 +214,7 @@ fn a_skill_command_expands_through_the_host_then_sends() {
     // While a turn runs the same command steers.
     app.session.projection.set_turn(TurnState::Running);
     assert_eq!(
-        submit(&mut app, &service, &dir, "/skill:greet"),
+        submit(&mut app, &dir, "/skill:greet"),
         vec![Effect::ExpandSkill {
             name: "greet".into(),
             args: String::new(),
@@ -417,10 +245,10 @@ fn a_skill_command_expands_through_the_host_then_sends() {
 /// the TUI half: the command reaches the host with the right name and args.
 #[test]
 fn skill_init_and_review_commands_expand_through_the_host_then_send() {
-    let (dir, mut app, service) = app_with_memory("skill-builtins");
+    let (dir, mut app) = app_with_scratch("skill-builtins");
     // No args: the block stands alone.
     assert_eq!(
-        submit(&mut app, &service, &dir, "/skill:init"),
+        submit(&mut app, &dir, "/skill:init"),
         vec![Effect::ExpandSkill {
             name: "init".into(),
             args: String::new(),
@@ -439,7 +267,7 @@ fn skill_init_and_review_commands_expand_through_the_host_then_send() {
 
     // With a target: it travels as the args (`$ARGUMENTS` in the `review` body).
     assert_eq!(
-        submit(&mut app, &service, &dir, "/skill:review main"),
+        submit(&mut app, &dir, "/skill:review main"),
         vec![Effect::ExpandSkill {
             name: "review".into(),
             args: "main".into(),
@@ -461,11 +289,8 @@ fn skill_init_and_review_commands_expand_through_the_host_then_send() {
 /// `/skills` is an effect too: the host owns discovery, and the answer is shown as notices.
 #[test]
 fn a_skills_command_lists_through_the_host() {
-    let (dir, mut app, service) = app_with_memory("skills");
-    assert_eq!(
-        submit(&mut app, &service, &dir, "/skills"),
-        vec![Effect::ListSkills]
-    );
+    let (dir, mut app) = app_with_scratch("skills");
+    assert_eq!(submit(&mut app, &dir, "/skills"), vec![Effect::ListSkills]);
     app.update(Input::SessionDone(vec!["greet: Say hello.".into()]));
     assert!(
         notices(&app)
@@ -482,25 +307,25 @@ fn a_skills_command_lists_through_the_host() {
 /// the forms.
 #[test]
 fn a_jobs_command_lists_or_kills_through_the_host() {
-    let (dir, mut app, service) = app_with_memory("jobs");
+    let (dir, mut app) = app_with_scratch("jobs");
     assert_eq!(
-        submit(&mut app, &service, &dir, "/jobs"),
+        submit(&mut app, &dir, "/jobs"),
         vec![Effect::OpenInspector {
             page: Some(radian_tui::command::InspectorPage::Jobs)
         }]
     );
     assert_eq!(
-        submit(&mut app, &service, &dir, "/jobs kill job-1"),
+        submit(&mut app, &dir, "/jobs kill job-1"),
         vec![Effect::Jobs(radian_tui::command::JobsRequest::Kill(
             "job-1".into()
         ))]
     );
     assert_eq!(
-        submit(&mut app, &service, &dir, "/jobs kill all"),
+        submit(&mut app, &dir, "/jobs kill all"),
         vec![Effect::Jobs(radian_tui::command::JobsRequest::KillAll)]
     );
     // Anything else is a usage notice, not an effect.
-    assert!(submit(&mut app, &service, &dir, "/jobs nope").is_empty());
+    assert!(submit(&mut app, &dir, "/jobs nope").is_empty());
     assert!(
         notices(&app).iter().any(|n| n.contains("usage: /jobs")),
         "{:?}",
@@ -652,38 +477,4 @@ fn a_ready_level_with_a_prefix_sibling_does_not_arm_on_an_exact_word() {
         }
         other => panic!("expected `Ready`: {other:?}"),
     }
-}
-
-/// ADR 0021 D7: `/memory off` then `/memory on` each answer with one status line, and the
-/// switch reaches the loop as an effect. `/memory search` is a removed command: the usage
-/// error names the current set.
-#[test]
-fn memory_off_and_on_show_a_status_line_and_search_names_the_current_set() {
-    let (dir, mut app, service) = app_with_memory("switch");
-
-    submit(&mut app, &service, &dir, "/memory off");
-    assert!(
-        notices(&app)
-            .iter()
-            .any(|line| line.starts_with("memory off:")),
-        "{:?}",
-        notices(&app)
-    );
-    submit(&mut app, &service, &dir, "/memory on");
-    let lines = notices(&app);
-    assert!(
-        lines.iter().any(|line| line.starts_with("memory on:")),
-        "{lines:?}"
-    );
-
-    submit(&mut app, &service, &dir, "/memory search x");
-    let lines = notices(&app);
-    let usage = lines
-        .iter()
-        .find(|line| line.contains("were removed"))
-        .unwrap_or_else(|| panic!("no removed-command usage line: {lines:?}"));
-    assert!(usage.contains("list"), "{usage}");
-    assert!(usage.contains("merge"), "{usage}");
-    assert!(!usage.contains("search,"), "{usage}");
-    let _ = std::fs::remove_dir_all(&dir);
 }

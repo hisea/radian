@@ -338,6 +338,31 @@ tool_result = "#010203"
         );
     }
 
+    /// An old theme file that still sets `ctx_memory` (the removed `/context` memory cell) loads:
+    /// the role is unknown now, so it is ignored with one warning and the rest of the file applies.
+    #[test]
+    fn an_old_theme_with_ctx_memory_still_loads() {
+        let (theme, warnings) = loaded(
+            r##"
+[roles]
+ctx_memory = "#ff5500"
+tool_call = "#010203"
+"##,
+        );
+        assert_ne!(
+            theme.tool_call.fg,
+            Theme::dark().tool_call.fg,
+            "the rest of the file applies"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("unknown role(s) ctx_memory")),
+            "{warnings:?}"
+        );
+    }
+
     /// A missing variable warns once; a bad value warns and the role keeps the built-in; an
     /// unknown role name is ignored with one warning.
     #[test]

@@ -14,7 +14,7 @@ Status: accepted
 
 ### 2. Remembers per project
 
-- Confirm offers "this time only" or "this project from now on". Records live in `~/.radian/access/access.json` (the user own directory, project identity per ADR 0021). Records stay **never in repo files**. Else a strange repo ships one `full` row, and its opener runs with no sandbox.
+- Confirm offers "this time only" or "this project from now on". Records live in `~/.radian/access/access.json` (the user own directory, project identity: the git common directory of the repository that holds the workspace, so a repository's worktrees share one record, or the workspace's canonical path outside a repository). Records stay **never in repo files**. Else a strange repo ships one `full` row, and its opener runs with no sandbox.
 - Project-level `<workspace>/.radian/config.toml` can write `profile = "workspace"`, meaning "this project wants the sandbox". It **only narrows**, and applies trusted or not. Writing `full` is a config error, warns and ignores.
 - Both sides take the narrower: user record `full` plus project claim `workspace` yields effective `workspace`. Any side wanting sandbox means sandbox.
 - An effective startup tier from records or project claims marks both the startup line and footer. Examples are `full · no sandbox (project)` and `workspace · sandbox on (project)`. One more `/access` switch changes or clears the record.

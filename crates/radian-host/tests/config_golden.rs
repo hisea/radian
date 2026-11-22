@@ -335,54 +335,18 @@ fn edge_cases() -> Vec<(String, String)> {
             "skills.disabled.not_array",
             "schema_version = 1\n[skills]\ndisabled = \"a\"\n",
         ),
-        // ---- memory (ADR 0021 D6) ----
+        // ---- memory (retired, ADR 0021): one warning, never a refusal ----
         (
             "memory.section_not_a_table",
             "schema_version = 1\nmemory = 3\n",
         ),
         (
-            "memory.enabled.false",
-            "schema_version = 1\n[memory]\nenabled = false\n",
+            "memory.old_keys",
+            "schema_version = 1\n[memory]\nenabled = false\nscopes = [\"global\"]\nindex_max_lines = 10\n",
         ),
         (
-            "memory.enabled.wrong_type",
-            "schema_version = 1\n[memory]\nenabled = 3\n",
-        ),
-        (
-            "memory.scopes.ok",
-            "schema_version = 1\n[memory]\nscopes = [\"global\"]\n",
-        ),
-        (
-            "memory.scopes.unknown",
-            "schema_version = 1\n[memory]\nscopes = [\"session\"]\n",
-        ),
-        (
-            "memory.scopes.wrong_type",
-            "schema_version = 1\n[memory]\nscopes = \"project\"\n",
-        ),
-        (
-            "memory.index_max_lines.ok",
-            "schema_version = 1\n[memory]\nindex_max_lines = 10\n",
-        ),
-        (
-            "memory.index_max_lines.zero",
-            "schema_version = 1\n[memory]\nindex_max_lines = 0\n",
-        ),
-        (
-            "memory.index_max_lines.wrong_type",
-            "schema_version = 1\n[memory]\nindex_max_lines = \"x\"\n",
-        ),
-        (
-            "memory.index_max_bytes.ok",
-            "schema_version = 1\n[memory]\nindex_max_bytes = 1024\n",
-        ),
-        (
-            "memory.index_max_bytes.zero",
-            "schema_version = 1\n[memory]\nindex_max_bytes = 0\n",
-        ),
-        (
-            "memory.index_max_bytes.wrong_type",
-            "schema_version = 1\n[memory]\nindex_max_bytes = \"x\"\n",
+            "memory.old_wrong_types",
+            "schema_version = 1\n[memory]\nenabled = 3\nscopes = \"x\"\nindex_max_lines = 0\n",
         ),
         (
             "memory.retired_injection",

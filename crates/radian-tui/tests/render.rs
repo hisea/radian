@@ -2800,8 +2800,8 @@ fn the_structured_label_split_is_one_rule() {
         Some(("profile:", " workspace · sandbox macos"))
     );
     assert_eq!(
-        split_label("[memory] no project linked"),
-        Some(("[memory]", " no project linked"))
+        split_label("[session] 1 skill declares"),
+        Some(("[session]", " 1 skill declares"))
     );
     assert_eq!(split_label("context: C ?"), Some(("context:", " C ?")));
     // No label: a colon far in, an empty prefix, a `[` that never closes.

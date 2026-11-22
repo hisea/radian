@@ -1072,7 +1072,7 @@ fn the_tui_attach_path_folds_the_journal_through_the_shared_fold() {
     let lines = journal_with_a_tool_call();
     let (scratch, mut view) = open_view("shared-fold", "shared", &lines);
     let path = scratch.file("shared.jsonl");
-    let fold = radian_host::transcript::AttachFold::open(&path, None).expect("the fold opens");
+    let fold = radian_host::transcript::AttachFold::open(&path).expect("the fold opens");
 
     let expected: Vec<(radian_host::transcript::EntryKind, &str)> = vec![
         (radian_host::transcript::EntryKind::User, "read it"),
@@ -1126,7 +1126,7 @@ fn the_resume_mapping_and_the_shared_fold_agree_on_a_journal() {
     for message in view.history() {
         app.push_message(message);
     }
-    let folded = radian_host::transcript::AttachFold::open(view.path(), None)
+    let folded = radian_host::transcript::AttachFold::open(view.path())
         .expect("the fold opens")
         .entries()
         .to_vec();
@@ -1190,7 +1190,7 @@ fn the_resume_mapping_keeps_the_folded_image_facts() {
     for message in view.history() {
         app.push_message(message);
     }
-    let folded = radian_host::transcript::AttachFold::open(view.path(), None)
+    let folded = radian_host::transcript::AttachFold::open(view.path())
         .expect("the fold opens")
         .entries()
         .to_vec();

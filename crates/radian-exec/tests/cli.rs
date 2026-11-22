@@ -1,7 +1,7 @@
 //! The headless command (`radian exec`) against a mock model server and the real MCP
 //! fixture, as subprocesses. It used to drive the `agent` binary (ADR 0032): every
 //! `agent <args>` is now `radian exec <args>`, and the management subcommands are top-level
-//! (`radian memory`, `radian login`, `radian config`).
+//! (`radian trust`, `radian login`, `radian config`).
 
 mod common;
 
@@ -168,7 +168,7 @@ fn spawn_radian(args: &[&str], envs: &[(&str, &str)]) -> Child {
     spawn_radian_command(true, args, envs)
 }
 
-/// Spawns `radian <args>` (no `exec`): the top-level management commands (`radian memory`,
+/// Spawns `radian <args>` (no `exec`): the top-level management commands (`radian trust`,
 /// `radian login`, `radian logout`, `radian config`), which run the same code as
 /// `radian exec <command>` (ADR 0032).
 fn spawn_radian_top(args: &[&str], envs: &[(&str, &str)]) -> Child {
@@ -224,23 +224,6 @@ async fn feed_and_wait(mut child: Child, input: &str) -> (i32, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
-}
-
-/// The number of `TurnFinished` events across the session files in `sessions`.
-fn journal_turns(sessions: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(sessions) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-        .map(|entry| {
-            std::fs::read_to_string(entry.path())
-                .unwrap_or_default()
-                .matches("\"event\":\"TurnFinished\"")
-                .count()
-        })
-        .sum()
 }
 
 fn sigint(child: &Child) {
@@ -1710,7 +1693,7 @@ async fn system_prompt_is_sent() {
 #[tokio::test]
 async fn the_default_role_layers_are_sent() {
     let server = MockServer::start(vec![text_reply("ok")]).await;
-    // A private home: the mounted tools must not depend on the machine's real memory.
+    // A private home: the mounted tools must not depend on the machine's real home.
     let home = scratch("default-role");
     let (code, _, _) = feed_and_wait(
         spawn_radian(
@@ -1733,12 +1716,9 @@ async fn the_default_role_layers_are_sent() {
         content.contains("You are radian, a coding agent"),
         "the default role: {content}"
     );
-    // ADR 0021 D7: an empty memory mounts no search, so the tool definitions name no
-    // memory tool at all.
-    assert!(
-        !content.contains("memory_search"),
-        "the mounted tools: {content}"
-    );
+    // ADR 0021 (removed): no memory section, no memory rules.
+    assert!(!content.contains("<memory>"), "{content}");
+    assert!(!content.contains("Write a memory file"), "{content}");
     assert!(content.trim_end().ends_with("</session>"), "{content}");
     assert!(content.contains("model: m"), "{content}");
 }
@@ -2273,105 +2253,6 @@ async fn built_in_read_outside_the_workspace_reads_in_the_full_tier() {
     assert!(
         result.contains("FULL-TIER-SENTINEL"),
         "the model sees the outside file: {result}"
-    );
-}
-
-/// ADR 0039 decision 4 end to end: a scripted model `write`s a memory file and `read`s it
-/// back in `radian exec --profile workspace`. The journal settles both calls without error,
-/// and the file on disk carries the bytes — the file tools' half of the memory opening.
-#[tokio::test]
-async fn a_scripted_model_writes_and_reads_a_memory_file_in_the_workspace_tier() {
-    // `common::process_dir`, not `scratch`: this test never binds its own Unix socket, and the
-    // system temp dir keeps it runnable inside the `workspace` sandbox too (a `/tmp` scratch
-    // is refused there). The session's control socket may fail to bind on a long macOS temp
-    // path; that is a warning, never a startup refusal (ADR 0043).
-    let dir = common::process_dir("radian-exec-memory-roots");
-    let ws = dir.join("ws");
-    let home = dir.join("radian");
-    let sessions = dir.join("sessions");
-    for path in [&ws, &home, &sessions] {
-        std::fs::create_dir_all(path).unwrap();
-    }
-    // The host creates `memory/global/` when it builds the file tools; the model writes a
-    // file straight into it, with no memory command in between.
-    let memory_file = home.join("memory/global/e2e.md");
-    let target = serde_json::to_string(memory_file.to_str().unwrap()).unwrap();
-
-    let server = MockServer::start(vec![
-        tool_reply(
-            "w1",
-            "write",
-            &format!("{{\"path\":{target},\"content\":\"E2E-MEMORY\\n\"}}"),
-        ),
-        tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
-        text_reply("done"),
-    ])
-    .await;
-
-    let envs = [
-        ("RADIAN_HOME", home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", sessions.to_str().unwrap()),
-    ];
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                ws.to_str().unwrap(),
-                "--profile",
-                "workspace",
-                "--session-id",
-                "memory-files",
-                "--yes",
-                "-p",
-                "write and read a memory file",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(
-        std::fs::read_to_string(&memory_file).unwrap(),
-        "E2E-MEMORY\n",
-        "the memory file was written where the model named it"
-    );
-
-    // Both tool calls settled without error in the journal, and the read returned the bytes
-    // the write had just written.
-    let raw = std::fs::read_to_string(sessions.join("memory-files.jsonl")).unwrap();
-    let settled: Vec<Value> = raw
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|value| value["event"] == "ToolExecutionSettled")
-        .map(|value| value["data"].clone())
-        .collect();
-    let settled_for = |call: &str| -> Value {
-        settled
-            .iter()
-            .find(|data| data["call_id"] == call)
-            .unwrap_or_else(|| panic!("no settled event for {call}: {settled:#?}"))
-            .clone()
-    };
-    assert_eq!(settled.len(), 2, "one settled event per call: {settled:#?}");
-    for call in ["w1", "r1"] {
-        assert_eq!(
-            settled_for(call)["result"]["is_error"],
-            false,
-            "{call} succeeded: {}",
-            settled_for(call)
-        );
-    }
-    assert!(
-        settled_for("r1").to_string().contains("E2E-MEMORY"),
-        "the read returned the written bytes: {}",
-        settled_for("r1")
     );
 }
 
@@ -7248,2264 +7129,6 @@ async fn workspace_shell_cannot_read_a_moved_sessions_directory() {
     );
 }
 
-// ---------- `radian memory` (ADR 0021 D7/D8) ----------
-
-/// An isolated `radian memory` environment: a workspace, a `RADIAN_HOME`, and a sessions
-/// directory that must stay free of `.jsonl` files.
-struct MemoryEnv {
-    dir: ScratchDir,
-    ws: PathBuf,
-    home: PathBuf,
-    sessions: PathBuf,
-}
-
-impl MemoryEnv {
-    fn new(name: &str) -> Self {
-        let dir = ScratchDir(common::process_dir(&format!("radian-exec-memory-{name}")));
-        Self::with_dir(dir)
-    }
-
-    /// Like [`MemoryEnv::new`], under `$TMPDIR` (which the workspace sandbox can write), for a
-    /// test that must run inside it: `/tmp` is denied there.
-    fn sandboxed(name: &str) -> Self {
-        let dir = ScratchDir(common::process_dir(&format!("radian-exec-{name}")));
-        Self::with_dir(dir)
-    }
-
-    fn with_dir(dir: ScratchDir) -> Self {
-        let ws = dir.join("ws");
-        let home = dir.join("radian");
-        let sessions = dir.join("sessions");
-        for path in [&ws, &home, &sessions] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        Self {
-            dir,
-            ws,
-            home,
-            sessions,
-        }
-    }
-
-    /// A second workspace under the same scratch (a moved repository, a worktree).
-    fn workspace(&self, name: &str) -> PathBuf {
-        let path = self.dir.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    async fn run(&self, args: &[&str]) -> (i32, String, String) {
-        self.run_in(&self.ws, args).await
-    }
-
-    async fn run_in(&self, ws: &Path, args: &[&str]) -> (i32, String, String) {
-        self.run_with_input_in(ws, args, "").await
-    }
-
-    async fn run_with_input_in(
-        &self,
-        ws: &Path,
-        args: &[&str],
-        input: &str,
-    ) -> (i32, String, String) {
-        // The top-level `radian memory --workspace … <command>` (ADR 0032:
-        // `radian memory` and `radian exec memory` run the same code).
-        let mut full: Vec<String> = vec![
-            "memory".into(),
-            "--workspace".into(),
-            ws.to_string_lossy().into_owned(),
-        ];
-        full.extend(args.iter().map(|arg| (*arg).to_owned()));
-        let refs: Vec<&str> = full.iter().map(String::as_str).collect();
-        let envs = [
-            ("RADIAN_HOME", self.home.to_str().unwrap()),
-            ("RADIAN_SESSION_DIR", self.sessions.to_str().unwrap()),
-        ];
-        feed_and_wait(spawn_radian_top(&refs, &envs), input).await
-    }
-
-    /// The directory of the only project in this home.
-    #[allow(dead_code)]
-    fn project_dir(&self) -> PathBuf {
-        let projects = self.home.join("memory/projects");
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&projects)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        dirs.sort();
-        assert_eq!(dirs.len(), 1, "expected one project, found {dirs:?}");
-        dirs[0].clone()
-    }
-}
-
-/// Writes one memory record file by hand: the store's own writer always stamps `created` and
-/// `modified` with now, and the aging tests need controlled timestamps.
-fn write_memory_record(
-    dir: &Path,
-    name: &str,
-    last_used: Option<&str>,
-    created: &str,
-    description: &str,
-) -> PathBuf {
-    std::fs::create_dir_all(dir).unwrap();
-    let last = last_used
-        .map(|value| format!("last_used: {value}\n"))
-        .unwrap_or_default();
-    let path = dir.join(format!("{name}.md"));
-    std::fs::write(
-        &path,
-        format!(
-            "---\nname: {name}\ndescription: {description}\ntype: project\nsource: model\n\
-             created: {created}\nmodified: {created}\n{last}---\nthe body\n"
-        ),
-    )
-    .unwrap();
-    path
-}
-
-fn git_available() -> bool {
-    std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success())
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-/// A memory command needs no `--model`, reads no key and creates no session file (ADR 0021
-/// D7). `--workspace` (a top-level flag, before `memory`) is enough.
-#[tokio::test]
-async fn memory_commands_do_not_need_a_model_or_create_a_session() {
-    let env = MemoryEnv::new("mem-no-model");
-    let (code, stdout, stderr) = env.run(&["project"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("identity:"), "{stdout}");
-    assert!(!stderr.contains("--model"), "{stderr}");
-    assert!(
-        jsonl_snapshot(&env.sessions).is_empty(),
-        "a memory command created a session file"
-    );
-}
-
-#[tokio::test]
-async fn memory_add_list_show_edit_round_trip() {
-    let env = MemoryEnv::new("mem-roundtrip");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let (code, stdout, stderr) = env.run(&["add", "--type", "feedback", "style"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("added style"), "{stdout}");
-    assert!(
-        stdout.contains("no editor was opened"),
-        "off a terminal, add says so: {stdout}"
-    );
-
-    // The file exists with the skeleton: source user, created/modified, empty body.
-    let project = linked_project(&env, &env.ws).await;
-    let path = env
-        .home
-        .join("memory/projects")
-        .join(&project)
-        .join("style.md");
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("source: user"), "{text}");
-    assert!(text.contains("type: feedback"), "{text}");
-    assert!(text.contains("created:"), "{text}");
-    assert!(text.contains("modified:"), "{text}");
-    let index = std::fs::read_to_string(path.with_file_name("MEMORY.md")).unwrap();
-    assert!(index.contains("[style](style.md)"), "{index}");
-
-    let (code, stdout, stderr) = env.run(&["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stdout.contains("project\tstyle\tfeedback\tuser"),
-        "{stdout}"
-    );
-
-    let (code, stdout, _) = env.run(&["show", "style"]).await;
-    assert_eq!(code, 0);
-    assert!(
-        stdout.contains("name: style"),
-        "show prints the file as stored: {stdout}"
-    );
-
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
-    let record = &value.as_array().unwrap()[0];
-    assert_eq!(record["name"], "style");
-    assert_eq!(record["type"], "feedback");
-    assert_eq!(record["source"], "user");
-    assert!(record["created"].is_string());
-    assert!(record["modified"].is_string());
-
-    // `edit` without an editor on a pipe prints the path and says no editor ran.
-    let (code, stdout, stderr) = env.run(&["edit", "style"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("style.md"), "{stdout}");
-    assert!(stdout.contains("no editor was opened"), "{stdout}");
-}
-
-#[tokio::test]
-async fn memory_add_refuses_a_bad_name_before_registering_an_unlinked_git_project() {
-    let env = MemoryEnv::new("mem-add-bad-name-unlinked-git");
-    // A `.git` directory makes the workspace a project workspace that `add` would otherwise
-    // register automatically. The bad name must be refused before that write.
-    std::fs::create_dir_all(env.ws.join(".git")).unwrap();
-
-    let (code, stdout, stderr) = env.run(&["add", "Bad Name"]).await;
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
-    assert!(
-        !stdout.contains("created project"),
-        "a refused name printed the created-project notice: {stdout}"
-    );
-    assert!(
-        !env.home.join("memory/projects.jsonl").exists(),
-        "a refused name registered a project"
-    );
-    assert!(
-        !env.home.join("memory/projects").exists(),
-        "a refused name created a project directory"
-    );
-}
-
-#[tokio::test]
-async fn memory_add_refuses_a_bad_name_before_an_unlinked_workspace_refusal() {
-    let env = MemoryEnv::new("mem-add-bad-name-unlinked");
-    let (code, _, stderr) = env.run(&["add", "Bad Name"]).await;
-    assert_eq!(
-        code, 2,
-        "the name rule wins over the workspace refusal: {stderr}"
-    );
-    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
-    assert!(
-        !stderr.contains("not a project workspace"),
-        "a bad name is a usage error, not a project refusal: {stderr}"
-    );
-}
-
-/// Edge 5: `split` reports a name already present in the target and moves neither file.
-#[tokio::test]
-async fn memory_split_reports_a_collision_and_moves_nothing() {
-    let env = MemoryEnv::new("mem-split-collision");
-    let a = env.workspace("split-a");
-    let b = env.workspace("split-b");
-    std::fs::create_dir_all(a.join(".git")).unwrap();
-    std::fs::create_dir_all(b.join(".git")).unwrap();
-    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (_, _, stderr) = env.run_in(&a, &["add", "note"]).await;
-    assert_eq!(stderr, "", "{stderr}");
-    let (_, _, stderr) = env.run_in(&b, &["add", "note"]).await;
-    assert_eq!(stderr, "", "{stderr}");
-    let project_a = linked_project(&env, &a).await;
-    let project_b = linked_project(&env, &b).await;
-
-    let (code, out, stderr) = env
-        .run_in(&a, &["split", "--yes", &project_a, &project_b, "note"])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        out.contains("conflict: note exists in the target; it was not moved"),
-        "the collision is reported: {out}"
-    );
-    let (_, out, _) = env.run_in(&a, &["list"]).await;
-    assert!(out.contains("note"), "the source file stays: {out}");
-    let (_, out, _) = env.run_in(&b, &["list"]).await;
-    assert_eq!(
-        out.lines().filter(|line| line.contains("\tnote\t")).count(),
-        1,
-        "the target copied nothing: {out}"
-    );
-}
-
-/// A `split` name outside the record rule is a usage error (exit 2), and a valid name
-/// earlier in the same list does not move.
-#[tokio::test]
-async fn memory_split_with_a_bad_name_exits_two_and_moves_nothing() {
-    let env = MemoryEnv::new("mem-split-bad-name");
-    let a = env.workspace("split-bad-a");
-    let b = env.workspace("split-bad-b");
-    std::fs::create_dir_all(a.join(".git")).unwrap();
-    std::fs::create_dir_all(b.join(".git")).unwrap();
-    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (_, _, stderr) = env.run_in(&a, &["add", "note"]).await;
-    assert_eq!(stderr, "", "{stderr}");
-    let project_a = linked_project(&env, &a).await;
-    let project_b = linked_project(&env, &b).await;
-
-    let (code, _, stderr) = env
-        .run_in(
-            &a,
-            &["split", "--yes", &project_a, &project_b, "note", "SESSIONS"],
-        )
-        .await;
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("invalid memory record name"), "{stderr}");
-    assert_eq!(
-        stderr.matches("invalid memory record name").count(),
-        1,
-        "one refusal, one prefix: {stderr}"
-    );
-    let (_, out, _) = env.run_in(&a, &["list"]).await;
-    assert!(out.contains("note"), "a refused split moves nothing: {out}");
-    let (_, out, _) = env.run_in(&b, &["list"]).await;
-    assert!(!out.contains("note"), "the target received nothing: {out}");
-}
-
-#[tokio::test]
-async fn memory_add_refuses_a_bad_or_existing_name_and_writes_nothing() {
-    let env = MemoryEnv::new("mem-add-refusal");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let (code, _, stderr) = env.run(&["add", "Bad Name"]).await;
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("a-z, 0-9 and -"), "{stderr}");
-    assert_eq!(
-        stderr.matches("invalid memory record name").count(),
-        1,
-        "one refusal, one prefix: {stderr}"
-    );
-
-    let (code, _, stderr) = env.run(&["add", "note"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run(&["add", "note"]).await;
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("already exists"), "{stderr}");
-    let (_, stdout, _) = env.run(&["list"]).await;
-    assert_eq!(stdout.lines().count(), 1, "{stdout}");
-}
-
-#[tokio::test]
-async fn memory_forget_needs_confirmation_off_a_terminal() {
-    let env = MemoryEnv::new("mem-forget");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, _, _) = env.run(&["add", "keep"]).await;
-
-    let (code, _, stderr) = env.run(&["forget", "keep"]).await;
-    assert_eq!(code, 2, "non-tty without --yes refuses: {stderr}");
-    assert!(stderr.contains("--yes"), "{stderr}");
-    let (code, _, _) = env.run(&["show", "keep"]).await;
-    assert_eq!(code, 0, "the file is still there");
-
-    let (code, stdout, stderr) = env.run(&["forget", "--yes", "keep"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("forgot"), "{stdout}");
-    let (code, _, _) = env.run(&["show", "keep"]).await;
-    assert_eq!(code, 1, "the file is gone");
-}
-
-#[tokio::test]
-async fn the_removed_memory_commands_exit_two_and_name_the_current_set() {
-    let env = MemoryEnv::new("mem-removed");
-    for command in ["purge", "export", "confirm"] {
-        let (code, _, stderr) = env.run(&[command]).await;
-        assert_eq!(code, 2, "{command}: {stderr}");
-        assert!(
-            stderr.contains(
-                "list, show, stale, add, edit, forget, open, project, relink, split, merge"
-            ),
-            "{command}: {stderr}"
-        );
-        assert!(stderr.contains("were removed"), "{command}: {stderr}");
-    }
-}
-
-#[tokio::test]
-async fn memory_open_off_a_terminal_prints_the_directory_and_exits_zero() {
-    let env = MemoryEnv::new("mem-open");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let (code, stdout, stderr) = env.run(&["open"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let expected = env.home.join("memory/projects").join(project);
-    assert_eq!(stdout.trim(), expected.to_string_lossy(), "{stdout}");
-}
-
-#[tokio::test]
-async fn memory_show_of_a_bad_file_names_the_line_and_list_still_lists_the_others() {
-    let env = MemoryEnv::new("mem-bad-frontmatter");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, _, _) = env.run(&["add", "good"]).await;
-    let project = linked_project(&env, &env.ws).await;
-    let bad = env
-        .home
-        .join("memory/projects")
-        .join(&project)
-        .join("bad.md");
-    std::fs::write(
-        &bad,
-        "---\nname: bad\ndescription: x\ntype: nope\nsource: user\ncreated: 2026-10-31T12:00:00.000000Z\nmodified: 2026-10-31T12:00:00.000000Z\n---\nbody\n",
-    )
-    .unwrap();
-
-    let (code, _, stderr) = env.run(&["show", "bad"]).await;
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("line 4"),
-        "the error names the line: {stderr}"
-    );
-    let (code, stdout, stderr) = env.run(&["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("good"), "{stdout}");
-    assert!(stdout.contains("unreadable"), "{stdout}");
-}
-
-#[tokio::test]
-async fn memory_json_output_is_parseable_and_has_stable_fields() {
-    let env = MemoryEnv::new("mem-json");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let (_, _, _) = env.run(&["add", "json-note", "--type", "reference"]).await;
-
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("list --json is JSON");
-    let record = &value.as_array().unwrap()[0];
-    for field in [
-        "scope",
-        "name",
-        "description",
-        "type",
-        "source",
-        "created",
-        "modified",
-    ] {
-        assert!(record.get(field).is_some(), "missing {field}: {record}");
-    }
-    assert_eq!(record["name"], "json-note");
-    assert_eq!(record["type"], "reference");
-    assert_eq!(record["source"], "user");
-    assert_eq!(record["scope"], "project");
-
-    let (code, stdout, _) = env.run(&["show", "json-note", "--json"]).await;
-    assert_eq!(code, 0);
-    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["frontmatter"]["name"], "json-note");
-    assert_eq!(value["body"], "");
-
-    let (code, stdout, _) = env.run(&["project", "--json"]).await;
-    assert_eq!(code, 0);
-    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(value["state"], "linked");
-    assert!(value["project_id"].is_string());
-    assert!(value["identity_key"].is_string());
-}
-
-#[tokio::test]
-async fn memory_unlinked_workspace_refuses_project_writes_and_lists_global() {
-    let env = MemoryEnv::new("mem-unlinked");
-    let (code, _, stderr) = env.run(&["add", "--global", "global-note"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, stdout, stderr) = env.run(&["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("global-note"), "{stdout}");
-    assert!(
-        stderr.contains("not linked"),
-        "a default-scope list says the workspace is unlinked: {stderr}"
-    );
-    assert!(
-        stderr.contains("no candidate projects"),
-        "no candidate projects yet: {stderr}"
-    );
-
-    let (code, _, stderr) = env.run(&["add", "project-note"]).await;
-    assert_eq!(code, 1, "{stderr}");
-    assert!(
-        stderr.contains("not a project workspace"),
-        "the workspace is not a git repository, so it is not a project workspace: {stderr}"
-    );
-    assert!(
-        stderr.contains("not saved"),
-        "the refusal says the memory was not saved: {stderr}"
-    );
-    assert!(
-        !stderr.contains("--global"),
-        "the refusal must not point at another scope: {stderr}"
-    );
-    assert!(
-        !env.home.join("memory/projects").exists(),
-        "a refused Project write created a project directory"
-    );
-
-    let (code, _, _) = env.run(&["list", "--project"]).await;
-    assert_eq!(code, 1, "a Project-only read needs a project");
-}
-
-/// Edge 4: a user command never touches `last_used`. `show` reads the record store, not the
-/// memory files, and the file's bytes stay exactly as they were.
-#[tokio::test]
-async fn memory_show_does_not_touch_last_used() {
-    let env = MemoryEnv::sandboxed("mem-show-last-used");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let dir = env.home.join("memory/projects").join(&project);
-    let path = write_memory_record(
-        &dir,
-        "note",
-        Some("2020-01-01T00:00:00.000000Z"),
-        "2020-01-01T00:00:00.000000Z",
-        "a note",
-    );
-    let before = std::fs::read_to_string(&path).unwrap();
-
-    let (code, stdout, stderr) = env.run(&["show", "--project", "note"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("the body"), "{stdout}");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        before,
-        "`show` changed the memory file"
-    );
-}
-
-/// Edges 5, 6, 8 and 9: `stale` lists old `last_used`, never-read files by `created`, carries
-/// the frontmatter fields in JSON, and reports a malformed file as unreadable beside the rest.
-#[tokio::test]
-async fn memory_stale_lists_aged_files_and_speaks_json() {
-    let env = MemoryEnv::sandboxed("mem-stale");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let dir = env.home.join("memory/projects").join(&project);
-    let old = "2020-01-01T00:00:00.000000Z";
-    let now = radian_memory::now_utc();
-    write_memory_record(&dir, "old-read", Some(old), old, "read long ago");
-    write_memory_record(&dir, "recent-read", Some(&now), old, "read just now");
-    write_memory_record(
-        &dir,
-        "unread-old",
-        None,
-        old,
-        "never read, created long ago",
-    );
-    write_memory_record(
-        &dir,
-        "unread-new",
-        None,
-        &now,
-        "never read, created just now",
-    );
-    write_memory_record(
-        &dir,
-        "broken",
-        Some("not-a-timestamp"),
-        old,
-        "whose timestamp is malformed",
-    );
-
-    // Edge 5: `--days 7` lists the 2020 read and not the one read just now.
-    let (code, stdout, stderr) = env.run(&["stale", "--project", "--days", "7"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("old-read"), "{stdout}");
-    assert!(!stdout.contains("read just now"), "{stdout}");
-    // Edge 6: the default 30 days judges a never-read file by `created`.
-    let (code, stdout, stderr) = env.run(&["stale", "--project"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("unread-old"), "{stdout}");
-    assert!(stdout.contains("never"), "{stdout}");
-    assert!(!stdout.contains("created just now"), "{stdout}");
-    // Edge 9: the broken file is named as unreadable, and the others still list.
-    assert!(stdout.contains("broken.md"), "{stdout}");
-    assert!(stdout.contains("unreadable"), "{stdout}");
-    assert!(stdout.contains("read long ago"), "{stdout}");
-
-    // Edge 8: `--json` parses and carries the frontmatter fields.
-    let (code, stdout, stderr) = env.run(&["stale", "--project", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("stale --json is JSON");
-    let records = value.as_array().unwrap();
-    let old_read = records
-        .iter()
-        .find(|record| record["name"] == "old-read")
-        .unwrap_or_else(|| panic!("no old-read record: {records:#?}"));
-    assert_eq!(old_read["scope"].as_str().unwrap(), "project");
-    assert_eq!(old_read["last_used"], old);
-    assert_eq!(old_read["created"], old);
-    assert_eq!(old_read["description"], "read long ago");
-    let unread = records
-        .iter()
-        .find(|record| record["name"] == "unread-old")
-        .unwrap();
-    assert_eq!(unread["last_used"], Value::Null);
-
-    // Edge 7: `--days 0` is a usage error (exit 2) naming the minimum.
-    let (code, _, stderr) = env.run(&["stale", "--days", "0"]).await;
-    assert_eq!(code, 2, "{stderr}");
-    assert!(stderr.contains("at least 1"), "{stderr}");
-}
-
-/// Edge 1 end to end: a scripted model `read`s a project memory file through the tool; the
-/// host records `last_used` within the test's window and changes no other byte.
-#[tokio::test]
-async fn a_model_read_of_a_project_memory_file_records_last_used() {
-    let env = MemoryEnv::sandboxed("mem-read-last-used");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let dir = env.home.join("memory/projects").join(&project);
-    let path = write_memory_record(
-        &dir,
-        "note",
-        Some("2020-01-01T00:00:00.000000Z"),
-        "2020-01-01T00:00:00.000000Z",
-        "a note",
-    );
-    let before = std::fs::read_to_string(&path).unwrap();
-    let target = serde_json::to_string(path.to_str().unwrap()).unwrap();
-    let server = MockServer::start(vec![
-        tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
-        text_reply("done"),
-    ])
-    .await;
-
-    let start = radian_memory::now_utc();
-    let envs = [
-        ("RADIAN_HOME", env.home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-    ];
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--profile",
-                "workspace",
-                "--session-id",
-                "read-last-used",
-                "--yes",
-                "-p",
-                "read the note",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-    let end = radian_memory::now_utc();
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert!(
-        tool_result_content(&server, 1).contains("the body"),
-        "the read reached the model"
-    );
-
-    let after = std::fs::read_to_string(&path).unwrap();
-    let new_line = after
-        .lines()
-        .find(|line| line.starts_with("last_used:"))
-        .unwrap_or_else(|| panic!("no last_used line in {after}"))
-        .to_owned();
-    let value = new_line.strip_prefix("last_used: ").unwrap();
-    assert!(
-        start.as_str() <= value && value <= end.as_str(),
-        "last_used {value} is not within [{start}, {end}]"
-    );
-    let old_line = "last_used: 2020-01-01T00:00:00.000000Z";
-    assert_eq!(
-        after.replace(&new_line, old_line),
-        before,
-        "every other byte is unchanged"
-    );
-}
-
-/// ADR 0021: a default-scope `radian memory add` in a git workspace
-/// whose project was never registered **registers it**, prints one notice line naming the new
-/// project and its identity key, and saves into that project. The next add is silent.
-#[tokio::test]
-async fn memory_add_registers_a_git_workspace_and_prints_one_notice() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let env = MemoryEnv::new("mem-auto-create");
-    git(&env.ws, &["init", "-q"]);
-
-    let (code, _, stderr) = env.run(&["add", "project-note"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.contains("[memory] created project"),
-        "one notice line names the new project: {stderr}"
-    );
-    assert!(
-        stderr.contains("identity key"),
-        "the notice names the identity key: {stderr}"
-    );
-    assert_eq!(
-        stderr.lines().count(),
-        1,
-        "one notice line, not a paragraph: {stderr}"
-    );
-    let project = linked_project(&env, &env.ws).await;
-    assert!(
-        stderr.contains(&project),
-        "the notice names the project it created: {stderr}"
-    );
-    // The file went into that project.
-    let (code, stdout, stderr) = env.run(&["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stdout.contains("project\tproject-note"),
-        "the file is a project record: {stdout}"
-    );
-    let registry = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
-    assert_eq!(
-        registry
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count(),
-        1,
-        "projects.jsonl gained the one project: {registry}"
-    );
-
-    // Already linked: the second add says nothing about projects.
-    let (code, _, stderr) = env.run(&["add", "second-note"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stderr.is_empty(),
-        "no notice for a linked project: {stderr}"
-    );
-
-    // A read never registers anything: the same commands in a second, unregistered repository
-    // leave the registry alone.
-    let other = env.workspace("other");
-    git(&other, &["init", "-q"]);
-    let (code, stdout, stderr) = env.run_in(&other, &["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(!stdout.contains("project-note"), "{stdout}");
-    let after = std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap();
-    assert_eq!(after, registry, "a read registered a project");
-}
-
-#[tokio::test]
-async fn memory_relink_after_a_move_finds_the_original_records() {
-    let env = MemoryEnv::new("mem-relink");
-    let first = env.workspace("here/radian");
-    let (code, _, stderr) = env.run_in(&first, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (_, _, stderr) = env.run_in(&first, &["add", "kept"]).await;
-    assert_eq!(stderr, "");
-    let (_, project_out, _) = env.run_in(&first, &["project"]).await;
-    let project = project_out
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("state: linked to "))
-        .expect("a linked project")
-        .to_owned();
-
-    let second = env.workspace("moved/radian");
-    let (code, stdout, stderr) = env.run_in(&second, &["project"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("not linked"), "{stdout}");
-    assert!(
-        stdout.contains(&project),
-        "the candidate is listed: {stdout}"
-    );
-    let (code, _, _) = env.run_in(&second, &["add", "nope"]).await;
-    assert_eq!(code, 1);
-
-    let (code, _, stderr) = env.run_in(&second, &["relink", &project]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, stdout, stderr) = env.run_in(&second, &["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("kept"), "{stdout}");
-}
-
-/// A real `git worktree` resolves to the main repository's project (ADR 0021 D2). Skipped
-/// without `git`, with the reason printed.
-#[tokio::test]
-async fn memory_project_is_shared_with_a_git_worktree() {
-    if !git_available() {
-        eprintln!("skipping: git is not on PATH");
-        return;
-    }
-    let env = MemoryEnv::new("mem-worktree");
-    let main = env.workspace("main");
-    git(&main, &["init", "-q"]);
-    git(&main, &["config", "user.email", "t@example.invalid"]);
-    git(&main, &["config", "user.name", "t"]);
-    std::fs::write(main.join("a.txt"), "hi\n").unwrap();
-    git(&main, &["add", "."]);
-    git(&main, &["commit", "-qm", "init"]);
-    let wt = env.workspace("wt");
-    std::fs::remove_dir(&wt).unwrap();
-    git(
-        &main,
-        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wtb"],
-    );
-
-    let (code, _, stderr) = env.run_in(&main, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (_, _, _) = env.run_in(&main, &["add", "shared"]).await;
-    let (code, stdout, stderr) = env.run_in(&wt, &["list"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        stdout.contains("shared"),
-        "a worktree shares the main repository's project: {stdout}"
-    );
-}
-
-async fn linked_project(env: &MemoryEnv, ws: &Path) -> String {
-    let (code, out, err) = env.run_in(ws, &["project"]).await;
-    assert_eq!(code, 0, "{err}");
-    out.lines()
-        .find_map(|line| line.trim().strip_prefix("state: linked to "))
-        .unwrap_or_else(|| panic!("not linked: {out}"))
-        .to_owned()
-}
-
-// ---------- the project session index, `SESSIONS.md` (ADR 0021 D3) ----------
-
-/// A workspace that is a repository without needing `git`: the identity and the repository
-/// root only look for `.git`, and these tests run no git command.
-fn repository(ws: &Path) {
-    std::fs::create_dir_all(ws.join(".git")).unwrap();
-}
-
-fn session_index_path(env: &MemoryEnv, project: &str) -> PathBuf {
-    env.home
-        .join("memory/projects")
-        .join(project)
-        .join("SESSIONS.md")
-}
-
-fn session_index_lines(env: &MemoryEnv, project: &str) -> Vec<String> {
-    std::fs::read_to_string(session_index_path(env, project))
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect()
-}
-
-fn memory_session_envs(env: &MemoryEnv) -> [(&str, &str); 2] {
-    [
-        ("RADIAN_HOME", env.home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-    ]
-}
-
-fn session_started_at(env: &MemoryEnv, id: &str) -> String {
-    let session = radian_session::Session::open(env.sessions.join(format!("{id}.jsonl"))).unwrap();
-    session.events().first().unwrap().ts.clone()
-}
-
-/// Edge case 1 end to end: a session ends and `SESSIONS.md` gains one line whose id, start
-/// time and first user line match the journal; the workspace column is `.` at the repository
-/// root and `crates/x` in a directory below it.
-#[tokio::test]
-async fn a_session_end_appends_one_line_with_the_journal_facts() {
-    let env = MemoryEnv::sandboxed("mem-sessions-line");
-    repository(&env.ws);
-    let nested = env.ws.join("crates/x");
-    std::fs::create_dir_all(&nested).unwrap();
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let envs = memory_session_envs(&env);
-    for (id, workspace, prompt) in [
-        ("root-session", env.ws.as_path(), "hello from root"),
-        ("nested-session", nested.as_path(), "hello from nested"),
-    ] {
-        let (code, _, stderr) = feed_and_wait(
-            spawn_radian(
-                &[
-                    "--model",
-                    "m",
-                    "--base-url",
-                    &server.base_url,
-                    "--workspace",
-                    workspace.to_str().unwrap(),
-                    "--session-id",
-                    id,
-                    "-p",
-                    prompt,
-                ],
-                &envs,
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-
-    let lines = session_index_lines(&env, &project);
-    assert_eq!(lines.len(), 2, "one line per ended session: {lines:?}");
-    assert_eq!(
-        lines[0],
-        format!(
-            "- root-session {} . — hello from root",
-            session_started_at(&env, "root-session")
-        )
-    );
-    assert_eq!(
-        lines[1],
-        format!(
-            "- nested-session {} crates/x — hello from nested",
-            session_started_at(&env, "nested-session")
-        )
-    );
-}
-
-/// Edge case 2: a session that never commits a user message writes nothing. First a session
-/// in the same project writes its line, so the env and the session-end path are proven to work;
-/// then a run whose input ends before a turn opens leaves the index byte for byte as it was.
-/// A model error after the first step cannot be this case: the Core commits the turn's input
-/// before the model call (ADR 0006), so the line would legitimately exist.
-#[tokio::test]
-async fn a_session_without_a_committed_user_message_appends_nothing() {
-    let env = MemoryEnv::sandboxed("mem-sessions-empty");
-    repository(&env.ws);
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let envs = memory_session_envs(&env);
-
-    // The same project and the same env do index an ended session that committed a message.
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "has-message",
-                "-p",
-                "hello",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let before = std::fs::read_to_string(session_index_path(&env, &project))
-        .expect("the first session wrote the index");
-    assert!(before.contains("has-message"), "{before}");
-    assert_eq!(session_index_lines(&env, &project).len(), 1, "{before}");
-
-    // A run whose input ends before a turn opens commits no user message at all.
-    let server = MockServer::start(Vec::new()).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "no-message",
-            ],
-            &envs,
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let session = radian_session::Session::open(env.sessions.join("no-message.jsonl")).unwrap();
-    assert!(
-        !session
-            .events()
-            .iter()
-            .any(|event| event.event == "MessageAppended"),
-        "the session has no committed message"
-    );
-    assert_eq!(server.requests().len(), 0, "no model call was made");
-    let after = std::fs::read_to_string(session_index_path(&env, &project))
-        .expect("the first session's index is still there");
-    assert_eq!(
-        after, before,
-        "a session with no committed user message writes nothing"
-    );
-    assert_eq!(session_index_lines(&env, &project).len(), 1, "{after}");
-}
-
-/// Edge case 3: a session in another workspace is another project, so it never appears in
-/// this project's file.
-#[tokio::test]
-async fn another_workspace_session_is_not_in_this_projects_file() {
-    let env = MemoryEnv::sandboxed("mem-sessions-project");
-    let here = env.workspace("here");
-    let there = env.workspace("there");
-    repository(&here);
-    repository(&there);
-    for ws in [&here, &there] {
-        let (code, _, stderr) = env.run_in(ws, &["project", "new"]).await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-    let here_project = linked_project(&env, &here).await;
-    let there_project = linked_project(&env, &there).await;
-    assert_ne!(here_project, there_project);
-
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let envs = memory_session_envs(&env);
-    for (id, workspace, prompt) in [
-        ("here-session", here.as_path(), "here work"),
-        ("there-session", there.as_path(), "there work"),
-    ] {
-        let (code, _, stderr) = feed_and_wait(
-            spawn_radian(
-                &[
-                    "--model",
-                    "m",
-                    "--base-url",
-                    &server.base_url,
-                    "--workspace",
-                    workspace.to_str().unwrap(),
-                    "--session-id",
-                    id,
-                    "-p",
-                    prompt,
-                ],
-                &envs,
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-
-    let here_lines = session_index_lines(&env, &here_project);
-    let there_lines = session_index_lines(&env, &there_project);
-    assert_eq!(here_lines.len(), 1, "{here_lines:?}");
-    assert_eq!(there_lines.len(), 1, "{there_lines:?}");
-    assert!(here_lines[0].contains("here-session"), "{here_lines:?}");
-    assert!(there_lines[0].contains("there-session"), "{there_lines:?}");
-}
-
-/// Edge case 4 end to end: a resumed session that ends again replaces its line instead of
-/// appending a second one.
-#[tokio::test]
-async fn a_resumed_session_replaces_its_line() {
-    let env = MemoryEnv::sandboxed("mem-sessions-resume");
-    repository(&env.ws);
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let envs = memory_session_envs(&env);
-    let base = [
-        "--model",
-        "m",
-        "--base-url",
-        server.base_url.as_str(),
-        "--workspace",
-        env.ws.to_str().unwrap(),
-    ];
-    let mut first: Vec<&str> = base.to_vec();
-    first.extend(["--session-id", "resume-me", "-p", "first task"]);
-    let (code, _, stderr) = feed_and_wait(spawn_radian(&first, &envs), "").await;
-    assert_eq!(code, 0, "{stderr}");
-    let before = session_index_lines(&env, &project);
-    assert_eq!(before.len(), 1, "{before:?}");
-
-    let mut second: Vec<&str> = base.to_vec();
-    second.extend(["--resume", "resume-me", "-p", "second task"]);
-    let (code, _, stderr) = feed_and_wait(spawn_radian(&second, &envs), "").await;
-    assert_eq!(code, 0, "{stderr}");
-    let after = session_index_lines(&env, &project);
-    assert_eq!(after.len(), 1, "one replaced line, not two: {after:?}");
-    assert!(after[0].contains("first task"), "{after:?}");
-}
-
-/// Edge case 9: an unlinked workspace writes no file and creates no project. A linked project
-/// in the same home indexes its own ended session first, so the env and the session-end path
-/// are proven to work; the unlinked run also commits a user message, so the missing line can
-/// only be the missing link.
-#[tokio::test]
-async fn an_unlinked_workspace_writes_no_session_index_and_creates_no_project() {
-    let env = MemoryEnv::sandboxed("mem-sessions-unlinked");
-    let linked = env.workspace("linked");
-    let unlinked = env.workspace("unlinked");
-    repository(&linked);
-    repository(&unlinked);
-    let (code, _, stderr) = env.run_in(&linked, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &linked).await;
-
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let envs = memory_session_envs(&env);
-    for (id, workspace, prompt) in [
-        ("linked-session", linked.as_path(), "linked work"),
-        ("unlinked-session", unlinked.as_path(), "unlinked work"),
-    ] {
-        let (code, _, stderr) = feed_and_wait(
-            spawn_radian(
-                &[
-                    "--model",
-                    "m",
-                    "--base-url",
-                    &server.base_url,
-                    "--workspace",
-                    workspace.to_str().unwrap(),
-                    "--session-id",
-                    id,
-                    "-p",
-                    prompt,
-                ],
-                &envs,
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 0, "{stderr}");
-    }
-
-    // The unlinked run had a message to index; only the missing link explains the missing line.
-    let unlinked_session =
-        radian_session::Session::open(env.sessions.join("unlinked-session.jsonl")).unwrap();
-    let history = unlinked_session.history().unwrap();
-    assert!(
-        history.iter().any(|message| {
-            message.text() == "unlinked work"
-                && message.meta().source == Some(radian_core::InputSource::User)
-        }),
-        "the unlinked session committed its user message, not just any message: {history:?}"
-    );
-
-    let lines = session_index_lines(&env, &project);
-    assert_eq!(
-        lines.len(),
-        1,
-        "only the linked session is indexed: {lines:?}"
-    );
-    assert!(lines[0].contains("linked-session"), "{lines:?}");
-    assert!(!lines[0].contains("unlinked-session"), "{lines:?}");
-
-    let registry =
-        std::fs::read_to_string(env.home.join("memory/projects.jsonl")).unwrap_or_default();
-    assert_eq!(
-        registry
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count(),
-        1,
-        "only the linked project is registered: {registry}"
-    );
-    let projects: Vec<_> = std::fs::read_dir(env.home.join("memory/projects"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(
-        projects.len(),
-        1,
-        "the unlinked run created a project directory: {projects:?}"
-    );
-}
-
-/// Edge case 7: the model may `read` `SESSIONS.md`; `write` and `patch` to it are refused with
-/// the host's reason in both tiers.
-#[tokio::test]
-async fn the_model_reads_the_session_index_and_cannot_write_it_in_both_tiers() {
-    let env = MemoryEnv::sandboxed("mem-sessions-read-only");
-    repository(&env.ws);
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-
-    let prep = MockServer::start(vec![text_reply("one")]).await;
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &prep.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "--session-id",
-                "prep-session",
-                "-p",
-                "prepare the index",
-            ],
-            &memory_session_envs(&env),
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    let index = session_index_path(&env, &project);
-    assert!(
-        std::fs::read_to_string(&index)
-            .unwrap()
-            .contains("prep-session"),
-        "the preparation session wrote the index"
-    );
-    let target = serde_json::to_string(index.to_str().unwrap()).unwrap();
-
-    for (tier, id) in [("workspace", "read-workspace"), ("full", "read-full")] {
-        let server = MockServer::start(vec![
-            tool_reply("r1", "read", &format!("{{\"path\":{target}}}")),
-            tool_reply(
-                "w1",
-                "write",
-                &format!("{{\"path\":{target},\"content\":\"nope\\n\"}}"),
-            ),
-            tool_reply(
-                "p1",
-                "patch",
-                &format!("{{\"path\":{target},\"old\":\"prep-session\",\"new\":\"nope\"}}"),
-            ),
-            text_reply("done"),
-        ])
-        .await;
-        let (code, _, stderr) = feed_and_wait(
-            spawn_radian(
-                &[
-                    "--model",
-                    "m",
-                    "--base-url",
-                    &server.base_url,
-                    "--workspace",
-                    env.ws.to_str().unwrap(),
-                    "--profile",
-                    tier,
-                    "--yes",
-                    "--session-id",
-                    id,
-                    "-p",
-                    "read then write the index",
-                ],
-                &memory_session_envs(&env),
-            ),
-            "",
-        )
-        .await;
-        assert_eq!(code, 0, "{tier}: {stderr}");
-        let read = tool_result_for(&server, 1, "r1");
-        assert!(
-            read.contains("prep-session"),
-            "{tier}: the read returned the index: {read}"
-        );
-        let write = tool_result_for(&server, 2, "w1");
-        assert!(
-            write.contains("SESSIONS.md is maintained by radian"),
-            "{tier}: the write names the host: {write}"
-        );
-        let patch = tool_result_for(&server, 3, "p1");
-        assert!(
-            patch.contains("SESSIONS.md is maintained by radian"),
-            "{tier}: the patch names the host: {patch}"
-        );
-        let after = std::fs::read_to_string(&index).unwrap();
-        assert!(
-            after.contains("prep-session"),
-            "{tier}: the existing line is untouched: {after}"
-        );
-        assert!(
-            !after.contains("nope"),
-            "{tier}: the refused write changed nothing: {after}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn memory_split_and_merge_move_files_and_rename_a_collision() {
-    let env = MemoryEnv::new("mem-split");
-    let a = env.workspace("a");
-    let b = env.workspace("b");
-    // A `.git` directory makes each workspace its own project: a real repository, with no
-    // `git` process. Without it, a scratch path under this worktree would resolve to the
-    // worktree's own project and both `a` and `b` would be one project.
-    std::fs::create_dir_all(a.join(".git")).unwrap();
-    std::fs::create_dir_all(b.join(".git")).unwrap();
-    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    env.run_in(&a, &["add", "moved-record"]).await;
-    env.run_in(&a, &["add", "note"]).await;
-    env.run_in(&b, &["add", "note"]).await;
-    let project_a = linked_project(&env, &a).await;
-    let project_b = linked_project(&env, &b).await;
-
-    // `split` needs confirmation: off a terminal, without --yes it refuses and moves nothing.
-    let (code, _, stderr) = env
-        .run_in(&a, &["split", &project_a, &project_b, "moved-record"])
-        .await;
-    assert_eq!(code, 2, "{stderr}");
-    let (_, out, _) = env.run_in(&b, &["list"]).await;
-    assert!(
-        !out.contains("moved-record"),
-        "the refused split moved it: {out}"
-    );
-
-    let (code, out, stderr) = env
-        .run_in(
-            &a,
-            &["split", "--yes", &project_a, &project_b, "moved-record"],
-        )
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("moved moved-record"), "{out}");
-    let (_, out, _) = env.run_in(&b, &["list"]).await;
-    assert!(out.contains("moved-record"), "the target has it: {out}");
-    // The index line moved too.
-    let b_index = env
-        .home
-        .join("memory/projects")
-        .join(&project_b)
-        .join("MEMORY.md");
-    assert!(
-        std::fs::read_to_string(&b_index)
-            .unwrap()
-            .contains("moved-record.md"),
-        "the target index has the line"
-    );
-
-    // `merge` every file from b into a: `note` exists in both, so b's copy is `note-2`.
-    let (code, out, stderr) = env
-        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("renamed it to note-2"), "{out}");
-    assert!(
-        !out.contains("it was not moved"),
-        "a merge renames its collision instead of reporting a skipped split: {out}"
-    );
-    let (_, out, _) = env.run_in(&a, &["list"]).await;
-    assert!(out.contains("note"), "{out}");
-    assert!(out.contains("note-2"), "{out}");
-    assert!(out.contains("moved-record"), "{out}");
-}
-
-/// `merge` moves record files only: each project keeps its own `SESSIONS.md` (the host's session
-/// index), so the source does not lose it and the target's is not replaced.
-#[tokio::test]
-async fn memory_merge_leaves_the_session_indexes_alone() {
-    let env = MemoryEnv::new("mem-merge-sessions");
-    let a = env.workspace("a");
-    let b = env.workspace("b");
-    std::fs::create_dir_all(a.join(".git")).unwrap();
-    std::fs::create_dir_all(b.join(".git")).unwrap();
-    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    env.run_in(&b, &["add", "moved-note"]).await;
-    let project_a = linked_project(&env, &a).await;
-    let project_b = linked_project(&env, &b).await;
-    let projects = env.home.join("memory/projects");
-    let a_sessions = projects.join(&project_a).join("SESSIONS.md");
-    let b_sessions = projects.join(&project_b).join("SESSIONS.md");
-    write_index(&a_sessions, "# Sessions\n- target-session\n");
-    write_index(&b_sessions, "# Sessions\n- source-session\n");
-
-    let (code, out, stderr) = env
-        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("moved moved-note"), "{out}");
-    assert_eq!(
-        std::fs::read_to_string(&a_sessions).unwrap(),
-        "# Sessions\n- target-session\n",
-        "the target's session index was replaced"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&b_sessions).unwrap(),
-        "# Sessions\n- source-session\n",
-        "the source lost its session index"
-    );
-    let (_, out, _) = env.run_in(&a, &["list"]).await;
-    assert!(out.contains("moved-note"), "the record moved: {out}");
-}
-
-/// A merge suffix must be free in both scopes: the rename happens inside the source before the
-/// move, so a name the source already has (here `note-2`) is skipped.
-#[tokio::test]
-async fn memory_merge_picks_a_collision_name_free_in_both_projects() {
-    let env = MemoryEnv::new("mem-merge-double-collision");
-    let a = env.workspace("a");
-    let b = env.workspace("b");
-    std::fs::create_dir_all(a.join(".git")).unwrap();
-    std::fs::create_dir_all(b.join(".git")).unwrap();
-    let (code, _, stderr) = env.run_in(&a, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let (code, _, stderr) = env.run_in(&b, &["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    env.run_in(&a, &["add", "note"]).await;
-    env.run_in(&b, &["add", "note"]).await;
-    env.run_in(&b, &["add", "note-2"]).await;
-    let project_a = linked_project(&env, &a).await;
-    let project_b = linked_project(&env, &b).await;
-
-    let (code, out, stderr) = env
-        .run_in(&b, &["merge", "--yes", &project_a, &project_b])
-        .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(
-        out.contains("conflict: note exists in the target; renamed it to note-3"),
-        "the free suffix skips the source's own note-2: {out}"
-    );
-    let (_, out, _) = env.run_in(&a, &["list"]).await;
-    for name in ["note", "note-2", "note-3"] {
-        assert!(
-            out.lines()
-                .any(|line| line.contains(&format!("\t{name}\t"))),
-            "the target lists {name}: {out}"
-        );
-    }
-    assert_eq!(
-        out.lines().filter(|line| line.contains("\tnote")).count(),
-        3,
-        "both files moved: {out}"
-    );
-}
-
-#[tokio::test]
-async fn memory_off_refuses_a_model_write_until_memory_on() {
-    let env = MemoryEnv::new("mem-off");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let project = linked_project(&env, &env.ws).await;
-    let target = env
-        .home
-        .join("memory/projects")
-        .join(&project)
-        .join("off-note.md");
-    let path = serde_json::to_string(target.to_str().unwrap()).unwrap();
-    let write = |call: &str| {
-        tool_reply(
-            call,
-            "write",
-            &format!("{{\"path\":{path},\"content\":\"NOTE\\n\"}}"),
-        )
-    };
-    let server = MockServer::start(vec![
-        write("w1"),
-        text_reply("first"),
-        write("w2"),
-        text_reply("second"),
-    ])
-    .await;
-    let args = memory_args(&env, &server, "mem-off", None, None);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(&refs, &memory_envs(&env)),
-        "/memory off\nwrite it\n/memory on\nwrite it\n/exit\n",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-
-    let refused = tool_result_for(&server, 1, "w1");
-    assert!(
-        refused.contains("memory is off for this session"),
-        "the off reason reaches the model: {refused}"
-    );
-    let allowed = tool_result_for(&server, 3, "w2");
-    assert!(
-        !allowed.contains("memory is off for this session"),
-        "after /memory on the write runs: {allowed}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).unwrap(),
-        "NOTE\n",
-        "only the on write reached the disk"
-    );
-}
-
-#[tokio::test]
-async fn a_session_resumed_after_memory_off_has_no_memory_section() {
-    let env = MemoryEnv::new("mem-off-resume");
-    let (_, _, _) = env.run(&["project", "new"]).await;
-    let project = linked_project(&env, &env.ws).await;
-    let index = project_index_path(&env, &project);
-    write_index(&index, "- [r](r.md) — REMEMBER-ME\n");
-
-    let first = MockServer::start(vec![text_reply("off")]).await;
-    let mut args = memory_args(&env, &first, "mem-off-resume", None, None);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (code, _, stderr) = feed_and_wait(
-        spawn_radian(&refs, &memory_envs(&env)),
-        "/memory off\nhello\n/exit\n",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-
-    // Resume: the recorded switch means this process starts without the section.
-    let second = MockServer::start(vec![text_reply("resumed")]).await;
-    args = memory_args(&env, &second, "unused", Some("hi"), None);
-    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
-    args[at] = "--resume".to_owned();
-    args[at + 1] = "mem-off-resume".to_owned();
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (code, _, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = system_prompt(&second, 0);
-    assert!(
-        !system.contains("REMEMBER-ME") && !system.contains("Memory indexes"),
-        "a resumed off session injects no memory section: {system}"
-    );
-}
-
-// ---------- memory index injection (ADR 0021 D6) ----------
-
-/// The `radian exec` arguments for one run against `server`.
-fn memory_args(
-    env: &MemoryEnv,
-    server: &MockServer,
-    session: &str,
-    prompt: Option<&str>,
-    config: Option<&Path>,
-) -> Vec<String> {
-    let mut args = vec![
-        "--model".to_owned(),
-        "m".to_owned(),
-        "--base-url".to_owned(),
-        server.base_url.clone(),
-        "--workspace".to_owned(),
-        env.ws.to_string_lossy().into_owned(),
-        "--session-id".to_owned(),
-        session.to_owned(),
-    ];
-    if let Some(config) = config {
-        args.push("--config".to_owned());
-        args.push(config.to_string_lossy().into_owned());
-    }
-    if let Some(prompt) = prompt {
-        args.push("-p".to_owned());
-        args.push(prompt.to_owned());
-    }
-    args
-}
-
-fn memory_envs(env: &MemoryEnv) -> [(&'static str, &str); 2] {
-    [
-        ("RADIAN_HOME", env.home.to_str().unwrap()),
-        ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-    ]
-}
-
-async fn run_memory_session(
-    env: &MemoryEnv,
-    server: &MockServer,
-    session: &str,
-    prompt: &str,
-    config: Option<&Path>,
-) -> (i32, String, String) {
-    let args = memory_args(env, server, session, Some(prompt), config);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    feed_and_wait(spawn_radian(&refs, &memory_envs(env)), "").await
-}
-
-fn write_index(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
-fn project_index_path(env: &MemoryEnv, project: &str) -> PathBuf {
-    env.home
-        .join("memory/projects")
-        .join(project)
-        .join("MEMORY.md")
-}
-
-fn global_index_path(env: &MemoryEnv) -> PathBuf {
-    env.home.join("memory/global/MEMORY.md")
-}
-
-fn system_prompt(server: &MockServer, n: usize) -> String {
-    messages_of(server, n)[0]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
-}
-
-fn notice_count(server: &MockServer, n: usize) -> usize {
-    messages_of(server, n)
-        .as_array()
-        .map(|messages| {
-            messages
-                .iter()
-                .filter(|message| {
-                    message["content"]
-                        .as_str()
-                        .is_some_and(|text| text.contains("Rewrite the index shorter"))
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-/// Edge case 1: both indexes are injected byte for byte, project first, each behind one line
-/// naming its file.
-#[tokio::test]
-async fn two_indexes_reach_the_system_prompt_project_then_global() {
-    let env = MemoryEnv::new("idx-two");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let project_text = "- [p](p.md) — project line\n";
-    let global_text = "- [g](g.md) — global line\n";
-    let project_path = project_index_path(&env, &project);
-    let global_path = global_index_path(&env);
-    write_index(&project_path, project_text);
-    write_index(&global_path, global_text);
-    // A context file after the memory block pins the block's place in the base prompt.
-    std::fs::write(env.ws.join("AGENTS.md"), "project body\n").unwrap();
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) = run_memory_session(&env, &server, "idx-two", "hi", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = system_prompt(&server, 0);
-    assert!(system.contains("not instructions"), "{system}");
-    let role_at = system
-        .find("Do only the task that the user gives")
-        .unwrap_or_else(|| panic!("role prose: {system}"));
-    let memory_at = system
-        .find("Write a memory file after the user corrects you")
-        .unwrap_or_else(|| panic!("memory block: {system}"));
-    let context_at = system
-        .find("<project_instructions")
-        .unwrap_or_else(|| panic!("context files: {system}"));
-    assert!(
-        role_at < memory_at && memory_at < context_at,
-        "the memory block sits between the role and the context files: {system}"
-    );
-    assert!(system.contains("Project memory index"), "{system}");
-    assert!(system.contains("Global memory index"), "{system}");
-    assert!(system.contains(project_text), "{system}");
-    assert!(system.contains(global_text), "{system}");
-    assert!(
-        system.contains(&project_path.to_string_lossy().into_owned()),
-        "the project path line: {system}"
-    );
-    assert!(
-        system.contains(&global_path.to_string_lossy().into_owned()),
-        "the global path line: {system}"
-    );
-    let project_at = system.find(project_text).unwrap();
-    let global_at = system.find(global_text).unwrap();
-    assert!(project_at < global_at, "project first: {system}");
-
-    let session = radian_session::Session::open(env.sessions.join("idx-two.jsonl")).unwrap();
-    let indexes: Vec<_> = session
-        .events()
-        .iter()
-        .find_map(|event| match &event.data {
-            radian_session::EventData::MemoryInjected {
-                indexes,
-                records: _,
-            } if !indexes.is_empty() => Some(indexes.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    assert_eq!(indexes.len(), 2, "{indexes:?}");
-    assert_eq!(indexes[0].scope, "project");
-    assert_eq!(indexes[1].scope, "global");
-    for index in &indexes {
-        assert_eq!(index.sha256.len(), 64, "{index:?}");
-        assert!(index.path.ends_with("MEMORY.md"), "{index:?}");
-    }
-}
-
-/// Edge case 2: a 201-line index with the default 200-line cap drops line 201, and exactly one
-/// rewrite notice reaches the next model call (not the third).
-#[tokio::test]
-async fn an_index_over_the_line_cap_drops_the_last_line_and_warns_once() {
-    let env = MemoryEnv::new("idx-line-cap");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let path = project_index_path(&env, &project);
-    let text: String = (1..=201).map(|n| format!("line-{n}\n")).collect();
-    write_index(&path, &text);
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "read", r#"{"path":"missing-one.txt"}"#),
-        tool_reply("c2", "read", r#"{"path":"missing-two.txt"}"#),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, _, stderr) = run_memory_session(&env, &server, "idx-line-cap", "hi", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(server.requests().len(), 3, "{}", server.requests().len());
-
-    let system = system_prompt(&server, 0);
-    assert!(system.contains("line-1\n"), "{system}");
-    assert!(system.contains("line-200\n"), "{system}");
-    assert!(!system.contains("line-201"), "the cap drops it: {system}");
-
-    assert_eq!(notice_count(&server, 1), 1, "the next call sees one notice");
-    let notices: Vec<String> = messages_of(&server, 1)
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|message| message["content"].as_str().map(str::to_owned))
-        .filter(|text| text.contains("Rewrite the index shorter"))
-        .collect();
-    assert!(notices[0].contains("project"), "{}", notices[0]);
-    assert!(
-        notices[0].contains(&path.to_string_lossy().into_owned()),
-        "{}",
-        notices[0]
-    );
-    assert!(notices[0].contains("1 line was dropped"), "{}", notices[0]);
-    assert_eq!(
-        notice_count(&server, 2),
-        1,
-        "a third call gets no second notice"
-    );
-}
-
-/// Edge case 3: an index under the line cap but over the byte cap is cut at the last whole line
-/// within the byte cap, and the notice is sent.
-#[tokio::test]
-async fn an_index_over_the_byte_cap_is_cut_at_a_line_boundary() {
-    let env = MemoryEnv::new("idx-byte-cap");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    write_index(&project_index_path(&env, &project), "aaa\nbbb\nccc\n");
-    let config = write_file(
-        &env.dir,
-        "config.toml",
-        "schema_version = 1\n[memory]\nindex_max_bytes = 8\n",
-    );
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "read", r#"{"path":"missing.txt"}"#),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, _, stderr) =
-        run_memory_session(&env, &server, "idx-byte-cap", "hi", Some(&config)).await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = system_prompt(&server, 0);
-    assert!(system.contains("aaa\n"), "{system}");
-    assert!(system.contains("bbb\n"), "{system}");
-    assert!(
-        !system.contains("ccc"),
-        "the third line does not fit: {system}"
-    );
-    assert_eq!(notice_count(&server, 1), 1);
-}
-
-/// Edge case 4: a workspace that maps to no project injects only the global index and one line
-/// saying the project scope has no index. A read never creates a project (ADR 0021 D2).
-#[tokio::test]
-async fn an_unlinked_workspace_injects_only_the_global_index() {
-    let env = MemoryEnv::new("idx-unlinked");
-    write_index(&global_index_path(&env), "global only\n");
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) = run_memory_session(&env, &server, "idx-unlinked", "hi", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    let system = system_prompt(&server, 0);
-    assert!(system.contains("global only"), "{system}");
-    assert!(
-        system.to_lowercase().contains("no project memory index"),
-        "{system}"
-    );
-    assert!(
-        !env.home.join("memory/projects").exists(),
-        "the injection created a project directory"
-    );
-}
-
-/// Edge case 5: `[memory] enabled = false` injects nothing, sends no notice and writes no
-/// `MemoryInjected`.
-#[tokio::test]
-async fn memory_disabled_injects_nothing_and_writes_no_record() {
-    let env = MemoryEnv::new("idx-disabled");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let text: String = (1..=201).map(|n| format!("line-{n}\n")).collect();
-    write_index(&project_index_path(&env, &project), &text);
-    write_index(&global_index_path(&env), "global note\n");
-    let config = write_file(
-        &env.dir,
-        "config.toml",
-        "schema_version = 1\n[memory]\nenabled = false\n",
-    );
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, _, stderr) =
-        run_memory_session(&env, &server, "idx-disabled", "hi", Some(&config)).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(server.requests().len(), 1);
-    let system = system_prompt(&server, 0);
-    assert!(!system.contains("Memory indexes"), "{system}");
-    for sentence in radian_host::prompt::MEMORY_RULES
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        assert!(
-            !system.contains(sentence),
-            "memory is disabled, but the prompt carries {sentence:?}: {system}"
-        );
-    }
-    assert!(!system.contains("line-1\n"), "{system}");
-    assert!(!system.contains("global note"), "{system}");
-    assert_eq!(notice_count(&server, 0), 0);
-    let raw = std::fs::read_to_string(env.sessions.join("idx-disabled.jsonl")).unwrap();
-    assert!(!raw.contains("MemoryInjected"), "{raw}");
-}
-
-/// Edge case 6: the section is identical on the second call after the index changes on disk; a
-/// resumed session reads the file again.
-#[tokio::test]
-async fn the_section_freezes_per_process_and_a_resume_reads_again() {
-    let env = MemoryEnv::new("idx-freeze");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    let path = project_index_path(&env, &project);
-    write_index(&path, "before\n");
-
-    let server = MockServer::start(vec![text_reply("one"), text_reply("two")]).await;
-    let args = memory_args(&env, &server, "idx-freeze", None, None);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut child = spawn_radian(&refs, &memory_envs(&env));
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"one\n").await.unwrap();
-    stdin.flush().await.unwrap();
-    wait_until("the first turn is finished", || {
-        journal_turns(&env.sessions) >= 1
-    })
-    .await;
-    // The file changes between the two turns of one process.
-    write_index(&path, "after\n");
-    stdin.write_all(b"two\n").await.unwrap();
-    stdin.flush().await.unwrap();
-    wait_until("the second turn is finished", || {
-        journal_turns(&env.sessions) >= 2
-    })
-    .await;
-    drop(stdin);
-    let output = timeout(EXIT_WATCHDOG, child.wait_with_output())
-        .await
-        .expect("the CLI exits")
-        .expect("wait");
-    assert_eq!(output.status.code(), Some(0));
-    assert_eq!(server.requests().len(), 2);
-    let first = system_prompt(&server, 0);
-    assert!(first.contains("before\n"), "{first}");
-    assert!(!first.contains("after\n"), "{first}");
-    assert_eq!(system_prompt(&server, 1), first, "the section is frozen");
-
-    // A resume is a new process: it reads the file again.
-    let server = MockServer::start(vec![text_reply("three")]).await;
-    let mut args = memory_args(&env, &server, "unused", Some("three"), None);
-    // Replace `--session-id idx` with `--resume idx-freeze`.
-    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
-    args[at] = "--resume".to_owned();
-    args[at + 1] = "idx-freeze".to_owned();
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (code, _, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
-    assert_eq!(code, 0, "{stderr}");
-    let resumed = system_prompt(&server, 0);
-    assert!(resumed.contains("after\n"), "{resumed}");
-    assert!(!resumed.contains("before\n"), "{resumed}");
-}
-
-/// Edge case 7: a retired `[memory.injection]` key gets one migration warning naming it, and the
-/// session starts.
-#[tokio::test]
-async fn a_retired_memory_injection_key_warns_and_the_session_starts() {
-    let env = MemoryEnv::new("idx-retired");
-    let config = write_file(
-        &env.dir,
-        "config.toml",
-        "schema_version = 1\n[memory.injection]\nmax_tokens = 1000\n",
-    );
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, stdout, stderr) =
-        run_memory_session(&env, &server, "idx-retired", "hi", Some(&config)).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("ok"), "{stdout}");
-    assert!(
-        stderr.contains("memory.injection.max_tokens"),
-        "the migration warning names the key: {stderr}"
-    );
-    assert!(
-        stderr.contains("index_max_lines"),
-        "the warning names the replacement: {stderr}"
-    );
-}
-
-/// Edge case 9: a model call to `memory_search` is an unknown tool, like `memory_save`, and the
-/// turn still succeeds.
-#[tokio::test]
-async fn a_model_call_to_memory_save_or_memory_search_is_an_unknown_tool_and_the_turn_succeeds() {
-    let env = MemoryEnv::new("mem-no-write-tool");
-    let server = MockServer::start(vec![
-        tool_reply("call_1", "memory_save", r#"{"content":"agent note"}"#),
-        tool_reply("call_2", "memory_search", r#"{"query":"agent note"}"#),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, stdout, stderr) = feed_and_wait(
-        spawn_radian(
-            &[
-                "--model",
-                "m",
-                "--base-url",
-                &server.base_url,
-                "--workspace",
-                env.ws.to_str().unwrap(),
-                "-p",
-                "remember this",
-            ],
-            &[
-                ("RADIAN_HOME", env.home.to_str().unwrap()),
-                ("RADIAN_SESSION_DIR", env.sessions.to_str().unwrap()),
-            ],
-        ),
-        "",
-    )
-    .await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(server.requests().len(), 3);
-    assert!(
-        tool_result_for(&server, 1, "call_1").contains("no tool named `memory_save`"),
-        "the model is told the save tool does not exist: {}",
-        tool_result_for(&server, 1, "call_1")
-    );
-    assert!(
-        tool_result_for(&server, 2, "call_2").contains("no tool named `memory_search`"),
-        "the model is told the search tool does not exist: {}",
-        tool_result_for(&server, 2, "call_2")
-    );
-    let (code, stdout, stderr) = env.run(&["list", "--json"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(
-        stdout.trim(),
-        "[]",
-        "the refused calls wrote nothing: {stdout}"
-    );
-}
-
-/// Edge case 10: an index with an invalid byte sequence contributes one line saying it could not
-/// be read; the session starts and a warning names the file.
-#[tokio::test]
-async fn an_invalid_utf8_index_warns_and_the_session_starts() {
-    let env = MemoryEnv::new("idx-bad-utf8");
-    let (code, _, stderr) = env.run(&["project", "new"]).await;
-    assert_eq!(code, 0, "{stderr}");
-    let project = linked_project(&env, &env.ws).await;
-    write_index(&project_index_path(&env, &project), "project note\n");
-    let global = global_index_path(&env);
-    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
-    std::fs::write(&global, [0xff, 0xfe, 0xfd]).unwrap();
-
-    let server = MockServer::start(vec![text_reply("ok")]).await;
-    let (code, stdout, stderr) =
-        run_memory_session(&env, &server, "idx-bad-utf8", "hi", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("ok"), "{stdout}");
-    let system = system_prompt(&server, 0);
-    assert!(system.contains("project note"), "{system}");
-    assert!(
-        system.contains("The global memory index at") && system.contains("could not be read"),
-        "{system}"
-    );
-    assert!(
-        stderr.contains(&global.to_string_lossy().into_owned()),
-        "the warning names the file: {stderr}"
-    );
-}
-
-// ---------- memory write guards (ADR 0021 invariant 4) ----------
-
-/// The `radian exec` arguments for one memory session with the MCP fixture attached.
-fn memory_mcp_args(
-    env: &MemoryEnv,
-    server: &MockServer,
-    session: &str,
-    prompt: &str,
-    mcp: &Path,
-) -> Vec<String> {
-    let mut args = memory_args(env, server, session, Some(prompt), None);
-    args.push("--mcp-config".to_owned());
-    args.push(mcp.to_string_lossy().into_owned());
-    args
-}
-
-async fn run_memory_mcp_session(
-    env: &MemoryEnv,
-    server: &MockServer,
-    session: &str,
-    prompt: &str,
-    mcp: &Path,
-) -> (i32, String, String) {
-    let args = memory_mcp_args(env, server, session, prompt, mcp);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    feed_and_wait(spawn_radian(&refs, &memory_envs(env)), "").await
-}
-
-/// Edge case 1: one MCP result makes every later memory write be refused; the same write
-/// before the MCP call succeeds. The refused call touches no byte.
-#[tokio::test]
-async fn a_memory_write_is_refused_after_an_mcp_result_and_allowed_before() {
-    let env = MemoryEnv::sandboxed("guard-input");
-    let log = env.dir.join("fixture.log");
-    let mcp = mcp_config(&env.dir, &log);
-    let file = env.home.join("memory/global/x.md");
-    let write = |content: &str| serde_json::json!({"path": file, "content": content}).to_string();
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "write", &write("before\n")),
-        tool_reply("c2", "fx__echo", ECHO_CALL),
-        tool_reply("c3", "write", &write("after\n")),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, stdout, stderr) =
-        run_memory_mcp_session(&env, &server, "guard-input", "remember", &mcp).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-
-    let first = tool_result_for(&server, 1, "c1");
-    assert!(
-        !first.contains("refused"),
-        "the write before MCP runs: {first}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "before\n",
-        "the refused second write changed nothing"
-    );
-    let refused = tool_result_for(&server, 3, "c3");
-    assert!(
-        refused.contains(radian_host::memory::INPUT_GUARD),
-        "the input guard names itself: {refused}"
-    );
-}
-
-/// Edge case 2: a workspace path is not a memory path, so an MCP result does not affect it.
-#[tokio::test]
-async fn a_workspace_write_after_an_mcp_result_is_unaffected() {
-    let env = MemoryEnv::sandboxed("guard-workspace");
-    let log = env.dir.join("fixture.log");
-    let mcp = mcp_config(&env.dir, &log);
-    let file = env.ws.join("after-mcp.txt");
-    let write = serde_json::json!({"path": file, "content": "WORKSPACE-AFTER-MCP\n"}).to_string();
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "fx__echo", ECHO_CALL),
-        tool_reply("c2", "write", &write),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, stdout, stderr) =
-        run_memory_mcp_session(&env, &server, "guard-workspace", "go", &mcp).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "WORKSPACE-AFTER-MCP\n",
-        "a workspace write keeps working"
-    );
-    let result = tool_result_for(&server, 2, "c2");
-    assert!(!result.contains("refused"), "{result}");
-}
-
-/// Edge case 3: a resumed session whose committed journal holds an MCP tool result refuses
-/// its first memory write, even though this process never called an MCP tool.
-#[tokio::test]
-async fn a_resumed_session_counts_an_mcp_result_and_refuses_the_first_memory_write() {
-    let env = MemoryEnv::sandboxed("guard-resume");
-    let log = env.dir.join("fixture.log");
-    let mcp = mcp_config(&env.dir, &log);
-    let server = MockServer::start(vec![
-        tool_reply("c1", "fx__echo", ECHO_CALL),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, _, stderr) = run_memory_mcp_session(&env, &server, "guard-resume", "go", &mcp).await;
-    assert_eq!(code, 0, "{stderr}");
-    // The first process settled the routed `fx__echo` call; the journal is the host's record
-    // of it. Assert that specific result, not merely that some call settled.
-    let session = radian_session::Session::open(env.sessions.join("guard-resume.jsonl")).unwrap();
-    let settled = session.events().iter().find_map(|event| match &event.data {
-        radian_session::EventData::ToolExecutionSettled { call_id, result } if call_id == "c1" => {
-            Some(result)
-        }
-        _ => None,
-    });
-    let settled = settled.expect("the journal holds the fx__echo result");
-    assert!(!settled.is_error, "the fixture's MCP call succeeded");
-    assert_ne!(
-        settled.error_code.as_deref(),
-        Some("unknown_tool"),
-        "the journaled call reached the fixture server"
-    );
-
-    let file = env.home.join("memory/global/x.md");
-    let write = serde_json::json!({"path": &file, "content": "after-resume\n"}).to_string();
-    let server =
-        MockServer::start(vec![tool_reply("w1", "write", &write), text_reply("done")]).await;
-    // The resumed process still configures the same fixture server, so `fx__echo` is a name it
-    // routes; the guard must judge the journal against that list, not against `__` alone.
-    let mut args = memory_mcp_args(&env, &server, "unused", "write", &mcp);
-    let at = args.iter().position(|arg| arg == "--session-id").unwrap();
-    args[at] = "--resume".to_owned();
-    args[at + 1] = "guard-resume".to_owned();
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&refs, &memory_envs(&env)), "").await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert!(!file.exists(), "the refused write created no file");
-    let refused = tool_result_for(&server, 1, "w1");
-    assert!(
-        refused.contains(radian_host::memory::INPUT_GUARD),
-        "the resumed process counts the journal's MCP result: {refused}"
-    );
-}
-
-/// Edge case 4: content with a secret prefix is refused, the message names the prefix and
-/// never the value; the same prefix inside a word is accepted by the heuristic.
-#[tokio::test]
-async fn a_secret_in_a_memory_write_is_refused_and_a_prefix_inside_a_word_is_allowed() {
-    let env = MemoryEnv::sandboxed("guard-secret");
-    let bad = env.home.join("memory/global/bad.md");
-    let good = env.home.join("memory/global/good.md");
-    let write = |path: &Path, content: &str| {
-        serde_json::json!({"path": path, "content": content}).to_string()
-    };
-
-    let server = MockServer::start(vec![
-        tool_reply("c1", "write", &write(&bad, "sk-abcdefghijklmnopqrst\n")),
-        tool_reply(
-            "c2",
-            "write",
-            &write(&good, "the musk-abcdefghijklmnopqrst note\n"),
-        ),
-        text_reply("done"),
-    ])
-    .await;
-    let (code, stdout, stderr) =
-        run_memory_session(&env, &server, "guard-secret", "remember", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert!(!bad.exists(), "the refused write created no file");
-    assert_eq!(
-        std::fs::read_to_string(&good).unwrap(),
-        "the musk-abcdefghijklmnopqrst note\n",
-        "a prefix inside a word is not a secret"
-    );
-    let refused = tool_result_for(&server, 1, "c1");
-    assert!(
-        refused.contains("memory write refused: the content looks like a secret (sk-)"),
-        "the refusal names the prefix: {refused}"
-    );
-    assert!(
-        !refused.contains("abcdefghijklmnopqrst"),
-        "the refusal never repeats the value: {refused}"
-    );
-}
-
-/// Edge case 5: a patch that would insert a secret into an existing memory file is refused
-/// before the file is touched.
-#[tokio::test]
-async fn a_patch_that_would_insert_a_secret_is_refused_and_the_file_is_unchanged() {
-    let env = MemoryEnv::sandboxed("guard-patch");
-    let file = env.home.join("memory/global/note.md");
-    let before = "---\nname: note\ndescription: a note\ntype: project\nsource: model\n\
-                  created: 2026-01-01T00:00:00Z\nmodified: 2026-01-01T00:00:00Z\n---\nsafe\n";
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(&file, before).unwrap();
-
-    let patch = serde_json::json!({
-        "path": &file,
-        "old": "safe",
-        "new": "sk-abcdefghijklmnopqrst",
-    })
-    .to_string();
-    let server =
-        MockServer::start(vec![tool_reply("c1", "patch", &patch), text_reply("done")]).await;
-    let (code, stdout, stderr) =
-        run_memory_session(&env, &server, "guard-patch", "remember", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        before,
-        "the refused patch left every byte alone"
-    );
-    let refused = tool_result_for(&server, 1, "c1");
-    assert!(
-        refused.contains("memory write refused: the content looks like a secret (sk-)"),
-        "the patch is judged on the content it would produce: {refused}"
-    );
-    assert!(
-        !refused.contains("abcdefghijklmnopqrst"),
-        "the refusal never repeats the value: {refused}"
-    );
-}
-
-/// A patch needle is located by the tool's normalising layers (here the LF view matching a
-/// CRLF needle), so the guard must judge the content the edit would actually write. The
-/// inserted text alone is clean; the result is not.
-#[tokio::test]
-async fn a_patch_matched_through_a_normalising_locator_still_catches_a_secret() {
-    let env = MemoryEnv::sandboxed("guard-patch-crlf");
-    let file = env.home.join("memory/global/crlf.md");
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    let before = "sk-\nX";
-    std::fs::write(&file, before).unwrap();
-
-    let patch = serde_json::json!({
-        "path": &file,
-        "old": "\r\nX",
-        "new": "abcdefghijklmnopqrst",
-    })
-    .to_string();
-    let server =
-        MockServer::start(vec![tool_reply("c1", "patch", &patch), text_reply("done")]).await;
-    let (code, stdout, stderr) =
-        run_memory_session(&env, &server, "guard-patch-crlf", "remember", None).await;
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains("done"), "{stdout}");
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        before,
-        "the refused patch left every byte alone"
-    );
-    let refused = tool_result_for(&server, 1, "c1");
-    assert!(
-        refused.contains("memory write refused: the content looks like a secret (sk-)"),
-        "the result of the normalising match is judged: {refused}"
-    );
-    assert!(
-        !refused.contains("abcdefghijklmnopqrst"),
-        "the refusal never repeats the value: {refused}"
-    );
-}
-
 #[tokio::test]
 async fn an_interactive_compact_is_a_command_and_compactfoo_is_a_message() {
     let server = MockServer::start(vec![text_reply("REPLY-TO-COMPACTFOO")]).await;
@@ -9792,25 +7415,7 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
         None,
     );
 
-    // One memory record, so `radian memory list` has a line to write.
     let home = scratch("sigpipe-home");
-    let add = std::process::Command::new(common::radian_bin())
-        .args(["memory", "add", "--global", "memory-note"])
-        .env("RADIAN_HOME", home.as_os_str())
-        .env("HOME", home.as_os_str())
-        .env("EDITOR", "true")
-        .env("VISUAL", "true")
-        .env("RADIAN_CATALOG_URL", common::fast_catalog_url())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("run radian memory add");
-    assert!(
-        add.status.success(),
-        "radian memory add failed: {}",
-        String::from_utf8_lossy(&add.stderr)
-    );
 
     let sessions_arg = sessions.to_str().unwrap();
     let ws_arg = ws.to_str().unwrap();
@@ -9845,7 +7450,6 @@ fn a_closed_stdout_is_not_a_panic_for_every_output_command() {
             "--export",
             "s1",
         ],
-        vec!["memory", "list", "--global"],
         vec!["trust", "status"],
     ];
     for args in cases {
@@ -11264,7 +8868,7 @@ async fn pty_agent_login_ctrl_c_during_the_key_prompt_restores_echo() {
 #[tokio::test]
 async fn a_headless_exec_mounts_no_orchestration_tools() {
     let server = MockServer::start(vec![text_reply("hi")]).await;
-    // A private home: the tool set must not depend on the machine's real memory.
+    // A private home: the tool set must not depend on the machine's real home.
     let home = scratch("headless-tools");
     let (code, _, stderr) = feed_and_wait(
         spawn_radian(
@@ -11300,12 +8904,11 @@ async fn a_headless_exec_mounts_no_orchestration_tools() {
             "`{gone}` must not be mounted: {names:?}"
         );
     }
-    // The exact set: a headless session with no `--workspace` and an empty memory mounts the
+    // The exact set: a headless session with no `--workspace` mounts the
     // built-in `skill` (its `theme-import` skill is compiled in), `subagent` (ADR 0043
     // decision 1a — a parent mounts it even with no workspace; only `explore` needs one) and
     // `goal` (ADR 0047 — host-level like `ask_user`, answering `no_active_goal` without one),
-    // and nothing else. No memory tool exists: `memory_search`, `memory_save` and
-    // `memory_revise` are unknown names.
+    // and nothing else.
     let mut got = names.clone();
     got.sort();
     assert_eq!(
@@ -12186,4 +9789,183 @@ async fn an_unknown_context_key_is_skipped_and_the_session_starts() {
         stderr.contains("[config] ignored key `context.other`"),
         "{stderr}"
     );
+}
+
+// ---------- old memory-era data (ADR 0021 was removed) ----------
+
+/// An old config that still carries `[memory]` (the last memory-era shape, with the retired
+/// `[memory.injection]` table too) starts the session: one retired-key warning, nothing else
+/// changes. The values are ignored.
+#[tokio::test]
+async fn an_old_memory_config_table_warns_once_and_the_session_starts() {
+    let (dir, ws, sessions) = subtree_scratch("old-memory-config");
+    let config = write_file(
+        &dir,
+        "config.toml",
+        "schema_version = 1\n[memory]\nenabled = true\nscopes = [\"project\", \"global\"]\n\
+         index_max_lines = 200\nindex_max_bytes = 25600\nsessions_index_max_lines = 1000\n\
+         [memory.injection]\nmax_tokens = 1000\n",
+    );
+    let server = MockServer::start(vec![text_reply("ok")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "-p",
+                "go",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(server.requests().len(), 1, "{stderr}");
+    assert_eq!(
+        stderr.matches("[config] ignored key `memory`").count(),
+        1,
+        "{stderr}"
+    );
+    // No memory section reaches the model, and the user's memory directory is never created.
+    let messages = messages_of(&server, 0);
+    let system = messages.as_array().expect("messages")[0]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(!system.contains("<memory>"), "{system}");
+}
+
+/// An old journal holding a `MemoryInjected` record and a `memory_addition` message still
+/// opens: `--list`, `--export` (markdown and JSON) and `--resume` all work, and the replayed
+/// history keeps the old message.
+#[tokio::test]
+async fn an_old_journal_with_memory_records_lists_exports_and_resumes() {
+    let dir = scratch("old-memory-journal");
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let ws = dir.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ts = "2026-10-13T00:00:00.000000Z";
+    let sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let event = |seq: u64, event: &str, critical: bool, data: Value| {
+        json!({"schema_version":1,"session_id":"old-mem","seq":seq,"ts":ts,
+               "event":event,"critical":critical,"data":data})
+    };
+    let lines = [
+        event(
+            0,
+            "SessionCreated",
+            true,
+            json!({"workspace":canonical(&ws),"config_snapshot":{}}),
+        ),
+        event(
+            1,
+            "MessageAppended",
+            true,
+            json!({"index":0,"message":{"user":{"content":[{"text":{"text":"OLD-USER-TEXT"}}]}}}),
+        ),
+        event(
+            2,
+            "MemoryInjected",
+            false,
+            json!({"indexes":[{"scope":"global",
+                "path":"/home/example/.radian/memory/global/MEMORY.md",
+                "sha256":sha,"lines":1,"bytes":40}]}),
+        ),
+        event(
+            3,
+            "MessageAppended",
+            true,
+            json!({"index":1,"message":{"user":{
+                "content":[{"text":{"text":"OLD-MEMORY-ADDITION"}}],
+                "meta":{"source":"system","origin":{"kind":"memory_addition","records":[]}}}}}),
+        ),
+        event(
+            4,
+            "MessageAppended",
+            true,
+            json!({"index":2,"message":{"assistant":{"content":[{"text":{"text":"OLD-REPLY"}}]}}}),
+        ),
+    ];
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.to_string());
+        text.push('\n');
+    }
+    std::fs::write(sessions.join("old-mem.jsonl"), text).unwrap();
+
+    let base = [
+        "--model",
+        "m",
+        "--session-dir",
+        sessions.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ];
+    let with = |extra: &[&'static str]| {
+        let mut args = base.to_vec();
+        args.extend_from_slice(extra);
+        args
+    };
+    let (code, stdout, stderr) = feed_and_wait(spawn_radian(&with(&["--list"]), &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("old-mem"), "{stdout}");
+
+    let (code, stdout, stderr) =
+        feed_and_wait(spawn_radian(&with(&["--export", "old-mem"]), &[]), "").await;
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("OLD-USER-TEXT"), "{stdout}");
+    assert!(stdout.contains("OLD-REPLY"), "{stdout}");
+
+    let (code, stdout, stderr) = feed_and_wait(
+        spawn_radian(&with(&["--export", "old-mem", "--format", "json"]), &[]),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let parsed: Value = serde_json::from_str(&stdout).expect("the JSON export is valid JSON");
+    assert!(
+        parsed["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == "MemoryInjected"),
+        "{stdout}"
+    );
+
+    let server = MockServer::start(vec![text_reply("NEW-REPLY")]).await;
+    let (code, _, stderr) = feed_and_wait(
+        spawn_radian(
+            &[
+                "--model",
+                "m",
+                "--base-url",
+                &server.base_url,
+                "--workspace",
+                ws.to_str().unwrap(),
+                "--session-dir",
+                sessions.to_str().unwrap(),
+                "--resume",
+                "old-mem",
+                "-p",
+                "again",
+            ],
+            &[],
+        ),
+        "",
+    )
+    .await;
+    assert_eq!(code, 0, "{stderr}");
+    let sent = server.requests()[0].body.clone();
+    assert!(sent.contains("OLD-USER-TEXT"), "{sent}");
+    assert!(sent.contains("OLD-MEMORY-ADDITION"), "{sent}");
 }

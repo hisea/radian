@@ -284,7 +284,7 @@ pub fn goal_block(goal: &GoalState) -> Option<String> {
     Some(out)
 }
 
-/// The hook that appends the `<goal>` block **after** skills and memory (ADR 0047, the
+/// The hook that appends the `<goal>` block **after** skills (ADR 0047, the
 /// context area of ADR 0036) and before the volatile `<session>` facts, so the static
 /// prefix stays cacheable. While the goal is unchanged the block bytes do not change;
 /// compaction never sees it (it only consumes transcript messages), so it can neither

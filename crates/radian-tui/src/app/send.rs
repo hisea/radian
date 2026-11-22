@@ -1,7 +1,7 @@
-//! The send path and the results the loop hands back: [`App::begin_send`] and the `/memory`
+//! The send path and the results the loop hands back: [`App::begin_send`] and the `/model` switch
 //! confirmation, the `@`-mention and `/skill` expansions, the `/…` completion state
 //! (`refresh_slash`, `set_slash`, `accept_slash_candidate`, `completions_ready`), the fetched
-//! `@` completions, and the `/memory` and `/compact` outcomes.
+//! `@` completions, and the `/compact` outcome.
 
 use super::*;
 
@@ -120,8 +120,8 @@ impl App {
         UpdateResult::effect(Effect::SendFollowup(Message::user(text)))
     }
 
-    /// The hardcoded answer to a `/memory` confirmation: `y` runs the command (through the
-    /// loop), `n`/`Esc` cancels it.
+    /// The hardcoded answer to a `/model` switch confirmation: `y` compacts and switches,
+    /// `n`/`Esc` cancels it.
     pub(super) fn confirm_command(&mut self, confirmed: bool) -> UpdateResult {
         let Some(Modal::ConfirmCommand(pending)) =
             self.remove_modal(|modal| matches!(modal, Modal::ConfirmCommand(_)))
@@ -130,25 +130,16 @@ impl App {
         };
         // A `/model` confirm (D7): y compacts first, n cancels the switch. The modal's y/n are
         // hardcoded (ADR 0023 U4), exactly like the approval's.
-        if let Some((provider, model, budget, route)) = pending.switch {
-            if !confirmed {
-                self.push_notice("cancelled; the model is unchanged");
-                return UpdateResult::dirty();
-            }
-            return UpdateResult::effect(Effect::CompactForSwitch {
-                provider,
-                model,
-                budget,
-                route,
-            });
-        }
+        let (provider, model, budget, route) = pending.switch;
         if !confirmed {
-            self.push_notice("cancelled");
+            self.push_notice("cancelled; the model is unchanged");
             return UpdateResult::dirty();
         }
-        UpdateResult::effect(Effect::RunMemoryCommand {
-            command: pending.command,
-            confirmed: true,
+        UpdateResult::effect(Effect::CompactForSwitch {
+            provider,
+            model,
+            budget,
+            route,
         })
     }
 
@@ -357,42 +348,6 @@ impl App {
             return UpdateResult::dirty();
         }
         self.set_slash(completion.range, candidates);
-        UpdateResult::dirty()
-    }
-
-    /// The newest memory card's file (ADR 0035), for `Enter` with an empty input. A `read`
-    /// line is not a card, so it never answers here.
-    pub(super) fn newest_memory_card(&self) -> Option<std::path::PathBuf> {
-        self.session.entries.iter().rev().find_map(|entry| {
-            entry
-                .tool
-                .as_deref()
-                .and_then(|card| card.memory.as_ref())
-                .filter(|memory| !memory.read)
-                .map(|memory| memory.path.clone())
-        })
-    }
-
-    /// A `/memory` command finished: show its output, or arm the confirmation prompt.
-    pub(super) fn memory_command_done(&mut self, result: MemoryResult) -> UpdateResult {
-        match result {
-            MemoryResult::Output(lines) => {
-                for line in lines {
-                    self.push_notice(line);
-                }
-            }
-            MemoryResult::NeedsConfirmation { command, prompt } => {
-                self.session
-                    .entries
-                    .push(Entry::new(EntryKind::Notice, format!("{prompt} [y/N]")));
-                self.push_modal(Modal::ConfirmCommand(PendingCommand {
-                    command,
-                    prompt,
-                    switch: None,
-                }));
-            }
-            MemoryResult::Failed(message) => self.push_notice(message),
-        }
         UpdateResult::dirty()
     }
 

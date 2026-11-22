@@ -17,7 +17,6 @@ use super::facade::{DriverEnd, SessionFacade};
 use super::ids::{CommandRefused, SessionCapability, SessionCommand, SessionId, UserBashRecord};
 use super::setup_types::{AccessBuilder, SessionFacts, SessionQueue};
 use super::support::trust_event;
-use crate::memory::{MemoryInjection, MemoryService};
 use crate::pending::{Answered, PendingResponse};
 use crate::projection::{ProjectionRead, SessionProjection};
 use crate::skills::{self, Skill};
@@ -60,7 +59,6 @@ pub struct LocalSession {
     pub(super) projection: Arc<SessionProjection>,
     /// The pending approvals and questions (ADR 0023 U7).
     pub(super) queue: Arc<SessionQueue>,
-    pub(super) memory: Option<MemoryService>,
     /// The discovered skills (ADR 0025). The TUI reads this list for `/skills`, `/skill:`
     /// completion and `/skill:<name>` expansion; the prompt hook and the `skill` tool share the
     /// same `Arc`.
@@ -85,12 +83,11 @@ pub struct LocalSession {
     /// strip so its list matches the request's set exactly.
     pub(super) tool_specs: Vec<radian_core::ToolSpec>,
     /// The `/context` estimate inputs (ADR 0015): the system layers split so the
-    /// categories add up, the memory injection for the fixed block, and the
-    /// estimate ruler. Read-only; the loop reads them while a turn runs.
+    /// categories add up, and the estimate ruler. Read-only; the loop reads them while a turn runs.
     pub(super) system_base: String,
     /// The exact `RoleHooks` base (layers 0a, 1 and 2) the next formal request
     /// carries. The side-question shape rebuilds the prompt from it (plus the
-    /// memory index section, the skills section, the `<goal>` block when a goal exists,
+    /// skills section, the `<goal>` block when a goal exists,
     /// and the cached `<session>` facts) so
     /// the bytes match what the driver would send.
     pub(super) role_base: String,
@@ -110,7 +107,6 @@ pub struct LocalSession {
     pub(super) skills_section: String,
     /// How many listable skills the listing names (ADR 0025 S2).
     pub(super) skills_count: usize,
-    pub(super) memory_injection: Arc<MemoryInjection>,
     pub(super) context_budget: Option<radian_core::ContextBudget>,
     /// `C` (ADR 0018): the context window size. `None` when unknown.
     pub(super) window_context: Option<u64>,
@@ -146,24 +142,20 @@ pub struct LocalSession {
 
 impl LocalSession {
     /// The next formal request's shape (backlog `tui-btw-side-question`): the
-    /// system prompt the hook chain would build (role base, memory index section,
+    /// system prompt the hook chain would build (role base,
     /// skills section, the `<goal>` block when a goal exists, cached `<session>`
     /// facts — in hook order), the journal's
     /// committed history, the open-time tool specs, and `Null` settings (the
     /// route and thinking travel in the model client, not the body).
     ///
     /// Read-only: it never touches the inbox or the driver and never runs hooks
-    /// (running them would take the one-shot `MemoryInjected` record and send the
-    /// pending notices), and works mid-turn. `/context` renders through it; `/btw`
+    /// (running them would send the pending notices), and works mid-turn. `/context` renders through it; `/btw`
     /// appends one trailing user message and sends it.
     pub fn next_request_shape(&self) -> Result<radian_core::ModelRequest, String> {
         let (history, _, _) = read_committed(&self.journal_path)?;
-        // The index section, computed once per process and reused byte for byte afterwards
-        // (ADR 0021 D6, ADR 0036). A read failure injects nothing (invariant 2).
-        let memory_text = self.memory_injection.section().text.clone();
-        // Hook order: role base, memory, skills, goal, then `\n` + the cached session
+        // Hook order: role base, skills, goal, then `\n` + the cached session
         // facts (`SessionFactsHooks::before_model_call` runs after `GoalHooks`).
-        let mut system_prompt = format!("{}{}{}", self.role_base, memory_text, self.skills_section);
+        let mut system_prompt = format!("{}{}", self.role_base, self.skills_section);
         // The `<goal>` block (ADR 0047): `'\n'` plus the block when a goal exists, exactly
         // as `GoalHooks::before_model_call` appends it, so the side body stays
         // byte-identical to the formal body.
@@ -250,16 +242,9 @@ impl LocalSession {
                 return Err(format!("context: cannot read the session file: {error}"));
             }
         };
-        // The index section's text and its injected index count, for the estimate's split and
-        // memory row. Cached after the first call, so this is the same section the shape above
-        // carries.
-        let section = self.memory_injection.section();
-        let memory_text = section.text.clone();
-        let memory_records = section.indexes.len();
         let system = SystemSplit {
             base: self.system_base.clone(),
             context_files: self.context_section.clone(),
-            memory: memory_text,
         };
         let context_blocks: Vec<ContextBlock> = self
             .context_blocks
@@ -290,7 +275,6 @@ impl LocalSession {
             skills_count: self.skills_count,
             context_blocks: &context_blocks,
             mcp_server_ids: &mcp_server_ids,
-            memory_records,
             bytes_per_token,
             count_reasoning,
             window: self.window_context,
@@ -325,11 +309,6 @@ impl LocalSession {
     /// ADR 0026 D5). `/model` pushes a route; a route never carries a key or a header value.
     pub fn queue_config(&self, change: serde_json::Value) {
         self.config_queue.push(change);
-    }
-
-    /// `/memory off|on` (ADR 0021 D7), the inherent form the line host calls.
-    pub fn set_memory_off(&self, off: bool) -> Result<(), CommandRefused> {
-        <Self as SessionFacade>::set_memory_off(self, off)
     }
 
     /// The journal, for host work that reads the session file (`/export`, `/sessions`).
@@ -427,10 +406,6 @@ impl LocalSession {
     /// A host reads this after a `/access` switch; the tools read the slot themselves.
     pub fn sandbox_mode(&self) -> Option<radian_sandbox::SandboxMode> {
         self.sandbox_slot.mode()
-    }
-
-    pub fn memory(&self) -> Option<&MemoryService> {
-        self.memory.as_ref()
     }
 
     /// The discovered skills, in discovery order (ADR 0025 S1). The UI lists these (`/skills`),
@@ -609,55 +584,11 @@ impl LocalSession {
         // run does not wait for a hook) — so this is the one place the kill belongs.
         self.command_hooks.end_session().await;
         let done = self.driver.done.lock().unwrap().take();
-        let end = match done {
+        match done {
             Some(done) => done
                 .await
                 .unwrap_or_else(|_| DriverEnd::Panicked("the driver watcher stopped".into())),
             None => DriverEnd::Panicked("the driver task was already joined".into()),
-        };
-        self.record_session_index();
-        end
-    }
-
-    /// Appends this session's line to the project's `SESSIONS.md` (ADR 0021 D3), from the
-    /// committed journal only. A failure never changes the session's ending: it is one
-    /// warning. An unlinked workspace, or a session with no committed user message, writes
-    /// nothing and creates no project.
-    fn record_session_index(&self) {
-        let Some(service) = &self.memory else {
-            return;
-        };
-        let session = match radian_session::Session::open(&self.journal_path) {
-            Ok(session) => session,
-            Err(error) => {
-                tracing::warn!(
-                    "session index: cannot read {}: {error}",
-                    self.journal_path.display()
-                );
-                return;
-            }
-        };
-        let history = match session.history() {
-            Ok(history) => history,
-            Err(error) => {
-                tracing::warn!("session index: cannot fold the transcript: {error}");
-                return;
-            }
-        };
-        let started_at = session
-            .events()
-            .first()
-            .map(|event| event.ts.clone())
-            .unwrap_or_default();
-        if let Err(error) = crate::memory::record_ended_session(
-            service,
-            session.session_id(),
-            &started_at,
-            &self.workspace,
-            &history,
-            self.memory_injection.config().sessions_index_max_lines,
-        ) {
-            tracing::warn!("session index could not be written: {error}");
         }
     }
 }
@@ -730,24 +661,6 @@ impl SessionFacade for LocalSession {
         self.hooks.set_approval(policy);
         self.config_queue
             .push(serde_json::json!({ "approval": policy.as_str() }));
-        Ok(())
-    }
-
-    fn set_memory_off(&self, off: bool) -> Result<(), CommandRefused> {
-        if !self
-            .capabilities
-            .contains(&SessionCapability::AnswerRequest)
-        {
-            return Err(CommandRefused {
-                command: "set-memory".into(),
-                capability: Some(SessionCapability::AnswerRequest.as_str().to_string()),
-                reason: "this session does not declare the `answer` capability".into(),
-            });
-        }
-        self.memory_injection.set_off(off);
-        // Durable at the next turn boundary, like the approval switch; a resume reads it.
-        self.config_queue
-            .push(serde_json::json!({ "memory": { "off": off } }));
         Ok(())
     }
 

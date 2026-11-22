@@ -35,7 +35,6 @@ pub(super) struct LoopContext<'a> {
     /// stays off while `/loop` owns the turn end. `None` has no session (never set in
     /// the session phase).
     pub(super) command_hooks: Option<Arc<radian_host::CommandHooks>>,
-    pub(super) memory: &'a Option<MemoryService>,
     pub(super) host: &'a SessionHost,
     pub(super) tx: &'a Sender<UiEvent>,
     /// The pending queue (ADR 0023 U7): the loop reads the head and the count when it is told
@@ -339,23 +338,6 @@ impl LoopContext<'_> {
                         refused.capability.as_deref().unwrap_or("capability")
                     )
                 }),
-            // ADR 0021 D7: `/memory off|on`. The facade flips the live switch and queues the
-            // durable record; nothing is written to the configuration file.
-            Effect::SetMemory { off } => self
-                .session
-                .set_memory_off(off)
-                .map_err(|refused| format!("cannot switch memory: {}", refused.reason)),
-            // ADR 0035: `Enter` on the newest memory card. The opener is the host's one helper
-            // (`$EDITOR`, else the platform opener); the TUI starts it detached and keeps drawing.
-            Effect::OpenMemory { path } => {
-                if let Err(error) = radian_host::memory::open_path(&path, false) {
-                    self.send(AppInput::MemoryCommandDone(MemoryResult::Failed(format!(
-                        "cannot open {}: {error}",
-                        path.display()
-                    ))));
-                }
-                Ok(())
-            }
             // ADR 0038 slice 2: the run-time tier switch. The facade rebuilds the profile and
             // the sandbox (a failed probe is a refusal that changes nothing) and queues the
             // durable `ConfigChanged`; when the user chose "remember", the loop also writes the
@@ -437,9 +419,6 @@ impl LoopContext<'_> {
                 // A level that needs the host: list the candidates here (I/O) and send them back as
                 // `Input::CompletionsReady` (ADR 0023 U3: `update` never does I/O).
                 let candidates = match &fetch {
-                    radian_tui::command::Fetch::MemoryRecords { command, .. } => {
-                        memory_record_candidates(self.memory, command)
-                    }
                     radian_tui::command::Fetch::Themes { .. } => {
                         // The current theme is marked, so the menu says what a pick changes.
                         let current = self.current_theme.clone();
@@ -538,44 +517,6 @@ impl LoopContext<'_> {
                     }
                 };
                 self.send(AppInput::CompletionsReady { fetch, candidates });
-                Ok(())
-            }
-            Effect::RunMemoryCommand { command, confirmed } => {
-                let result = match self.memory {
-                    Some(service) => {
-                        let json = command.json();
-                        match radian_host::memory::commands::execute(
-                            service,
-                            command.clone(),
-                            confirmed,
-                            json,
-                        ) {
-                            Ok(output) => {
-                                if let Some(path) = &output.open
-                                    && let Err(error) = radian_host::memory::open_path(path, false)
-                                {
-                                    self.send(AppInput::MemoryCommandDone(MemoryResult::Failed(
-                                        format!("cannot open {}: {error}", path.display()),
-                                    )));
-                                    return Ok(());
-                                }
-                                match output.needs_confirmation {
-                                    Some(prompt) => {
-                                        MemoryResult::NeedsConfirmation { command, prompt }
-                                    }
-                                    None => MemoryResult::Output(
-                                        radian_tui::command::output_notices(&output),
-                                    ),
-                                }
-                            }
-                            Err(error) => MemoryResult::Failed(error.message),
-                        }
-                    }
-                    None => {
-                        MemoryResult::Failed("memory is disabled (no RADIAN_HOME or HOME)".into())
-                    }
-                };
-                self.send(AppInput::MemoryCommandDone(result));
                 Ok(())
             }
             // `/skill:<name> [args]` (ADR 0025 S3): the host reads the body and folds it into
@@ -1253,9 +1194,6 @@ mod tests {
         ) -> Result<(), radian_host::CommandRefused> {
             todo!()
         }
-        fn set_memory_off(&self, _off: bool) -> Result<(), radian_host::CommandRefused> {
-            todo!()
-        }
         fn set_access(
             &self,
             _tier: radian_permissions::Preset,
@@ -1407,7 +1345,6 @@ mod tests {
             workspace: &ws,
             runtime: &rt,
             session: &facade,
-            memory: &None,
             host: &host,
             tx: &tx,
             queue: &queue,
@@ -1518,7 +1455,6 @@ mod tests {
             workspace: &ws,
             runtime: &rt,
             session: &facade,
-            memory: &None,
             host: &host,
             tx: &tx,
             queue: &queue,
@@ -1639,7 +1575,6 @@ mod tests {
             workspace: &ws,
             runtime: &rt,
             session: &facade,
-            memory: &None,
             host: &host,
             tx: &tx,
             queue: &queue,

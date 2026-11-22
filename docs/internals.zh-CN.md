@@ -19,17 +19,15 @@
 | `radian-permissions` | 权限层：`ApprovalPolicy` + `ToolRuleSet` 合成一个 `Hooks` 实现，决定 allow / ask / deny。它本身不强制执行任何东西。 | `crates/radian-permissions/README.md` |
 | `radian-sandbox` | 操作系统沙箱后端（macOS `sandbox-exec`、Linux `bubblewrap`），按策略构造命令；没有经过验证的后端时**拒绝运行**。 | `crates/radian-sandbox/LIMITS.md` |
 | `radian-coding` | 内置编码工具：`read`（文件和目录）、`write`、`patch`（单处或原子的多处编辑）、`glob`、`grep`，在宿主提供工作区时挂载；`shell` 和 `job` 工具还需要沙箱。模型通过 `shell` 运行 git（在不受信任的项目里用 `GIT_CONFIG_*` 加固）。被截断的前台结果登记为普通 job id；保留输出还需要会话私有的输出目录。所有工具都限制在工作区路径内。 | `crates/radian-coding/README.md` |
-| `radian-memory` | 记忆存储层：一条记录一个 Markdown 文件（frontmatter 与正文）、每个作用域一个 `MEMORY.md` 索引、命名规则、原子写入、`projects.jsonl` 登记表，以及一次性的旧日志迁移。不依赖宿主：调用方传入 `~/.radian/memory/`。 | `crates/radian-memory/README.md` |
-| `radian-host` | TUI 和无头命令共用的宿主管道，保证两者不会走偏：`--header` 解析、会话 id、`--mcp-config` 文件、模型构造、启动说明、"内置工具 + MCP" 提供者、`~/.radian/` 目录布局和诊断、模型目录，以及记忆层（基于文件存储的 `MemoryService`、项目身份、索引注入、`/memory off` 开关、共用的 `radian memory` / `/memory` 命令）。 | `crates/radian-host/README.md` |
-| `radian-exec` | `radian exec` 背后的库：行提示聊天客户端，可选内置工具、MCP 服务器、会话管理命令和 `radian memory` 命令。 | `crates/radian-exec/README.md` |
-| `radian-tui` | `radian` 二进制：基于 `radian-runtime` 的全屏 TUI（只有全屏，没有内联模式），带斜杠命令层（`/help`、`/memory …`、`/access`、`/jobs`）和自己的对话滚动。 | `crates/radian-tui/README.md` |
+| `radian-host` | TUI 和无头命令共用的宿主管道，保证两者不会走偏：`--header` 解析、会话 id、`--mcp-config` 文件、模型构造、启动说明、"内置工具 + MCP" 提供者、`~/.radian/` 目录布局和诊断、模型目录，以及项目身份键。 | `crates/radian-host/README.md` |
+| `radian-exec` | `radian exec` 背后的库：行提示聊天客户端，可选内置工具、MCP 服务器、会话管理命令和 `radian trust`、`radian config` 命令。 | `crates/radian-exec/README.md` |
+| `radian-tui` | `radian` 二进制：基于 `radian-runtime` 的全屏 TUI（只有全屏，没有内联模式），带斜杠命令层（`/help`、`/access`、`/jobs`）和自己的对话滚动。 | `crates/radian-tui/README.md` |
 
 另有两个二进制不属于产品界面：`agent-extensions` 的 `mcp-fixture`（给它的测试用的手写 MCP 服务器）和 `radian-sandbox` 的 `sandbox-escape`（需要 `--features testing`）。
 
 ## 状态
 
-- **`~/.radian/` 目录布局**已实现：`config/` 和 `cache/` 沙箱可读；`sessions/` 和 `memory/` 被拒绝。`RADIAN_HOME` 覆盖根目录。（`--session-dir` / `RADIAN_SESSION_DIR` 仍然只覆盖会话目录。）
-- **记忆**已实现：`radian memory` 命令行命令、TUI 的 `/memory` 斜杠命令（同一组命令），以及把两个 `MEMORY.md` 索引文件确定性注入、并写 `MemoryInjected` 审计事件。模型没有记忆工具。
+- **`~/.radian/` 目录布局**已实现：`config/` 和 `cache/` 沙箱可读；`sessions/`、`credentials/`、`trust/` 和 `access/` 被拒绝。`RADIAN_HOME` 覆盖根目录。（`--session-dir` / `RADIAN_SESSION_DIR` 仍然只覆盖会话目录。）
 - **配置文件**已实现，只读：`--config`/`RADIAN_CONFIG`/`~/.radian/config/config.toml`，`model.*`、`permissions.profile` 和 `compaction.auto` 作为默认值生效（命令行优先）。它从不包含密钥值。
 - **Pi 配置迁移（Phase 5）**已实现：`radian config import-pi --from <pi-agent-dir>` 起草一份 Radian 配置（stdout）和一份映射报告（stderr）。它只读你指定的目录，从不读 `auth.json`，从不读密钥值；没有 `--write` 时什么都不写（`--write` 遇到已有文件会拒绝）。Radian **不**承诺兼容 Pi 的文件格式：见 [`docs/user/pi-migration.md`](user/pi-migration.md)。
 - **会话分叉**已实现：`radian exec --fork <parent> [--at <seq>] [--session-id <child>]` 和 TUI 的 `/fork`。分叉点是父会话的轮次边界；子会话在那里物化父会话的有效历史（已提交的压缩生效，未提交的替换丢弃），先于父会话的记录写入，可以恢复，也可以再分叉。
@@ -53,7 +51,7 @@ cargo build --workspace --locked --release
 
 ## 运行
 
-两种模式都**只**从凭据存储（`~/.radian/credentials/auth.json`，由 `radian login` 写入）读 API key，从不从命令行读，也从不打印它。具体见 `radian docs providers`。一个会话是一个 `<session-dir>/<session-id>.jsonl` 文件；会话目录依次取 `--session-dir`、`$RADIAN_SESSION_DIR`、`~/.radian/sessions`（设置了 `RADIAN_HOME` 时是 `$RADIAN_HOME/sessions`）。同一个 `~/.radian/` 根目录下还有 `config/`、`cache/` 和 `memory/`；沙箱拒绝读取 `sessions/` 和 `memory/`。
+两种模式都**只**从凭据存储（`~/.radian/credentials/auth.json`，由 `radian login` 写入）读 API key，从不从命令行读，也从不打印它。具体见 `radian docs providers`。一个会话是一个 `<session-dir>/<session-id>.jsonl` 文件；会话目录依次取 `--session-dir`、`$RADIAN_SESSION_DIR`、`~/.radian/sessions`（设置了 `RADIAN_HOME` 时是 `$RADIAN_HOME/sessions`）。同一个 `~/.radian/` 根目录下还有 `config/`、`cache/`；沙箱拒绝读取 `sessions/`。
 
 ### `radian exec`（行提示）
 

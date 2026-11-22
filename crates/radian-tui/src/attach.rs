@@ -70,12 +70,8 @@ impl AttachView {
     /// Opens `path` read-only and folds its committed prefix. The file must exist; the caller
     /// reports a missing session before entering the terminal.
     pub fn open(path: &Path, id: &str) -> Result<Self, String> {
-        // ADR 0035: a memory card in the observed transcript resolves against this process's
-        // memory root, the same one the recording session used. The fold resolves it, so every
-        // reader's entries carry the same card.
-        let fold = AttachFold::open(path, radian_host::memory_dir())?;
-        let mut app = App::new("", id);
-        app.set_memory_root(radian_host::memory_dir());
+        let fold = AttachFold::open(path)?;
+        let app = App::new("", id);
         let mut view = Self {
             fold,
             app,

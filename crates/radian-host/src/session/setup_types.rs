@@ -19,7 +19,6 @@ use super::facade::DriverEnd;
 use super::ids::{SessionCapability, SessionId};
 use crate::cost::RoutePrice;
 use crate::describe::Wording;
-use crate::memory::InjectionConfig;
 use crate::model::SwitchableModel;
 use crate::pending::{PendingQueue, PendingRequest, PendingResponse};
 use crate::projection::SessionProjection;
@@ -102,8 +101,6 @@ pub struct SessionSetup {
     /// cannot start a child. Ignored, so the tool is not mounted, when [`SessionSetup::parent`]
     /// says this session is itself a subagent child.
     pub subagent: Option<SubagentParts>,
-    /// The memory root, or `None` when neither `RADIAN_HOME` nor `HOME` is set.
-    pub memory_root: Option<PathBuf>,
     /// Extra skill roots from `[skills] extra_paths` (ADR 0025 slice 4), already resolved by the
     /// host (`~` and paths relative to the config file). Discovery order is user-level, then
     /// these, then the trusted project's `.agents/skills`, then built-ins — so the user-level
@@ -121,9 +118,6 @@ pub struct SessionSetup {
     /// the named ones in the catalog, and a name discovery did not find is reported at spawn,
     /// never a failure.
     pub skills_allow: Option<Vec<String>>,
-    /// The memory index-injection configuration (ADR 0021 D6). The host builds it
-    /// from `[memory]`; `InjectionConfig::default()` is the documented defaults.
-    pub memory_injection: InjectionConfig,
     /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
     pub subtree_files: bool,
     /// The resolved `[hooks]` section (ADR 0045 slice A): user-level external command hooks.
@@ -190,10 +184,11 @@ pub struct HostBindings {
     pub driver_stopped: Arc<dyn Fn(DriverEnd) + Send + Sync>,
     /// Runs at the start of the driver task (a TUI test hook panics here).
     pub before_driver: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// A memory hook's warning line (the two hosts prefix it differently).
-    pub memory_warning: Arc<dyn Fn(&str) + Send + Sync>,
+    /// A session warning line (a malformed context file, a bad skill, a jobs sweep failure;
+    /// the two hosts prefix it differently).
+    pub session_warning: Arc<dyn Fn(&str) + Send + Sync>,
     /// A command hook's warning line (ADR 0045: refused `allow`/`ask`, unparsable stdout,
-    /// hook errors outside a turn). Routed like `memory_warning`, with the `[hooks]` prefix.
+    /// hook errors outside a turn). Routed like `session_warning`, with the `[hooks]` prefix.
     pub hooks_warning: Arc<dyn Fn(&str) + Send + Sync>,
     /// A wake-budget degrade's notice line (one per degrade; the TUI shows a single line
     /// per burst and reports `blocked` with the `wake budget` label while they wait).
@@ -222,10 +217,6 @@ pub struct SessionFacts {
     /// words for `workspace` (`macOS sandbox` / `Linux sandbox`),
     /// `no sandbox` for `full`. The TUI prints it as-is.
     pub sandbox_word: String,
-    /// The `[memory]` line.
-    pub memory_notice: String,
-    /// Whether this process has a memory root (`/memory` is refused without one).
-    pub memory_enabled: bool,
     /// How many MCP servers were configured.
     pub mcp_configured: usize,
     /// The servers/tools that actually connected, once the session is open.

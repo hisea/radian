@@ -21,7 +21,6 @@ use radian_sandbox::Sandbox;
 use crate::config::{Config, resolve_extra_paths};
 use crate::cost::RoutePrice;
 use crate::describe::Wording;
-use crate::memory::InjectionConfig;
 use crate::model::SwitchableModel;
 use crate::output::{StdoutError, write_line};
 use crate::provider::{ProviderDecl, ProviderRef};
@@ -218,8 +217,6 @@ pub struct SessionSettings {
     pub skills_builtin: bool,
     /// `[skills] disabled`: built-in skill names to leave out.
     pub skills_disabled: Vec<String>,
-    /// The memory index-injection configuration (ADR 0021 D6).
-    pub memory_injection: InjectionConfig,
     /// `[context] subtree_files` (ADR 0036): append a subtree context file on first use.
     pub subtree_files: bool,
     /// The resolved `[hooks]` section (ADR 0045 slice A): user-level command hooks.
@@ -287,7 +284,6 @@ impl SessionSettings {
                 .builtin
                 .unwrap_or(crate::config::DEFAULT_SKILLS_BUILTIN),
             skills_disabled: config.skills.disabled.clone(),
-            memory_injection: config.memory.injection(),
             subtree_files: config.context.subtree_files(),
             hooks: config.hooks.clone(),
         };
@@ -346,7 +342,6 @@ pub struct LeadSetup {
     /// The project-level hooks (`<workspace>/.radian/hooks.json`, ADR 0045 slice B), loaded
     /// once trust is resolved (untrusted means empty).
     pub project_hooks: crate::config::HooksConfig,
-    pub memory_root: Option<PathBuf>,
     pub trust: trust::Setup,
     pub resume: bool,
     pub config_snapshot: serde_json::Value,
@@ -388,13 +383,11 @@ impl LeadSetup {
             access_builder: self.access_builder,
             parent: self.parent,
             subagent: self.subagent,
-            memory_root: self.memory_root,
             skills_extra_paths: settings.skills_extra_paths,
             skills_builtin: settings.skills_builtin,
             skills_disabled: settings.skills_disabled,
             tools_allow: self.tools_allow,
             skills_allow: None,
-            memory_injection: settings.memory_injection,
             subtree_files: settings.subtree_files,
             hooks: settings.hooks,
             project_hooks: self.project_hooks,
