@@ -145,7 +145,7 @@ not (
   | test(=built_in_write_tool_creates_a_file_in_the_workspace)
   | test(=cancelling_at_the_approval_prompt_does_not_swallow_the_next_line)
   | test(=cancelling_at_the_shell_approval_does_not_hang)
-  | test(=config_import_claude_drafts_and_writes)
+  | test(=config_import_claude_is_an_unknown_subcommand)
   | test(=config_import_pi_drafts_a_valid_configuration_and_never_shows_a_literal_key)
   | test(=config_import_pi_lists_a_command_key_and_does_not_run_it)
   | test(=config_import_pi_never_reads_auth_json)

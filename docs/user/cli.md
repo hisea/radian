@@ -256,17 +256,7 @@ radian config import-pi --from ~/.pi/agent > draft.toml
 radian config import-pi --from ~/.pi/agent --write
 ```
 
-`radian config import-claude --claude-home <DIR> --project <DIR>` drafts a configuration from Claude Code files.
-At least one of `--claude-home` and `--project` is required.
-Stdout carries the draft: the config, then each skill file and `AGENTS.md` body under a header line.
-`--write` saves every file instead; nothing that exists is ever changed.
-Exit `0` for a draft, `2` when neither source is given, `1` for other failures.
 See `configuration` for the file format and `pi-migration` for the Pi mapping table.
-
-```sh
-radian config import-claude --claude-home ~/.claude > draft.toml
-radian config import-claude --project "$PWD" --write
-```
 
 ## `radian theme import`
 
