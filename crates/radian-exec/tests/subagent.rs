@@ -233,8 +233,15 @@ async fn child_pid(_env: &Env, parent_pid: u32) -> u32 {
             .filter_map(|pid| pid.parse().ok())
             .collect()
     };
-    wait_until("the child radian", || !children().is_empty()).await;
-    children().into_iter().next().expect("the child pid")
+    // One `pgrep` result is both the wait condition and the answer: a second call could find the
+    // child already gone.
+    let found = std::cell::Cell::new(None);
+    wait_until("the child radian", || {
+        found.set(children().into_iter().next());
+        found.get().is_some()
+    })
+    .await;
+    found.get().expect("the child pid")
 }
 
 fn sigint(child: &Child) {
@@ -543,8 +550,8 @@ async fn a_non_auto_parent_denies_the_childs_ask_and_says_so() {
 }
 
 /// ADR 0043 1a: a cancelled parent turn kills the child's whole session. The child is parked
-/// on a model request that never answers; the test finds its pid from the control socket it
-/// binds at startup, cancels the parent, and polls (bounded) for the process to go away. The
+/// on a model request that never answers; the test waits for its model request, finds its pid with
+/// `pgrep -P`, cancels the parent, and polls (bounded) for the process to go away. The
 /// mutation (not propagating cancellation) leaves it alive.
 ///
 /// The parent runs with a 60 s tool cancel grace (the hidden test-only
@@ -574,6 +581,9 @@ async fn a_cancelled_parent_turn_kills_the_child() {
         ],
     );
     let parent_pid = parent.id().expect("parent pid");
+    // The child is parked on its first model request (the second request the server sees), so
+    // the parent's tool is running and its cancellation is armed before the interrupt.
+    wait_until("the child's model request", || server.requests().len() >= 2).await;
     let child_pid = child_pid(&env, parent_pid).await;
 
     sigint(&parent);
