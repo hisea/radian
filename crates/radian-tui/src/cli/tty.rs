@@ -388,10 +388,6 @@ pub(super) fn draw_frame(
     if let Some(millis) = SLOW_DRAW.get() {
         std::thread::sleep(Duration::from_millis(*millis));
     }
-    // ADR 0027: hand the background `command` items the footer's live
-    // facts. One pure state read and one lock write, before the frame; a command reads the latest
-    // snapshot when it next runs, so the UI never waits for one.
-    app.publish_footer_context();
     if FREEZE_DRAW.get().is_some_and(|path| path.exists()) {
         return Ok(true);
     }

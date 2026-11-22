@@ -295,7 +295,7 @@ configuration: Every configuration key, where the file lives, and how it is chec
 context-files: Which project direction files load, from where, in which order, and their limits.
 environment: Every environment variable radian reads, and what each controls.
 extensions: Which extension mechanism fits which need, where each lives, and a first example.
-footer: Shape the status line under the input box: presets, rows, items and command items.
+footer: Shape the status line under the input box: presets, rows and items.
 hooks: Run your own commands when a tool runs, the model stops, a turn fails, or radian needs you.
 index: What radian is and where every radian manual page lives.
 keybindings: Every key in the full screen interface, by area, and how to rebind it.

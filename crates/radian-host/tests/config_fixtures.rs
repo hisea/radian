@@ -470,11 +470,10 @@ fn the_refusal_messages_never_echo_a_value() {
     }
 }
 
-/// ADR 0027: the `command`/`period` item parameters are carried by the
-/// reader, and `command_specs` turns them into specs. v1 has no project-level config layer
-/// (ADR 0031), so every configuration source is the user's own and is accepted.
+/// ADR 0027: `command` and `period` are retired footer item keys. An old config that still sets
+/// them parses (the reader carries them as plain item parameters); the TUI warns and ignores them.
 #[test]
-fn the_command_fixture_carries_command_and_period() {
+fn an_old_config_with_retired_footer_command_items_still_parses() {
     let (path, text) = fixture("tui-footer-command.toml");
     let config = config::parse(&path, &text).unwrap();
     let weather = &config.tui.footer.items["weather"];
@@ -487,14 +486,5 @@ fn the_command_fixture_carries_command_and_period() {
     };
     assert_eq!(param("command"), Some("printf 72F"));
     assert_eq!(param("period"), Some("300"));
-
-    let (specs, warnings) = radian_host::command_specs(&config.tui.footer);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(specs.len(), 2, "{specs:?}");
-    let weather = specs.iter().find(|spec| spec.id == "weather").unwrap();
-    assert_eq!(weather.program, std::ffi::OsString::from("printf"));
-    assert_eq!(weather.args, vec![std::ffi::OsString::from("72F")]);
-    assert_eq!(weather.period, Some(std::time::Duration::from_secs(300)));
-    let host_tag = specs.iter().find(|spec| spec.id == "host_tag").unwrap();
-    assert_eq!(host_tag.period, None, "period = 0 is startup-only");
+    assert!(config.tui.footer.items.contains_key("host_tag"));
 }

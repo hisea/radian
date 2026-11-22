@@ -348,7 +348,7 @@ async fn a_passed_deadline_beats_a_truncation_continuation() {
             _cx: &HookContext,
             _response: &ModelResponse,
         ) -> Result<(), HookError> {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(600));
             Ok(())
         }
     }
@@ -357,7 +357,7 @@ async fn a_passed_deadline_beats_a_truncation_continuation() {
     let agent = Arc::new(Agent::new(model.clone(), NoTools).with_hooks(SlowAfterResponse));
     let mut chat = agent.open_session().await.unwrap();
     let options = TurnOptions {
-        deadline: Some(tokio::time::Instant::now() + Duration::from_millis(20)),
+        deadline: Some(tokio::time::Instant::now() + Duration::from_millis(300)),
         ..Default::default()
     };
 

@@ -60,7 +60,6 @@ Everything else, including every key, is removed.
 
 | Variable | Allowed values | Default when unset | What it does |
 |---|---|---|---|
-| `RADIAN_SESSION_ID`, `RADIAN_CWD` | set by radian, never read back | — | Set on footer `command` contributors: the session id and the workspace path. Radian itself never reads them back. |
 | `RADIAN_CHILD_HEADERS` | JSON array of `NAME=VALUE`, set by the parent only | empty | Internal. Carries a parent `--header` values to a `subagent` child. Read and removed from the environment at startup. Never set it by hand. |
 
 ## Herdr

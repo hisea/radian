@@ -1,5 +1,5 @@
 ---
-description: Shape the status line under the input box: presets, rows, items and command items.
+description: Shape the status line under the input box: presets, rows and items.
 ---
 
 # The footer
@@ -55,16 +55,14 @@ without an `item` key is a structural mistake and drops the whole
 
 | Field | Type | Default | What it does |
 |---|---|---|---|
-| `item` | string | none | The item id. A built-in id draws its component; an id with a `command` parameter draws that command's value; any other id draws a contributor's published text once one exists, else its own id text with one warning. |
+| `item` | string | none | The item id. A built-in id draws its component; any other id draws a contributor's published text once one exists, else its own id text with one warning. |
 | `icon` / `symbol` | string | the glyph set's icon | Both names set the same field. Drawn before the text. `""` draws no icon. |
 | `symbol_style` | style | the item's text style | The icon's own style, when it differs from the text's. A bad value warns and follows the text. |
 | `format` | string | the item's own default | `{placeholder}` names from the item's section below, plus `[text](style)` spans with an inline style. An unknown placeholder or a bad inline style warns and shows the format as written. |
 | `style` | style | the item's own role | A theme role, one of `dim`, `muted`, `accent`, `warn`, `error`, `ok`, `text`, or a fixed color. A bad value warns and keeps the role. A style the data itself sets (a thinking level, a stale mark) wins over it. |
 | `priority` | integer | the item's own number | Higher survives a narrow terminal longer. |
 | `thresholds` | array | the item's own list | `{ at = 70, style = "warn" }` entries in file order. Only `context`, `cost`, `pending` and `queued` have a number to compare, so only they ever match one. |
-| `disabled` | boolean | `false` | `true` hides the item everywhere it is named. A disabled command item never runs. |
-| `command` | string | none | Turns the id into a command item. Write it in `[tui.footer.items.<id>]`: only that table starts the command. An inline `command` (or `period`) in a row is not read: the load warns `` tui.footer: item "<id>" sets `command` (or `period`) inline; inline `command`/`period` is not read, move it to `[tui.footer.items.<id>]` `` and the id follows the unknown-id rule unless the items table sets `command` for it. A `command` under a built-in id never runs: the load warns `` tui.footer.items.<id>.command: "<id>" is a built-in item; its `command` is ignored `` and the built-in keeps the draw. |
-| `period` | integer seconds | `60` | How often a command item runs. `0` runs once at startup. Any other value clamps silently into `15`–`3600`. A non-number warns and keeps `60`. |
+| `disabled` | boolean | `false` | `true` hides the item everywhere it is named. |
 | `width`, `fill`, `empty` | string | `10`, `━`, `─` | The `context` item's bar. A non-number `width` reads as `10`. |
 | `keys` | string | all keys | The `status` item's filter: comma-separated `status.*` key names, trimmed. |
 
@@ -268,46 +266,16 @@ Icons: none. Role: none. Priority: `20`. Never hides. `{position}` is `all`
 at the bottom with nothing to scroll, else `scroll/max` (for example
 `12/48`). `{mode}` is `follow` or `paused`.
 
-### Command items
+### Retired item keys
 
-Any id no built-in claims becomes a command item when its
-`[tui.footer.items.<id>]` table sets `command`. Only that table starts the
-command: a `command` (or `period`) written inline in a row is not read. The
-load warns once per such item
-`` tui.footer: item "<id>" sets `command` (or `period`) inline; inline `command`/`period` is not read, move it to `[tui.footer.items.<id>]` ``,
-and the id follows the unknown-id rule unless the items table sets `command`
-for it (an inline table still wins over the items table for every other
-field). A `command` under a built-in id never runs: the load warns
-`` tui.footer.items.<id>.command: "<id>" is a built-in item; its `command` is ignored ``
-and the built-in keeps the draw. Placeholders: `value`.
-Default format: `{value}`. Icons: none, unless the output or the item sets
-one. Priority: `50` unless the item sets another.
-
-`command` is a command line, not a shell: whitespace separates words, single
-and double quotes group them, a backslash escapes the next character (inside
-double quotes too). An empty command, an empty executable name, an
-unterminated quote or a trailing backslash warns and never runs. `period`
-sets the refresh period (see the items table). The command runs as you,
-unsandboxed, on that period, with stdin as one JSON object of display-safe
-facts (`model`, `cwd`, `branch`, `context_percent`, `tokens` with `input`,
-`output` and `cache_read`, `cost_usd`; each `null` when unknown, never a
-fabricated zero). Only `PATH`, `RADIAN_SESSION_ID` and `RADIAN_CWD` pass
-through from the environment; everything else is cleared.
-
-Its stdout's first line is the value, trimmed and cut at 256 bytes on a
-UTF-8 boundary (at most 64 KiB is read, so a flooding command cannot grow
-memory). A line that does not start with `{` is plain text. A line that
-starts with `{` must be a JSON object with a string `text` and optional
-string `style` and `symbol`: `{"text": "ok", "style": "warn", "symbol": "! "}`.
-`style` names one of `normal` (also `text`), `dim` (also `dimmed`,
-`muted`), `warn` (also `warning`), `ok` (also `success`), `error` (also
-`err`), `accent`; absent or `null` means `normal`. A JSON `symbol` draws
-verbatim before the text, so include its own trailing space; a configured
-`symbol` on the item wins over it.
-
-One run may take 5 seconds; a timeout, a spawn failure, a non-zero exit, an
-empty line or a bad line keeps the last value and draws it stale (dim).
-Until the first good value the item hides.
+`command` and `period` are retired and inert. The footer's out-of-process
+`command` item was removed, so a file that still sets either key in
+`[tui.footer.items.<id>]` or inline in a row opens normally and gets one
+warning line per item:
+`` tui.footer: item "<id>" sets `command` or `period`, which are retired and ignored ``.
+Nothing runs. An id no built-in claims then follows the unknown-id rule: its
+own text draws with one more warning. Under a built-in id only the retired
+warning shows and the built-in keeps the draw. Delete the keys.
 
 ## Narrow terminals, numbers, unknown text
 
@@ -474,20 +442,3 @@ left = ["tokens", "cost"]
 right = [{ item = "context", format = "{percent}%/{budget}" }]
 separator = " "
 ```
-
-A command item that shows the current ticket. The id is your own, so no
-built-in claims it; `period = 60` refreshes it every minute; `{value}` is
-its only placeholder:
-
-```toml
-[tui.footer.items.ticket]
-command = "~/bin/ticket"
-period = 60
-
-[[tui.footer.rows]]
-left = ["model", "ticket"]
-```
-
-When `~/bin/ticket` prints `{"text": "T-123", "style": "accent"}`,
-the item shows `T-123` in the accent role. When it exits non-zero, the last
-ticket stays and draws dim.

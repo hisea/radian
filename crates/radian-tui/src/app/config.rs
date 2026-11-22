@@ -21,7 +21,6 @@ impl App {
             now: Instant::now(),
             footer: crate::footer::Footer::default(),
             contributions: radian_host::ContributionStore::new(),
-            footer_context: radian_host::FooterContext::new(),
             input: Composer::new(),
             composer_images: Vec::new(),
             clipboard_reader: crate::clipboard::system(),

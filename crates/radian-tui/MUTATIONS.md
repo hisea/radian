@@ -3714,3 +3714,11 @@ file and restored from `.radian/bak/`, which `cmp` found identical.
 | TK0323-M4 | the composer is not frozen once a close is in flight | `quit::keys_queued_behind_a_remote_close_do_not_refill_the_composer` | ✅ 1 failed |
 
 4/4 caught.
+
+## T-0014 (footer `command` and `period` retired)
+
+| id | mutation | test that fails | result |
+|---|---|---|---|
+| T-0014-M1 | the items-table loop in `Footer::from_config` never warns about a retired `command`/`period` | `footer::a_retired_command_item_warns_once_and_shows_its_id`, `footer::a_retired_command_under_a_builtin_id_warns_and_the_builtin_draws` | ✅ 2 failed |
+
+1/1 caught.

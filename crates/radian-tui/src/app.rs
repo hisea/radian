@@ -729,10 +729,6 @@ pub struct App {
     /// The contributor store (ADR 0027 C3). The background tasks write it; the renderer reads a
     /// snapshot, and the `git_branch`/`worktree`/`status` items come from it.
     pub contributions: std::sync::Arc<radian_host::ContributionStore>,
-    /// The footer facts a background `command` item reads on stdin (ADR 0027
-    /// decision 4). The loop publishes a snapshot as the facts change; the command producers read
-    /// it, so the draw path never runs a command and the command never blocks a frame.
-    pub footer_context: std::sync::Arc<radian_host::FooterContext>,
     /// The input composer: text plus a cursor (ADR 0009 Phase 4).
     pub input: Composer,
     /// Images attached in the composer: a dropped absolute path or a clipboard paste (Q7).

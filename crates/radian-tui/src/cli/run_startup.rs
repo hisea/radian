@@ -16,7 +16,6 @@ pub(super) struct Startup {
     pub(super) config_warnings: Vec<String>,
     pub(super) app: App,
     pub(super) allow_unix_sockets: Vec<PathBuf>,
-    pub(super) command_specs: Vec<radian_host::CommandSpec>,
     pub(super) mouse: bool,
     pub(super) startup_terminal: Option<(
         radian_tui::terminal::TtyGuard,
@@ -153,13 +152,6 @@ pub(super) fn startup_preamble(
     if let Some(warning) = radian_host::unix_sockets_ignored_warning(&allow_unix_sockets) {
         config_warnings.push(warning);
     }
-    // ADR 0027: the configured footer `command` items, parsed once and
-    // spawned as background producers later (their values travel only through the contribution
-    // store). v1 has no project-level config layer (ADR 0031), so every current source is the
-    // user's own and every command is accepted; when one is added, a `command` must be refused
-    // there and that slice owns the test.
-    let (command_specs, command_warnings) = radian_host::command_specs(&config.tui.footer);
-    config_warnings.extend(command_warnings);
     match &config.source {
         Some(path) => eprintln!("[config] {}", path.display()),
         None => eprintln!("[config] none"),
@@ -193,7 +185,6 @@ pub(super) fn startup_preamble(
         config_warnings,
         app,
         allow_unix_sockets,
-        command_specs,
         mouse,
         startup_terminal,
         startup_log,

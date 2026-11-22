@@ -1,10 +1,7 @@
-# ADR 0027: an out-of-process footer item.
-# `[tui.footer.items.<id>] command = "<executable or command line>"` runs a user command as the
-# user (unsandboxed) and shows its first stdout line; `period` is its refresh period in seconds
-# (15–3600; 0 = run once at startup). The reader keeps both as item parameters; v1 has one config
-# layer, chosen by the user (`--config` > `RADIAN_CONFIG` > `~/.radian/config/config.toml`), so
-# every command is accepted (no project-level config, ADR 0031; when one is added a command must
-# be refused there, and that slice owns the test).
+# ADR 0027: an old config that sets the retired out-of-process footer item keys.
+# `[tui.footer.items.<id>] command` and `period` were removed. A file that still sets them opens
+# normally: the reader keeps both as item parameters, the TUI warns one line per item, then
+# ignores them and treats the id as an unknown item. It never refuses the file (ADR 0008).
 schema_version = 1
 
 [tui.footer]

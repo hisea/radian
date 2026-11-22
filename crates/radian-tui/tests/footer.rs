@@ -1814,336 +1814,88 @@ fn a_builtin_id_wins_over_the_store_fallback() {
     );
 }
 
-// ---- ADR 0027: the out-of-process `command` footer component ----
+// ---- ADR 0027: the retired `command` and `period` item keys ----
 
-/// A footer config whose `weather` item is a command (no real process runs here; the value is
-/// published straight into the store, exactly as the runner does).
-fn command_item_config(id: &str, extra: TuiFooterItemConfig) -> TuiFooterConfig {
+/// An old config: `weather` is configured with `command` and `period` in the items table and is
+/// placed in a row. The keys are retired, so the id is just an unknown item.
+fn retired_command_config() -> TuiFooterConfig {
     let mut config = items(&[(
-        id,
+        "weather",
         TuiFooterItemConfig {
-            id: id.to_string(),
-            params: vec![("command".to_string(), "printf hi".to_string())],
-            ..extra
+            id: "weather".to_string(),
+            params: vec![
+                ("command".to_string(), "printf hi".to_string()),
+                ("period".to_string(), "300".to_string()),
+            ],
+            ..Default::default()
         },
     )]);
     config.rows = vec![TuiFooterRowConfig {
-        left: vec![item(id)],
+        left: vec![item("model"), item("weather")],
         ..Default::default()
     }];
     config
 }
 
-/// Publish a command value with an optional symbol, the way `CommandContributor` writes it.
-fn publish_contribution(
-    app: &App,
-    id: &str,
-    text: &str,
-    role: radian_host::SegmentRole,
-    symbol: Option<&str>,
-) {
-    app.contributions
-        .write_contribution(radian_host::Contribution {
-            item: id.to_string(),
-            segments: vec![radian_host::Segment::new(text, role)],
-            stale: false,
-            symbol: symbol.map(str::to_string),
-            usage: None,
-        });
-}
-
-/// A `command` id is a known item: no "unknown item" warning, and it appears wherever its id is
-/// placed in a row. Before the producer's first value it hides (never shows its raw id).
+/// An items-table `command` and `period` warn once, then are ignored: the id follows the
+/// unknown-id rule and its text is drawn raw. Nothing is hidden and nothing runs.
 #[test]
-fn a_command_item_appears_where_its_id_is_placed() {
-    let mut config = command_item_config("weather", TuiFooterItemConfig::default());
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![item("model"), item("weather")],
-        ..Default::default()
-    }];
+fn a_retired_command_item_warns_once_and_shows_its_id() {
+    let config = retired_command_config();
     let (footer, warnings) = Footer::from_config(&config);
+    let retired: Vec<_> = warnings.iter().filter(|w| w.contains("retired")).collect();
+    assert_eq!(retired.len(), 1, "one line for the item: {warnings:?}");
+    assert!(retired[0].contains("\"weather\""), "{retired:?}");
     assert!(
-        warnings.is_empty(),
-        "a command id is known, not an unknown id: {warnings:?}"
+        warnings
+            .iter()
+            .any(|w| w.contains("unknown item") && w.contains("\"weather\"")),
+        "the id follows the unknown-id rule: {warnings:?}"
     );
     let mut app = App::new("mock", "s");
     app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
     app.footer = footer;
-
-    // No value yet: the item hides rather than showing the raw id (unlike an unknown id).
-    let before = render(&mut app, 60, 12);
-    assert!(
-        !row(&before, 11).contains("weather"),
-        "{}",
-        row(&before, 11)
-    );
-
-    publish_contribution(
-        &app,
-        "weather",
-        "72F",
-        radian_host::SegmentRole::Normal,
-        None,
-    );
-    let after = render(&mut app, 60, 12);
-    let line = row(&after, 11);
-    let model = line.find("Mock 5").expect("the model");
-    let weather = line.find("72F").expect("the command value");
-    assert!(
-        model < weather,
-        "the value is where the id is placed: {line:?}"
-    );
-}
-
-/// A JSON line's `style` sets the text's theme role; a configured `symbol_style` styles the
-/// symbol; a configured `symbol` wins over the JSON `symbol`.
-#[test]
-fn a_command_json_style_and_symbol_render_and_the_symbol_style_applies() {
-    let config = command_item_config(
-        "weather",
-        TuiFooterItemConfig {
-            symbol_style: Some("red".to_string()),
-            ..Default::default()
-        },
-    );
-    let (footer, warnings) = Footer::from_config(&config);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let mut app = App::new("mock", "s");
-    app.footer = footer;
-    publish_contribution(
-        &app,
-        "weather",
-        "hi",
-        radian_host::SegmentRole::Warn,
-        // The symbol is drawn verbatim, so it carries its own trailing space (as the built-in
-        // glyphs do).
-        Some("! "),
-    );
-    let terminal = render(&mut app, 60, 12);
-    let line = row(&terminal, 11);
-    assert!(line.contains("! hi"), "{line:?}");
-    // The JSON `style` is the warn role.
-    assert_eq!(
-        fg_at(&terminal, 11, "hi"),
-        app.theme.budget_over.fg,
-        "the JSON style is the text role"
-    );
-    // The configured `symbol_style` styles the JSON symbol too.
-    assert_eq!(
-        fg_at(&terminal, 11, "!"),
-        Some(Color::Red),
-        "the configured symbol_style applies to the JSON symbol"
-    );
-
-    // A configured `symbol` wins over the JSON `symbol`.
-    let config = command_item_config(
-        "weather",
-        TuiFooterItemConfig {
-            icon: Some("> ".to_string()),
-            ..Default::default()
-        },
-    );
-    let (footer, _) = Footer::from_config(&config);
-    let mut app = App::new("mock", "s");
-    app.footer = footer;
-    publish_contribution(
-        &app,
-        "weather",
-        "hi",
-        radian_host::SegmentRole::Normal,
-        Some("! "),
-    );
-    let terminal = render(&mut app, 60, 12);
-    let line = row(&terminal, 11);
-    assert!(line.contains("> hi"), "{line:?}");
-    assert!(!line.contains('!'), "the configured symbol wins: {line:?}");
-}
-
-/// A command item may format its `{value}` without a "unknown placeholder" warning.
-#[test]
-fn a_command_item_accepts_the_value_placeholder() {
-    let config = command_item_config(
-        "weather",
-        TuiFooterItemConfig {
-            format: Some("[{value}](red)".to_string()),
-            ..Default::default()
-        },
-    );
-    let (footer, warnings) = Footer::from_config(&config);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let mut app = App::new("mock", "s");
-    app.footer = footer;
-    publish_contribution(
-        &app,
-        "weather",
-        "72F",
-        radian_host::SegmentRole::Normal,
-        None,
-    );
-    let terminal = render(&mut app, 60, 12);
-    assert!(row(&terminal, 11).contains("72F"), "{}", row(&terminal, 11));
-    assert_eq!(fg_at(&terminal, 11, "72F"), Some(Color::Red));
-}
-
-/// The brief's acceptance, end to end: a fixture `printf hi` command runs through the real
-/// contributor and its first line appears in the footer where its id is placed.
-#[test]
-fn a_printf_fixture_appears_in_the_configured_footer_location() {
-    let dir = common::TempDir::named("radian-tui-command-footer");
-    let script = dir.join("hi.sh");
-    std::fs::write(&script, "#!/bin/sh\nprintf hi\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    let store = radian_host::ContributionStore::new();
-    let spec = radian_host::CommandSpec {
-        id: "weather".to_string(),
-        program: script.as_os_str().to_owned(),
-        args: Vec::new(),
-        period: Some(std::time::Duration::from_secs(60)),
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let contributor = std::sync::Arc::new(radian_host::CommandContributor::new(
-            spec,
-            radian_host::FooterContext::new(),
-            "sess-1",
-            Some(dir.display().to_string()),
-        ));
-        let mut runner =
-            radian_host::ContributorRunner::new(contributor, std::sync::Arc::clone(&store));
-        runner.tick().await;
-    });
-
-    let mut app = App::new("mock", "s");
-    app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
-    app.set_contributions(store);
-    let (footer, warnings) = Footer::from_config(&command_item_config(
-        "weather",
-        TuiFooterItemConfig::default(),
-    ));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    app.footer = footer;
     let terminal = render(&mut app, 60, 12);
     let line = row(&terminal, 11);
     assert!(
-        line.contains("hi"),
-        "the fixture's `printf hi` is in the configured location: {line:?}"
+        line.contains("Mock 5") && line.contains("weather"),
+        "{line:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Case 1: an inline `command` in a row is not read. No spec is produced (nothing runs),
-/// the load warns once naming the id, and the id follows the ordinary unknown-id rule:
-/// raw text with its warning, never a hidden command slot.
+/// An inline `command` or `period` in a row is retired the same way.
 #[test]
-fn an_inline_command_is_not_read_and_warns() {
+fn an_inline_retired_command_warns_and_shows_its_id() {
     let config = TuiFooterConfig {
         rows: vec![TuiFooterRowConfig {
             left: vec![TuiFooterItemConfig {
                 id: "weather".to_string(),
-                params: vec![("command".to_string(), "printf hi".to_string())],
+                params: vec![("period".to_string(), "30".to_string())],
                 ..Default::default()
             }],
             ..Default::default()
         }],
         ..Default::default()
     };
-    let (specs, spec_warnings) = radian_host::command_specs(&config);
-    assert!(
-        specs.is_empty(),
-        "an inline `command` starts nothing: {specs:?}"
-    );
-    assert!(spec_warnings.is_empty(), "{spec_warnings:?}");
     let (footer, warnings) = Footer::from_config(&config);
-    assert!(
-        warnings.iter().any(|w| w.contains("\"weather\"")
-            && w.contains("`command`/`period` is not read")
-            && w.contains("[tui.footer.items.weather]")),
-        "one warning names the id and its items-table home: {warnings:?}"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("unknown item") && w.contains("\"weather\"")),
-        "the id then follows the unknown-id rule: {warnings:?}"
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("retired")).count(),
+        1,
+        "{warnings:?}"
     );
     let mut app = App::new("mock", "s");
     app.footer = footer;
     let terminal = render(&mut app, 60, 12);
     assert!(
         row(&terminal, 11).contains("weather"),
-        "the id shows raw, never hidden: {}",
+        "{}",
         row(&terminal, 11)
     );
 }
 
-/// Case 1, no regression: an inline `command` plus `[tui.footer.items.<id>] command` still
-/// runs the items-table command. The inline entry warns, but the id stays a command item
-/// through the table (a bare id takes the table; the unknown-id rule does not apply).
+/// A retired `command` under a built-in id warns, and the built-in still draws.
 #[test]
-fn an_inline_command_plus_an_items_table_command_runs_the_table_command() {
-    let mut config = items(&[(
-        "weather",
-        TuiFooterItemConfig {
-            id: "weather".to_string(),
-            params: vec![("command".to_string(), "printf table".to_string())],
-            ..Default::default()
-        },
-    )]);
-    config.rows = vec![TuiFooterRowConfig {
-        left: vec![TuiFooterItemConfig {
-            id: "weather".to_string(),
-            params: vec![("command".to_string(), "printf inline".to_string())],
-            ..Default::default()
-        }],
-        ..Default::default()
-    }];
-    let (specs, _) = radian_host::command_specs(&config);
-    assert_eq!(
-        specs.len(),
-        1,
-        "the items-table command still runs: {specs:?}"
-    );
-    assert_eq!(
-        specs[0].args,
-        vec![std::ffi::OsString::from("table")],
-        "the inline line never reaches the spec: {specs:?}"
-    );
-    let (footer, warnings) = Footer::from_config(&config);
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("\"weather\"") && w.contains("`command`/`period` is not read")),
-        "the inline entry still warns: {warnings:?}"
-    );
-    assert!(
-        !warnings.iter().any(|w| w.contains("unknown item")),
-        "the id stays a command item through the table: {warnings:?}"
-    );
-    let mut app = App::new("mock", "s");
-    app.footer = footer;
-    publish_contribution(
-        &app,
-        "weather",
-        "72F",
-        radian_host::SegmentRole::Normal,
-        None,
-    );
-    let terminal = render(&mut app, 60, 12);
-    assert!(row(&terminal, 11).contains("72F"), "{}", row(&terminal, 11));
-}
-
-/// Case 2: a `command` under a built-in id spawns nothing (one warning naming the id),
-/// and the built-in still draws.
-#[test]
-fn a_command_under_a_builtin_id_is_ignored_but_the_builtin_draws() {
+fn a_retired_command_under_a_builtin_id_warns_and_the_builtin_draws() {
     let mut config = items(&[(
         "model",
         TuiFooterItemConfig {
@@ -2156,37 +1908,20 @@ fn a_command_under_a_builtin_id_is_ignored_but_the_builtin_draws() {
         left: vec![item("model")],
         ..Default::default()
     }];
-    let (specs, spec_warnings) = radian_host::command_specs(&config);
-    assert!(
-        specs.is_empty(),
-        "a built-in `command` never runs: {specs:?}"
-    );
-    assert_eq!(spec_warnings.len(), 1, "{spec_warnings:?}");
-    assert!(
-        spec_warnings[0].contains("\"model\"")
-            && spec_warnings[0].contains("built-in item; its `command` is ignored"),
-        "{spec_warnings:?}"
-    );
     let mut app = App::new("mock", "s");
     app.set_footer_facts(None, Some("Mock 5".to_string()), None, None);
     let warnings = app.apply_footer(&config);
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("retired")).count(),
+        1,
+        "{warnings:?}"
+    );
     assert!(
         !warnings.iter().any(|w| w.contains("unknown item")),
         "the built-in stays known: {warnings:?}"
     );
     let terminal = render(&mut app, 60, 12);
     assert_eq!(row(&terminal, 11).trim_end(), "Mock 5");
-}
-
-/// The host's built-in list mirrors the component registry: a new built-in fails here
-/// until it is added there too (otherwise `command_specs` would spawn under it).
-#[test]
-fn the_host_builtin_list_matches_the_registry() {
-    let mut registry = radian_tui::footer::footer_item_ids();
-    let mut host = radian_host::BUILTIN_FOOTER_ITEMS.to_vec();
-    registry.sort_unstable();
-    host.sort_unstable();
-    assert_eq!(registry, host, "the host list mirrors the registry");
 }
 
 // ---- ADR 0027: the provider-related `usage` component ----

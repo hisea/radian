@@ -40,7 +40,6 @@ pub(super) fn wire_post_open(
     window: &radian_host::Window,
     route_price: &RoutePrice,
     bash_sandbox: &Option<radian_sandbox::Sandbox>,
-    command_specs: Vec<radian_host::CommandSpec>,
     session_id: &str,
     startup_log: &mut StartupLog,
 ) -> PostOpen {
@@ -228,38 +227,6 @@ pub(super) fn wire_post_open(
         None
     };
     app.set_contributions(Arc::clone(&contributions));
-    // ADR 0027: the out-of-process footer `command` items. Each runs on
-    // its own background producer; its value enters the contribution store and nowhere else, so
-    // the renderer needs no special case. The command's stdin facts come from a snapshot the loop
-    // publishes (a safe handoff, never the app itself), published once here before the first run
-    // and again before every frame.
-    let footer_context = radian_host::FooterContext::new();
-    footer_context.set(app.footer_snapshot());
-    app.set_footer_context(Arc::clone(&footer_context));
-    for spec in command_specs {
-        let once = spec.period.is_none();
-        let contributor = Arc::new(radian_host::CommandContributor::new(
-            spec,
-            Arc::clone(&footer_context),
-            session_id.to_owned(),
-            Some(workspace_path.to_string_lossy().into_owned()),
-        ));
-        if once {
-            background.push(radian_host::spawn_contributor_once(
-                runtime.handle(),
-                contributor,
-                Arc::clone(&contributions),
-                Arc::clone(&on_tick),
-            ));
-        } else {
-            background.push(radian_host::spawn_contributor(
-                runtime.handle(),
-                contributor,
-                Arc::clone(&contributions),
-                Arc::clone(&on_tick),
-            ));
-        }
-    }
     PostOpen {
         usage_gate,
         chatgpt_usage_gate,

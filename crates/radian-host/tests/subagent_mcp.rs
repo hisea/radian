@@ -51,7 +51,7 @@ async fn run_child(arguments: Value, coding_root: Option<PathBuf>, trust: bool) 
     // parallel threads: another thread's `fork` (for its own child) can inherit
     // the still-open write descriptor, and the `exec` of the stub in that window
     // fails with `ETXTBSY` ("Text file busy", os error 26) on Linux — the same
-    // race `command_footer` retries in product. The product's own subagent spawn
+    // race the removed footer command runner once retried. The product's own subagent spawn
     // starts the installed `radian` binary, which nobody writes at run time, so
     // no product path needs this; serializing the fixture's write-then-spawn is
     // enough. The three tests stay fast: each stub exits at once.

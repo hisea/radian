@@ -22,9 +22,8 @@
 //! heading, `pub const BOARD_LABEL: &str = "TODO"` beside `.env("TODO", …)` is not a use,
 //! and the same holds for a list constant (`pub const BOARD_LABELS: &[&str] = &["TODO"]`) —
 //! a call's literal argument never promotes a constant's entries. Write literals are not a
-//! source, only the read forms above; so a name that only the code sets (`RADIAN_SESSION_ID`,
-//! `RADIAN_CWD`, which a footer command receives) is not collected here. The manual documents
-//! those beside `RADIAN_CHILD_HEADERS`.
+//! source, only the read forms above; so a name that only the code sets is not collected here. The manual documents
+//! such a name beside `RADIAN_CHILD_HEADERS`.
 
 use std::path::{Path, PathBuf};
 

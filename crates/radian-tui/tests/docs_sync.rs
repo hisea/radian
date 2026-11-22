@@ -213,10 +213,10 @@ fn every_footer_item_id_appears_in_the_manual() {
             "item `{id}` is missing from footer.md"
         );
     }
-    // The command item is no built-in: its section is pinned by name.
+    // The retired keys are no item: their section is pinned by name.
     assert!(
-        footer_md.contains("### Command items"),
-        "the command item section is missing from footer.md"
+        footer_md.contains("### Retired item keys"),
+        "the retired item keys section is missing from footer.md"
     );
 }
 
@@ -225,8 +225,8 @@ fn every_footer_item_id_appears_in_the_manual() {
 ///
 /// The source is [`radian_tui::footer::footer_item_params`]: each component declares its own
 /// list by overriding `Component::params` (`context`'s `width`/`fill`/`empty`, `status`'s
-/// `keys`), so the test cannot drift from the behavior. A command item's `command`/`period` come from
-/// [`radian_host::command_footer::COMMAND_ITEM_PARAMS`], the same list `command_specs` reads.
+/// `keys`), so the test cannot drift from the behavior. The retired keys come from
+/// [`radian_tui::footer::RETIRED_ITEM_KEYS`], the same list the load warning reads.
 #[test]
 fn every_footer_item_parameter_appears_in_its_section() {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -241,11 +241,15 @@ fn every_footer_item_parameter_appears_in_its_section() {
             );
         }
     }
-    let commands = item_section(&footer_md, "Command items");
-    for param in radian_host::command_footer::COMMAND_ITEM_PARAMS {
+    let retired = item_section(&footer_md, "Retired item keys");
+    assert!(
+        retired.contains("inert"),
+        "the retired section says the keys are inert"
+    );
+    for key in radian_tui::footer::RETIRED_ITEM_KEYS {
         assert!(
-            commands.contains(&format!("`{param}`")),
-            "a command item reads `{param}` but its section does not name it"
+            retired.contains(&format!("`{key}`")),
+            "`{key}` is a retired item key but its section does not name it"
         );
     }
 }
