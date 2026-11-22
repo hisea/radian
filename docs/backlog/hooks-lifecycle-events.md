@@ -6,12 +6,12 @@
 
 ## 背景
 
-Claude Code 有 35 个事件，radian 有意只做三个（0045 §1）。多数差距是我们不要的（子 agent、任务表、worktree、配置变化、文件 watcher、UI 层事件：radian 的对应物在 arc 或根本不存在）。剩下五个有 radian 内的真实用例；`StopFailure` 与 `Notification` 已决定（见 `hooks-stopfailure-notification.md`），其余三个还没人要，记在这里，谁先有用例谁先做。任何一个落地都要先改 0045 §1 那句话。
+Claude Code 有 35 个事件，radian 有意只做三个（0045 §1）。多数差距是我们不要的（子 agent、任务表、worktree、配置变化、文件 watcher、UI 层事件：radian 里根本没有对应物）。剩下五个有 radian 内的真实用例；`StopFailure` 与 `Notification` 已决定（见 `hooks-stopfailure-notification.md`），其余三个还没人要，记在这里，谁先有用例谁先做。任何一个落地都要先改 0045 §1 那句话。
 
 | 事件 | 用例 | 接入点 | 顾虑 |
 |---|---|---|---|
 | `UserPromptSubmit` | Claude Code 最常用的 hook 模式：按策略拦下提示词（exit 2）、注入 git 状态与日期（`additionalContext`） | 0011 的 inbox 认领处，只对 `User` 来源 | 每回合变动的注入必须放在 user message 末尾，不动 system prompt，否则破缓存前缀（`cache-efficiency.md`）；不允许改写提示词（Claude 也不允许） |
-| `SessionStart` | 每会话一次的动态上下文（分支、环境变量、上次留的状态），与 AGENTS.md 的静态内容互补；matcher 分 `startup` / `resume` / `fork` | 会话建立后、第一回合前 | 和 0036 的上下文文件重叠；arc worker 的 setup 由 wrapper 做，所以不急 |
+| `SessionStart` | 每会话一次的动态上下文（分支、环境变量、上次留的状态），与 AGENTS.md 的静态内容互补；matcher 分 `startup` / `resume` / `fork` | 会话建立后、第一回合前 | 和 0036 的上下文文件重叠 |
 | `PreCompact` / `PostCompact` | 压缩前让项目脚本落盘状态（exit 2 可阻止一次压缩）；压缩后把摘要（`compact_summary`）交给脚本写进 memory 或外部 | 0018 的压缩路径两端 | 阻止由上下文溢出触发的压缩会让本次请求失败（Claude 的说法一致）；与 `compaction-threshold.md`、`overflow-three-stage.md` 同一片区域，一起考虑 |
 
 ## 待决问题

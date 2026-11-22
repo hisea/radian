@@ -47,14 +47,8 @@ parseable `id` gets `"id": null`.
 
 `followup`, `steer` and `inject` carry an input whose source the port decides, never the
 client's word alone; that source is what the inbox records, and the turn the input opens runs
-with it. A turn that is already running keeps its own effective source, which only ever lowers:
-a `steer` or `inject` that joins it can lower it, never raise it, not even the owner's. A
-`followup` that arrives mid-turn belongs to a later turn: it leaves the running turn's source
-alone and opens its own turn with its own source. The same rule holds at that turn's start: its
-source is the least-privileged of the input that opens it and every `steer`/`inject` the turn
-admits, so a queued scheduled input can lower the turn an owner's `followup` starts. Without a
-matching owner token (below), the client picks the input's source with an optional `source`
-field:
+with it. There is no owner: every input that arrives through the port is non-human, and the
+client picks its source with an optional `source` field:
 
 | `source` | result |
 |---|---|
@@ -65,167 +59,18 @@ field:
 | `"permission_decision"` | **refused** |
 | anything else | refused |
 
-### Owner token
+A turn that is already running keeps its own effective source, which only ever lowers: a
+`steer` or `inject` that joins it can lower it, never raise it. A `followup` that arrives
+mid-turn belongs to a later turn: it leaves the running turn's source alone and opens its own
+turn with its own source. The same rule holds at that turn's start: its source is the
+least-privileged of the input that opens it and every `steer`/`inject` the turn admits.
 
-A request may carry an optional string field `token`. When it equals the trimmed content of
-`$RADIAN_HOME/hub/token` (read when the request arrives, so a rotation takes effect at the next
-request), the request is the owner's:
-
-- `followup`, `steer` and `inject` enqueue with source `User`; the `source` field is ignored.
-- The message's `origin` metadata is `{"via": "hub"}` (ADR 0005 G1), so the transcript can tell
-a phone-sent message from a typed one.
-
-A missing, unreadable or empty token file means no token matches. A request without `token`, or
-with a wrong one, behaves exactly as without this section: source `Scheduler` by default, no
-`via` metadata, and the `source` rules above. The comparison is constant-time.
-
-The same token gates the five owner verbs — `pending`, `answer`, `config`, `models` and
-`close` (below). Without the matching token each returns an error line and changes nothing;
-`subscribe` stays token-free but redacts the `pending` event (see below).
-
-### Owner verbs
-
-All five require `token` equal to `$RADIAN_HOME/hub/token` (trimmed). A missing, empty or wrong
-token returns `{"ok": false, "error": "this verb needs the owner token: …"}` and changes
-nothing.
-
-#### `pending`
-
-```json
-{"id": 7, "verb": "pending", "token": "…"}
-```
-
-Result (`head` is `null` on an empty queue):
-
-```json
-{"id": 7, "ok": true, "head": {"request_id": 3, "kind": "approval", …}, "length": 1}
-```
-
-`request_id` is the queue id `answer` takes (an integer that grows per push). An approval head
-also carries `call_id`, `tool` (the tool name), `resource` (the resource as the call wrote
-it), `resolved_resource` (the path or command the rules matched — what a prompt shows),
-`arguments` (the call's raw JSON arguments), `reason` (the rule's reason, or `null`) and
-`approval_id` (the permission layer's own request id). A question head carries the full
-`QuestionRequest` as `question: {"questions": […]}` (ADR 0024 Q2).
-
-#### `answer`
-
-```json
-{"id": 8, "verb": "answer", "request_id": 3, "response": "allow_once", "token": "…"}
-```
-
-An approval response is one of:
-
-| `response` | effect |
-|---|---|
-| `"allow_once"` | `ApprovalOutcome::AllowOnce` |
-| `"allow_always"` | `ApprovalOutcome::AllowForSession`: a process-local grant, exactly the ACP surface's `allow_always` |
-| `"reject_once"` | `ApprovalOutcome::Deny { reason: null }`; the permission layer turns this into “denied by the user” |
-| `{"kind": "reject_once", "reason": "…"}` | `ApprovalOutcome::Deny { reason }`; the reason lands verbatim in the tool result |
-
-The same three may be written as objects: `{"kind": "allow_once"}` or
-`{"kind": "allow_always"}` (no `reason`), and the `reject_once` object above.
-
-A question response carries the `QuestionAnswer` as `answers`, one object per question:
-
-```json
-{"response": {"answers": [{"id": "loader", "selected": ["builtin"]},
-                           {"id": "name", "text": "radian"},
-                           {"id": "tiers", "selected": ["safe"], "other": "a custom tier"}]}}
-```
-
-Each `QuestionReply` accepts `id`, `selected`, `text`, `other` and `note` (ADR 0024 Q3). The
-answer's `request_id` is optional; when absent the port derives the TUI's `q-<queue id>`, so a
-port answer and a keyboard answer land the same tool result. Free text, multi-select and
-`Other` are all answerable (more than the ACP surface can represent, ADR 0024 Q9).
-
-The queue is the arbiter. Success means this request completed the entry. `answer` returns an
-error and changes nothing when:
-
-- the id is unknown: `no pending request has that id`;
-- the entry was already answered (by the TUI, ACP, or an earlier port answer) or abandoned:
-  `the request is no longer pending: a late answer changes nothing`;
-- the response is for the other kind (an approval response for a question, or the reverse);
-- `response` does not parse (an unknown approval word, a non-string `reason`, an `answers` list
-  that violates `QuestionReply`'s shape).
-
-#### `config`
-
-```json
-{"id": 9, "verb": "config", "token": "…",
- "config": {"model": {"provider": "anthropic", "model": "claude-sonnet-4"}}}
-{"id": 10, "verb": "config", "token": "…", "config": {"thinking": "high"}}
-```
-
-The change goes into the driver's `ConfigQueue` and is applied at the next turn boundary with
-one `ConfigChanged` record — the `/model` and `/thinking` path (ADR 0004 path B, ADR 0026 D5).
-An in-flight model request keeps the old route; the next turn uses the new one (ADR 0004 D4).
-`config` accepts only these keys, and queues nothing when any check fails:
-
-| key | type | accepted values |
-|---|---|---|
-| `model` | object | exactly `{"provider": string, "model": string}`. The route must be the route in force or one entry of `models` (below). Any other provider/model is an error. |
-| `thinking` | string | one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the `/thinking` set). Any other value is an error. |
-
-Both keys may appear in one object, and are applied as one change. An empty object, an unknown
-key, a non-object `model`, a missing or empty `provider`/`model`, or an unknown route returns an
-error line and queues nothing.
-
-#### `models`
-
-```json
-{"id": 11, "verb": "models", "token": "…"}
-```
-
-Result: the same list `/model` shows for this session (ADR 0026 D5), grouped by provider and
-with the current route marked.
-
-```json
-{"id": 11, "ok": true, "models": [
-  {"provider": "anthropic", "models": [
-    {"id": "claude-sonnet-4", "current": false},
-    {"id": "claude-opus-4", "current": true}]},
-  {"provider": "opencode-go", "models": [
-    {"id": "deepseek-v4.1-flash", "current": false}]}]}
-```
-
-The groups follow `/model`'s order: the current provider first, then providers and models by
-name. The current route's entry has `current: true` when it appears in the list. Only logged-in
-providers (a usable `auth.json` entry) and the current route's provider are considered; a
-provider with no known model contributes no group. A `config` `model` must name one of these
-entries or the current route.
-
-#### `close`
-
-```json
-{"id": 12, "verb": "close", "token": "…"}
-```
-
-```json
-{"id": 12, "ok": true}
-```
-
-The port writes the `ok` answer first, then ends the process. It stops accepting new
-connections and lets every connection that is already open finish the answers it owes; a
-connection with no complete line yet waits a brief moment (100 ms) for one the client is still
-writing, so two `close` requests crossing at once both see `ok`; each connection then ends.
-Only after that does the port ask its host to close. The host cancels a running turn through the same path as
-`cancel` (so an interrupted assistant prefix and an open tool call are recorded the way ADR
-0002/0003 require), abandons pending approvals and questions the way a process exit does, and
-ends the process cleanly; the journal stays, and the next `prompt` through the hub resumes it.
-Subscribers see their stream end as they do on any process exit. The full-screen interface
-closes the queue before it cancels, so a followup waiting behind the running turn opens no
-turn; it also journals one `HostNotice` (`session closed remotely`, ADR 0006 §5.14) before it
-leaves, and a resume renders it as a transcript notice.
-
-A host that installs no close hook — any embedder but the full-screen interface — answers
-`{"ok": false, "error": "this process cannot be closed remotely"}` and changes nothing. The host
-is asked once however many connections crossed, so the process exits once. A client that stops
-reading cannot hold the process open: the wait for the drain is bounded (a quarter second).
+Approvals and questions are not answered through the port. They are answered only in the
+session that asked them: the TUI popup, or `radian exec`'s stdin prompt.
 
 ### Attachments
 
-`followup`, `steer` and `inject` also accept optional attachments, with or without a token:
+`followup`, `steer` and `inject` also accept optional attachments:
 
 | field | type | what it is |
 |---|---|---|
@@ -251,21 +96,17 @@ retry with a smaller request.
 
 | verb | fields | result |
 |---|---|---|
-| `followup` | `text`, `source?`, `token?`, `images?`, `files?` | enqueues a new turn; `message_id` |
-| `steer` | `text`, `source?`, `token?`, `images?`, `files?` | redirects the running turn |
-| `inject` | `text`, `source?`, `token?`, `images?`, `files?` | adds context without waking an idle session |
+| `followup` | `text`, `source?`, `images?`, `files?` | enqueues a new turn; `message_id` |
+| `steer` | `text`, `source?`, `images?`, `files?` | redirects the running turn |
+| `inject` | `text`, `source?`, `images?`, `files?` | adds context without waking an idle session |
 | `cancel` | — | cancels the running turn (idempotent) |
 | `list_sessions` | — | `sessions`: the hosting `main` session and its workspace, model route, state and pending count (below) |
-| `subscribe` | `token?` | response `{"id":n,"ok":true}`, then event lines (see below) |
-| `pending` | `token` | `head` (or `null`) and `length`; see *Owner verbs* |
-| `answer` | `request_id`, `response`, `token` | completes one pending entry; see *Owner verbs* |
-| `config` | `config`, `token` | queues one turn-boundary change; see *Owner verbs* |
-| `models` | `token` | `models`, grouped by provider; see *Owner verbs* |
-| `close` | `token` | `ok`, then the host ends the process; see *Owner verbs* |
+| `subscribe` | — | response `{"id":n,"ok":true}`, then event lines (see below) |
 
-The task verbs (`spawn_task`, `wait_task`, `task_status`) are not part of the port: there is no
-in-process orchestration (ADR 0043 decision 1); the port now serves input, cancellation,
-listing and event streaming only.
+Any other verb (including `pending`, `answer`, `config`, `models`, `close`) returns an error
+line and changes nothing. The task verbs (`spawn_task`, `wait_task`, `task_status`) are not part
+of the port either: there is no in-process orchestration (ADR 0043 decision 1); the port serves
+input, cancellation, listing and event streaming only.
 
 ### `subscribe`
 
@@ -278,30 +119,12 @@ After the `subscribe` response, the server writes committed events as lines:
 
 The agent events are the same committed `AgentEvent`s the TUI receives, minus the live-only
 streaming deltas (`model_text_delta`, `model_reasoning_delta`). The runtime events are the
-`RuntimeEvent`s the driver raises (`TurnFailed`, `TurnFinished`, `ConfigChanged`, …).
+`RuntimeEvent`s the driver raises (`TurnFailed`, `TurnFinished`, `ConfigChanged`, …). No token or
+reasoning deltas are pushed: the stream is committed facts only (ADR 0043).
 
 One client may issue requests and subscribe on the same connection. The per-client buffer is
 **bounded**: a subscriber that falls behind is disconnected and its connection is closed; the
 session never waits on a client.
-
-### `subscribe` and the `pending` event
-
-The committed `AgentEvent` and `RuntimeEvent` lines above are joined by one `pending` event,
-written whenever the pending queue's version changes (a push, an answer, an abort, or an
-abandoned wait disappearing):
-
-```json
-{"event": {"source": "control", "name": "pending",
-           "data": {"head": {"request_id": 3, "kind": "approval", "tool": "write", …},
-                     "length": 1}}}
-```
-
-`head` is `null` and `length` is `0` when the queue is empty. A subscriber that sent `token`
-on its `subscribe` request gets the same head `pending` returns. A subscriber without the
-token gets the redacted head: `request_id`, `kind` (`"approval"` or `"question"`) and `tool`
-(the tool name for an approval, `null` for a question) only — no arguments, no resource and no
-question text. The event is still a committed fact: no token or reasoning deltas are pushed
-(ADR 0043).
 
 ### `list_sessions`
 
@@ -309,9 +132,8 @@ One `main` row (one process serves one session):
 
 ```json
 {"id": 1, "ok": true, "sessions": [{
-  "id": "…", "kind": "main", "holder": "tui",
+  "id": "…", "kind": "main",
   "workspace": "/home/me/project",
-  "journal": "/home/me/.radian/sessions/….jsonl",
   "model": {"provider": "anthropic", "model": "claude-sonnet-4"},
   "state": "blocked",
   "pending": 1}]}
@@ -319,14 +141,12 @@ One `main` row (one process serves one session):
 
 | field | meaning |
 |---|---|
+| `id` | the session id |
+| `kind` | always `main` |
 | `workspace` | the canonical workspace this session was opened in |
-| `journal` | the journal file this process has open, so two sessions with the same user-chosen id under different session directories are told apart. A process that does not report the field (an older build) is matched by `id` alone. |
-| `holder` | always `tui`; the field stays so that a client written against it keeps working. |
 | `model` | the model route in force (ADR 0026 D8) |
 | `state` | `idle`, `working` or `blocked` by ADR 0034 H2: a non-empty pending queue is `blocked`, a running turn (or background jobs) is `working`, an idle block (the wake budget, a `/goal` budget, a lost job notice, the intent-stop cap or the idle hook-continuation cap) is `blocked` while no turn runs, and everything else is `idle` |
-| `pending` | the pending approval/question count |
-
-None of these fields needs the owner token.
+| `pending` | the count of approvals and questions the session is waiting on |
 
 ## Example: send a turn and follow the events
 

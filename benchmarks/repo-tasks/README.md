@@ -1,11 +1,11 @@
 # Fixed repository task set
 
-A fixed set of real tasks from this repository's own arc history, with a runner,
+A fixed set of real tasks from this repository's own history, with a runner,
 crate-scoped checks and a report. It exists so two A/B rounds can be
 compared: the tasks, the base shas and the column definitions stay fixed, and the
 only thing a round changes is an arm.
 
-The tasks are merged work, not invented fixtures: each was an arc task. Four of
+The tasks are merged work, not invented fixtures: each was a worker task. Four of
 them passed on the first attempt and are the ones this repository measured in the
 2026-10-30 tool-set A/B; add more by the rule below. The fifth, TK0236, is the
 long task: a 305-step worker run that touches five crates and whose first attempt
@@ -269,7 +269,7 @@ numbers are in:
 
 A task joins the set when it meets all four rules:
 
-1. **Merged.** The original arc task is on `main`; `base` is the commit its
+1. **Merged.** The original task is on `main`; `base` is the commit its
    first attempt started from (from that task's merged history), and `outcome`
    is the first attempt's result (`pass` = checks passed).
 2. **Passed first time.** The first attempt passed; a task that needed a rework

@@ -144,11 +144,6 @@ transcript: ❯ user  ·  assistant prose  ·  ◼/◻ thinking  ·  <fold> tool
  model │ idle/running/cancelled │ tier │ usage in/out │ mcp servers/tools │ context │ scroll N/M
 ```
 
-A user message the owner sent through the control port (the hub) keeps the `❯ ` marker and
-its text, and appends ` · hub` in the dim role at the end of its last row (ADR 0035); a typed
-message has no suffix. A pending popup the port answers closes with one dim
-`answered from the hub` line in the transcript, and the TUI applies no second answer.
-
 The default input area is `tui.input_style = "lines"` (ADR 0035): a rule
 above and below with a `❯ ` prompt, continuation lines indented two cells. The running status
 sits on the top rule (`── <spinner>  Working · 12s · esc to interrupt ──`; the clock is the
@@ -561,7 +556,7 @@ it from the journal's user messages. It is not persisted on its own.
 
 The **draft** is: on a clean exit (the two-press Ctrl-C quit, `/quit`, SIGTERM/SIGHUP) a non-empty input is written to
 `<session-dir>/<session-id>.draft` (0600, atomic temp-file + rename); `--resume` restores it
-once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a remote close clears the input the same way, so it saves no draft; a signal exit
+once and deletes the file. An idle Ctrl-C with a non-empty input clears it first (see the key table), so a Ctrl-C exit saves the *cleared* input; a signal exit
 saves what was typed. A panic writes nothing (the panic path does no file I/O). `--list`
 and the index only read `*.jsonl`, so a draft is never a session.
 
@@ -767,13 +762,6 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   A `!printf x > <outside>` must fail and `!printf x > ./inside` succeed: those are the outer
   sandbox's rules, and radian claims nothing about them (no deny-read list, no `.git` wording, no
   network state). `tests/pty.rs` covers the same path in automation; the feel is yours.
-- **the arc task page's metrics tab**: open a task with a finished attempt and press `Tab`
-  until `metrics` is the bold tab. Does a run's row read at your width, does `j`/`k` move
-  the `❯` over the run rows (skipping a run without metrics), does `Enter` open the tool
-  table and the collapsed `requests N (r to expand)` row under the run's last row, does `r`
-  open the aligned request log and collapse it again, does a long counter row wrap at the
-  detail column rather than cut with `…`, and does a narrow terminal keep the stage and
-  table columns aligned? pty automation asserts the text, not the feel (ADR 0009).
 - **the input area's two styles**: the default is `lines` — a rule above and below with the `❯ ` prompt; is it
   comfortable? Compare `input_style = "box"` (the thin half frame). For the `box` frame: does the
   top rule read as a full-width open frame with no label; does the `│ ` rail line up with a code
@@ -856,38 +844,6 @@ implement a real emulator's glyph metrics. **It cannot judge these** (ADR 0009's
   adds the picker in front in the same terminal: do the rows and the filter feel like `--pick`
   (there is no `n new`), and does Esc leave cleanly before any choice is made? pty automation
   asserts the text and the one-second follow latency, not the feel.
-- **the arc TUI** (ADR 0048): with a repository arc is set up in, run `radian arc`. Is the plans
-  list scannable — does the state mark read at a glance, are the second line's `auto`, the
-  merged/total count and the cost lined up, and is the selected plan's frame title readable at
-  your width? Switch to the flat list (`g`): does `after` explain the order better than the
-  tree's connectors? Press `f` through the four views (`active` → `all` → `done` → `cancelled`):
-  does the header name each view and show the hidden count (`active · 14 hidden`; `all` shows
-  none, and a zero count is omitted), and is each list still scannable — do `done` and
-  `cancelled` read as finished work, and is an empty view's one weak line obvious? On the task
-  page: does the tree's `├─`/`└─` indentation line up, is
-  `also after`/`waits` obvious as an explanation, and does a row with a long phase keep its
-  columns? Open the conversation tab on a task whose worker ran: do the `❯`/thinking/tool blocks
-  match the main transcript, and do `j`/`k` and `f` move the way you expect? For a task whose
-  worker is `[worker] command`, or a flow that runs an ACP agent (`acp`), does the tab name the
-  program, show the stdout rows one per line (an ACP `tool_call` as a tool row and a message
-  chunk as text), colour the `Result` outcome, and add a row while the worker writes? On the diff tab:
-  is the file list's `+N`/`-N` readable, is the second frame's title the path, and does the
-  syntax highlighting help at your width? Open the merge page on a task in `review.awaiting_human`
-  (`m`): do the stage marks, the `on <sha>` column and the `summary` frame read at your width, is
-  the command row's log legible in its float, and does a moved branch (push to `work/<task>`) make
-  every mark weak with the moved row? Press `M` and check that the float says
-  `merge <task> onto <target branch>? y/n` (`main` by default); `n` must change nothing. Opening
-  the TUI with no loop running
-  starts one: does the header go from `loop ◌ starting` to `loop ● running (pid <n>)`, does a
-  started task's line appear on the footer's ticker, and does `L` open the log with the same
-  lines and the pass summaries? With a task in `doing.running`, does its diff tab say
-  `live · worktree` and show the worker's uncommitted files (marked `uncommitted`) within a few
-  seconds? Start a second `radian arc run` from another terminal and check that it exits `4`;
-  press `q` and check that the loop it started is still running (its pid in the header, then
-  `loop ● running` when you open the TUI again) and that the attempt is reconciled by the next
-  pass. With a loop already running, opening the TUI must start nothing and name that loop's
-  pid; `R` must say why it does nothing. pty automation asserts the pages, the keys,
-  the marks and the footer's result line, not the feel.
 - **radian as a herdr agent** (ADR 0034, slice ④): the pty tests can only watch a fake
   socket, so the real herdr is yours. In a herdr pane (its env sets `HERDR_ENV=1`), start `radian`,
   then from another pane run `herdr agent list` — radian's entry must carry `agent_session` (the
@@ -1134,33 +1090,19 @@ throwaway terminal, not your working one.
     multiplexer may or may not forward OSC 52); the status bar says `copied N chars (via …)`;
     `pbcopy` works on macOS; `off` writes nothing and says so. *Fail*: record herdr's version
     and whether OSC 52 forwarding is enabled — this is the known-open question.
-14. **The phone on the tailnet, taking over a TUI session** (ADR 0048 §16, ADR 0035).
-    *Steps*: on the Mac open a `radian` session in a repository the hub has registered, with
-    `radian hub` running and the hub exposed to the tailnet (`tailscale serve`). From the phone
-    in the tailnet: send one message, answer one approval, switch the model, and send a photo.
-    *Expect*: the message appears in the TUI with the dim ` · hub` suffix; the approval popup
-    the TUI shows closes when the phone answers (the tool runs, and the TUI shows one dim
-    `answered from the hub` line); the footer's model changes at the next turn; the photo
-    draws as an image under its placeholder. A late answer from the other front end changes
-    nothing. *Fail*: record which front end missed the update, the hub's
-    version, and the session id.
-15. **`/quit` and a remote close** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit`
-    while a turn runs; `/quit` while a turn runs and `/queue` left a followup waiting;
-    `/quit extra`; then, with the owner token written to `~/.radian/hub/token`, send
-    `{"id":1,"verb":"close","token":"…"}` on the session's `~/.radian/run/<pid>.sock` while
-    typing a draft and again under an approval popup. *Expect*: `/quit` on an idle session leaves
-    at once and restores the shell prompt (`stty -a` shows `icanon`); `/quit` during a turn
-    cancels it first, so a `--resume` shows a cancelled turn, then exits; a followup still in the
-    queue at that moment opens no second turn (the journal has one `TurnStarted` and one
-    cancelled `TurnFinished`), and a `--resume` claims that journaled followup and sends it as
-    the resumed session's first turn, with no keypress; `/quit extra` is a usage notice and
-    never quits; the remote close answers `ok`, adds one `session closed remotely` notice, and
-    exits like `/quit`; a draft typed when the close arrives is lost (no `.draft` file on the
-    next `--resume`). *Look*: after the process has left, the shell prompt is back and the
-    alternate screen is gone; the notice is a transcript fact, so look for it on the next
-    `--resume owner-close`, not on the restored shell screen. Does the close under a popup still
-    exit (the popup is abandoned, not answered)? *Fail*: record the verb's answer, the screen's
-    last frame, and whether `icanon` came back.
+14. **`/quit`** (ADR 0043). *Steps*: `/quit` on an idle session; `/quit` while a turn runs;
+    `/quit` while a turn runs and `/queue` left a followup waiting; `/quit extra`; and `/quit`
+    while typing a draft and again under an approval popup. *Expect*: `/quit` on an idle
+    session leaves at once and restores the shell prompt (`stty -a` shows `icanon`); `/quit`
+    during a turn cancels it first, so a `--resume` shows a cancelled turn, then exits; a
+    followup still in the queue at that moment opens no second turn (the journal has one
+    `TurnStarted` and one cancelled `TurnFinished`), and a `--resume` claims that journaled
+    followup and sends it as the resumed session's first turn, with no keypress; `/quit extra`
+    is a usage notice and never quits; a draft typed when `/quit` runs is lost (no `.draft`
+    file on the next `--resume`). *Look*: after the process has left, the shell prompt is back
+    and the alternate screen is gone. Does `/quit` under a popup still exit (the popup is
+    abandoned, not answered)? *Fail*: record the screen's last frame, and whether `icanon`
+    came back.
 
 ### Hand test: passed
 
@@ -1251,7 +1193,7 @@ Whatever ended the app, the normal screen now says why, once, after the terminal
 
 | How it ends | Exit | Reason line (stderr, after restore) |
 |---|---|---|
-| clean quit (Ctrl-C twice / `/quit` / a remote close / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
+| clean quit (Ctrl-C twice / `/quit` / driver ends by request) | 0 | `session <id> saved; resume with `--resume <id>`` |
 | startup/config refusal (bad workspace, failed probe, bad MCP file, bad header, ...) | 2 | `radian: <the error>` (terminal never entered) |
 | driver task ends with a `RunError` | 1 | `radian: driver: <error>` |
 | driver task panics | 1 | `radian: the driver task ended unexpectedly: <join error>: <redacted panic>` |
