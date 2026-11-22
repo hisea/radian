@@ -1916,18 +1916,12 @@ async fn a_second_prompts_metrics_hold_only_its_turns_requests() {
     let metrics = &result["_meta"]["radian"]["metrics"];
     assert_eq!(result["_meta"]["radian"]["text"], "TWO", "{result}");
     assert_eq!(metrics["requests"], 1, "{result}");
-    assert_eq!(
-        metrics["request_log"].as_array().map(Vec::len),
-        Some(1),
-        "only the second turn's request: {result}"
-    );
     assert_eq!(metrics["input_uncached"], 300, "{result}");
     assert_eq!(metrics["output"], 30, "{result}");
-    assert_eq!(
-        metrics["models"][0]["model"], "m",
-        "the route comes from SessionCreated, before the turn: {result}"
+    assert!(
+        metrics.get("models").is_none() && metrics.get("request_log").is_none(),
+        "the metrics are totals only: {result}"
     );
-    assert_eq!(metrics["request_log"][0]["model"], "m", "{result}");
     let (code, stderr) = acp.finish().await;
     assert_eq!(code, 0, "{stderr}");
 }

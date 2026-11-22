@@ -32,7 +32,6 @@
 
 | 文件 | 状态 | ADR | 一句话 |
 |---|---|---|---|
-| `exec-run-metrics-totals.md` | decided | 0044、0049、0007、0010 | `run_metrics` 只留总数，删 `request_log`、按模型/工具细项；不再对齐 `journal_metrics.py` |
 | `remove-import-claude.md` | decided | 0046、0045、0008 | 删 `radian config import-claude`（约 170 KB 含测试），保留 `import-pi` |
 | `remove-footer-command-items.md` | decided | 0027、0008、0013 | 删 footer `command` 项这个公开扩展点；内部 contributor 保留 |
 | `remove-mermaid.md` | decided | 0042、0028、0035、0008、0029 | 删 vendored grok-mermaid 与渲染，mermaid 块按代码块显示，`tui.display.mermaid` 退役 |
